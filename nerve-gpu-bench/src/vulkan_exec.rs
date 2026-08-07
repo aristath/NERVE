@@ -62,6 +62,9 @@ const PACKED_U32_TRANSFORM_SHADER_SPV: &[u32] = &[
 
 const F32_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_moe_expert.spv");
 const F32_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_router_reduction.spv");
+const F16_DENSE_PROJECTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_dense_projection.spv");
+const F16_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_moe_expert.spv");
+const F16_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_router_reduction.spv");
 const PACKED_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/packed_moe_expert.spv");
 const PACKED_ROUTER_REDUCTION_SHADER_SPV: &[u8] =
     include_bytes!("shaders/packed_router_reduction.spv");
@@ -80,6 +83,7 @@ struct DenseFormatKernel {
     logical_elements_per_storage_element: u64,
     operations_per_storage_element: u64,
     pattern: &'static str,
+    required_feature: Option<&'static str>,
 }
 
 fn workload_format_kernel(workload_class: &str, format: &str) -> Option<DenseFormatKernel> {
@@ -100,8 +104,17 @@ fn dense_format_kernel(format: &str) -> Option<DenseFormatKernel> {
             logical_elements_per_storage_element: 1,
             operations_per_storage_element: 2,
             pattern: "single_target_compute",
+            required_feature: None,
         }),
-        "f16" => Some(packed_dense_kernel("f16", 2)),
+        "f16" => Some(DenseFormatKernel {
+            format: "f16".to_string(),
+            shader: ShaderCode::Bytes(F16_DENSE_PROJECTION_SHADER_SPV),
+            bytes_per_storage_element: mem::size_of::<u32>(),
+            logical_elements_per_storage_element: 2,
+            operations_per_storage_element: 4,
+            pattern: "single_target_f16_native_compute",
+            required_feature: Some("shader_float16"),
+        }),
         "bf16" => Some(packed_dense_kernel("bf16", 2)),
         "fp8" | "fp8_e4m3" | "fp8_e5m2" => Some(packed_dense_kernel(format, 4)),
         "int8" | "q8_0" => Some(packed_dense_kernel(format, 4)),
@@ -129,6 +142,7 @@ fn packed_dense_kernel(
         logical_elements_per_storage_element,
         operations_per_storage_element: 4,
         pattern: "single_target_packed_emulated_compute",
+        required_feature: None,
     }
 }
 
@@ -141,6 +155,16 @@ fn moe_expert_kernel(format: &str) -> Option<DenseFormatKernel> {
             logical_elements_per_storage_element: 1,
             operations_per_storage_element: 10,
             pattern: "moe_expert_compute",
+            required_feature: None,
+        }),
+        "f16" => Some(DenseFormatKernel {
+            format: "f16".to_string(),
+            shader: ShaderCode::Bytes(F16_MOE_EXPERT_SHADER_SPV),
+            bytes_per_storage_element: mem::size_of::<u32>(),
+            logical_elements_per_storage_element: 2,
+            operations_per_storage_element: 14,
+            pattern: "moe_expert_f16_native_compute",
+            required_feature: Some("shader_float16"),
         }),
         _ => packed_workload_kernel(
             format,
@@ -160,6 +184,16 @@ fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
             logical_elements_per_storage_element: 1,
             operations_per_storage_element: 8,
             pattern: "router_reduction_compute",
+            required_feature: None,
+        }),
+        "f16" => Some(DenseFormatKernel {
+            format: "f16".to_string(),
+            shader: ShaderCode::Bytes(F16_ROUTER_REDUCTION_SHADER_SPV),
+            bytes_per_storage_element: mem::size_of::<u32>(),
+            logical_elements_per_storage_element: 2,
+            operations_per_storage_element: 10,
+            pattern: "router_reduction_f16_native_compute",
+            required_feature: Some("shader_float16"),
         }),
         _ => packed_workload_kernel(
             format,
@@ -361,6 +395,21 @@ fn run_vulkan_ordered_serial_pair_measurements(
         .flat_map(|format| {
             workloads.iter().filter_map(|workload| {
                 workload_format_kernel(workload, format).map(|kernel| {
+                    if let Some(reason) =
+                        unsupported_kernel_reason(&kernel, &[&source_device, &destination_device])
+                    {
+                        return dense_pair_status_measurement(
+                            &source.stable_target_id,
+                            &destination.stable_target_id,
+                            "synthetic_layer_split_small_payload",
+                            "two_target_serial",
+                            "unsupported",
+                            payload_bytes,
+                            workload,
+                            format,
+                            &reason,
+                        );
+                    }
                     match run_vulkan_dense_serial_pair(
                         &source_device,
                         &destination_device,
@@ -432,6 +481,21 @@ fn run_vulkan_parallel_pair_measurements(
         .flat_map(|format| {
             workloads.iter().filter_map(|workload| {
                 workload_format_kernel(workload, format).map(|kernel| {
+                    if let Some(reason) =
+                        unsupported_kernel_reason(&kernel, &[&left_device, &right_device])
+                    {
+                        return dense_pair_status_measurement(
+                            &left.stable_target_id,
+                            &right.stable_target_id,
+                            "synthetic_tensor_split_small_payload",
+                            "two_target_parallel",
+                            "unsupported",
+                            payload_bytes,
+                            workload,
+                            format,
+                            &reason,
+                        );
+                    }
                     match run_vulkan_dense_parallel_pair(
                         &left_device,
                         &right_device,
@@ -542,6 +606,33 @@ fn run_vulkan_triplet_measurements(
         .flat_map(|format| {
             workloads.iter().filter_map(|workload| {
                 workload_format_kernel(workload, format).map(|kernel| {
+                    if let Some(reason) = unsupported_kernel_reason(
+                        &kernel,
+                        &[&first_device, &second_device, &third_device],
+                    ) {
+                        return [
+                            triplet_status_measurement(
+                                &target_ids,
+                                "synthetic_layer_split_group_small_payload",
+                                "three_target_serial",
+                                "unsupported",
+                                payload_bytes,
+                                workload,
+                                format,
+                                &reason,
+                            ),
+                            triplet_status_measurement(
+                                &target_ids,
+                                "synthetic_tensor_split_group_small_payload",
+                                "three_target_parallel",
+                                "unsupported",
+                                payload_bytes,
+                                workload,
+                                format,
+                                &reason,
+                            ),
+                        ];
+                    }
                     let serial = run_vulkan_dense_serial_triplet(
                         [&first_device, &second_device, &third_device],
                         &target_ids,
@@ -601,6 +692,16 @@ fn vulkan_measurements(
         .flat_map(|format| {
             workloads.iter().filter_map(move |workload| {
                 workload_format_kernel(workload, format).map(|kernel| {
+                    if let Some(reason) = unsupported_kernel_reason(&kernel, &[device]) {
+                        return single_target_status_measurement(
+                            target_id,
+                            payload_bytes,
+                            workload,
+                            format,
+                            "unsupported",
+                            &reason,
+                        );
+                    }
                     match run_vulkan_dense_projection(
                         device,
                         target_id,
@@ -644,6 +745,24 @@ fn skipped_vulkan_axes<'a>(
         .collect()
 }
 
+fn unsupported_kernel_reason(
+    kernel: &DenseFormatKernel,
+    devices: &[&OpenVulkanComputeDevice],
+) -> Option<String> {
+    kernel.required_feature.and_then(|required_feature| {
+        devices
+            .iter()
+            .any(|device| !feature_flags_include(&device.feature_flags, required_feature))
+            .then(|| format!("required Vulkan feature {required_feature} is not available"))
+    })
+}
+
+fn feature_flags_include(feature_flags: &[String], required_feature: &str) -> bool {
+    feature_flags
+        .iter()
+        .any(|feature| feature == required_feature)
+}
+
 struct OpenVulkanComputeDevice {
     device: ash::Device,
     instance: ash::Instance,
@@ -652,6 +771,7 @@ struct OpenVulkanComputeDevice {
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     timestamp_period_ns: f32,
     timestamp_valid_bits: u32,
+    feature_flags: Vec<String>,
 }
 
 impl Drop for OpenVulkanComputeDevice {
@@ -1085,6 +1205,17 @@ fn create_dense_compute_context(
     payload_bytes: usize,
     kernel: DenseFormatKernel,
 ) -> Result<DenseComputeContext, String> {
+    if let Some(required_feature) = kernel.required_feature {
+        if !compute_device
+            .feature_flags
+            .iter()
+            .any(|feature| feature == required_feature)
+        {
+            return Err(format!(
+                "selected Vulkan device does not support required feature {required_feature}"
+            ));
+        }
+    }
     if compute_device.timestamp_valid_bits == 0 || compute_device.timestamp_period_ns <= 0.0 {
         return Err("selected Vulkan compute queue does not expose usable timestamps".to_string());
     }
@@ -1485,6 +1616,30 @@ fn failed_dense_pair_measurement(
     format: &str,
     reason: &str,
 ) -> PairMeasurement {
+    dense_pair_status_measurement(
+        source_id,
+        destination_id,
+        workload_prefix,
+        placement_strategy,
+        "failed",
+        payload_bytes,
+        workload_class,
+        format,
+        reason,
+    )
+}
+
+fn dense_pair_status_measurement(
+    source_id: &str,
+    destination_id: &str,
+    workload_prefix: &str,
+    placement_strategy: &str,
+    status: &str,
+    payload_bytes: usize,
+    workload_class: &str,
+    format: &str,
+    reason: &str,
+) -> PairMeasurement {
     let source_payload_bytes = payload_bytes / 2;
     let destination_payload_bytes = payload_bytes - source_payload_bytes;
     PairMeasurement {
@@ -1498,7 +1653,7 @@ fn failed_dense_pair_measurement(
         operation_family: workload_class.to_string(),
         regime: "small_payload".to_string(),
         format: format.to_string(),
-        status: "failed".to_string(),
+        status: status.to_string(),
         reason: Some(reason.to_string()),
         payload_bytes,
         source_payload_bytes,
@@ -1777,6 +1932,28 @@ fn failed_triplet_measurement(
     format: &str,
     reason: &str,
 ) -> GroupMeasurement {
+    triplet_status_measurement(
+        target_ids,
+        workload_prefix,
+        placement_strategy,
+        "failed",
+        payload_bytes,
+        workload_class,
+        format,
+        reason,
+    )
+}
+
+fn triplet_status_measurement(
+    target_ids: &[String; 3],
+    workload_prefix: &str,
+    placement_strategy: &str,
+    status: &str,
+    payload_bytes: usize,
+    workload_class: &str,
+    format: &str,
+    reason: &str,
+) -> GroupMeasurement {
     GroupMeasurement {
         workload_id: format_workload_id(workload_prefix, workload_class, format),
         comparison_group: "small_payload_placement_comparison".to_string(),
@@ -1787,7 +1964,7 @@ fn failed_triplet_measurement(
         operation_family: workload_class.to_string(),
         regime: "small_payload".to_string(),
         format: format.to_string(),
-        status: "failed".to_string(),
+        status: status.to_string(),
         reason: Some(reason.to_string()),
         participant_count: 3,
         payload_bytes,
@@ -2300,8 +2477,13 @@ fn open_compute_device(target: &Target) -> Result<OpenVulkanComputeDevice, Strin
         )
     }
     .map_err(|error| format!("could not create Vulkan instance: {error:?}"))?;
-    let result =
-        unsafe { open_compute_device_from_instance(instance, vulkan.physical_device_index) };
+    let result = unsafe {
+        open_compute_device_from_instance(
+            instance,
+            vulkan.physical_device_index,
+            vulkan.feature_flags.clone(),
+        )
+    };
     match result {
         Ok(device) => Ok(device),
         Err((instance, message)) => {
@@ -2314,6 +2496,7 @@ fn open_compute_device(target: &Target) -> Result<OpenVulkanComputeDevice, Strin
 unsafe fn open_compute_device_from_instance(
     instance: ash::Instance,
     physical_device_index: usize,
+    feature_flags: Vec<String>,
 ) -> Result<OpenVulkanComputeDevice, (ash::Instance, String)> {
     let physical_devices = unsafe { instance.enumerate_physical_devices() }.map_err(|error| {
         (
@@ -2348,7 +2531,16 @@ unsafe fn open_compute_device_from_instance(
     let queue_info = [vk::DeviceQueueCreateInfo::default()
         .queue_family_index(compute_queue_family_index)
         .queue_priorities(&priorities)];
-    let device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queue_info);
+    let mut shader_float16_int8 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+    if feature_flags
+        .iter()
+        .any(|feature| feature == "shader_float16")
+    {
+        shader_float16_int8.shader_float16 = vk::TRUE;
+    }
+    let device_info = vk::DeviceCreateInfo::default()
+        .queue_create_infos(&queue_info)
+        .push_next(&mut shader_float16_int8);
     let device = unsafe { instance.create_device(physical_device, &device_info, None) }.map_err(
         |error| {
             (
@@ -2366,6 +2558,7 @@ unsafe fn open_compute_device_from_instance(
         memory_properties,
         timestamp_period_ns: physical_device_properties.limits.timestamp_period,
         timestamp_valid_bits,
+        feature_flags,
     })
 }
 
@@ -2440,7 +2633,6 @@ mod tests {
     #[test]
     fn maps_model_storage_formats_to_packed_dense_kernel() {
         for (format, logical_elements) in [
-            ("f16", 2),
             ("bf16", 2),
             ("fp8_e4m3", 4),
             ("fp8_e5m2", 4),
@@ -2460,6 +2652,27 @@ mod tests {
                 logical_elements
             );
         }
+    }
+
+    #[test]
+    fn maps_f16_to_native_feature_gated_kernels() {
+        for (workload, pattern) in [
+            ("dense_projection", "single_target_f16_native_compute"),
+            ("moe_expert", "moe_expert_f16_native_compute"),
+            ("router_reduction", "router_reduction_f16_native_compute"),
+        ] {
+            let kernel = workload_format_kernel(workload, "f16").unwrap();
+            assert_eq!(kernel.format, "f16");
+            assert_eq!(kernel.pattern, pattern);
+            assert_eq!(kernel.required_feature, Some("shader_float16"));
+            assert_eq!(kernel.bytes_per_storage_element, mem::size_of::<u32>());
+            assert_eq!(kernel.logical_elements_per_storage_element, 2);
+        }
+        assert!(feature_flags_include(
+            &["shader_float16".to_string()],
+            "shader_float16"
+        ));
+        assert!(!feature_flags_include(&[], "shader_float16"));
     }
 
     #[test]

@@ -22,8 +22,8 @@ This first implementation provides:
   MoE expert, and router/reduction classes, with unsupported records for
   unimplemented CPU formats;
 - opt-in Vulkan dense-projection, MoE expert, and router/reduction dispatches
-  with GPU timestamp samples for F32 plus packed-emulated baselines for
-  lower-precision and quantized formats;
+  with GPU timestamp samples for F32, native F16 when available, and
+  packed-emulated baselines for other lower-precision and quantized formats;
 - opt-in Vulkan ordered activation transfer, two-target serial dense, and
   two-target parallel dense measurements for small pair comparisons;
 - workload specs and comparison candidates for single-target, pair, and triplet
@@ -34,14 +34,15 @@ This first implementation provides:
 Default runs keep GPU work passive. GPU targets are discovered and reported, but
 GPU compute only runs when `run --execute` is provided. The executable Vulkan
 path submits small workload-specific compute dispatches over the requested
-payload, measured with Vulkan timestamps. F32 uses float shader paths. F16,
-BF16, FP8 variants, FP4/MXFP4/NVFP4, INT formats, and GGUF-style Q/IQ storage
+payload, measured with Vulkan timestamps. F32 uses float shader paths. F16 uses
+feature-gated native 16-bit arithmetic when `shaderFloat16` is available. BF16,
+FP8 variants, FP4/MXFP4/NVFP4, INT formats, and GGUF-style Q/IQ storage
 families use packed-u32 emulation baselines until native format-specific kernels
 exist. Peer activation transfer, dense/MoE/router layer-split, and
 dense/MoE/router tensor-split pair and triplet paths run when `--execute` and
-pair measurements are active. Native format-specific kernels still produce no
-measurement rows until their backend kernels exist; their absence is reported as
-missing comparison coverage.
+pair measurements are active. Native format-specific kernels beyond F16 still
+produce no measurement rows until their backend kernels exist; their absence is
+reported as missing comparison coverage.
 CPU reference versions of the small compound patterns execute today so the
 logical workload contracts stay testable while GPU coverage grows.
 For CPU single-target comparisons, requested F32 workload records already use
@@ -64,7 +65,7 @@ workload dispatches for the requested executable formats. Pair execution also
 measures ordered host-staged activation transfer, ordered layer-split execution,
 and tensor-split execution for selected pairs. Triplet execution measures
 ordered three-stage layer-split and three-target tensor-split execution. Native
-format-specific kernels are omitted rather than guessed.
+format-specific kernels beyond F16 are omitted rather than guessed.
 
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,
