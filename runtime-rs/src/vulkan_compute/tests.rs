@@ -2168,6 +2168,45 @@ mod tests {
     }
 
     #[test]
+    fn resident_buffer_readback_binding_reuses_one_packed_transfer() {
+        let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+        let first = device.create_resident_buffer(16).unwrap();
+        let second = device.create_resident_buffer(16).unwrap();
+        assert!(device
+            .create_resident_buffer_readback_binding(&[])
+            .is_err());
+        let reads = [
+            VulkanResidentBufferReadRange::new(&second, 4, 8).unwrap(),
+            VulkanResidentBufferReadRange::new(&first, 0, 4).unwrap(),
+        ];
+        let binding = device
+            .create_resident_buffer_readback_binding(&reads)
+            .unwrap();
+        assert_eq!(binding.range_count(), 2);
+        reset_vulkan_resident_execution_counters();
+
+        first.write_bytes(&[1, 2, 3, 4]).unwrap();
+        second
+            .write_bytes(&[0, 0, 0, 0, 11, 12, 13, 14, 15, 16, 17, 18])
+            .unwrap();
+        let first_run = binding.run().unwrap();
+        assert_eq!(first_run.range_bytes(0).unwrap(), &[11, 12, 13, 14, 15, 16, 17, 18]);
+        assert_eq!(first_run.range_bytes(1).unwrap(), &[1, 2, 3, 4]);
+
+        first.write_bytes(&[21, 22, 23, 24]).unwrap();
+        second
+            .write_bytes(&[0, 0, 0, 0, 31, 32, 33, 34, 35, 36, 37, 38])
+            .unwrap();
+        let second_run = binding.run().unwrap();
+        assert_eq!(second_run.range_bytes(0).unwrap(), &[31, 32, 33, 34, 35, 36, 37, 38]);
+        assert_eq!(second_run.range_bytes(1).unwrap(), &[21, 22, 23, 24]);
+
+        let counters = vulkan_resident_execution_counters();
+        assert_eq!(counters.resident_copy_queue_submits, 2);
+        assert_eq!(counters.resident_copy_waits, 2);
+    }
+
+    #[test]
     fn resident_transfer_stream_bounds_staging_and_completes_with_a_timeline() {
         let device = match selected_test_vulkan_device() {
             Ok(device) => device,

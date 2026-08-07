@@ -635,6 +635,32 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                 )),
             ));
         };
+        let draft_tokens_output = device_slice
+            .mounted
+            .boundary_io
+            .output_buffer(&draft_tokens_output_signal_id)
+            .expect("validated parallel token output remains mounted");
+        let confidence_output = device_slice
+            .mounted
+            .boundary_io
+            .output_buffer(&confidence_output_signal_id)
+            .expect("validated parallel confidence output remains mounted");
+        let output_readback = device
+            .create_resident_buffer_readback_binding(&[
+                VulkanResidentBufferReadRange::new(
+                    &draft_tokens_output.buffer,
+                    0,
+                    block_width * size_of::<u32>(),
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                VulkanResidentBufferReadRange::new(
+                    &confidence_output.buffer,
+                    0,
+                    block_width * size_of::<f32>(),
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+            ])
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let state_transaction = VulkanResidentStateTransactionBank::new_transactional(
             device,
             &device_slice.mounted.buffers,
@@ -662,9 +688,8 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             ingress_copies,
             state_ingress_copies,
             egress_copies,
+            output_readback,
             anchor_input_signal_id: anchor_port.id.clone(),
-            draft_tokens_output_signal_id,
-            confidence_output_signal_id,
             minimum_draft_token_count,
             block_width: *block_width,
             source_context_tick_offset: *source_context_tick_offset,
@@ -804,27 +829,20 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
             .run_with_stream_control(device, control)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?;
 
-        let mut tokens = self
-            .mounted()
-            .boundary_io
-            .output_buffer(&self.draft_tokens_output_signal_id)
-            .expect("validated parallel token output remains mounted")
-            .buffer
-            .read_bytes(self.block_width * size_of::<u32>())
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?
+        let output_readback = self
+            .output_readback
+            .run()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let mut tokens = output_readback
+            .range_bytes(0)
+            .expect("mounted parallel token readback range exists")
             .chunks_exact(size_of::<u32>())
             .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("u32-sized token chunk")))
             .take(draft_token_count)
             .collect::<Vec<_>>();
-        let confidence_logits = self
-            .mounted()
-            .boundary_io
-            .output_buffer(&self.confidence_output_signal_id)
-            .expect("validated parallel confidence output remains mounted")
-            .buffer
-            .read_bytes(self.block_width * size_of::<f32>())
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let confidence_logits = confidence_logits
+        let confidence_logits = output_readback
+            .range_bytes(1)
+            .expect("mounted parallel confidence readback range exists")
             .chunks_exact(size_of::<f32>())
             .take(draft_token_count)
             .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("f32-sized confidence chunk")))

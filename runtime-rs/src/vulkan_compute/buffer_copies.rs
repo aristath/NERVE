@@ -31,6 +31,16 @@ pub struct VulkanResidentBufferReadback {
     ranges: Vec<std::ops::Range<usize>>,
 }
 
+/// A mounted device-to-host readback transaction. The transfer command buffer,
+/// staging allocation, and mapping are retained across runs; only the bytes in
+/// the source buffers change.
+pub struct VulkanResidentBufferReadbackBinding {
+    copy_batch: VulkanResidentBufferCopyBatch,
+    staging: VulkanResidentBuffer,
+    ranges: Vec<std::ops::Range<usize>>,
+    total_byte_count: usize,
+}
+
 impl VulkanResidentBufferReadback {
     pub fn range_count(&self) -> usize {
         self.ranges.len()
@@ -44,6 +54,20 @@ impl VulkanResidentBufferReadback {
             ))
         })?;
         Ok(&self.bytes[range.clone()])
+    }
+}
+
+impl VulkanResidentBufferReadbackBinding {
+    pub fn range_count(&self) -> usize {
+        self.ranges.len()
+    }
+
+    pub fn run(&self) -> Result<VulkanResidentBufferReadback, VulkanError> {
+        self.copy_batch.run()?;
+        Ok(VulkanResidentBufferReadback {
+            bytes: self.staging.read_bytes(self.total_byte_count)?,
+            ranges: self.ranges.clone(),
+        })
     }
 }
 

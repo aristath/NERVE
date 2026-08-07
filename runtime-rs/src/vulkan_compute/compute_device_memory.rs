@@ -1862,6 +1862,18 @@ impl VulkanComputeDevice {
                 ranges: Vec::new(),
             });
         }
+        self.create_resident_buffer_readback_binding(ranges)?.run()
+    }
+
+    pub fn create_resident_buffer_readback_binding(
+        &self,
+        ranges: &[VulkanResidentBufferReadRange<'_>],
+    ) -> Result<VulkanResidentBufferReadbackBinding, VulkanError> {
+        if ranges.is_empty() {
+            return Err(VulkanError(
+                "resident buffer readback binding must contain at least one range".to_string(),
+            ));
+        }
         let mut packed_ranges = Vec::with_capacity(ranges.len());
         let total_byte_count = ranges.iter().try_fold(0usize, |offset, range| {
             let end = offset.checked_add(range.byte_len).ok_or_else(|| {
@@ -1870,7 +1882,8 @@ impl VulkanComputeDevice {
             packed_ranges.push(offset..end);
             Ok(end)
         })?;
-        let staging = self.create_host_readback_resident_buffer(total_byte_count)?;
+        let mut staging = self.create_host_readback_resident_buffer(total_byte_count)?;
+        staging.persistently_map()?;
         let copies = ranges
             .iter()
             .zip(&packed_ranges)
@@ -1884,10 +1897,12 @@ impl VulkanComputeDevice {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.create_resident_buffer_copy_batch(&copies)?.run()?;
-        Ok(VulkanResidentBufferReadback {
-            bytes: staging.read_bytes(total_byte_count)?,
+        let copy_batch = self.create_resident_buffer_copy_batch(&copies)?;
+        Ok(VulkanResidentBufferReadbackBinding {
+            copy_batch,
+            staging,
             ranges: packed_ranges,
+            total_byte_count,
         })
     }
 
