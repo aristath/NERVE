@@ -123,6 +123,7 @@ mod tests {
             payload_bytes: 1024,
             samples: 1,
             benchmark_formats: vec!["f32".to_string()],
+            benchmark_workloads: vec!["dense_projection".to_string()],
             include_targets: Vec::new(),
             exclude_targets: Vec::new(),
             exclude_pci: Vec::new(),

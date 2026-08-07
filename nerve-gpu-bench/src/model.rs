@@ -38,6 +38,7 @@ pub struct RunPolicy {
     pub payload_bytes: usize,
     pub samples: usize,
     pub benchmark_formats: Vec<String>,
+    pub benchmark_workloads: Vec<String>,
     pub include_targets: Vec<String>,
     pub exclude_targets: Vec<String>,
     pub exclude_pci: Vec<String>,
@@ -81,6 +82,7 @@ pub struct BenchmarkRun {
 pub struct ComparisonSet {
     pub comparison_id: String,
     pub comparison_group: String,
+    pub workload_class: String,
     pub regime: String,
     pub format: String,
     pub target_ids: Vec<String>,
@@ -108,6 +110,7 @@ pub struct Implementation {
 pub struct WorkloadSpec {
     pub workload_id: String,
     pub comparison_group: String,
+    pub workload_class: String,
     pub placement_strategy: String,
     pub pattern: String,
     pub format: String,
@@ -123,6 +126,7 @@ pub struct WorkloadSpec {
 pub struct Measurement {
     pub workload_id: String,
     pub comparison_group: String,
+    pub workload_class: String,
     pub placement_strategy: String,
     pub target_id: String,
     pub pattern: String,
@@ -141,6 +145,7 @@ pub struct Measurement {
 pub struct PairMeasurement {
     pub workload_id: String,
     pub comparison_group: String,
+    pub workload_class: String,
     pub placement_strategy: String,
     pub source_target_id: String,
     pub destination_target_id: String,
@@ -163,6 +168,7 @@ pub struct PairMeasurement {
 pub struct GroupMeasurement {
     pub workload_id: String,
     pub comparison_group: String,
+    pub workload_class: String,
     pub placement_strategy: String,
     pub target_ids: Vec<String>,
     pub pattern: String,
@@ -284,6 +290,11 @@ impl BenchmarkRun {
         {
             return Err("policy.benchmark_formats must contain non-empty formats".to_string());
         }
+        if self.policy.benchmark_workloads.is_empty()
+            || self.policy.benchmark_workloads.iter().any(String::is_empty)
+        {
+            return Err("policy.benchmark_workloads must contain non-empty workloads".to_string());
+        }
         if self.policy.max_group_size == 0 || self.policy.max_group_size > 3 {
             return Err("policy.max_group_size must be between 1 and 3".to_string());
         }
@@ -322,9 +333,9 @@ impl BenchmarkRun {
             return Err("workload_specs contain duplicate workload IDs".to_string());
         }
         for spec in &self.workload_specs {
-            if spec.comparison_group.is_empty() {
+            if spec.comparison_group.is_empty() || spec.workload_class.is_empty() {
                 return Err(format!(
-                    "workload spec {:?} has an empty comparison_group",
+                    "workload spec {:?} has empty comparison metadata",
                     spec.workload_id
                 ));
             }
@@ -356,7 +367,10 @@ impl BenchmarkRun {
             return Err("comparison_sets contain duplicate comparison IDs".to_string());
         }
         for comparison in &self.comparison_sets {
-            if comparison.comparison_group.is_empty() || comparison.candidates.is_empty() {
+            if comparison.comparison_group.is_empty()
+                || comparison.workload_class.is_empty()
+                || comparison.candidates.is_empty()
+            {
                 return Err(format!(
                     "comparison set {:?} is missing group or candidates",
                     comparison.comparison_id
@@ -399,7 +413,9 @@ impl BenchmarkRun {
             }
         }
         for measurement in &self.measurements {
-            if measurement.comparison_group.is_empty() || measurement.placement_strategy.is_empty()
+            if measurement.comparison_group.is_empty()
+                || measurement.workload_class.is_empty()
+                || measurement.placement_strategy.is_empty()
             {
                 return Err(format!(
                     "measurement {:?} has empty comparison metadata",
@@ -415,7 +431,9 @@ impl BenchmarkRun {
             validate_status(&measurement.status)?;
         }
         for measurement in &self.pair_measurements {
-            if measurement.comparison_group.is_empty() || measurement.placement_strategy.is_empty()
+            if measurement.comparison_group.is_empty()
+                || measurement.workload_class.is_empty()
+                || measurement.placement_strategy.is_empty()
             {
                 return Err(format!(
                     "pair measurement {:?} has empty comparison metadata",
@@ -443,7 +461,9 @@ impl BenchmarkRun {
             validate_status(&measurement.status)?;
         }
         for measurement in &self.group_measurements {
-            if measurement.comparison_group.is_empty() || measurement.placement_strategy.is_empty()
+            if measurement.comparison_group.is_empty()
+                || measurement.workload_class.is_empty()
+                || measurement.placement_strategy.is_empty()
             {
                 return Err(format!(
                     "group measurement {:?} has empty comparison metadata",
@@ -819,6 +839,7 @@ mod tests {
                 payload_bytes: 1024,
                 samples: 1,
                 benchmark_formats: vec!["f32".to_string()],
+                benchmark_workloads: vec!["dense_projection".to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),
@@ -867,6 +888,7 @@ mod tests {
                 payload_bytes: 1024,
                 samples: 1,
                 benchmark_formats: vec!["f32".to_string()],
+                benchmark_workloads: vec!["dense_projection".to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),
@@ -902,6 +924,7 @@ mod tests {
         run.measurements.push(Measurement {
             workload_id: "work".to_string(),
             comparison_group: "test".to_string(),
+            workload_class: "dense_projection".to_string(),
             placement_strategy: "single_target_serial".to_string(),
             target_id: "cpu:host".to_string(),
             pattern: "single".to_string(),
@@ -940,6 +963,7 @@ mod tests {
                 payload_bytes: 1024,
                 samples: 1,
                 benchmark_formats: vec!["f32".to_string()],
+                benchmark_workloads: vec!["dense_projection".to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),
@@ -993,6 +1017,7 @@ mod tests {
         run.measurements.push(Measurement {
             workload_id: "single".to_string(),
             comparison_group: "small_payload_placement_comparison".to_string(),
+            workload_class: "dense_projection".to_string(),
             placement_strategy: "single_target_serial".to_string(),
             target_id: "gpu:a".to_string(),
             pattern: "single".to_string(),
@@ -1026,6 +1051,7 @@ mod tests {
                 payload_bytes: 1024,
                 samples: 1,
                 benchmark_formats: vec!["f32".to_string()],
+                benchmark_workloads: vec!["dense_projection".to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),
@@ -1040,6 +1066,7 @@ mod tests {
             comparison_sets: vec![ComparisonSet {
                 comparison_id: "cmp".to_string(),
                 comparison_group: "small_payload_placement_comparison".to_string(),
+                workload_class: "dense_projection".to_string(),
                 regime: "small_payload".to_string(),
                 format: "backend_selected".to_string(),
                 target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
@@ -1065,6 +1092,7 @@ mod tests {
             measurements: vec![Measurement {
                 workload_id: "single_target_gpu_small_payload".to_string(),
                 comparison_group: "small_payload_placement_comparison".to_string(),
+                workload_class: "dense_projection".to_string(),
                 placement_strategy: "single_target_serial".to_string(),
                 target_id: "gpu:a".to_string(),
                 pattern: "single".to_string(),

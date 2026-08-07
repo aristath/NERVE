@@ -23,7 +23,7 @@ unsupported, or skipped.
 - `started_at_unix_ms`, `finished_at_unix_ms`: wall-clock run timestamps.
 - `implementation`: benchmark package name, version, and backend status.
 - `policy`: user-selected run policy, including payload size, requested
-  `benchmark_formats`, and exclusions.
+  `benchmark_formats`, requested `benchmark_workloads`, and exclusions.
 - `discovered_targets`: every target discovered before policy filtering.
   Targets include `format_capabilities`, which record native, emulated,
   fallback, unsupported, or unmeasured support per format.
@@ -64,28 +64,34 @@ transfer cost, synchronization, and format path.
 For two-target comparisons, serial placement is directional. A result should
 preserve both A-to-B and B-to-A candidates because the activation transfer path,
 target speed, and stage ownership may not be symmetric.
-Comparison sets are also format-specific. The same target pair can have a
-different answer for F32, BF16, FP8, INT4, or FP4.
+Comparison sets are also workload- and format-specific. The same target pair can
+have a different answer for dense projection, MoE expert, router reduction, F32,
+BF16, FP8, INT4, or FP4.
 
 Current workload spec families:
 
-- `single_target_gpu_small_payload:<format>`: full logical payload on one target.
+- `single_target_gpu_small_payload:<workload_class>:<format>`: full logical
+  payload on one target.
 - `cpu_reference_serialized_small_payload`: CPU reference execution of the full
   logical payload as one serialized pattern.
 - `cpu_reference_layer_split_small_payload`: CPU reference execution of the same
   logical payload using the layer-split dataflow shape.
 - `cpu_reference_tensor_split_small_payload`: CPU reference execution of the
   same logical payload using the tensor-split dataflow shape.
-- `ordered_activation_transfer:<format>`: activation-sized movement from one
-  target to another.
-- `synthetic_layer_split_small_payload:<format>`: first half of the logical
-  payload on source, activation transfer, second half on destination.
-- `synthetic_tensor_split_small_payload:<format>`: split logical payload across
-  two targets, broadcast activation, compute shards, collect output.
-- `synthetic_layer_split_group_small_payload:<format>`: split logical payload
-  across three ordered targets with activation movement between stages.
-- `synthetic_tensor_split_group_small_payload:<format>`: split logical payload
-  across three targets, broadcast activation, compute shards, collect output.
+- `ordered_activation_transfer:<workload_class>:<format>`: activation-sized
+  movement from one target to another.
+- `synthetic_layer_split_small_payload:<workload_class>:<format>`: first half of
+  the logical payload on source, activation transfer, second half on
+  destination.
+- `synthetic_tensor_split_small_payload:<workload_class>:<format>`: split
+  logical payload across two targets, broadcast activation, compute shards,
+  collect output.
+- `synthetic_layer_split_group_small_payload:<workload_class>:<format>`: split
+  logical payload across three ordered targets with activation movement between
+  stages.
+- `synthetic_tensor_split_group_small_payload:<workload_class>:<format>`: split
+  logical payload across three targets, broadcast activation, compute shards,
+  collect output.
 
 GPU-backed specs are emitted before the Vulkan backend exists. Their
 measurements use `status: "unmeasured"` until a backend can execute them. CPU
@@ -101,3 +107,7 @@ class.
 Format capability is not a speed claim. A target can lack native FP4 but still
 win F32, BF16, routing, logits, sampler, or fallback/dequantized work. Placement
 must use measurements, not support flags alone.
+
+Workload class is also not a capability claim. It is the benchmark axis that
+keeps dense projection, MoE expert, router/reduction, and future operation
+families from being merged into one misleading score.

@@ -6,6 +6,8 @@ const DEFAULT_PAYLOAD_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_SAMPLES: usize = 5;
 const DEFAULT_MAX_GROUP_SIZE: usize = 3;
 const DEFAULT_BENCHMARK_FORMATS: &[&str] = &["bf16", "f32", "fp4", "fp8", "int4"];
+const DEFAULT_BENCHMARK_WORKLOADS: &[&str] =
+    &["dense_projection", "moe_expert", "router_reduction"];
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SAMPLES: usize = 30;
 const MAX_GROUP_SIZE: usize = 3;
@@ -27,6 +29,7 @@ pub enum Command {
         payload_bytes: usize,
         samples: usize,
         benchmark_formats: Vec<String>,
+        benchmark_workloads: Vec<String>,
         include_targets: Vec<String>,
         exclude_targets: Vec<String>,
         exclude_pci: Vec<String>,
@@ -126,6 +129,7 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
     let mut exclude_pci = Vec::new();
     let mut exclude_kinds = Vec::new();
     let mut benchmark_formats = Vec::new();
+    let mut benchmark_workloads = Vec::new();
     let mut pairs = true;
     let mut max_group_size = DEFAULT_MAX_GROUP_SIZE;
 
@@ -158,6 +162,9 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
             }
             "--format" => {
                 benchmark_formats.push(required_value(&arguments, &mut index, "--format")?);
+            }
+            "--workload" => {
+                benchmark_workloads.push(required_value(&arguments, &mut index, "--workload")?);
             }
             "--include-target" => {
                 include_targets.push(required_value(&arguments, &mut index, "--include-target")?);
@@ -208,12 +215,27 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
     if benchmark_formats.iter().any(|format| format.is_empty()) {
         return Err(CliError("--format cannot be empty".to_string()));
     }
+    if benchmark_workloads.is_empty() {
+        benchmark_workloads = DEFAULT_BENCHMARK_WORKLOADS
+            .iter()
+            .map(|workload| (*workload).to_string())
+            .collect();
+    }
+    benchmark_workloads.sort();
+    benchmark_workloads.dedup();
+    if benchmark_workloads
+        .iter()
+        .any(|workload| workload.is_empty())
+    {
+        return Err(CliError("--workload cannot be empty".to_string()));
+    }
 
     Ok(Command::Run {
         output,
         payload_bytes,
         samples,
         benchmark_formats,
+        benchmark_workloads,
         include_targets,
         exclude_targets,
         exclude_pci,
@@ -242,7 +264,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--workload WORKLOAD ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -261,6 +283,10 @@ mod tests {
                 benchmark_formats: DEFAULT_BENCHMARK_FORMATS
                     .iter()
                     .map(|format| (*format).to_string())
+                    .collect(),
+                benchmark_workloads: DEFAULT_BENCHMARK_WORKLOADS
+                    .iter()
+                    .map(|workload| (*workload).to_string())
                     .collect(),
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
@@ -288,6 +314,7 @@ mod tests {
                 include_targets,
                 exclude_kinds,
                 benchmark_formats,
+                benchmark_workloads,
                 pairs,
                 max_group_size,
                 ..
@@ -299,6 +326,13 @@ mod tests {
                     DEFAULT_BENCHMARK_FORMATS
                         .iter()
                         .map(|format| (*format).to_string())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    benchmark_workloads,
+                    DEFAULT_BENCHMARK_WORKLOADS
+                        .iter()
+                        .map(|workload| (*workload).to_string())
                         .collect::<Vec<_>>()
                 );
                 assert!(!pairs);
@@ -336,6 +370,25 @@ mod tests {
             Command::Run {
                 benchmark_formats, ..
             } => assert_eq!(benchmark_formats, ["f32", "fp4"]),
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_benchmark_workloads() {
+        let command = parse_args([
+            "run".to_string(),
+            "--workload".to_string(),
+            "dense_projection".to_string(),
+            "--workload".to_string(),
+            "moe_expert".to_string(),
+        ])
+        .unwrap();
+        match command {
+            Command::Run {
+                benchmark_workloads,
+                ..
+            } => assert_eq!(benchmark_workloads, ["dense_projection", "moe_expert"]),
             _ => panic!("expected run command"),
         }
     }

@@ -44,6 +44,11 @@ The run policy records requested benchmark formats, and backend workload IDs
 are format-specific so F32, BF16, FP8, INT4, and FP4 evidence cannot collapse
 into one generic path.
 
+The workload matrix is separate from the format matrix. Defaults include dense
+projection, MoE expert, and router/reduction shapes because one device may win
+F32 dense math while losing FP8 expert work or low-byte routing. Backend
+workload IDs include both workload class and format.
+
 ## Commands
 
 List discovered targets:
@@ -65,6 +70,15 @@ Limit the requested format matrix:
 cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
   --format f32 \
   --format fp4 \
+  --output benchmark-results.json
+```
+
+Limit the requested workload matrix:
+
+```sh
+cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
+  --workload dense_projection \
+  --workload router_reduction \
   --output benchmark-results.json
 ```
 
