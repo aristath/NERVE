@@ -58,6 +58,17 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   mean decode tok/s versus the accepted 8.4228 baseline. It was removed from
   source and the compiled package was restored. Local shader wins are not
   promotion evidence when the complete routed stream does not improve.
+- Four compact-expert representation candidates were also rejected on the same
+  discrete AMD GPU and real six-expert geometry. Resolving and caching dynamic
+  addresses once per workgroup preserved output but made gate/up 54% slower
+  (0.67512 vs 0.43760 ms). Raising the gate tile from 32 to 128 rows was slower
+  (0.86488 vs 0.43760 ms). A byte-exact once-per-route FP8 intermediate plus a
+  prequantized down dispatch was slower than the fused down path (0.28520 vs
+  0.24268 ms). Finally, llama.cpp-style MXFP4-to-signed-INT8 decode and packed
+  INT8 dot products preserved a representable conformance input but improved
+  gate/up by only 2.9% (0.42648 vs 0.43876 ms), which cannot justify changing
+  the activation representation and model numerics. All four candidates were
+  removed; no experimental runtime path remains.
 - Demand-paged residency correctness, immutable miss records, causal suffix
   resume, complete-conversation convergence, shared bounded host caching, and
   exact teardown are implemented. Resident FP8 coexistence is also implemented
@@ -78,17 +89,14 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      exact fused or tiled schedule is faster. Preserve score accumulation order,
      online-softmax semantics, sink handling, compressed-index ordering, and
      BF16 output bits.
-   - Continue with native compact-MXFP4 expert gate/up. Measure whether repeated
-     selector-address validation and indirection can be resolved once per routed
-     expert by the residency gate and consumed as a compact device-resident route
-     table by all expert workgroups.
-   - Benchmark on-the-fly compact-MXFP4 tile decoding into FP8/INT8 matrix tiles,
-     a persistent workgroup-per-expert circuit that keeps the SwiGLU intermediate
-     on chip, and other exact hardware-native mappings. Do not permanently expand
-     every sparse expert merely to use matrix hardware.
-   - Remove redundant per-tile intermediate quantization in down projection only
-     if a sub-minute real-geometry microbenchmark proves a win and exhaustive
-     numeric checks preserve the current result.
+   - Native compact-MXFP4 vector alternatives are now locally exhausted: address
+     caching, larger persistent tiles, once-per-route intermediate quantization,
+     and packed INT8 dot products all lost or were immaterial. Do not retry those
+     shapes. A future expert candidate must be a materially different compiled
+     transaction, such as direct compact decode into a hardware matrix tile that
+     amortizes its otherwise wasted columns across real attached proposal lanes,
+     keeps SwiGLU on chip, preserves verified behavior, and does not permanently
+     expand every sparse expert.
    - Every candidate microbenchmark must answer the binary faster/not-faster
      question in under one minute with only enough repetitions to avoid a cold
      anomaly. Reject a candidate immediately when it is slower or changes the
