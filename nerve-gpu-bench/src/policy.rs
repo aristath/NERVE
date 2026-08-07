@@ -12,22 +12,24 @@ pub fn apply_selection_policy(targets: &[Target], policy: &RunPolicy) -> Selecti
     let mut skipped_targets = Vec::new();
 
     for target in targets {
-        let reason =
-            if !include_targets.is_empty() && !include_targets.contains(&target.stable_target_id) {
-                Some("not_in_include_set")
-            } else if exclude_targets.contains(&target.stable_target_id) {
-                Some("user_excluded_target")
-            } else if target
-                .pci_address
-                .as_ref()
-                .is_some_and(|pci| exclude_pci.contains(pci))
-            {
-                Some("user_excluded_pci")
-            } else if exclude_kinds.contains(&target.kind) {
-                Some("user_excluded_kind")
-            } else {
-                None
-            };
+        let reason = if target.kind == "unavailable" {
+            Some("target_unavailable")
+        } else if !include_targets.is_empty() && !include_targets.contains(&target.stable_target_id)
+        {
+            Some("not_in_include_set")
+        } else if exclude_targets.contains(&target.stable_target_id) {
+            Some("user_excluded_target")
+        } else if target
+            .pci_address
+            .as_ref()
+            .is_some_and(|pci| exclude_pci.contains(pci))
+        {
+            Some("user_excluded_pci")
+        } else if exclude_kinds.contains(&target.kind) {
+            Some("user_excluded_kind")
+        } else {
+            None
+        };
 
         if let Some(reason) = reason {
             skipped_targets.push(SkippedTarget {
@@ -140,5 +142,32 @@ mod tests {
         );
         assert_eq!(selection.skipped_targets.len(), 1);
         assert_eq!(selection.skipped_targets[0].reason, "user_excluded_kind");
+    }
+
+    #[test]
+    fn unavailable_targets_are_discovered_but_not_selected() {
+        let targets = [
+            target("cpu:host", "cpu", None),
+            target("vulkan:unavailable", "unavailable", None),
+        ];
+        let policy = RunPolicy {
+            payload_bytes: 1024,
+            samples: 1,
+            benchmark_formats: vec!["f32".to_string()],
+            benchmark_workloads: vec!["dense_projection".to_string()],
+            include_targets: Vec::new(),
+            exclude_targets: Vec::new(),
+            exclude_pci: Vec::new(),
+            exclude_kinds: Vec::new(),
+            pair_measurements: true,
+            max_group_size: 3,
+        };
+        let selection = apply_selection_policy(&targets, &policy);
+        assert_eq!(selection.selected_target_ids, ["cpu:host"]);
+        assert_eq!(
+            selection.skipped_targets[0].stable_target_id,
+            "vulkan:unavailable"
+        );
+        assert_eq!(selection.skipped_targets[0].reason, "target_unavailable");
     }
 }
