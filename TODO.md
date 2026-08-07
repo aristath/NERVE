@@ -212,6 +212,18 @@ toward 50 tok/s without regressing supported Qwen models.
      for a real residency miss, cancellation, or completed emitted block. Prove exact
      stop-token, sampler, routed-expert, state-digest, protocol-boundary, and teardown
      equivalence before promotion.
+
+     Do not mistake command-buffer recording for that persistent stream. A rejected
+     demand-template experiment replayed every completed feedback window and reused
+     8,234 of 8,452 resident sequence command buffers, yet a 124-token DeepSeek turn
+     fell to **1.205 decode tok/s**. It still issued 7,976 queue batches, 6,238 copy
+     submissions, and 8,828 copy waits. Reusing the same fragmented submission graph
+     is therefore not the solution. The next candidate must change the submission
+     topology itself: one bounded device-owned transaction must carry routing,
+     demand predicates, expert execution, cross-device edges, sampling, and the
+     attached DSpark proposal/verification/commit loop. Host-visible checkpoints
+     remain only for a true residency fault, cancellation, watchdog progress, or a
+     completed emitted block.
    - Isolate product Vulkan execution behind supervised per-device worker
      processes. Normal inference fence, timeline, transfer, and quiescence waits
      now poll at the existing 250 ms execution-quantum target, quarantine a
