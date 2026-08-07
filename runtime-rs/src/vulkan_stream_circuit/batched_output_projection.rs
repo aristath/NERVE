@@ -336,10 +336,19 @@ impl VulkanResidentBatchedOutputProjectionKernelRunner {
         device: &VulkanComputeDevice,
         batch_width: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let _projection = runtime_critical_path_span(RuntimeCriticalPathPhase::OutputProjection);
         let sequence = self.projection_sequence(device, batch_width)?;
         device
             .run_recorded_resident_kernel_sequence(&sequence)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let duration_ns = device
+            .read_recorded_resident_kernel_sequence_duration_ns(&sequence)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        record_runtime_critical_path_device_duration(
+            RuntimeCriticalPathPhase::OutputProjection,
+            duration_ns,
+        );
+        Ok(())
     }
 }
 
@@ -454,6 +463,7 @@ impl VulkanResidentBatchedOutputProjectionRunner {
         stream_ticks: &[u64],
         dynamic_state_capacities: &[u32],
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let _sampling = runtime_critical_path_span(RuntimeCriticalPathPhase::Sampling);
         let batch_width = self.prepare_sampler_lanes(
             device,
             token_prefixes,
@@ -495,7 +505,17 @@ impl VulkanResidentBatchedOutputProjectionRunner {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         device
             .wait_resident_kernel_sequence(&self.sampler_views[batch_width - 1].sequence)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        for view in self.sampler_views.iter().take(batch_width) {
+            let duration_ns = device
+                .read_recorded_resident_kernel_sequence_duration_ns(&view.sequence)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            record_runtime_critical_path_device_duration(
+                RuntimeCriticalPathPhase::Sampling,
+                duration_ns,
+            );
+        }
+        Ok(())
     }
 
     fn project_and_sample_lanes(
@@ -505,6 +525,7 @@ impl VulkanResidentBatchedOutputProjectionRunner {
         stream_ticks: &[u64],
         dynamic_state_capacities: &[u32],
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let _output = runtime_critical_path_span(RuntimeCriticalPathPhase::OutputProjection);
         let profile = std::env::var_os("NERVE_VK_PERF_LOGGER").is_some();
         let started = profile.then(std::time::Instant::now);
         let batch_width = self.prepare_sampler_lanes(
@@ -560,6 +581,23 @@ impl VulkanResidentBatchedOutputProjectionRunner {
         device
             .wait_resident_kernel_sequence(&self.sampler_views[batch_width - 1].sequence)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let projection_sequence = self.projection.projection_sequence(device, batch_width)?;
+        let projection_duration_ns = device
+            .read_recorded_resident_kernel_sequence_duration_ns(&projection_sequence)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        record_runtime_critical_path_device_duration(
+            RuntimeCriticalPathPhase::OutputProjection,
+            projection_duration_ns,
+        );
+        for view in self.sampler_views.iter().take(batch_width) {
+            let sampler_duration_ns = device
+                .read_recorded_resident_kernel_sequence_duration_ns(&view.sequence)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            record_runtime_critical_path_device_duration(
+                RuntimeCriticalPathPhase::Sampling,
+                sampler_duration_ns,
+            );
+        }
         if profile {
             let catalog =
                 self.projection.projection_sequence_catalog.borrow();

@@ -812,6 +812,31 @@
                 }],
             },
             timing,
+            critical_path: crate::RuntimeCriticalPathReport {
+                wall_duration_ns: 90,
+                host_exclusive_work_duration_ns: 80,
+                host_attributed_critical_path_duration_ns: 80,
+                host_unattributed_duration_ns: 10,
+                host_parallel_overlap_duration_ns: 0,
+                host_coverage_basis_points: 8_888,
+                device_timestamp_duration_ns: 70,
+                generated_token_count: 1,
+                execution_window_count: 1,
+                phases: vec![crate::RuntimeCriticalPathPhaseReport {
+                    phase: "host_synchronization".to_string(),
+                    host_invocation_count: 1,
+                    host_inclusive_duration_ns: 60,
+                    host_exclusive_duration_ns: 60,
+                    host_max_inclusive_duration_ns: 60,
+                    device_timestamp_count: 0,
+                    device_duration_ns: 0,
+                    device_max_duration_ns: 0,
+                    host_exclusive_per_generated_token_ns: Some(60),
+                    device_per_generated_token_ns: Some(0),
+                    host_exclusive_per_execution_window_ns: Some(60),
+                    device_per_execution_window_ns: Some(0),
+                }],
+            },
             component_timings: vec![RuntimePlacedComponentTimingReport {
                 stream_tick: 0,
                 device_id: "gpu0".to_string(),
@@ -990,6 +1015,8 @@
         );
         assert_eq!(placed_payload["resident_feedback"]["planned_tick_count"], 7);
         assert_eq!(placed_payload["resident_feedback"]["discarded_tick_count"], 4);
+        assert_eq!(placed_payload["critical_path"]["host_unattributed_duration_ns"], 10);
+        assert_eq!(placed_payload["critical_path"]["phases"][0]["phase"], "host_synchronization");
         assert_eq!(
             placed_payload["resource_residency"]["policy"],
             "demand_retained"

@@ -13,6 +13,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         input_token_id: u32,
         stream_tick: u64,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let _draft = runtime_critical_path_span(RuntimeCriticalPathPhase::SpeculativeDraft);
         if self.speculative_decoders.is_empty() {
             return Ok(());
         }
@@ -39,6 +40,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         start_stream_tick: u64,
         planned_tick_count: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let _draft = runtime_critical_path_span(RuntimeCriticalPathPhase::SpeculativeDraft);
         if self.speculative_decoders.is_empty() || input_token_ids.is_empty() {
             return Ok(());
         }

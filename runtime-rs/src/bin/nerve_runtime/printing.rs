@@ -256,17 +256,73 @@ fn print_runtime_execution_counters(counters: &VulkanResidentExecutionCounters) 
         nanos_to_millis(counters.execution_quantum_predicted_duration_ns)
     );
     println!(
-        "  execution_quantum_actual_ms={:.3}",
-        nanos_to_millis(counters.execution_quantum_actual_duration_ns)
+        "  execution_quantum_host_submit_wait_ms={:.3}",
+        nanos_to_millis(counters.execution_quantum_host_submit_wait_duration_ns)
     );
     println!(
         "  execution_quantum_max_regions={}",
         counters.execution_quantum_max_region_count
     );
     println!(
-        "  execution_quantum_max_actual_ms={:.3}",
-        nanos_to_millis(counters.execution_quantum_max_actual_duration_ns)
+        "  execution_quantum_max_host_submit_wait_ms={:.3}",
+        nanos_to_millis(counters.execution_quantum_max_host_submit_wait_duration_ns)
     );
+}
+
+fn print_runtime_critical_path(report: &RuntimeCriticalPathReport) {
+    for line in runtime_critical_path_lines(report) {
+        println!("{line}");
+    }
+}
+
+fn runtime_critical_path_lines(report: &RuntimeCriticalPathReport) -> Vec<String> {
+    let mut lines = vec![
+        "critical_path:".to_string(),
+        format!(
+            "  wall_ms={:.3} host_exclusive_work_ms={:.3} attributed_ms={:.3} unattributed_ms={:.3} parallel_overlap_ms={:.3} coverage={:.2}%",
+        nanos_to_millis(report.wall_duration_ns),
+        nanos_to_millis(report.host_exclusive_work_duration_ns),
+        nanos_to_millis(report.host_attributed_critical_path_duration_ns),
+        nanos_to_millis(report.host_unattributed_duration_ns),
+        nanos_to_millis(report.host_parallel_overlap_duration_ns),
+        f64::from(report.host_coverage_basis_points) / 100.0,
+        ),
+        format!(
+            "  device_timestamp_ms={:.3} (reported separately; device intervals may overlap host work and each other)",
+            nanos_to_millis(report.device_timestamp_duration_ns),
+        ),
+        format!(
+            "  normalization_generated_tokens={} normalization_execution_windows={}",
+            report.generated_token_count, report.execution_window_count,
+        ),
+    ];
+    for phase in &report.phases {
+        if phase.host_invocation_count == 0 && phase.device_timestamp_count == 0 {
+            continue;
+        }
+        lines.push(format!(
+            "  phase={} host_calls={} host_exclusive_ms={:.3} host_inclusive_ms={:.3} host_max_ms={:.3} device_timestamps={} device_ms={:.3} device_max_ms={:.3} host_us/token={} device_us/token={} host_us/window={} device_us/window={}",
+            phase.phase,
+            phase.host_invocation_count,
+            nanos_to_millis(phase.host_exclusive_duration_ns),
+            nanos_to_millis(phase.host_inclusive_duration_ns),
+            nanos_to_millis(phase.host_max_inclusive_duration_ns),
+            phase.device_timestamp_count,
+            nanos_to_millis(phase.device_duration_ns),
+            nanos_to_millis(phase.device_max_duration_ns),
+            optional_nanos_to_micros(phase.host_exclusive_per_generated_token_ns),
+            optional_nanos_to_micros(phase.device_per_generated_token_ns),
+            optional_nanos_to_micros(phase.host_exclusive_per_execution_window_ns),
+            optional_nanos_to_micros(phase.device_per_execution_window_ns),
+        ));
+    }
+    lines
+}
+
+fn optional_nanos_to_micros(duration_ns: Option<u64>) -> String {
+    duration_ns
+        .map(|duration_ns| format!("{:.3}", duration_ns as f64 / 1_000.0))
+        .unwrap_or_else(|| "n/a".to_string())
 }
 
 fn print_runtime_sparse_moe_stats(stats: &RuntimeSparseMoeWorkReport) {

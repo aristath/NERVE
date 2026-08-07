@@ -117,21 +117,28 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
         let run = (|| {
             let draft_start = Instant::now();
-            let draft_token_ids = decoder.run_draft_window(
-                draft_device.as_ref(),
-                initial_token_id,
-                start_stream_tick,
-                draft_token_count,
-                confidence_threshold,
-            )?;
+            let draft_token_ids = {
+                let _draft =
+                    runtime_critical_path_span(RuntimeCriticalPathPhase::SpeculativeDraft);
+                decoder.run_draft_window(
+                    draft_device.as_ref(),
+                    initial_token_id,
+                    start_stream_tick,
+                    draft_token_count,
+                    confidence_threshold,
+                )?
+            };
             let draft_time_ns = u64::try_from(draft_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
 
             let target_inputs = std::iter::once(initial_token_id)
                 .chain(draft_token_ids.iter().copied())
                 .collect::<Vec<_>>();
             let target_start = Instant::now();
-            let target_tokens =
-                self.run_causal_verification_window(devices, &target_inputs, start_stream_tick)?;
+            let target_tokens = {
+                let _verification =
+                    runtime_critical_path_span(RuntimeCriticalPathPhase::SpeculativeVerification);
+                self.run_causal_verification_window(devices, &target_inputs, start_stream_tick)?
+            };
             let target_verification_time_ns =
                 u64::try_from(target_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
             let mut verification =
@@ -187,18 +194,22 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
             let catch_up_start = Instant::now();
-            decoder.restore_baseline()?;
-            let catch_up_input_token_ids = std::iter::once(initial_token_id)
-                .chain(draft_token_ids.iter().copied())
-                .take(verification.committed_target_tick_count)
-                .collect::<Vec<_>>();
-            self.catch_up_speculative_decoder_after_verification(
-                decoder,
-                draft_device.as_ref(),
-                &catch_up_input_token_ids,
-                start_stream_tick,
-                target_inputs.len(),
-            )?;
+            {
+                let _draft =
+                    runtime_critical_path_span(RuntimeCriticalPathPhase::SpeculativeDraft);
+                decoder.restore_baseline()?;
+                let catch_up_input_token_ids = std::iter::once(initial_token_id)
+                    .chain(draft_token_ids.iter().copied())
+                    .take(verification.committed_target_tick_count)
+                    .collect::<Vec<_>>();
+                self.catch_up_speculative_decoder_after_verification(
+                    decoder,
+                    draft_device.as_ref(),
+                    &catch_up_input_token_ids,
+                    start_stream_tick,
+                    target_inputs.len(),
+                )?;
+            }
             let draft_catch_up_time_ns =
                 u64::try_from(catch_up_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
 

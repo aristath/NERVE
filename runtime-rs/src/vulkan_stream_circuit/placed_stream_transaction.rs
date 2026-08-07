@@ -30,6 +30,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         VulkanResidentInProcessPlacedPromptEngineStreamTransaction,
         VulkanResidentInProcessPlacedPromptEngineError,
     > {
+        let _state_commit = runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
         let depth = self
             .active_transaction_depths
             .get(stream_id)
@@ -161,6 +162,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         &mut self,
         transaction: VulkanResidentInProcessPlacedPromptEngineStreamTransaction,
     ) -> Result<(), VulkanResidentInProcessPlacedPromptEngineError> {
+        let _state_commit = runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
         self.validate_current_stream_transaction(&transaction)?;
         let stream_id = transaction.stream_id.clone();
         let depth = transaction.depth;
@@ -218,6 +220,7 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         &mut self,
         transaction: VulkanResidentInProcessPlacedPromptEngineStreamTransaction,
     ) -> Result<(), VulkanResidentInProcessPlacedPromptEngineError> {
+        let _state_commit = runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
         self.validate_current_stream_transaction(&transaction)?;
         let stream_id = transaction.stream_id.clone();
         let depth = transaction.depth;

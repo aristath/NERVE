@@ -11,12 +11,13 @@ use minijinja::{Environment, Error as TemplateError, ErrorKind as TemplateErrorK
 use serde::Serialize;
 
 use crate::{
-    VulkanResidentExecutionCounters, VulkanResidentHfTokenizerTextCodec,
-    VulkanResidentInProcessPlacedPromptEngine,
+    RuntimeCriticalPathPhase, RuntimeCriticalPathReport, VulkanResidentExecutionCounters,
+    VulkanResidentHfTokenizerTextCodec, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun, VulkanResidentModelPackageManifest,
     VulkanResidentOutputControl, VulkanResidentTokenInputEvent,
     VulkanResidentTokenRuntimeSchedulerOutputEvent, VulkanResidentTokenTextCodec,
-    reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
+    reset_runtime_critical_path_counters, reset_vulkan_resident_execution_counters,
+    runtime_critical_path_report, runtime_critical_path_span, vulkan_resident_execution_counters,
 };
 
 mod compiled_codec;
@@ -54,6 +55,7 @@ pub struct VulkanResidentChatTransactionRun {
     pub generation_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
     pub canonical_commit_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
     pub execution_counters: VulkanResidentExecutionCounters,
+    pub critical_path: RuntimeCriticalPathReport,
     pub generation_terminated_by_protocol: bool,
     pub elapsed_ns: u64,
 }
@@ -123,8 +125,13 @@ where
     ) -> Result<(), Box<dyn Error>>,
 {
     reset_vulkan_resident_execution_counters();
+    reset_runtime_critical_path_counters();
     let started = Instant::now();
-    let outer_transaction = engine.begin_stream_transaction(stream_id)?;
+    let protocol_span = runtime_critical_path_span(RuntimeCriticalPathPhase::Protocol);
+    let outer_transaction = {
+        let _state_commit = runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+        engine.begin_stream_transaction(stream_id)?
+    };
     let transaction = (|| -> Result<VulkanResidentChatTransactionRun, Box<dyn Error>> {
         let user_run = engine.submit_input_event_until_idle(
             stream_id,
@@ -135,7 +142,10 @@ where
             )
             .with_origin("runtime_chat_canonical_user"),
         )?;
-        on_phase_completed(VulkanResidentChatTransactionPhase::UserCommitted, engine)?;
+        {
+            let _telemetry = runtime_critical_path_span(RuntimeCriticalPathPhase::Telemetry);
+            on_phase_completed(VulkanResidentChatTransactionPhase::UserCommitted, engine)?;
+        }
 
         let mut generation_event = VulkanResidentTokenInputEvent::new(
             format!("chat_{turn_index}_generation_branch"),
@@ -158,6 +168,7 @@ where
                 if output_error.is_some() || protocol_retained_token_count.is_some() {
                     return VulkanResidentOutputControl::Abort;
                 }
+                let _protocol = runtime_critical_path_span(RuntimeCriticalPathPhase::Protocol);
                 match on_output_event(event) {
                     Ok(RuntimeChatGeneratedOutputControl::Continue) => {
                         VulkanResidentOutputControl::Continue
@@ -185,10 +196,13 @@ where
                 }
             },
         )?;
-        on_phase_completed(
-            VulkanResidentChatTransactionPhase::GenerationBranchCompleted,
-            engine,
-        )?;
+        {
+            let _telemetry = runtime_critical_path_span(RuntimeCriticalPathPhase::Telemetry);
+            on_phase_completed(
+                VulkanResidentChatTransactionPhase::GenerationBranchCompleted,
+                engine,
+            )?;
+        }
         if let Some(error) = output_error {
             return Err(recoverable_chat_turn_error(
                 "streaming generated assistant output failed before canonical commit",
@@ -255,10 +269,13 @@ where
             )
             .with_origin("runtime_chat_canonical_assistant"),
         )?;
-        on_phase_completed(
-            VulkanResidentChatTransactionPhase::CanonicalTurnCommitted,
-            engine,
-        )?;
+        {
+            let _telemetry = runtime_critical_path_span(RuntimeCriticalPathPhase::Telemetry);
+            on_phase_completed(
+                VulkanResidentChatTransactionPhase::CanonicalTurnCommitted,
+                engine,
+            )?;
+        }
         Ok(VulkanResidentChatTransactionRun {
             generated_token_ids,
             assistant_content,
@@ -271,6 +288,7 @@ where
             generation_run,
             canonical_commit_run,
             execution_counters: vulkan_resident_execution_counters(),
+            critical_path: RuntimeCriticalPathReport::default(),
             generation_terminated_by_protocol,
             elapsed_ns: 0,
         })
@@ -278,13 +296,22 @@ where
 
     match transaction {
         Ok(mut transaction) => {
-            engine.commit_stream_transaction(outer_transaction)?;
+            {
+                let _state_commit =
+                    runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+                engine.commit_stream_transaction(outer_transaction)?;
+            }
+            drop(protocol_span);
             transaction.elapsed_ns = u64::try_from(started.elapsed().as_nanos())
                 .unwrap_or(u64::MAX)
                 .max(1);
+            transaction.critical_path = runtime_critical_path_report(transaction.elapsed_ns);
             Ok(transaction)
         }
-        Err(error) => match engine.restore_stream_transaction(outer_transaction) {
+        Err(error) => match {
+            let _state_commit = runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+            engine.restore_stream_transaction(outer_transaction)
+        } {
             Ok(()) => Err(error),
             Err(restore_error) => Err(Box::new(io::Error::other(format!(
                 "chat turn failed ({error}) and canonical state rollback also failed ({restore_error})",

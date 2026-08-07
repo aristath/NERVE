@@ -163,6 +163,7 @@ impl VulkanResidentTransferStream {
         &mut self,
         writes: &[VulkanResidentBufferWriteRange<'_>],
     ) -> Result<VulkanResidentTransferTicket, VulkanError> {
+        let _transfer = runtime_critical_path_span(RuntimeCriticalPathPhase::CrossDeviceTransfer);
         self.device_health.require_healthy()?;
         if writes.is_empty() {
             return Err(VulkanError(
@@ -309,6 +310,7 @@ impl VulkanResidentTransferStream {
         &mut self,
         writes: &[VulkanResidentBufferWriteRange<'_>],
     ) -> Result<(), (VulkanError, bool)> {
+        let _transfer = runtime_critical_path_span(RuntimeCriticalPathPhase::CrossDeviceTransfer);
         self.device_health
             .require_healthy()
             .map_err(|error| (error, false))?;
@@ -516,6 +518,7 @@ impl VulkanResidentTransferStream {
         &self,
         ticket: &VulkanResidentTransferTicket,
     ) -> Result<(), VulkanError> {
+        let _transfer = runtime_critical_path_span(RuntimeCriticalPathPhase::CrossDeviceTransfer);
         self.validate_ticket(ticket)?;
         if self.queue_is_distinct_from_consumer {
             self.wait_timeline_value_on_consumer_queue(ticket.timeline_value)
@@ -552,6 +555,7 @@ impl VulkanResidentTransferStream {
     }
 
     fn wait_timeline_value(&self, value: u64) -> Result<(), VulkanError> {
+        let _wait = runtime_critical_path_span(RuntimeCriticalPathPhase::HostSynchronization);
         wait_for_vulkan_timeline_points_with_progress_watchdog(
             &self.device,
             &[self.timeline.semaphore],
@@ -576,6 +580,7 @@ impl VulkanResidentTransferStream {
         &self,
         value: u64,
     ) -> Result<(), VulkanError> {
+        let _wait = runtime_critical_path_span(RuntimeCriticalPathPhase::HostSynchronization);
         self.device_health.require_healthy()?;
         unsafe {
             let fence = self

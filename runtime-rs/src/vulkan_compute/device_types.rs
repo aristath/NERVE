@@ -76,9 +76,9 @@ pub struct VulkanResidentExecutionCounters {
     pub execution_quantum_estimated_memory_bytes: u64,
     pub execution_quantum_dispatch_count: u64,
     pub execution_quantum_predicted_duration_ns: u64,
-    pub execution_quantum_actual_duration_ns: u64,
+    pub execution_quantum_host_submit_wait_duration_ns: u64,
     pub execution_quantum_max_region_count: u64,
-    pub execution_quantum_max_actual_duration_ns: u64,
+    pub execution_quantum_max_host_submit_wait_duration_ns: u64,
 }
 
 static RESIDENT_SEQUENCE_PREPARE_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -106,9 +106,9 @@ static EXECUTION_QUANTUM_ESTIMATED_WORK_UNITS: AtomicU64 = AtomicU64::new(0);
 static EXECUTION_QUANTUM_ESTIMATED_MEMORY_BYTES: AtomicU64 = AtomicU64::new(0);
 static EXECUTION_QUANTUM_DISPATCH_COUNT: AtomicU64 = AtomicU64::new(0);
 static EXECUTION_QUANTUM_PREDICTED_DURATION_NS: AtomicU64 = AtomicU64::new(0);
-static EXECUTION_QUANTUM_ACTUAL_DURATION_NS: AtomicU64 = AtomicU64::new(0);
+static EXECUTION_QUANTUM_HOST_SUBMIT_WAIT_DURATION_NS: AtomicU64 = AtomicU64::new(0);
 static EXECUTION_QUANTUM_MAX_REGION_COUNT: AtomicU64 = AtomicU64::new(0);
-static EXECUTION_QUANTUM_MAX_ACTUAL_DURATION_NS: AtomicU64 = AtomicU64::new(0);
+static EXECUTION_QUANTUM_MAX_HOST_SUBMIT_WAIT_DURATION_NS: AtomicU64 = AtomicU64::new(0);
 
 pub fn reset_vulkan_resident_execution_counters() {
     RESIDENT_SEQUENCE_PREPARE_CALLS.store(0, Ordering::Relaxed);
@@ -136,9 +136,9 @@ pub fn reset_vulkan_resident_execution_counters() {
     EXECUTION_QUANTUM_ESTIMATED_MEMORY_BYTES.store(0, Ordering::Relaxed);
     EXECUTION_QUANTUM_DISPATCH_COUNT.store(0, Ordering::Relaxed);
     EXECUTION_QUANTUM_PREDICTED_DURATION_NS.store(0, Ordering::Relaxed);
-    EXECUTION_QUANTUM_ACTUAL_DURATION_NS.store(0, Ordering::Relaxed);
+    EXECUTION_QUANTUM_HOST_SUBMIT_WAIT_DURATION_NS.store(0, Ordering::Relaxed);
     EXECUTION_QUANTUM_MAX_REGION_COUNT.store(0, Ordering::Relaxed);
-    EXECUTION_QUANTUM_MAX_ACTUAL_DURATION_NS.store(0, Ordering::Relaxed);
+    EXECUTION_QUANTUM_MAX_HOST_SUBMIT_WAIT_DURATION_NS.store(0, Ordering::Relaxed);
 }
 
 pub fn vulkan_resident_execution_counters() -> VulkanResidentExecutionCounters {
@@ -181,12 +181,12 @@ pub fn vulkan_resident_execution_counters() -> VulkanResidentExecutionCounters {
         execution_quantum_dispatch_count: EXECUTION_QUANTUM_DISPATCH_COUNT.load(Ordering::Relaxed),
         execution_quantum_predicted_duration_ns: EXECUTION_QUANTUM_PREDICTED_DURATION_NS
             .load(Ordering::Relaxed),
-        execution_quantum_actual_duration_ns: EXECUTION_QUANTUM_ACTUAL_DURATION_NS
-            .load(Ordering::Relaxed),
+        execution_quantum_host_submit_wait_duration_ns:
+            EXECUTION_QUANTUM_HOST_SUBMIT_WAIT_DURATION_NS.load(Ordering::Relaxed),
         execution_quantum_max_region_count: EXECUTION_QUANTUM_MAX_REGION_COUNT
             .load(Ordering::Relaxed),
-        execution_quantum_max_actual_duration_ns: EXECUTION_QUANTUM_MAX_ACTUAL_DURATION_NS
-            .load(Ordering::Relaxed),
+        execution_quantum_max_host_submit_wait_duration_ns:
+            EXECUTION_QUANTUM_MAX_HOST_SUBMIT_WAIT_DURATION_NS.load(Ordering::Relaxed),
     }
 }
 
@@ -240,13 +240,13 @@ pub(crate) fn record_vulkan_execution_quantum_measurement(
         measurement.cost.predicted_duration_ns,
         Ordering::Relaxed,
     );
-    EXECUTION_QUANTUM_ACTUAL_DURATION_NS
+    EXECUTION_QUANTUM_HOST_SUBMIT_WAIT_DURATION_NS
         .fetch_add(measurement.duration_ns, Ordering::Relaxed);
     EXECUTION_QUANTUM_MAX_REGION_COUNT.fetch_max(
         u64::try_from(measurement.region_count).unwrap_or(u64::MAX),
         Ordering::Relaxed,
     );
-    EXECUTION_QUANTUM_MAX_ACTUAL_DURATION_NS
+    EXECUTION_QUANTUM_MAX_HOST_SUBMIT_WAIT_DURATION_NS
         .fetch_max(measurement.duration_ns, Ordering::Relaxed);
 }
 

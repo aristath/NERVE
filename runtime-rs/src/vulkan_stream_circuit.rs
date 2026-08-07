@@ -15,6 +15,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 
+use crate::critical_path::{
+    RuntimeCriticalPathPhase, record_runtime_critical_path_device_duration,
+    runtime_critical_path_span,
+};
 use crate::execution_schedule::{
     RuntimeExecutionCost, RuntimeExecutionQuantumCalibrator, RuntimeExecutionRegion,
 };
@@ -70,7 +74,7 @@ use crate::vulkan_compute::{
     VulkanStableResourceGroupLayout, VulkanSubgroupOperation, VulkanTimelineSemaphore,
     VulkanTimelineSemaphorePoint, VulkanTimelineSemaphoreReplayState,
     record_vulkan_demand_sequence_device_duration, record_vulkan_execution_quantum_measurement,
-    record_vulkan_resident_component_sequence_device_duration,
+    record_vulkan_resident_component_sequence_device_duration, semantic_label_field,
     vulkan_gpu_residency_gate_spirv_words, vulkan_spirv_requirements,
 };
 #[cfg(test)]

@@ -44,6 +44,7 @@ impl VulkanComputeDevice {
         sequence: &VulkanResidentKernelSequence,
         timeout: Duration,
     ) -> Result<(), VulkanError> {
+        let _wait = runtime_critical_path_span(RuntimeCriticalPathPhase::HostSynchronization);
         self.require_device_healthy()?;
         let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
         unsafe {
@@ -198,6 +199,7 @@ impl VulkanComputeDevice {
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
     ) -> Result<(), VulkanError> {
+        let _submission = runtime_critical_path_span(RuntimeCriticalPathPhase::QueueSubmission);
         self.require_device_healthy()?;
         if wait_points.is_empty() && signal_points.is_empty() {
             return Err(VulkanError(
@@ -277,6 +279,7 @@ impl VulkanComputeDevice {
         label: &str,
         record_sequence_submission: bool,
     ) -> Result<(), VulkanError> {
+        let _submission = runtime_critical_path_span(RuntimeCriticalPathPhase::QueueSubmission);
         self.require_device_healthy()?;
         for point in wait_points.iter().chain(signal_points) {
             self.validate_local_timeline_semaphore(point.semaphore)?;
@@ -346,6 +349,7 @@ impl VulkanResidentQueueSubmitter {
         timeline_value_transform: VulkanTimelineValueTransform<'_>,
         completion_fence_override: Option<vk::Fence>,
     ) -> Result<(), VulkanError> {
+        let _submission = runtime_critical_path_span(RuntimeCriticalPathPhase::QueueSubmission);
         self.device_health.require_healthy()?;
         if submissions.is_empty() {
             return Ok(());
@@ -478,6 +482,7 @@ impl VulkanResidentQueueSubmitter {
     }
 
     fn wait_for_completion_fence(&self, fence: vk::Fence) -> Result<(), VulkanError> {
+        let _wait = runtime_critical_path_span(RuntimeCriticalPathPhase::HostSynchronization);
         wait_for_vulkan_fences_with_progress_watchdog(
             &self.device,
             &[fence],
@@ -501,6 +506,7 @@ impl VulkanComputeDevice {
         &self,
         sequence: &VulkanResidentKernelSequence,
     ) -> Result<(), VulkanError> {
+        let _wait = runtime_critical_path_span(RuntimeCriticalPathPhase::HostSynchronization);
         wait_for_vulkan_fences_with_progress_watchdog(
             &self.device,
             &[sequence.completion_fence],
@@ -572,6 +578,7 @@ impl VulkanComputeDevice {
         snapshot_copies: &[VulkanResidentKernelSequenceSnapshotCopy<'_>],
         execute: bool,
     ) -> Result<(), VulkanError> {
+        let _preparation = runtime_critical_path_span(RuntimeCriticalPathPhase::CommandPreparation);
         if steps.is_empty() {
             return Err(VulkanError(
                 "resident kernel sequence must contain at least one dispatch".to_string(),

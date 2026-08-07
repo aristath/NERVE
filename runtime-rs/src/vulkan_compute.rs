@@ -1,3 +1,4 @@
+use crate::critical_path::{RuntimeCriticalPathPhase, runtime_critical_path_span};
 use crate::execution_schedule::{
     RUNTIME_EXECUTION_TARGET_QUANTUM_DURATION_NS, RuntimeExecutionQuantum,
     RuntimeExecutionQuantumBudget, RuntimeExecutionQuantumCalibrator, RuntimeExecutionRegion,

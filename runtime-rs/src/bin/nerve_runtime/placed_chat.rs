@@ -353,6 +353,10 @@ fn run_placed_chat(
                 .compiled_resource_residency_report(
                     &cumulative_selection_coverage,
                 )?;
+            let critical_path = transaction.critical_path.with_normalization(
+                timing.generated_token_count,
+                resident_feedback.window_count,
+            );
             Ok(RuntimeChatTurn {
                 generated_token_ids: transaction.generated_token_ids,
                 assistant_message: transaction.assistant_message,
@@ -369,6 +373,7 @@ fn run_placed_chat(
                 ),
                 implementation_selection: implementation_selection.clone(),
                 execution_counters: transaction.execution_counters,
+                critical_path,
                 prefix_state_cache,
                 speculative_cycle_count: speculative_decode.cycle_count,
                 speculative_rollback_cycle_count:
@@ -486,7 +491,10 @@ fn execute_placed_prompt_run(
     let setup_time_ns = elapsed_nanos_u64(setup_start);
     let run_result =
         (|| -> Result<RuntimePlacedPromptRunReport, Box<dyn Error>> {
+    reset_vulkan_resident_execution_counters();
+    reset_runtime_critical_path_counters();
     let run_start = Instant::now();
+    let protocol_span = runtime_critical_path_span(RuntimeCriticalPathPhase::Protocol);
     let selection_before = engine
         .stream("main")
         .ok_or_else(|| {
@@ -499,7 +507,6 @@ fn execute_placed_prompt_run(
     let input_event =
         VulkanResidentTokenInputEvent::new("prompt", prompt_ids.to_vec(), args.max_new_tokens);
     let input_event_id = input_event.id.clone();
-    reset_vulkan_resident_execution_counters();
     let submitted_run = engine.submit_input_event_until_idle("main", input_event)?;
     let selection_after = engine
         .stream("main")
@@ -525,6 +532,7 @@ fn execute_placed_prompt_run(
         .compiled_resource_residency_report(
             &cumulative_selection_coverage,
         )?;
+    drop(protocol_span);
     let run_time_ns = elapsed_nanos_u64(run_start);
     let engine_run = submitted_run.engine_run;
     let prefill_activation_count = engine_run.prefill_activation_count;
@@ -591,6 +599,10 @@ fn execute_placed_prompt_run(
     let transport_direct_receive_count = run.transport_stats.direct_receive_count;
     let transport_direct_receive_byte_count = run.transport_stats.direct_receive_byte_count;
     let transport_edges = runtime_placed_transport_edge_reports(&run.transport_stats);
+    let critical_path = runtime_critical_path_report(run_time_ns).with_normalization(
+        generated_token_count,
+        run.resident_feedback.window_count,
+    );
 
     Ok(RuntimePlacedPromptRunReport {
         ok: true,
@@ -635,6 +647,7 @@ fn execute_placed_prompt_run(
             by_tick: transport_stats_by_tick,
         },
         timing,
+        critical_path,
         component_timings,
         component_timing_summaries,
         speculative_cycle_count: run.speculative_decode.cycle_count,
@@ -746,6 +759,7 @@ fn print_placed_prompt_report(
         print_text(&report.output_text);
         print_runtime_timing_stats("stats", &report.timing);
         print_runtime_execution_counters(&vulkan_resident_execution_counters());
+        print_runtime_critical_path(&report.critical_path);
         print_runtime_feedback_stats(&report.resident_feedback);
         print_runtime_sparse_moe_stats(&report.sparse_moe);
         print_runtime_selection_coverage_stats(

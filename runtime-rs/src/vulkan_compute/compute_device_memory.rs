@@ -1656,6 +1656,7 @@ impl VulkanComputeDevice {
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
     ) -> Result<(), VulkanError> {
+        let _transfer = runtime_critical_path_span(RuntimeCriticalPathPhase::CrossDeviceTransfer);
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(
                 "resident buffer copy belongs to another logical device".to_string(),
@@ -1676,6 +1677,7 @@ impl VulkanComputeDevice {
         &self,
         binding: &VulkanResidentBufferCopy,
     ) -> Result<(), VulkanError> {
+        let _transfer = runtime_critical_path_span(RuntimeCriticalPathPhase::CrossDeviceTransfer);
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(
                 "resident buffer copy belongs to another logical device".to_string(),
@@ -1702,6 +1704,7 @@ impl VulkanComputeDevice {
         &self,
         binding: &VulkanResidentBufferCopyBatch,
     ) -> Result<(), VulkanError> {
+        let _transfer = runtime_critical_path_span(RuntimeCriticalPathPhase::CrossDeviceTransfer);
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(
                 "resident buffer copy batch belongs to another logical device".to_string(),
@@ -1728,6 +1731,7 @@ impl VulkanComputeDevice {
         &self,
         binding: &VulkanResidentBufferCopyBatch,
     ) -> Result<(), VulkanError> {
+        let _transfer = runtime_critical_path_span(RuntimeCriticalPathPhase::CrossDeviceTransfer);
         self.require_device_healthy()?;
         if binding.device.handle() != self.device.handle() {
             return Err(VulkanError(

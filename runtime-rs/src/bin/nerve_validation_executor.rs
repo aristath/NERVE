@@ -1923,15 +1923,15 @@ fn add_counters(
     total.execution_quantum_predicted_duration_ns = total
         .execution_quantum_predicted_duration_ns
         .saturating_add(value.execution_quantum_predicted_duration_ns);
-    total.execution_quantum_actual_duration_ns = total
-        .execution_quantum_actual_duration_ns
-        .saturating_add(value.execution_quantum_actual_duration_ns);
+    total.execution_quantum_host_submit_wait_duration_ns = total
+        .execution_quantum_host_submit_wait_duration_ns
+        .saturating_add(value.execution_quantum_host_submit_wait_duration_ns);
     total.execution_quantum_max_region_count = total
         .execution_quantum_max_region_count
         .max(value.execution_quantum_max_region_count);
-    total.execution_quantum_max_actual_duration_ns = total
-        .execution_quantum_max_actual_duration_ns
-        .max(value.execution_quantum_max_actual_duration_ns);
+    total.execution_quantum_max_host_submit_wait_duration_ns = total
+        .execution_quantum_max_host_submit_wait_duration_ns
+        .max(value.execution_quantum_max_host_submit_wait_duration_ns);
 }
 
 fn resolve_package_path(root: &Path, raw: &str) -> PathBuf {

@@ -575,6 +575,7 @@ pub struct RuntimePlacedPromptRunReport {
     pub completed_stage_deltas: Vec<usize>,
     pub transport: RuntimePlacedTransportReport,
     pub timing: RuntimePromptTimingReport,
+    pub critical_path: crate::RuntimeCriticalPathReport,
     pub component_timings: Vec<RuntimePlacedComponentTimingReport>,
     pub component_timing_summaries: Vec<RuntimePlacedComponentTimingSummaryReport>,
     pub speculative_cycle_count: usize,

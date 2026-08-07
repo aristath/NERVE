@@ -454,8 +454,12 @@ impl VulkanResidentInProcessPlacedPromptEngine {
     where
         F: FnMut(VulkanResidentTokenRuntimeSchedulerOutputEvent),
     {
+        let _scheduler = runtime_critical_path_span(RuntimeCriticalPathPhase::SchedulerControl);
         let input_event_id = event.id.clone();
-        let queued_input_event = self.enqueue_input_event(stream_id, event)?;
+        let queued_input_event = {
+            let _input = runtime_critical_path_span(RuntimeCriticalPathPhase::InputPreparation);
+            self.enqueue_input_event(stream_id, event)?
+        };
         let mut engine_run = self.run_until_idle_bounded_abortable_with_output(
             usize::MAX,
             abort_requested,
@@ -666,9 +670,10 @@ impl VulkanResidentInProcessPlacedPromptEngine {
                 scheduler_activation_capacity.saturating_mul(activation_work_width),
             )
             .with_max_decode_tokens_per_activation(activation_work_width);
-            let scheduler_step = self
-                .runtime_scheduler
-                .schedule_batch_step(scheduler_budget)?;
+            let scheduler_step = {
+                let _routing = runtime_critical_path_span(RuntimeCriticalPathPhase::Routing);
+                self.runtime_scheduler.schedule_batch_step(scheduler_budget)?
+            };
             if scheduler_step.batches.is_empty() {
                 if pending_activations.is_empty() {
                     break;

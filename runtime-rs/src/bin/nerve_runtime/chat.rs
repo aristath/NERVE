@@ -11,6 +11,7 @@ struct RuntimeChatTurn {
     sustained_decode: RuntimeSustainedDecodeReport,
     implementation_selection: RuntimeImplementationSelectionReport,
     execution_counters: VulkanResidentExecutionCounters,
+    critical_path: RuntimeCriticalPathReport,
     prefix_state_cache: VulkanResidentPlacedPrefixStateCacheStats,
     speculative_cycle_count: usize,
     speculative_rollback_cycle_count: usize,
@@ -251,6 +252,7 @@ where
                 &turn.implementation_selection,
             );
             print_runtime_execution_counters(&turn.execution_counters);
+            print_runtime_critical_path(&turn.critical_path);
             print_runtime_prefix_state_cache_stats(
                 &turn.prefix_state_cache,
             );

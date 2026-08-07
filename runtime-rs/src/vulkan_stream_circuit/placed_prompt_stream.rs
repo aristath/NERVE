@@ -635,6 +635,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         Option<VulkanResidentInProcessPlacedPromptStreamActivationRun>,
         VulkanResidentInProcessPlacedRuntimeError,
     > {
+        let _scheduler = runtime_critical_path_span(RuntimeCriticalPathPhase::SchedulerControl);
         if !self.activate_next_input_event()? {
             return Ok(None);
         }
@@ -684,12 +685,15 @@ impl VulkanResidentInProcessPlacedPromptStream {
         } else {
             VulkanResidentPlacedTokenTickTail::None
         };
-        self.processor.prepare_token_input(placed_token_input(
-            activation.input_token_id,
-            &self.processor.model.input_device_id,
-            &self.processor.model.output_device_id,
-            activation.input_is_feedback,
-        ))?;
+        {
+            let _input = runtime_critical_path_span(RuntimeCriticalPathPhase::InputPreparation);
+            self.processor.prepare_token_input(placed_token_input(
+                activation.input_token_id,
+                &self.processor.model.input_device_id,
+                &self.processor.model.output_device_id,
+                activation.input_is_feedback,
+            ))?;
+        }
         let placed_run = self
             .processor
             .execute_prepared_token_id_stream_tick_on_bound_devices_in_process_with_transport(
@@ -699,12 +703,14 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 tail,
             )?;
         let sampled_token = if activation.should_emit_public_output {
-            Some(
-                VulkanResidentSampledToken::from(&self.processor
+            let _sampling = runtime_critical_path_span(RuntimeCriticalPathPhase::Sampling);
+            Some(VulkanResidentSampledToken::from(
+                &self
+                    .processor
                     .sampler
                     .completed_run()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?),
-            )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?,
+            ))
         } else {
             None
         };

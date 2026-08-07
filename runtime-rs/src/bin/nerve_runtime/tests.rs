@@ -32,6 +32,7 @@ mod tests {
         validate_explicit_logical_device_bindings, runtime_uses_explicit_placement,
         runtime_auto_placement_device_is_eligible,
         rank_runtime_auto_placement_candidates_across_capability_classes,
+        runtime_critical_path_lines,
     };
 
     fn formatter(template_source: &str) -> RuntimeChatFormatter {
@@ -1284,5 +1285,49 @@ mod tests {
             report.windows.last().unwrap().elapsed_ns
                 > report.windows.first().unwrap().elapsed_ns
         );
+    }
+
+    #[test]
+    fn critical_path_output_separates_device_timestamps_and_omits_empty_phases() {
+        let report = nerve_runtime::RuntimeCriticalPathReport {
+            wall_duration_ns: 10_000_000,
+            host_exclusive_work_duration_ns: 9_500_000,
+            host_attributed_critical_path_duration_ns: 9_500_000,
+            host_unattributed_duration_ns: 500_000,
+            host_parallel_overlap_duration_ns: 0,
+            host_coverage_basis_points: 9_500,
+            device_timestamp_duration_ns: 20_000_000,
+            generated_token_count: 2,
+            execution_window_count: 1,
+            phases: vec![
+                nerve_runtime::RuntimeCriticalPathPhaseReport {
+                    phase: "queue_submission".to_string(),
+                    host_invocation_count: 2,
+                    host_exclusive_duration_ns: 1_000_000,
+                    host_inclusive_duration_ns: 1_500_000,
+                    host_max_inclusive_duration_ns: 900_000,
+                    device_timestamp_count: 0,
+                    device_duration_ns: 0,
+                    device_max_duration_ns: 0,
+                    host_exclusive_per_generated_token_ns: Some(500_000),
+                    device_per_generated_token_ns: Some(0),
+                    host_exclusive_per_execution_window_ns: Some(1_000_000),
+                    device_per_execution_window_ns: Some(0),
+                },
+                nerve_runtime::RuntimeCriticalPathPhaseReport {
+                    phase: "unused".to_string(),
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let lines = runtime_critical_path_lines(&report);
+
+        assert!(lines.iter().any(|line| line.contains("coverage=95.00%")));
+        assert!(lines.iter().any(|line| {
+            line.contains("reported separately") && line.contains("device intervals may overlap")
+        }));
+        assert!(lines.iter().any(|line| line.contains("phase=queue_submission")));
+        assert!(!lines.iter().any(|line| line.contains("phase=unused")));
     }
 }

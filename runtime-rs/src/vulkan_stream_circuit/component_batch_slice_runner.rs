@@ -21,6 +21,81 @@ struct VulkanResidentComponentBatchSliceRunner {
     quantum_calibrator: Rc<RefCell<RuntimeExecutionQuantumCalibrator>>,
 }
 
+fn critical_path_phase_for_dispatches<'a>(
+    dispatches: impl Iterator<Item = &'a VulkanResidentKernelDispatch>,
+) -> RuntimeCriticalPathPhase {
+    let mut phase = None;
+    for dispatch in dispatches {
+        let candidate = dispatch
+            .semantic_label()
+            .map(critical_path_phase_for_semantic_label)
+            .unwrap_or(RuntimeCriticalPathPhase::MixedDeviceCompute);
+        match phase {
+            None => phase = Some(candidate),
+            Some(current) if current == candidate => {}
+            Some(_) => return RuntimeCriticalPathPhase::MixedDeviceCompute,
+        }
+    }
+    phase.unwrap_or(RuntimeCriticalPathPhase::MixedDeviceCompute)
+}
+
+fn critical_path_phase_for_semantic_label(label: &str) -> RuntimeCriticalPathPhase {
+    let operation = semantic_label_field(label, "op")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let component = semantic_label_field(label, "component")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if operation.starts_with("sparse_moe")
+        || operation == "grouped_linear"
+        || component.split(['.', '/', ':']).any(|part| {
+            part == "expert" || part == "experts"
+        })
+    {
+        RuntimeCriticalPathPhase::ExpertCompute
+    } else if operation == "top_k" || operation == "moe_route" {
+        RuntimeCriticalPathPhase::Routing
+    } else if operation.contains("attention")
+        || operation.contains("rotary")
+        || operation.contains("rope")
+    {
+        RuntimeCriticalPathPhase::AttentionIndexCompute
+    } else if operation == "output_transducer" {
+        RuntimeCriticalPathPhase::OutputProjection
+    } else {
+        RuntimeCriticalPathPhase::MixedDeviceCompute
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn semantic_kernel_phase_classification_uses_structure_not_model_identity() {
+    assert_eq!(
+        critical_path_phase_for_semantic_label(
+            "kernel=k component=block_3.experts node=n op=sparse_moe_gate_up"
+        ),
+        RuntimeCriticalPathPhase::ExpertCompute,
+    );
+    assert_eq!(
+        critical_path_phase_for_semantic_label(
+            "kernel=k component=block_3 node=n op=indexed_sparse_attention"
+        ),
+        RuntimeCriticalPathPhase::AttentionIndexCompute,
+    );
+    assert_eq!(
+        critical_path_phase_for_semantic_label(
+            "kernel=k component=block_3 node=n op=top_k"
+        ),
+        RuntimeCriticalPathPhase::Routing,
+    );
+    assert_eq!(
+        critical_path_phase_for_semantic_label(
+            "kernel=k component=expertise node=n op=linear"
+        ),
+        RuntimeCriticalPathPhase::MixedDeviceCompute,
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum VulkanComponentBatchExecutionUnit {
     LocalComponent {
@@ -1420,7 +1495,18 @@ impl VulkanResidentComponentBatchSliceRunner {
                         flush_after_segment,
                     )?;
                     if sequence_was_enqueued {
-                        pending_timed_sequences.push(sequence);
+                        pending_timed_sequences.push((
+                            sequence,
+                            critical_path_phase_for_dispatches(
+                                self.steps[*step_start..*step_end]
+                                    .iter()
+                                    .filter(|step| {
+                                        step.lane_index
+                                            .is_none_or(|lane| lane < batch_width)
+                                    })
+                                    .map(|step| &step.dispatch),
+                            ),
+                        ));
                     }
                     if !wait_points.is_empty() {
                         pending_owner_wait_points.clear();
@@ -1640,6 +1726,9 @@ impl VulkanResidentComponentBatchSliceRunner {
         if active_steps.is_empty() {
             return Ok(false);
         }
+        let critical_path_phase = critical_path_phase_for_dispatches(
+            active_steps.iter().map(|step| &step.dispatch),
+        );
         let sequence_steps = active_steps
             .iter()
             .zip(&push_constant_storage)
@@ -1734,6 +1823,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                 .read_recorded_resident_kernel_sequence_duration_ns(sequence)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             record_vulkan_resident_component_sequence_device_duration(duration_ns);
+            record_runtime_critical_path_device_duration(critical_path_phase, duration_ns);
             Ok(false)
         }
     }
@@ -1741,18 +1831,22 @@ impl VulkanResidentComponentBatchSliceRunner {
     fn record_completed_component_sequence_timings(
         &self,
         device: &VulkanComputeDevice,
-        sequences: &mut Vec<&VulkanResidentKernelSequence>,
+        sequences: &mut Vec<(
+            &VulkanResidentKernelSequence,
+            RuntimeCriticalPathPhase,
+        )>,
         completion_mode: VulkanComponentBatchCompletionMode,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         if completion_mode != VulkanComponentBatchCompletionMode::Blocking {
             sequences.clear();
             return Ok(());
         }
-        for sequence in sequences.drain(..) {
+        for (sequence, critical_path_phase) in sequences.drain(..) {
             let duration_ns = device
                 .read_recorded_resident_kernel_sequence_duration_ns(sequence)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             record_vulkan_resident_component_sequence_device_duration(duration_ns);
+            record_runtime_critical_path_device_duration(critical_path_phase, duration_ns);
         }
         Ok(())
     }

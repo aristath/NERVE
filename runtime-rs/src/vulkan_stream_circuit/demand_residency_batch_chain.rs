@@ -682,6 +682,7 @@ impl VulkanDemandResidencyBatchChain {
         dynamic_state_capacity_activations: u32,
         context: &VulkanDemandResidencyExecutionContext,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let _residency = runtime_critical_path_span(RuntimeCriticalPathPhase::ResidencyGate);
         if !self.continuation_enabled.get() {
             self.continuation_predicate
                 .write_bytes(&1u32.to_le_bytes())
@@ -996,6 +997,10 @@ impl VulkanDemandResidencyBatchChain {
             .read_recorded_resident_kernel_sequence_duration_ns(sequence)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         record_vulkan_demand_sequence_device_duration(resumed, duration_ns);
+        record_runtime_critical_path_device_duration(
+            RuntimeCriticalPathPhase::MixedDeviceCompute,
+            duration_ns,
+        );
         Ok(())
     }
 
