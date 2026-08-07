@@ -18,6 +18,9 @@ pub enum RuntimeCriticalPathPhase {
     Routing,
     ResidencyGate,
     ExpertCompute,
+    ExpertGateUp,
+    ExpertDown,
+    ExpertReduction,
     DenseProjection,
     GroupedProjection,
     Normalization,
@@ -41,7 +44,7 @@ pub enum RuntimeCriticalPathPhase {
 }
 
 impl RuntimeCriticalPathPhase {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 32] = [
         Self::Protocol,
         Self::SchedulerControl,
         Self::InputPreparation,
@@ -51,6 +54,9 @@ impl RuntimeCriticalPathPhase {
         Self::Routing,
         Self::ResidencyGate,
         Self::ExpertCompute,
+        Self::ExpertGateUp,
+        Self::ExpertDown,
+        Self::ExpertReduction,
         Self::DenseProjection,
         Self::GroupedProjection,
         Self::Normalization,
@@ -84,6 +90,9 @@ impl RuntimeCriticalPathPhase {
             Self::Routing => "routing",
             Self::ResidencyGate => "residency_gate",
             Self::ExpertCompute => "expert_compute",
+            Self::ExpertGateUp => "expert_gate_up",
+            Self::ExpertDown => "expert_down",
+            Self::ExpertReduction => "expert_reduction",
             Self::DenseProjection => "dense_projection",
             Self::GroupedProjection => "grouped_projection",
             Self::Normalization => "normalization",

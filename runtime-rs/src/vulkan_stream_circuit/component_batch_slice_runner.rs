@@ -62,8 +62,13 @@ fn critical_path_phase_for_component_operation(
         || component_parts().any(|part| part == "output_stream_adapter")
     {
         RuntimeCriticalPathPhase::OutputProjection
+    } else if operation.contains("sparse_moe_gate_up") {
+        RuntimeCriticalPathPhase::ExpertGateUp
+    } else if operation.contains("sparse_moe_down") {
+        RuntimeCriticalPathPhase::ExpertDown
+    } else if operation == "moe_reduce" {
+        RuntimeCriticalPathPhase::ExpertReduction
     } else if operation.contains("sparse_moe")
-        || operation == "moe_reduce"
         || component_parts().any(|part| part == "expert" || part == "experts")
     {
         RuntimeCriticalPathPhase::ExpertCompute
@@ -115,13 +120,19 @@ fn semantic_kernel_phase_classification_uses_structure_not_model_identity() {
         critical_path_phase_for_semantic_label(
             "kernel=k component=block_3.experts node=n op=sparse_moe_gate_up"
         ),
-        RuntimeCriticalPathPhase::ExpertCompute,
+        RuntimeCriticalPathPhase::ExpertGateUp,
     );
     assert_eq!(
         critical_path_phase_for_semantic_label(
             "kernel=k component=block_3 node=n op=independent_sparse_moe_down"
         ),
-        RuntimeCriticalPathPhase::ExpertCompute,
+        RuntimeCriticalPathPhase::ExpertDown,
+    );
+    assert_eq!(
+        critical_path_phase_for_semantic_label(
+            "kernel=k component=block_3 node=n op=moe_reduce"
+        ),
+        RuntimeCriticalPathPhase::ExpertReduction,
     );
     assert_eq!(
         critical_path_phase_for_semantic_label(
