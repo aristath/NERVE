@@ -541,6 +541,101 @@ fn mounted_colocated_stream_circuit_binds_local_edges_between_component_instance
 }
 
 #[test]
+fn mounted_execution_graph_is_one_sequence_and_matches_component_execution() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let manifest_dir = fixture_model_package_manifest_path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let run = |composed: bool| {
+        let slice = VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
+            &device,
+            &manifest_dir,
+            fixture_model_runtime_model_with_colocated_three_layer_series(),
+            "gpu0",
+            Some(4),
+        )
+        .unwrap();
+        let mounted = slice.create_mounted_stream_circuit(&device).unwrap();
+        mounted.buffers.initialize_state_buffers(&device).unwrap();
+        let input = mounted.boundary_io.input_buffer("input_frame").unwrap();
+        input
+            .buffer
+            .write_bytes(&vec![0; FIXTURE_MODEL_FRAME_BYTES])
+            .unwrap();
+        let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
+        let bound = mounted
+            .mounted_placed_bound_dispatch_plan(&reusable_manifest)
+            .unwrap();
+        let component_ids = mounted
+            .placed_plan
+            .binding_plan
+            .circuits
+            .iter()
+            .map(|circuit| circuit.component_id.clone())
+            .collect::<Vec<_>>();
+        let control = VulkanMountedPlacedStreamControl {
+            stream_tick: 0,
+            control_flags: 0,
+            dynamic_state_capacity_activations: 4,
+        };
+        reset_vulkan_resident_execution_counters();
+        if composed {
+            mounted
+                .create_resident_execution_graph_runner(
+                    &device,
+                    &bound,
+                    &component_ids,
+                    slice.loaded_manifest(),
+                )
+                .unwrap()
+                .run_with_stream_control(&device, control)
+                .unwrap();
+        } else {
+            for component_id in &component_ids {
+                mounted
+                    .create_resident_component_runner(
+                        &device,
+                        &bound,
+                        component_id,
+                        slice.loaded_manifest(),
+                    )
+                    .unwrap()
+                    .run_with_stream_control(&device, control)
+                    .unwrap();
+            }
+        }
+        let output = mounted
+            .boundary_io
+            .output_buffer("output_frame")
+            .unwrap()
+            .buffer
+            .read_bytes(FIXTURE_MODEL_FRAME_BYTES)
+            .unwrap();
+        let state = mounted
+            .buffers
+            .state_buffers
+            .iter()
+            .flat_map(|allocation| {
+                allocation
+                    .buffer
+                    .read_bytes(allocation.byte_capacity)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        (output, state, vulkan_resident_execution_counters())
+    };
+
+    let (component_output, component_state, component_counters) = run(false);
+    let (graph_output, graph_state, graph_counters) = run(true);
+
+    assert_eq!(graph_output, component_output);
+    assert_eq!(graph_state, component_state);
+    assert_eq!(graph_counters.resident_sequence_queue_submits, 1);
+    assert!(component_counters.resident_sequence_queue_submits > 1);
+}
+
+#[test]
 fn mounted_placed_stream_circuit_binds_only_local_device_slice() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let (_, mounted) = mounted_remote_middle_slices(&device);

@@ -884,6 +884,20 @@ impl VulkanResidentQueueSubmissionTemplate {
         self.submission_count
     }
 
+    /// Returns the number of host queue-submit calls made by one replay.
+    ///
+    /// A template may contain many ordered Vulkan submit records so their
+    /// timeline dependencies remain explicit, but all records in one bounded
+    /// execution quantum are passed to Vulkan in one `queue_submit2` call.
+    /// This count therefore scales with physical devices and watchdog quanta,
+    /// not with command buffers, graph nodes, or stream ticks.
+    pub fn host_queue_submit_count(&self) -> usize {
+        self.groups
+            .iter()
+            .map(|group| group.quantum_ranges.len())
+            .sum()
+    }
+
     pub fn submit_with_timeline_value_offset(
         &self,
         timeline_value_offset: u64,

@@ -3,6 +3,7 @@ pub struct VulkanMountedPlacedResidentExecutionGraphRunner {
     pub components: Vec<VulkanMountedPlacedResidentComponentRunner>,
     pub total_descriptor_count: usize,
     pub total_push_constant_byte_count: u32,
+    sequence: VulkanResidentKernelSequence,
 }
 
 impl VulkanMountedPlacedResidentExecutionGraphRunner {
@@ -60,6 +61,9 @@ impl VulkanMountedPlacedResidentExecutionGraphRunner {
             components,
             total_descriptor_count,
             total_push_constant_byte_count,
+            sequence: device
+                .create_resident_kernel_sequence()
+                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?,
         })
     }
 
@@ -88,14 +92,12 @@ impl VulkanMountedPlacedResidentExecutionGraphRunner {
         VulkanMountedPlacedResidentExecutionGraphRun,
         VulkanMountedPlacedResidentKernelDispatchError,
     > {
-        let mut component_runs = Vec::with_capacity(self.components.len());
-        for component in &self.components {
-            component_runs.push(component.run_zeroed_push_constants(device)?);
-        }
-
-        Ok(VulkanMountedPlacedResidentExecutionGraphRun {
-            device_id: self.device_id.clone(),
-            component_runs,
+        self.run_with_push_constant_bytes(device, |dispatch| {
+            Ok(vec![
+                0u8;
+                dispatch.resident_dispatch.push_constant_byte_count()
+                    as usize
+            ])
         })
     }
 
@@ -107,15 +109,56 @@ impl VulkanMountedPlacedResidentExecutionGraphRunner {
         VulkanMountedPlacedResidentExecutionGraphRun,
         VulkanMountedPlacedResidentKernelDispatchError,
     > {
-        let mut component_runs = Vec::with_capacity(self.components.len());
-        for component in &self.components {
-            component_runs.push(component.run_with_stream_control(device, control)?);
-        }
-
-        Ok(VulkanMountedPlacedResidentExecutionGraphRun {
-            device_id: self.device_id.clone(),
-            component_runs,
+        self.components
+            .first()
+            .expect("resident execution graph components are non-empty")
+            .stream_control_buffer
+            .write_bytes_at(
+                VULKAN_STREAM_CONTROL_METADATA_OFFSET,
+                &stream_control_metadata_bytes(control),
+            )
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        self.run_with_push_constant_bytes(device, |dispatch| {
+            stream_control_push_constant_bytes(&dispatch.push_constants, control)
         })
+    }
+
+    fn run_with_push_constant_bytes<F>(
+        &self,
+        device: &VulkanComputeDevice,
+        mut push_constant_bytes_for: F,
+    ) -> Result<
+        VulkanMountedPlacedResidentExecutionGraphRun,
+        VulkanMountedPlacedResidentKernelDispatchError,
+    >
+    where
+        F: FnMut(
+            &VulkanMountedPlacedResidentComponentDispatch,
+        ) -> Result<Vec<u8>, VulkanMountedPlacedResidentKernelDispatchError>,
+    {
+        let dispatches = self
+            .components
+            .iter()
+            .flat_map(|component| component.dispatches.iter())
+            .collect::<Vec<_>>();
+        let push_constants = dispatches
+            .iter()
+            .map(|dispatch| push_constant_bytes_for(dispatch))
+            .collect::<Result<Vec<_>, _>>()?;
+        let steps = dispatches
+            .iter()
+            .zip(&push_constants)
+            .map(|(dispatch, push_constants)| {
+                VulkanResidentKernelSequenceStep::new(
+                    &dispatch.resident_dispatch,
+                    push_constants,
+                )
+            })
+            .collect::<Vec<_>>();
+        device
+            .run_resident_kernel_sequence(&self.sequence, &steps)
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        Ok(self.completed_sequence_run())
     }
 
     fn completed_sequence_run(&self) -> VulkanMountedPlacedResidentExecutionGraphRun {

@@ -1599,6 +1599,7 @@ mod tests {
             .unwrap();
         let template = batch.mount().unwrap();
         assert_eq!(template.submission_count(), 3);
+        assert_eq!(template.host_queue_submit_count(), 2);
         reset_vulkan_resident_execution_counters();
 
         template.submit_with_timeline_value_offset(0).unwrap();
