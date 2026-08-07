@@ -174,8 +174,15 @@ struct ActiveSpan {
     child_duration_ns: u64,
 }
 
+struct ActiveDevicePhaseOverride {
+    id: u64,
+    epoch: u64,
+    phase: RuntimeCriticalPathPhase,
+}
+
 thread_local! {
     static ACTIVE_SPANS: RefCell<Vec<ActiveSpan>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_DEVICE_PHASE_OVERRIDES: RefCell<Vec<ActiveDevicePhaseOverride>> = const { RefCell::new(Vec::new()) };
 }
 
 #[must_use = "the critical-path span must be held for the duration of the measured operation"]
@@ -184,6 +191,26 @@ pub struct RuntimeCriticalPathSpan {
     epoch: u64,
     phase: RuntimeCriticalPathPhase,
     _not_send: PhantomData<Rc<()>>,
+}
+
+#[must_use = "the device phase scope must be held for the duration of the measured operation"]
+pub struct RuntimeCriticalPathDevicePhaseScope {
+    id: u64,
+    epoch: u64,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl Drop for RuntimeCriticalPathDevicePhaseScope {
+    fn drop(&mut self) {
+        ACTIVE_DEVICE_PHASE_OVERRIDES.with(|overrides| {
+            let mut overrides = overrides.borrow_mut();
+            let Some(index) = overrides.iter().rposition(|scope| scope.id == self.id) else {
+                return;
+            };
+            let scope = overrides.remove(index);
+            debug_assert_eq!(scope.epoch, self.epoch);
+        });
+    }
 }
 
 impl Drop for RuntimeCriticalPathSpan {
@@ -249,18 +276,46 @@ pub fn runtime_critical_path_span(phase: RuntimeCriticalPathPhase) -> RuntimeCri
     }
 }
 
+pub fn runtime_critical_path_device_phase_scope(
+    phase: RuntimeCriticalPathPhase,
+) -> RuntimeCriticalPathDevicePhaseScope {
+    let epoch = CRITICAL_PATH_EPOCH.load(Ordering::Relaxed);
+    let id = NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed);
+    ACTIVE_DEVICE_PHASE_OVERRIDES.with(|overrides| {
+        let mut overrides = overrides.borrow_mut();
+        overrides.retain(|scope| scope.epoch == epoch);
+        overrides.push(ActiveDevicePhaseOverride { id, epoch, phase });
+    });
+    RuntimeCriticalPathDevicePhaseScope {
+        id,
+        epoch,
+        _not_send: PhantomData,
+    }
+}
+
 pub fn reset_runtime_critical_path_counters() {
     CRITICAL_PATH_EPOCH.fetch_add(1, Ordering::Relaxed);
     for counters in &PHASE_COUNTERS {
         counters.reset();
     }
     ACTIVE_SPANS.with(|active_spans| active_spans.borrow_mut().clear());
+    ACTIVE_DEVICE_PHASE_OVERRIDES.with(|overrides| overrides.borrow_mut().clear());
 }
 
 pub fn record_runtime_critical_path_device_duration(
     phase: RuntimeCriticalPathPhase,
     duration_ns: u64,
 ) {
+    let epoch = CRITICAL_PATH_EPOCH.load(Ordering::Relaxed);
+    let phase = ACTIVE_DEVICE_PHASE_OVERRIDES.with(|overrides| {
+        overrides
+            .borrow()
+            .iter()
+            .rev()
+            .find(|scope| scope.epoch == epoch)
+            .map(|scope| scope.phase)
+            .unwrap_or(phase)
+    });
     let counters = &PHASE_COUNTERS[phase as usize];
     counters
         .device_timestamp_count
@@ -417,6 +472,71 @@ mod tests {
         assert_eq!(
             phase(&report, RuntimeCriticalPathPhase::ExpertCompute).device_duration_ns,
             90_000
+        );
+    }
+
+    #[test]
+    fn device_phase_scopes_override_structural_attribution_and_restore_when_nested() {
+        reset_runtime_critical_path_counters();
+        record_runtime_critical_path_device_duration(RuntimeCriticalPathPhase::ExpertCompute, 10);
+        {
+            let _commit =
+                runtime_critical_path_device_phase_scope(RuntimeCriticalPathPhase::StateCommit);
+            record_runtime_critical_path_device_duration(
+                RuntimeCriticalPathPhase::ExpertCompute,
+                20,
+            );
+            {
+                let _verification = runtime_critical_path_device_phase_scope(
+                    RuntimeCriticalPathPhase::SpeculativeVerification,
+                );
+                record_runtime_critical_path_device_duration(
+                    RuntimeCriticalPathPhase::ExpertCompute,
+                    30,
+                );
+            }
+            record_runtime_critical_path_device_duration(
+                RuntimeCriticalPathPhase::AttentionIndexCompute,
+                40,
+            );
+        }
+        record_runtime_critical_path_device_duration(RuntimeCriticalPathPhase::ExpertCompute, 50);
+
+        let report = runtime_critical_path_report(1);
+        assert_eq!(
+            phase(&report, RuntimeCriticalPathPhase::ExpertCompute).device_duration_ns,
+            60
+        );
+        assert_eq!(
+            phase(&report, RuntimeCriticalPathPhase::StateCommit).device_duration_ns,
+            60
+        );
+        assert_eq!(
+            phase(&report, RuntimeCriticalPathPhase::SpeculativeVerification).device_duration_ns,
+            30
+        );
+        assert_eq!(
+            phase(&report, RuntimeCriticalPathPhase::AttentionIndexCompute).device_duration_ns,
+            0
+        );
+    }
+
+    #[test]
+    fn reset_discards_device_phase_scope_from_the_previous_measurement() {
+        reset_runtime_critical_path_counters();
+        let stale = runtime_critical_path_device_phase_scope(RuntimeCriticalPathPhase::StateCommit);
+        reset_runtime_critical_path_counters();
+        record_runtime_critical_path_device_duration(RuntimeCriticalPathPhase::ExpertCompute, 70);
+        drop(stale);
+
+        let report = runtime_critical_path_report(1);
+        assert_eq!(
+            phase(&report, RuntimeCriticalPathPhase::ExpertCompute).device_duration_ns,
+            70
+        );
+        assert_eq!(
+            phase(&report, RuntimeCriticalPathPhase::StateCommit).device_duration_ns,
+            0
         );
     }
 

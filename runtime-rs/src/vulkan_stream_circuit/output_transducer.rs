@@ -146,12 +146,13 @@ impl VulkanResidentOutputTransducerRunner {
                 .kernel_binding(2)
                 .with_access(VulkanResidentKernelBufferAccess::Read),
         ];
-        let embedding_norm_dispatch = device.create_resident_kernel_dispatch(
+        let embedding_norm_dispatch = device.create_resident_kernel_dispatch_labeled(
             embedding_norm_spirv_words,
             &embedding_norm_bindings,
             1,
             spec.norm_local_size_x,
             0,
+            Some("component=output_stream_adapter op=output_transducer".to_string()),
         )?;
 
         let projection_workgroup_count_x = spec.projection_workgroup_count_x;
@@ -178,12 +179,13 @@ impl VulkanResidentOutputTransducerRunner {
                     .with_access(VulkanResidentKernelBufferAccess::Read),
             );
         }
-        let tied_projection_dispatch = device.create_resident_kernel_dispatch(
+        let tied_projection_dispatch = device.create_resident_kernel_dispatch_labeled(
             tied_projection_spirv_words,
             &tied_projection_bindings,
             projection_workgroup_count_x,
             spec.projection_local_size_x,
             0,
+            Some("component=output_stream_adapter op=output_transducer".to_string()),
         )?;
 
         let total_descriptor_count = embedding_norm_dispatch
@@ -206,7 +208,7 @@ impl VulkanResidentOutputTransducerRunner {
             logits_buffer,
             embedding_norm_dispatch,
             tied_projection_dispatch,
-            sequence: device.create_resident_kernel_sequence()?,
+            sequence: device.create_timestamped_resident_kernel_sequence()?,
             node_ids: spec.node_ids.clone(),
         })
     }
@@ -261,6 +263,12 @@ impl VulkanResidentOutputTransducerRunner {
                 VulkanResidentKernelSequenceStep::new(&self.tied_projection_dispatch, &[]),
             ],
         )?;
+        let duration_ns = device
+            .read_recorded_resident_kernel_sequence_duration_ns(&self.sequence)?;
+        record_runtime_critical_path_device_duration(
+            RuntimeCriticalPathPhase::OutputProjection,
+            duration_ns,
+        );
         Ok(self.completed_run())
     }
 

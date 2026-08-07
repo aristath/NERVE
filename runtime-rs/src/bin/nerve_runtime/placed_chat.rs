@@ -355,7 +355,7 @@ fn run_placed_chat(
                 )?;
             let critical_path = transaction.critical_path.with_normalization(
                 timing.generated_token_count,
-                resident_feedback.window_count,
+                timing.scheduler_turn_count,
             );
             Ok(RuntimeChatTurn {
                 generated_token_ids: transaction.generated_token_ids,
@@ -601,7 +601,7 @@ fn execute_placed_prompt_run(
     let transport_edges = runtime_placed_transport_edge_reports(&run.transport_stats);
     let critical_path = runtime_critical_path_report(run_time_ns).with_normalization(
         generated_token_count,
-        run.resident_feedback.window_count,
+        total_scheduler_turns,
     );
 
     Ok(RuntimePlacedPromptRunReport {

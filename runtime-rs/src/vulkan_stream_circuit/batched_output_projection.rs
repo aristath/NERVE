@@ -296,7 +296,7 @@ impl VulkanResidentBatchedOutputProjectionKernelRunner {
             let sequence = if std::env::var_os("NERVE_VK_PERF_LOGGER").is_some() {
                 device.create_profiled_resident_kernel_sequence(2)
             } else {
-                device.create_resident_kernel_sequence()
+                device.create_timestamped_resident_kernel_sequence()
             }
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             self.projection_sequence_catalog

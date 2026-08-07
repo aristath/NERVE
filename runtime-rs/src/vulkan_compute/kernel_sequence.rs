@@ -26,6 +26,7 @@ pub struct VulkanResidentKernelSequence {
     timestamp_period_ns: f32,
     timestamp_query_pool: Option<vk::QueryPool>,
     profiling_timestamp_query_pool: Option<(vk::QueryPool, u32)>,
+    critical_path_timestamp_query_pool: Option<(vk::QueryPool, u32)>,
     recorded_input_copies: RefCell<Option<Vec<VulkanResidentKernelRecordedInputCopy>>>,
     recorded_steps: RefCell<Option<Vec<VulkanResidentKernelRecordedStep>>>,
     recorded_snapshot_copies: RefCell<Option<Vec<VulkanResidentKernelRecordedSnapshotCopy>>>,
@@ -49,6 +50,7 @@ struct VulkanResidentKernelRecordedStep {
     base_workgroup_z: u32,
     indirect_dispatch: Option<VulkanResidentKernelRecordedIndirectDispatch>,
     condition: Option<VulkanResidentKernelRecordedCondition>,
+    critical_path_region_index: Option<u32>,
     push_constants: Vec<u8>,
 }
 
@@ -83,6 +85,7 @@ pub struct VulkanResidentKernelSequenceStep<'a> {
     direct_workgroup_count: Option<[u32; 2]>,
     indirect_dispatch: Option<VulkanResidentKernelSequenceIndirectDispatch<'a>>,
     condition: Option<VulkanResidentKernelSequenceCondition<'a>>,
+    critical_path_region_index: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -118,6 +121,7 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
             direct_workgroup_count: None,
             indirect_dispatch: None,
             condition: None,
+            critical_path_region_index: None,
         }
     }
 
@@ -138,6 +142,7 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
             direct_workgroup_count: Some([workgroup_count_x, workgroup_count_y]),
             indirect_dispatch: None,
             condition: None,
+            critical_path_region_index: None,
         })
     }
 
@@ -163,6 +168,7 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
                 offset: byte_offset as vk::DeviceSize,
             }),
             condition: None,
+            critical_path_region_index: None,
         })
     }
 
@@ -209,6 +215,11 @@ impl<'a> VulkanResidentKernelSequenceStep<'a> {
             region_id,
         });
         Ok(self)
+    }
+
+    pub fn with_critical_path_region(mut self, region_index: u32) -> Self {
+        self.critical_path_region_index = Some(region_index);
+        self
     }
 
     fn workgroup_count_x(self) -> u32 {

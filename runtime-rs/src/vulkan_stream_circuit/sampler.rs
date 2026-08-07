@@ -538,7 +538,7 @@ impl VulkanResidentSamplerRunner {
         let mut input_tracking_dispatches = Vec::with_capacity(usize::from(token_state_is_active));
         if token_state_is_active && let Some(kernel) = current_token_kernel {
             input_tracking_dispatches.push(
-                device.create_resident_kernel_dispatch(
+                device.create_resident_kernel_dispatch_labeled(
                     &kernel.spirv_words,
                     &[
                         VulkanResidentKernelBufferBinding::new(
@@ -559,6 +559,7 @@ impl VulkanResidentSamplerRunner {
                     kernel.workgroup_count_x,
                     kernel.local_size_x,
                     0,
+                    Some("component=sampler op=sample_token".to_string()),
                 )?,
             );
         }
@@ -566,7 +567,7 @@ impl VulkanResidentSamplerRunner {
             .then_some(token_batch_kernel)
             .flatten()
             .map(|kernel| {
-                device.create_resident_kernel_dispatch(
+                device.create_resident_kernel_dispatch_labeled(
                     &kernel.spirv_words,
                     &[
                         VulkanResidentKernelBufferBinding::new(
@@ -589,6 +590,7 @@ impl VulkanResidentSamplerRunner {
                     kernel.workgroup_count_x,
                     kernel.local_size_x,
                     std::mem::size_of::<u32>() as u32,
+                    Some("component=sampler op=sample_token".to_string()),
                 )
             })
             .transpose()?;
@@ -751,17 +753,18 @@ impl VulkanResidentSamplerRunner {
                     .with_access(VulkanResidentKernelBufferAccess::Read),
                 );
             }
-            resident_dispatches.push(device.create_resident_kernel_dispatch(
+            resident_dispatches.push(device.create_resident_kernel_dispatch_labeled(
                 &kernel.spirv_words,
                 &bindings,
                 kernel.workgroup_count_x,
                 kernel.local_size_x,
                 0,
+                Some("component=sampler op=sample_token".to_string()),
             )?);
         }
         let feedback_control_kernel =
             feedback_control_kernel.expect("feedback control kernel plan was validated");
-        let feedback_control_dispatch = device.create_resident_kernel_dispatch(
+        let feedback_control_dispatch = device.create_resident_kernel_dispatch_labeled(
             &feedback_control_kernel.spirv_words,
             &[
                 VulkanResidentKernelBufferBinding::new(
@@ -780,6 +783,7 @@ impl VulkanResidentSamplerRunner {
             feedback_control_kernel.workgroup_count_x,
             feedback_control_kernel.local_size_x,
             0,
+            Some("component=sampler op=sample_token".to_string()),
         )?;
         let descriptor_count = resident_dispatches
             .iter()
@@ -800,7 +804,7 @@ impl VulkanResidentSamplerRunner {
                 total.checked_add(dispatch.push_constant_byte_count())
             })
             .ok_or(VulkanResidentSamplerRunnerError::PushConstantByteCountOverflow)?;
-        let sequence = device.create_resident_kernel_sequence()?;
+        let sequence = device.create_timestamped_resident_kernel_sequence()?;
 
         Ok(Self {
             sampler_id: spec.sampler_id.clone(),
@@ -860,6 +864,12 @@ impl VulkanResidentSamplerRunner {
             .map(|dispatch| VulkanResidentKernelSequenceStep::new(dispatch, &[]))
             .collect::<Vec<_>>();
         device.run_resident_kernel_sequence(&self.sequence, &steps)?;
+        let duration_ns = device
+            .read_recorded_resident_kernel_sequence_duration_ns(&self.sequence)?;
+        record_runtime_critical_path_device_duration(
+            RuntimeCriticalPathPhase::Sampling,
+            duration_ns,
+        );
         self.completed_run()
     }
 
@@ -1312,18 +1322,19 @@ impl VulkanResidentSamplerRunner {
                     .with_access(VulkanResidentKernelBufferAccess::Read),
                 );
             }
-            resident_dispatches.push(device.create_resident_kernel_dispatch(
+            resident_dispatches.push(device.create_resident_kernel_dispatch_labeled(
                 &kernel.spirv_words,
                 &bindings,
                 kernel.workgroup_count_x,
                 kernel.local_size_x,
                 0,
+                Some("component=sampler op=sample_token".to_string()),
             )?);
         }
         let sequence = if std::env::var_os("NERVE_VK_PERF_LOGGER").is_some() {
             device.create_profiled_resident_kernel_sequence(resident_dispatches.len())?
         } else {
-            device.create_resident_kernel_sequence()?
+            device.create_timestamped_resident_kernel_sequence()?
         };
         Ok(VulkanResidentSamplerLogitsView {
             resident_dispatches,

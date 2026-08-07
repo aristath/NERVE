@@ -69,6 +69,7 @@ struct VulkanDemandResidencyGateRuntime {
 
 struct VulkanDemandResidencyDispatchChain {
     commands: Vec<VulkanDemandResidencyCommand>,
+    command_critical_path_phases: Vec<RuntimeCriticalPathPhase>,
     first_gate_command_index: usize,
     continuation_predicate: Arc<VulkanResidentBuffer>,
     continuation_enabled: Cell<bool>,
@@ -78,6 +79,68 @@ struct VulkanDemandResidencyDispatchChain {
     resume_sequences: Vec<VulkanResidentKernelSequence>,
     observed_notification_epoch: Cell<u32>,
     shared_pipeline_guard: bool,
+}
+
+fn demand_command_critical_path_phase(
+    command: VulkanDemandResidencyCommand,
+    dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
+    prefix_dispatches: &[&VulkanResidentKernelDispatch],
+    suffix_dispatches: &[&VulkanResidentKernelDispatch],
+) -> Result<RuntimeCriticalPathPhase, VulkanError> {
+    match command {
+        VulkanDemandResidencyCommand::Prefix(index) => prefix_dispatches
+            .get(index)
+            .map(|dispatch| {
+                dispatch
+                    .semantic_label()
+                    .map(critical_path_phase_for_semantic_label)
+                    .unwrap_or(RuntimeCriticalPathPhase::MixedDeviceCompute)
+            })
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "demand critical-path prefix dispatch {index} is absent"
+                ))
+            }),
+        VulkanDemandResidencyCommand::Dispatch(index) => dispatches
+            .get(index)
+            .map(|dispatch| {
+                critical_path_phase_for_component_operation(
+                    &dispatch.component_id,
+                    &dispatch.op,
+                )
+            })
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "demand critical-path model dispatch {index} is absent"
+                ))
+            }),
+        VulkanDemandResidencyCommand::Gate(_) => Ok(RuntimeCriticalPathPhase::ResidencyGate),
+        VulkanDemandResidencyCommand::Suffix(index) => suffix_dispatches
+            .get(index)
+            .map(|dispatch| {
+                dispatch
+                    .semantic_label()
+                    .map(critical_path_phase_for_semantic_label)
+                    .unwrap_or(RuntimeCriticalPathPhase::MixedDeviceCompute)
+            })
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "demand critical-path suffix dispatch {index} is absent"
+                ))
+            }),
+    }
+}
+
+fn contiguous_critical_path_regions(
+    phases: &[RuntimeCriticalPathPhase],
+) -> Vec<RuntimeCriticalPathPhase> {
+    let mut regions = Vec::new();
+    for phase in phases.iter().copied() {
+        if regions.last().copied() != Some(phase) {
+            regions.push(phase);
+        }
+    }
+    regions
 }
 
 struct VulkanDemandResidencySegment {
@@ -616,6 +679,19 @@ impl VulkanDemandResidencyDispatchChain {
                 .enumerate()
                 .map(|(index, _)| VulkanDemandResidencyCommand::Suffix(index)),
         );
+        let command_critical_path_phases = commands
+            .iter()
+            .copied()
+            .map(|command| {
+                demand_command_critical_path_phase(
+                    command,
+                    dispatches,
+                    prefix_dispatches,
+                    suffix_dispatches,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         let first_gate_command_index = commands
             .iter()
             .position(|command| matches!(command, VulkanDemandResidencyCommand::Gate(_)))
@@ -707,15 +783,25 @@ impl VulkanDemandResidencyDispatchChain {
             });
         }
         let full_sequence = device
-            .create_resident_kernel_sequence()
+            .create_critical_path_timestamped_resident_kernel_sequence(
+                contiguous_critical_path_regions(&command_critical_path_phases).len(),
+            )
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         let resume_sequences = gates
             .iter()
-            .map(|_| device.create_resident_kernel_sequence())
+            .map(|gate| {
+                device.create_critical_path_timestamped_resident_kernel_sequence(
+                    contiguous_critical_path_regions(
+                        &command_critical_path_phases[gate.command_index..],
+                    )
+                    .len(),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         Ok(Self {
             commands,
+            command_critical_path_phases,
             first_gate_command_index,
             continuation_predicate,
             continuation_enabled: Cell::new(true),
@@ -1066,6 +1152,13 @@ impl VulkanDemandResidencyDispatchChain {
         input_copies: &[VulkanResidentKernelSequenceInputCopy<'_>],
         post_copies: &[VulkanResidentBufferRangeCopy<'_>],
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
+        let start_command_index = resume_gate_index
+            .and_then(|gate_index| self.gates.get(gate_index))
+            .map(|gate| gate.command_index)
+            .unwrap_or_default();
+        let region_phases = contiguous_critical_path_regions(
+            &self.command_critical_path_phases[start_command_index..],
+        );
         self.with_prepared_steps(
             resume_gate_index,
             dispatches,
@@ -1074,7 +1167,7 @@ impl VulkanDemandResidencyDispatchChain {
             suffix_dispatches,
             None,
             |sequence, steps| {
-                if input_copies.is_empty() && post_copies.is_empty() {
+                let execution_result = if input_copies.is_empty() && post_copies.is_empty() {
                     device
                         .record_resident_kernel_sequence(sequence, steps)
                         .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
@@ -1085,38 +1178,58 @@ impl VulkanDemandResidencyDispatchChain {
                             signal_points,
                         )
                         .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-                    return device
+                    device
                         .wait_resident_kernel_sequence(sequence)
-                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan);
+                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
+                } else {
+                    if !wait_points.is_empty() || !signal_points.is_empty() {
+                        return Err(demand_dispatch_error(
+                            "demand-resident inline copies cannot cross a timeline boundary",
+                        ));
+                    }
+                    let after_step_index = steps
+                        .len()
+                        .checked_sub(1)
+                        .expect("demand-resident chains contain at least one step");
+                    let snapshot_copies = post_copies
+                        .iter()
+                        .copied()
+                        .map(|copy| {
+                            VulkanResidentKernelSequenceSnapshotCopy::
+                                unconditional_from_range_after_conditional_step(
+                                    after_step_index,
+                                    copy,
+                                )
+                        })
+                        .collect::<Vec<_>>();
+                    device
+                        .run_resident_kernel_sequence_with_input_and_snapshot_copies(
+                            sequence,
+                            input_copies,
+                            steps,
+                            &snapshot_copies,
+                        )
+                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
+                };
+                execution_result?;
+                let region_durations = device
+                    .read_recorded_resident_kernel_critical_path_region_durations_ns(sequence)
+                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+                if region_durations.len() != region_phases.len() {
+                    return Err(demand_dispatch_error(format!(
+                        "demand critical-path sequence reported {} region durations for {} semantic regions",
+                        region_durations.len(),
+                        region_phases.len(),
+                    )));
                 }
-                if !wait_points.is_empty() || !signal_points.is_empty() {
-                    return Err(demand_dispatch_error(
-                        "demand-resident inline copies cannot cross a timeline boundary",
-                    ));
-                }
-                let after_step_index = steps
-                    .len()
-                    .checked_sub(1)
-                    .expect("demand-resident chains contain at least one step");
-                let snapshot_copies = post_copies
+                for (phase, duration_ns) in region_phases
                     .iter()
                     .copied()
-                    .map(|copy| {
-                        VulkanResidentKernelSequenceSnapshotCopy::
-                            unconditional_from_range_after_conditional_step(
-                                after_step_index,
-                                copy,
-                            )
-                    })
-                    .collect::<Vec<_>>();
-                device
-                    .run_resident_kernel_sequence_with_input_and_snapshot_copies(
-                        sequence,
-                        input_copies,
-                        steps,
-                        &snapshot_copies,
-                    )
-                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
+                    .zip(region_durations)
+                {
+                    record_runtime_critical_path_device_duration(phase, duration_ns);
+                }
+                Ok(())
             },
         )
     }
@@ -1190,6 +1303,8 @@ impl VulkanDemandResidencyDispatchChain {
             resume_gate_index.is_some(),
         )?;
         let mut steps = Vec::with_capacity(self.commands.len() - start_command_index);
+        let mut critical_path_region_index = 0u32;
+        let mut previous_critical_path_phase = None;
         let mut feedback_dispatch_index = feedback_indirect
             .map(|indirect| {
                 demand_feedback_indirect_command_range(
@@ -1207,6 +1322,26 @@ impl VulkanDemandResidencyDispatchChain {
             .enumerate()
             .skip(start_command_index)
         {
+            let critical_path_phase = *self
+                .command_critical_path_phases
+                .get(command_index)
+                .ok_or_else(|| {
+                    demand_dispatch_error(format!(
+                        "demand command {command_index} has no critical-path phase"
+                    ))
+                })?;
+            if previous_critical_path_phase
+                .is_some_and(|previous| previous != critical_path_phase)
+            {
+                critical_path_region_index = critical_path_region_index
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        demand_dispatch_error(
+                            "demand critical-path region index overflowed",
+                        )
+                    })?;
+            }
+            previous_critical_path_phase = Some(critical_path_phase);
             let (dispatch, push_constants): (&VulkanResidentKernelDispatch, &[u8]) =
                 match command {
                     VulkanDemandResidencyCommand::Prefix(index) => (
@@ -1282,7 +1417,8 @@ impl VulkanDemandResidencyDispatchChain {
                 .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?
             } else {
                 VulkanResidentKernelSequenceStep::new(dispatch, push_constants)
-            };
+            }
+            .with_critical_path_region(critical_path_region_index);
             let conditional_region = conditional_regions
                 .get(command_index - start_command_index)
                 .copied()

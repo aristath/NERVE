@@ -145,6 +145,51 @@ impl VulkanComputeDevice {
             .collect()
     }
 
+    pub(crate) fn read_recorded_resident_kernel_critical_path_region_durations_ns(
+        &self,
+        sequence: &VulkanResidentKernelSequence,
+    ) -> Result<Vec<u64>, VulkanError> {
+        let (query_pool, query_count) = sequence
+            .critical_path_timestamp_query_pool
+            .ok_or_else(|| {
+                VulkanError(
+                    "resident kernel sequence was not created with critical-path region timing"
+                        .to_string(),
+                )
+            })?;
+        let mut timestamps = vec![0_u64; query_count as usize];
+        unsafe {
+            self.device
+                .get_query_pool_results(
+                    query_pool,
+                    0,
+                    &mut timestamps,
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                )
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to read resident sequence critical-path timestamps: {error:?}"
+                    ))
+                })?;
+        }
+        timestamps
+            .windows(2)
+            .map(|pair| {
+                let elapsed_ns = pair[1].wrapping_sub(pair[0]) as f64
+                    * f64::from(sequence.timestamp_period_ns);
+                if !elapsed_ns.is_finite()
+                    || elapsed_ns <= 0.0
+                    || elapsed_ns > u64::MAX as f64
+                {
+                    return Err(VulkanError(format!(
+                        "resident sequence critical-path region produced invalid device duration {elapsed_ns}"
+                    )));
+                }
+                Ok((elapsed_ns.round() as u64).max(1))
+            })
+            .collect()
+    }
+
     pub fn submit_recorded_resident_kernel_sequence(
         &self,
         sequence: &VulkanResidentKernelSequence,
@@ -340,6 +385,92 @@ impl VulkanComputeDevice {
         Ok(())
     }
 
+}
+
+fn validate_resident_sequence_critical_path_regions(
+    region_indices: &[Option<u32>],
+    query_count: u32,
+) -> Result<(), VulkanError> {
+    let expected_region_count = query_count.checked_sub(1).ok_or_else(|| {
+        VulkanError(
+            "resident kernel critical-path timestamp pool has no boundary query".to_string(),
+        )
+    })?;
+    if expected_region_count == 0 {
+        return Err(VulkanError(
+            "resident kernel critical-path timestamp pool has no regions".to_string(),
+        ));
+    }
+    let mut previous = None::<u32>;
+    for (step_index, region_index) in region_indices.iter().copied().enumerate() {
+        let region_index = region_index.ok_or_else(|| {
+            VulkanError(format!(
+                "resident kernel critical-path sequence step {step_index} has no timing region"
+            ))
+        })?;
+        match previous {
+            None if region_index != 0 => {
+                return Err(VulkanError(format!(
+                    "resident kernel critical-path timing starts at region {region_index}, expected 0"
+                )));
+            }
+            Some(previous)
+                if region_index != previous
+                    && previous.checked_add(1) != Some(region_index) =>
+            {
+                return Err(VulkanError(format!(
+                    "resident kernel critical-path timing jumps from region {previous} to {region_index} at step {step_index}"
+                )));
+            }
+            _ => {}
+        }
+        previous = Some(region_index);
+    }
+    let actual_region_count = previous
+        .and_then(|last| last.checked_add(1))
+        .unwrap_or_default();
+    if actual_region_count != expected_region_count {
+        return Err(VulkanError(format!(
+            "resident kernel critical-path timing recorded {actual_region_count} regions but allocated {expected_region_count}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn critical_path_region_validation_rejects_incomplete_or_noncontiguous_layouts() {
+    assert!(
+        validate_resident_sequence_critical_path_regions(
+            &[Some(0), Some(0), Some(1), Some(2), Some(2)],
+            4,
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_resident_sequence_critical_path_regions(&[Some(0), None], 2)
+            .unwrap_err()
+            .0
+            .contains("has no timing region")
+    );
+    assert!(
+        validate_resident_sequence_critical_path_regions(&[Some(1)], 2)
+            .unwrap_err()
+            .0
+            .contains("expected 0")
+    );
+    assert!(
+        validate_resident_sequence_critical_path_regions(&[Some(0), Some(2)], 3)
+            .unwrap_err()
+            .0
+            .contains("jumps")
+    );
+    assert!(
+        validate_resident_sequence_critical_path_regions(&[Some(0)], 3)
+            .unwrap_err()
+            .0
+            .contains("recorded 1 regions but allocated 2")
+    );
 }
 
 impl VulkanResidentQueueSubmitter {
@@ -625,6 +756,15 @@ impl VulkanComputeDevice {
                 steps.len()
             )));
         }
+        if let Some((_, query_count)) = sequence.critical_path_timestamp_query_pool {
+            validate_resident_sequence_critical_path_regions(
+                &steps
+                    .iter()
+                    .map(|step| step.critical_path_region_index)
+                    .collect::<Vec<_>>(),
+                query_count,
+            )?;
+        }
 
         unsafe {
             RESIDENT_SEQUENCE_PREPARE_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -664,6 +804,8 @@ impl VulkanComputeDevice {
                                         == step.condition.map(
                                             VulkanResidentKernelSequenceCondition::recorded,
                                         )
+                                    && recorded.critical_path_region_index
+                                        == step.critical_path_region_index
                                     && recorded.push_constants == step.push_constants
                             })
                     })
@@ -774,6 +916,23 @@ impl VulkanComputeDevice {
                         "resident kernel profile allocated {query_count} timestamps but recording requires {expected_query_count}"
                     )));
                 }
+                self.device.cmd_reset_query_pool(
+                    sequence.command_buffer,
+                    query_pool,
+                    0,
+                    query_count,
+                );
+                self.device.cmd_write_timestamp(
+                    sequence.command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    query_pool,
+                    0,
+                );
+            }
+            if !command_buffer_matches
+                && let Some((query_pool, query_count)) =
+                    sequence.critical_path_timestamp_query_pool
+            {
                 self.device.cmd_reset_query_pool(
                     sequence.command_buffer,
                     query_pool,
@@ -1175,6 +1334,51 @@ impl VulkanComputeDevice {
                         );
                         pending_buffer_accesses.clear();
                     }
+                    let critical_path_region_ends = step
+                        .critical_path_region_index
+                        .is_some_and(|region_index| {
+                            steps
+                                .get(step_index + 1)
+                                .and_then(|next| next.critical_path_region_index)
+                                != Some(region_index)
+                        });
+                    if critical_path_region_ends {
+                        if active_condition.is_some() {
+                            let conditional_rendering =
+                                self.conditional_rendering.as_ref().ok_or_else(|| {
+                                    VulkanError(
+                                        "conditional compute dispatch was recorded on a device without VK_EXT_conditional_rendering"
+                                            .to_string(),
+                                    )
+                                })?;
+                            (conditional_rendering
+                                .fp()
+                                .cmd_end_conditional_rendering_ext)(
+                                sequence.command_buffer,
+                            );
+                            active_condition = None;
+                        }
+                        if let Some((query_pool, _)) =
+                            sequence.critical_path_timestamp_query_pool
+                        {
+                            let query_index = step
+                                .critical_path_region_index
+                                .expect("critical-path region end has an index")
+                                .checked_add(1)
+                                .ok_or_else(|| {
+                                    VulkanError(
+                                        "resident kernel critical-path timestamp index overflowed"
+                                            .to_string(),
+                                    )
+                                })?;
+                            self.device.cmd_write_timestamp(
+                                sequence.command_buffer,
+                                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                                query_pool,
+                                query_index,
+                            );
+                        }
+                    }
                 }
                 if active_condition.is_some() {
                     let conditional_rendering =
@@ -1253,6 +1457,7 @@ impl VulkanComputeDevice {
                                 condition: step.condition.map(
                                     VulkanResidentKernelSequenceCondition::recorded,
                                 ),
+                                critical_path_region_index: step.critical_path_region_index,
                                 push_constants: step.push_constants.to_vec(),
                             })
                             .collect(),

@@ -120,6 +120,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             let draft_token_ids = {
                 let _draft =
                     runtime_critical_path_span(RuntimeCriticalPathPhase::SpeculativeDraft);
+                let _device_draft = runtime_critical_path_device_phase_scope(
+                    RuntimeCriticalPathPhase::SpeculativeDraft,
+                );
                 decoder.run_draft_window(
                     draft_device.as_ref(),
                     initial_token_id,
@@ -137,6 +140,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             let target_tokens = {
                 let _verification =
                     runtime_critical_path_span(RuntimeCriticalPathPhase::SpeculativeVerification);
+                let _device_verification = runtime_critical_path_device_phase_scope(
+                    RuntimeCriticalPathPhase::SpeculativeVerification,
+                );
                 self.run_causal_verification_window(devices, &target_inputs, start_stream_tick)?
             };
             let target_verification_time_ns =
@@ -197,6 +203,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             {
                 let _draft =
                     runtime_critical_path_span(RuntimeCriticalPathPhase::SpeculativeDraft);
+                let _device_draft = runtime_critical_path_device_phase_scope(
+                    RuntimeCriticalPathPhase::SpeculativeDraft,
+                );
                 decoder.restore_baseline()?;
                 let catch_up_input_token_ids = std::iter::once(initial_token_id)
                     .chain(draft_token_ids.iter().copied())

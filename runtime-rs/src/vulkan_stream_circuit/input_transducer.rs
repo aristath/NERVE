@@ -95,12 +95,13 @@ impl VulkanResidentInputEmbeddingTransducerRunner {
                 .div_ceil(spec.local_size_x as usize),
         )
         .map_err(|_| VulkanResidentInputEmbeddingTransducerRunnerError::WorkgroupCountOverflow)?;
-        let resident_dispatch = device.create_resident_kernel_dispatch(
+        let resident_dispatch = device.create_resident_kernel_dispatch_labeled(
             spirv_words,
             &bindings,
             workgroup_count_x,
             spec.local_size_x,
             0,
+            Some("component=input_transducer op=embedding_lookup".to_string()),
         )?;
 
         Ok(Self {
@@ -261,13 +262,14 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
             ))
         })?;
         let dispatch = device
-            .create_resident_kernel_dispatch_2d(
+            .create_resident_kernel_dispatch_2d_labeled(
                 spirv_words,
                 &bindings,
                 workgroup_count_x,
                 workgroup_count_y,
                 spec.local_size_x,
                 0,
+                Some("component=input_transducer op=embedding_lookup".to_string()),
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         Ok(Self {
@@ -325,7 +327,15 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
         if wait_for_completion {
             device
                 .run_recorded_resident_kernel_sequence(sequence)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            let duration_ns = device
+                .read_recorded_resident_kernel_sequence_duration_ns(sequence)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            record_runtime_critical_path_device_duration(
+                RuntimeCriticalPathPhase::InputPreparation,
+                duration_ns,
+            );
+            Ok(())
         } else {
             device
                 .submit_recorded_resident_kernel_sequence_unfenced_with_timeline_semaphores(
@@ -368,7 +378,7 @@ impl VulkanResidentBatchedInputEmbeddingRunner {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         if self.sequence.borrow().is_none() {
             let sequence = device
-                .create_resident_kernel_sequence()
+                .create_timestamped_resident_kernel_sequence()
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             *self.sequence.borrow_mut() = Some(sequence);
         }

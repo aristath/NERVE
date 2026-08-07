@@ -46,8 +46,16 @@ fn critical_path_phase_for_semantic_label(label: &str) -> RuntimeCriticalPathPha
     let component = semantic_label_field(label, "component")
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if operation.starts_with("sparse_moe")
+    critical_path_phase_for_component_operation(&component, &operation)
+}
+
+fn critical_path_phase_for_component_operation(
+    component: &str,
+    operation: &str,
+) -> RuntimeCriticalPathPhase {
+    if operation.contains("sparse_moe")
         || operation == "grouped_linear"
+        || operation == "moe_reduce"
         || component.split(['.', '/', ':']).any(|part| {
             part == "expert" || part == "experts"
         })
@@ -58,9 +66,23 @@ fn critical_path_phase_for_semantic_label(label: &str) -> RuntimeCriticalPathPha
     } else if operation.contains("attention")
         || operation.contains("rotary")
         || operation.contains("rope")
+        || operation.contains("compressed_index")
+        || operation.contains("index_scores")
+        || operation == "radix_topk_index"
+        || operation == "learned_gated_kv_pool"
+        || operation == "compressed_index_kv_finalize"
+        || operation == "compressed_kv_finalize"
     {
         RuntimeCriticalPathPhase::AttentionIndexCompute
-    } else if operation == "output_transducer" {
+    } else if operation == "embedding_lookup" {
+        RuntimeCriticalPathPhase::InputPreparation
+    } else if operation == "sample_token" {
+        RuntimeCriticalPathPhase::Sampling
+    } else if operation == "output_transducer"
+        || component
+            .split(['.', '/', ':'])
+            .any(|part| part == "output_stream_adapter")
+    {
         RuntimeCriticalPathPhase::OutputProjection
     } else {
         RuntimeCriticalPathPhase::MixedDeviceCompute
@@ -78,7 +100,19 @@ fn semantic_kernel_phase_classification_uses_structure_not_model_identity() {
     );
     assert_eq!(
         critical_path_phase_for_semantic_label(
+            "kernel=k component=block_3 node=n op=independent_sparse_moe_down"
+        ),
+        RuntimeCriticalPathPhase::ExpertCompute,
+    );
+    assert_eq!(
+        critical_path_phase_for_semantic_label(
             "kernel=k component=block_3 node=n op=indexed_sparse_attention"
+        ),
+        RuntimeCriticalPathPhase::AttentionIndexCompute,
+    );
+    assert_eq!(
+        critical_path_phase_for_semantic_label(
+            "kernel=k component=block_3 node=n op=chronological_compressed_index"
         ),
         RuntimeCriticalPathPhase::AttentionIndexCompute,
     );
@@ -93,6 +127,20 @@ fn semantic_kernel_phase_classification_uses_structure_not_model_identity() {
             "kernel=k component=expertise node=n op=linear"
         ),
         RuntimeCriticalPathPhase::MixedDeviceCompute,
+    );
+    assert_eq!(
+        contiguous_critical_path_regions(&[
+            RuntimeCriticalPathPhase::AttentionIndexCompute,
+            RuntimeCriticalPathPhase::AttentionIndexCompute,
+            RuntimeCriticalPathPhase::Routing,
+            RuntimeCriticalPathPhase::ExpertCompute,
+            RuntimeCriticalPathPhase::ExpertCompute,
+        ]),
+        vec![
+            RuntimeCriticalPathPhase::AttentionIndexCompute,
+            RuntimeCriticalPathPhase::Routing,
+            RuntimeCriticalPathPhase::ExpertCompute,
+        ],
     );
 }
 

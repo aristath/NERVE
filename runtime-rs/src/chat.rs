@@ -17,7 +17,8 @@ use crate::{
     VulkanResidentOutputControl, VulkanResidentTokenInputEvent,
     VulkanResidentTokenRuntimeSchedulerOutputEvent, VulkanResidentTokenTextCodec,
     reset_runtime_critical_path_counters, reset_vulkan_resident_execution_counters,
-    runtime_critical_path_report, runtime_critical_path_span, vulkan_resident_execution_counters,
+    runtime_critical_path_device_phase_scope, runtime_critical_path_report,
+    runtime_critical_path_span, vulkan_resident_execution_counters,
 };
 
 mod compiled_codec;
@@ -260,15 +261,20 @@ where
             })?;
         let mut canonical_turn_token_delta = prepared.user_token_delta.clone();
         canonical_turn_token_delta.extend_from_slice(&assistant_token_delta);
-        let canonical_commit_run = engine.submit_input_event_until_idle(
-            stream_id,
-            VulkanResidentTokenInputEvent::new(
-                format!("chat_{turn_index}_canonical_assistant"),
-                assistant_token_delta.clone(),
-                0,
-            )
-            .with_origin("runtime_chat_canonical_assistant"),
-        )?;
+        let canonical_commit_run = {
+            let _state_commit = runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+            let _device_state_commit =
+                runtime_critical_path_device_phase_scope(RuntimeCriticalPathPhase::StateCommit);
+            engine.submit_input_event_until_idle(
+                stream_id,
+                VulkanResidentTokenInputEvent::new(
+                    format!("chat_{turn_index}_canonical_assistant"),
+                    assistant_token_delta.clone(),
+                    0,
+                )
+                .with_origin("runtime_chat_canonical_assistant"),
+            )?
+        };
         {
             let _telemetry = runtime_critical_path_span(RuntimeCriticalPathPhase::Telemetry);
             on_phase_completed(

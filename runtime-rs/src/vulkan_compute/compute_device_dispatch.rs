@@ -269,13 +269,33 @@ impl VulkanComputeDevice {
     pub fn create_resident_kernel_sequence(
         &self,
     ) -> Result<VulkanResidentKernelSequence, VulkanError> {
-        self.create_resident_kernel_sequence_internal(false, None)
+        self.create_resident_kernel_sequence_internal(false, None, None)
     }
 
     pub fn create_timestamped_resident_kernel_sequence(
         &self,
     ) -> Result<VulkanResidentKernelSequence, VulkanError> {
-        self.create_resident_kernel_sequence_internal(true, None)
+        self.create_resident_kernel_sequence_internal(true, None, None)
+    }
+
+    pub(crate) fn create_critical_path_timestamped_resident_kernel_sequence(
+        &self,
+        region_count: usize,
+    ) -> Result<VulkanResidentKernelSequence, VulkanError> {
+        let query_count = u32::try_from(region_count)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "resident kernel critical-path region count {region_count} overflows Vulkan query count"
+                ))
+            })?;
+        if region_count == 0 {
+            return Err(VulkanError(
+                "resident kernel critical-path timing requires at least one region".to_string(),
+            ));
+        }
+        self.create_resident_kernel_sequence_internal(true, None, Some(query_count))
     }
 
     pub(crate) fn create_profiled_resident_kernel_sequence(
@@ -290,13 +310,14 @@ impl VulkanComputeDevice {
                     "resident kernel profile step count {step_count} overflows Vulkan query count"
                 ))
             })?;
-        self.create_resident_kernel_sequence_internal(true, Some(query_count))
+        self.create_resident_kernel_sequence_internal(true, Some(query_count), None)
     }
 
     fn create_resident_kernel_sequence_internal(
         &self,
         timestamped: bool,
         profiling_query_count: Option<u32>,
+        critical_path_query_count: Option<u32>,
     ) -> Result<VulkanResidentKernelSequence, VulkanError> {
         unsafe {
             let command_pool_info = vk::CommandPoolCreateInfo::default()
@@ -375,6 +396,32 @@ impl VulkanComputeDevice {
                 } else {
                     None
                 };
+            let critical_path_timestamp_query_pool =
+                if let Some(query_count) = critical_path_query_count {
+                    match self.device.create_query_pool(
+                        &vk::QueryPoolCreateInfo::default()
+                            .query_type(vk::QueryType::TIMESTAMP)
+                            .query_count(query_count),
+                        None,
+                    ) {
+                        Ok(query_pool) => Some((query_pool, query_count)),
+                        Err(error) => {
+                            if let Some((query_pool, _)) = profiling_timestamp_query_pool {
+                                self.device.destroy_query_pool(query_pool, None);
+                            }
+                            if let Some(query_pool) = timestamp_query_pool {
+                                self.device.destroy_query_pool(query_pool, None);
+                            }
+                            self.device.destroy_fence(completion_fence, None);
+                            self.device.destroy_command_pool(command_pool, None);
+                            return Err(VulkanError(format!(
+                                "failed to create resident kernel critical-path timestamp pool: {error:?}"
+                            )));
+                        }
+                    }
+                } else {
+                    None
+                };
 
             Ok(VulkanResidentKernelSequence {
                 device: self.device.clone(),
@@ -384,6 +431,7 @@ impl VulkanComputeDevice {
                 timestamp_period_ns: self.timestamp_period_ns,
                 timestamp_query_pool,
                 profiling_timestamp_query_pool,
+                critical_path_timestamp_query_pool,
                 recorded_input_copies: RefCell::new(None),
                 recorded_steps: RefCell::new(None),
                 recorded_snapshot_copies: RefCell::new(None),
