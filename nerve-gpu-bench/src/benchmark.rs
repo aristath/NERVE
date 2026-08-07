@@ -122,7 +122,18 @@ pub fn run_benchmarks(
         }
     }
 
-    let pair_measurements = Vec::new();
+    let pair_measurements =
+        if policy.execute && policy.pair_measurements && policy.max_group_size >= 2 {
+            run_vulkan_pair_measurements(
+                &selected_targets,
+                policy.payload_bytes,
+                policy.samples,
+                &policy.benchmark_formats,
+                &policy.benchmark_workloads,
+            )
+        } else {
+            Vec::new()
+        };
     let group_measurements = Vec::new();
     let workload_specs = build_workload_specs(
         policy.payload_bytes,
@@ -713,6 +724,27 @@ fn run_vulkan_single_target_measurements(
     )
 }
 
+fn run_vulkan_pair_measurements(
+    targets: &[&Target],
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<crate::model::PairMeasurement> {
+    let vulkan_targets = targets
+        .iter()
+        .copied()
+        .filter(|target| target.backend == "vulkan")
+        .collect::<Vec<_>>();
+    crate::vulkan_exec::run_vulkan_pair_measurements(
+        &vulkan_targets,
+        payload_bytes,
+        samples,
+        formats,
+        workloads,
+    )
+}
+
 pub(crate) fn single_target_status_measurements(
     target_id: &str,
     payload_bytes: usize,
@@ -1124,7 +1156,7 @@ fn build_workload_specs(
     specs
 }
 
-fn format_workload_id(base: &str, workload_class: &str, format: &str) -> String {
+pub(crate) fn format_workload_id(base: &str, workload_class: &str, format: &str) -> String {
     format!("{base}:{workload_class}:{format}")
 }
 
@@ -1136,11 +1168,11 @@ fn split_bytes(total: usize, parts: usize) -> Vec<usize> {
         .collect()
 }
 
-fn activation_bytes_for_payload(payload_bytes: usize) -> usize {
+pub(crate) fn activation_bytes_for_payload(payload_bytes: usize) -> usize {
     payload_bytes.clamp(4 * 1024, 256 * 1024)
 }
 
-fn output_bytes_for_payload(payload_bytes: usize) -> usize {
+pub(crate) fn output_bytes_for_payload(payload_bytes: usize) -> usize {
     (payload_bytes / 16).clamp(4 * 1024, 512 * 1024)
 }
 
