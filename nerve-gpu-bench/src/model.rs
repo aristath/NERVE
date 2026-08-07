@@ -76,6 +76,8 @@ pub struct Implementation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadSpec {
     pub workload_id: String,
+    pub comparison_group: String,
+    pub placement_strategy: String,
     pub pattern: String,
     pub format: String,
     pub participant_count: usize,
@@ -89,6 +91,8 @@ pub struct WorkloadSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Measurement {
     pub workload_id: String,
+    pub comparison_group: String,
+    pub placement_strategy: String,
     pub target_id: String,
     pub pattern: String,
     pub operation_family: String,
@@ -105,6 +109,8 @@ pub struct Measurement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairMeasurement {
     pub workload_id: String,
+    pub comparison_group: String,
+    pub placement_strategy: String,
     pub source_target_id: String,
     pub destination_target_id: String,
     pub pattern: String,
@@ -125,6 +131,8 @@ pub struct PairMeasurement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupMeasurement {
     pub workload_id: String,
+    pub comparison_group: String,
+    pub placement_strategy: String,
     pub target_ids: Vec<String>,
     pub pattern: String,
     pub operation_family: String,
@@ -157,6 +165,21 @@ pub struct Summary {
     pub median_duration_ns: u128,
     pub bytes_per_second: f64,
     pub operations_per_second: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BenchmarkRunSummary {
+    pub discovered_target_count: usize,
+    pub selected_target_count: usize,
+    pub skipped_target_count: usize,
+    pub single_measurement_count: usize,
+    pub pair_measurement_count: usize,
+    pub group_measurement_count: usize,
+    pub completed_count: usize,
+    pub unmeasured_count: usize,
+    pub failed_count: usize,
+    pub unsupported_count: usize,
+    pub skipped_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -235,6 +258,18 @@ impl BenchmarkRun {
             return Err("workload_specs contain duplicate workload IDs".to_string());
         }
         for spec in &self.workload_specs {
+            if spec.comparison_group.is_empty() {
+                return Err(format!(
+                    "workload spec {:?} has an empty comparison_group",
+                    spec.workload_id
+                ));
+            }
+            if spec.placement_strategy.is_empty() {
+                return Err(format!(
+                    "workload spec {:?} has an empty placement_strategy",
+                    spec.workload_id
+                ));
+            }
             if spec.payload_bytes != self.policy.payload_bytes {
                 return Err(format!(
                     "workload spec {:?} payload differs from policy",
@@ -249,6 +284,13 @@ impl BenchmarkRun {
             }
         }
         for measurement in &self.measurements {
+            if measurement.comparison_group.is_empty() || measurement.placement_strategy.is_empty()
+            {
+                return Err(format!(
+                    "measurement {:?} has empty comparison metadata",
+                    measurement.workload_id
+                ));
+            }
             if !discovered_ids.contains(&measurement.target_id) {
                 return Err(format!(
                     "measurement {:?} references unknown target {:?}",
@@ -258,6 +300,13 @@ impl BenchmarkRun {
             validate_status(&measurement.status)?;
         }
         for measurement in &self.pair_measurements {
+            if measurement.comparison_group.is_empty() || measurement.placement_strategy.is_empty()
+            {
+                return Err(format!(
+                    "pair measurement {:?} has empty comparison metadata",
+                    measurement.workload_id
+                ));
+            }
             if !discovered_ids.contains(&measurement.source_target_id) {
                 return Err(format!(
                     "pair measurement {:?} references unknown source {:?}",
@@ -279,6 +328,13 @@ impl BenchmarkRun {
             validate_status(&measurement.status)?;
         }
         for measurement in &self.group_measurements {
+            if measurement.comparison_group.is_empty() || measurement.placement_strategy.is_empty()
+            {
+                return Err(format!(
+                    "group measurement {:?} has empty comparison metadata",
+                    measurement.workload_id
+                ));
+            }
             if measurement.participant_count != measurement.target_ids.len() {
                 return Err(format!(
                     "group measurement {:?} participant_count does not match target_ids",
@@ -309,6 +365,47 @@ impl BenchmarkRun {
             validate_status(&measurement.status)?;
         }
         Ok(())
+    }
+
+    pub fn summary(&self) -> BenchmarkRunSummary {
+        let mut summary = BenchmarkRunSummary {
+            discovered_target_count: self.discovered_targets.len(),
+            selected_target_count: self.selected_target_ids.len(),
+            skipped_target_count: self.skipped_targets.len(),
+            single_measurement_count: self.measurements.len(),
+            pair_measurement_count: self.pair_measurements.len(),
+            group_measurement_count: self.group_measurements.len(),
+            completed_count: 0,
+            unmeasured_count: 0,
+            failed_count: 0,
+            unsupported_count: 0,
+            skipped_count: 0,
+        };
+        for status in self
+            .measurements
+            .iter()
+            .map(|measurement| measurement.status.as_str())
+            .chain(
+                self.pair_measurements
+                    .iter()
+                    .map(|measurement| measurement.status.as_str()),
+            )
+            .chain(
+                self.group_measurements
+                    .iter()
+                    .map(|measurement| measurement.status.as_str()),
+            )
+        {
+            match status {
+                "completed" => summary.completed_count += 1,
+                "unmeasured" => summary.unmeasured_count += 1,
+                "failed" => summary.failed_count += 1,
+                "unsupported" => summary.unsupported_count += 1,
+                "skipped" => summary.skipped_count += 1,
+                _ => {}
+            }
+        }
+        summary
     }
 }
 
@@ -419,5 +516,67 @@ mod tests {
         let encoded = run.to_json_pretty().unwrap();
         let parsed = parse_benchmark_run_json(&encoded).unwrap();
         parsed.validate_basic().unwrap();
+    }
+
+    #[test]
+    fn summarizes_run_status_counts() {
+        let mut run = BenchmarkRun {
+            schema: RUN_SCHEMA.to_string(),
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: 2,
+            implementation: Implementation::current(),
+            policy: RunPolicy {
+                payload_bytes: 1024,
+                samples: 1,
+                include_targets: Vec::new(),
+                exclude_targets: Vec::new(),
+                exclude_pci: Vec::new(),
+                exclude_kinds: Vec::new(),
+                pair_measurements: false,
+                max_group_size: 1,
+            },
+            discovered_targets: vec![Target {
+                stable_target_id: "cpu:host".to_string(),
+                backend: "cpu".to_string(),
+                kind: "cpu".to_string(),
+                name: "Host CPU".to_string(),
+                vendor_id: None,
+                vendor_name: None,
+                device_id: None,
+                pci_address: None,
+                physical_location: Some("host".to_string()),
+                numa_node: None,
+                boot_vga: None,
+                capabilities: Vec::new(),
+                diagnostics: Vec::new(),
+            }],
+            selected_target_ids: vec!["cpu:host".to_string()],
+            skipped_targets: Vec::new(),
+            workload_specs: Vec::new(),
+            measurements: Vec::new(),
+            pair_measurements: Vec::new(),
+            group_measurements: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        run.measurements.push(Measurement {
+            workload_id: "work".to_string(),
+            comparison_group: "test".to_string(),
+            placement_strategy: "single_target_serial".to_string(),
+            target_id: "cpu:host".to_string(),
+            pattern: "single".to_string(),
+            operation_family: "test".to_string(),
+            regime: "small_payload".to_string(),
+            format: "u8".to_string(),
+            status: "completed".to_string(),
+            reason: None,
+            payload_bytes: 1024,
+            working_set_bytes: 1024,
+            samples: Vec::new(),
+            summary: None,
+        });
+        let summary = run.summary();
+        assert_eq!(summary.discovered_target_count, 1);
+        assert_eq!(summary.completed_count, 1);
+        assert_eq!(summary.unmeasured_count, 0);
     }
 }

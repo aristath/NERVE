@@ -18,6 +18,9 @@ pub enum Command {
     Validate {
         input: PathBuf,
     },
+    Summarize {
+        input: PathBuf,
+    },
     Run {
         output: Option<PathBuf>,
         payload_bytes: usize,
@@ -53,6 +56,7 @@ where
     match command.as_str() {
         "-h" | "--help" | "help" => Ok(Command::Help),
         "list" => parse_list(args.collect()),
+        "summarize" => parse_input_file_command("summarize", args.collect()),
         "validate" => parse_validate(args.collect()),
         "run" => parse_run(args.collect()),
         other => Err(CliError(format!(
@@ -63,6 +67,10 @@ where
 }
 
 fn parse_validate(arguments: Vec<String>) -> Result<Command, CliError> {
+    parse_input_file_command("validate", arguments)
+}
+
+fn parse_input_file_command(command: &str, arguments: Vec<String>) -> Result<Command, CliError> {
     let mut input = None;
     let mut index = 0;
     while index < arguments.len() {
@@ -75,15 +83,19 @@ fn parse_validate(arguments: Vec<String>) -> Result<Command, CliError> {
             }
             other => {
                 return Err(CliError(format!(
-                    "unknown validate argument {other:?}\n\n{}",
+                    "unknown {command} argument {other:?}\n\n{}",
                     usage()
                 )));
             }
         }
         index += 1;
     }
-    let input = input.ok_or_else(|| CliError("validate requires --input PATH".to_string()))?;
-    Ok(Command::Validate { input })
+    let input = input.ok_or_else(|| CliError(format!("{command} requires --input PATH")))?;
+    match command {
+        "summarize" => Ok(Command::Summarize { input }),
+        "validate" => Ok(Command::Validate { input }),
+        _ => unreachable!("unsupported input file command"),
+    }
 }
 
 fn parse_list(arguments: Vec<String>) -> Result<Command, CliError> {
@@ -212,7 +224,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -291,6 +303,20 @@ mod tests {
         match command {
             Command::Validate { input } => assert_eq!(input, PathBuf::from("result.json")),
             _ => panic!("expected validate command"),
+        }
+    }
+
+    #[test]
+    fn parses_summarize() {
+        let command = parse_args([
+            "summarize".to_string(),
+            "--input".to_string(),
+            "result.json".to_string(),
+        ])
+        .unwrap();
+        match command {
+            Command::Summarize { input } => assert_eq!(input, PathBuf::from("result.json")),
+            _ => panic!("expected summarize command"),
         }
     }
 }

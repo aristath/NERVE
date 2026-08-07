@@ -29,6 +29,12 @@ measurements are deliberately marked `unmeasured` until backend kernels exist.
 CPU reference versions of the small compound patterns execute today so the
 logical workload contracts are testable before GPU backend work starts.
 
+The benchmark schema treats placement strategy as first-class data. The initial
+small-payload comparison records distinguish one-target serialized execution,
+two-target serialized execution, and two-target parallel execution. A future
+planner should compare those alternatives within the same comparison group,
+instead of assuming any two-target placement is automatically better or worse.
+
 ## Commands
 
 List discovered targets:
@@ -48,6 +54,13 @@ Validate a saved result:
 
 ```sh
 cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- validate \
+  --input benchmark-results.json
+```
+
+Summarize a saved result:
+
+```sh
+cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- summarize \
   --input benchmark-results.json
 ```
 

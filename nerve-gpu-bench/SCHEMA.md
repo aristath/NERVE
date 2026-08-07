@@ -7,6 +7,8 @@ This document is descriptive rather than a formal JSON Schema file. The Rust
 types in `src/model.rs` are the source of truth for the first implementation.
 Use `nerve-gpu-bench validate --input <path>` to parse and run basic structural
 validation on a saved result.
+Use `nerve-gpu-bench summarize --input <path>` for a compact status and target
+summary of the same saved result.
 
 ## Top-Level Fields
 
@@ -30,6 +32,21 @@ validation on a saved result.
 
 The default payload is 5 MiB. Workload specs scale with
 `--payload-bytes`, but stay intentionally small.
+
+Placement decisions must compare alternatives inside the same
+`comparison_group`. The initial group is
+`small_payload_placement_comparison`, which explicitly separates:
+
+- `single_target_serial`: the whole payload on one target;
+- `two_target_serial`: the same logical payload split into ordered stages across
+  two targets;
+- `two_target_parallel`: the same logical payload split into parallel shards
+  across two targets; and
+- three-target serial/parallel variants when triplet records are requested.
+
+That distinction is intentional: a single GPU can beat two-GPU parallelism, and
+two-GPU serial placement can beat or lose to both depending on compute cost,
+transfer cost, synchronization, and format path.
 
 Current workload specs:
 

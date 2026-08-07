@@ -41,6 +41,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .map_err(|message| format!("invalid benchmark JSON: {message}"))?;
             println!("valid {}", input.display());
         }
+        Command::Summarize { input } => {
+            let payload = fs::read_to_string(&input)?;
+            let run = model::parse_benchmark_run_json(&payload)?;
+            run.validate_basic()
+                .map_err(|message| format!("invalid benchmark JSON: {message}"))?;
+            print_run_summary(&run)?;
+        }
         Command::Run {
             output,
             payload_bytes,
@@ -71,6 +78,44 @@ fn run() -> Result<(), Box<dyn Error>> {
             } else {
                 println!("{payload}");
             }
+        }
+    }
+    Ok(())
+}
+
+fn print_run_summary(run: &model::BenchmarkRun) -> Result<(), Box<dyn Error>> {
+    let summary = run.summary();
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "schema: {}", run.schema)?;
+    writeln!(stdout, "payload_bytes: {}", run.policy.payload_bytes)?;
+    writeln!(stdout, "samples: {}", run.policy.samples)?;
+    writeln!(
+        stdout,
+        "targets: discovered={} selected={} skipped={}",
+        summary.discovered_target_count,
+        summary.selected_target_count,
+        summary.skipped_target_count
+    )?;
+    writeln!(
+        stdout,
+        "measurements: single={} pair={} group={}",
+        summary.single_measurement_count,
+        summary.pair_measurement_count,
+        summary.group_measurement_count
+    )?;
+    writeln!(
+        stdout,
+        "statuses: completed={} unmeasured={} failed={} unsupported={} skipped={}",
+        summary.completed_count,
+        summary.unmeasured_count,
+        summary.failed_count,
+        summary.unsupported_count,
+        summary.skipped_count
+    )?;
+    if !run.selected_target_ids.is_empty() {
+        writeln!(stdout, "selected_targets:")?;
+        for target_id in &run.selected_target_ids {
+            writeln!(stdout, "  {target_id}")?;
         }
     }
     Ok(())

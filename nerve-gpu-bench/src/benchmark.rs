@@ -7,6 +7,8 @@ use crate::model::{
     RunPolicy, Sample, Selection, Summary, Target, WorkloadSpec, now_unix_ms,
 };
 
+const SMALL_PAYLOAD_COMPARISON_GROUP: &str = "small_payload_placement_comparison";
+
 pub fn run_benchmarks(
     discovered_targets: Vec<Target>,
     selection: Selection,
@@ -124,6 +126,8 @@ fn run_cpu_copy(target_id: &str, payload_bytes: usize, samples: usize) -> Measur
 
     Measurement {
         workload_id: "single_cpu_u8_copy".to_string(),
+        comparison_group: "single_target_primitives".to_string(),
+        placement_strategy: "single_target_serial".to_string(),
         target_id: target_id.to_string(),
         pattern: "single_target_copy".to_string(),
         operation_family: "memory_copy".to_string(),
@@ -167,6 +171,8 @@ fn run_cpu_f32_dot(target_id: &str, payload_bytes: usize, samples: usize) -> Mea
 
     Measurement {
         workload_id: "single_cpu_f32_dot".to_string(),
+        comparison_group: "single_target_primitives".to_string(),
+        placement_strategy: "single_target_serial".to_string(),
         target_id: target_id.to_string(),
         pattern: "single_target_reduction".to_string(),
         operation_family: "dot_product_reduction".to_string(),
@@ -237,6 +243,14 @@ impl CpuCompoundPattern {
             Self::TensorSplit => "synthetic_tensor_split_small_payload",
         }
     }
+
+    fn placement_strategy(self) -> &'static str {
+        match self {
+            Self::Serialized => "single_target_serial",
+            Self::LayerSplit => "two_stage_serial_reference",
+            Self::TensorSplit => "two_shard_parallel_reference",
+        }
+    }
 }
 
 fn run_cpu_compound_pattern(
@@ -273,6 +287,8 @@ fn run_cpu_compound_pattern(
 
     Measurement {
         workload_id: pattern.workload_id().to_string(),
+        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+        placement_strategy: pattern.placement_strategy().to_string(),
         target_id: target_id.to_string(),
         pattern: pattern.pattern().to_string(),
         operation_family: "cpu_reference_compound".to_string(),
@@ -423,6 +439,8 @@ fn compound_operations(
 fn unmeasured_single_target(target_id: &str, payload_bytes: usize, reason: &str) -> Measurement {
     Measurement {
         workload_id: "single_target_gpu_small_payload".to_string(),
+        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+        placement_strategy: "single_target_serial".to_string(),
         target_id: target_id.to_string(),
         pattern: "single_target_gpu_compute".to_string(),
         operation_family: "backend_compute".to_string(),
@@ -448,6 +466,7 @@ fn build_pair_placeholders(targets: &[&Target], payload_bytes: usize) -> Vec<Pai
                 &source.stable_target_id,
                 &destination.stable_target_id,
                 "ordered_activation_transfer",
+                "activation_transfer_only",
                 "activation_transfer",
                 "requires_device_backend",
                 payload_bytes,
@@ -462,6 +481,7 @@ fn build_pair_placeholders(targets: &[&Target], payload_bytes: usize) -> Vec<Pai
                 left,
                 right,
                 "synthetic_layer_split_small_payload",
+                "two_target_serial",
                 "layer_split",
                 "requires_device_backend",
                 payload_bytes,
@@ -470,6 +490,7 @@ fn build_pair_placeholders(targets: &[&Target], payload_bytes: usize) -> Vec<Pai
                 left,
                 right,
                 "synthetic_tensor_split_small_payload",
+                "two_target_parallel",
                 "tensor_split",
                 "requires_device_backend",
                 payload_bytes,
@@ -500,6 +521,7 @@ fn build_group_placeholders(
                 measurements.push(unmeasured_group(
                     target_ids.clone(),
                     "synthetic_layer_split_group_small_payload",
+                    "three_target_serial",
                     "layer_split",
                     "requires_device_backend",
                     payload_bytes,
@@ -507,6 +529,7 @@ fn build_group_placeholders(
                 measurements.push(unmeasured_group(
                     target_ids,
                     "synthetic_tensor_split_group_small_payload",
+                    "three_target_parallel",
                     "tensor_split",
                     "requires_device_backend",
                     payload_bytes,
@@ -521,6 +544,7 @@ fn unmeasured_pair(
     source: &str,
     destination: &str,
     pattern: &str,
+    placement_strategy: &str,
     operation_family: &str,
     reason: &str,
     payload_bytes: usize,
@@ -530,6 +554,8 @@ fn unmeasured_pair(
     let output_bytes = output_bytes_for_payload(payload_bytes);
     PairMeasurement {
         workload_id: pattern.to_string(),
+        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+        placement_strategy: placement_strategy.to_string(),
         source_target_id: source.to_string(),
         destination_target_id: destination.to_string(),
         pattern: pattern.to_string(),
@@ -551,6 +577,7 @@ fn unmeasured_pair(
 fn unmeasured_group(
     target_ids: Vec<String>,
     pattern: &str,
+    placement_strategy: &str,
     operation_family: &str,
     reason: &str,
     payload_bytes: usize,
@@ -558,6 +585,8 @@ fn unmeasured_group(
     let payload_bytes_per_participant = split_bytes(payload_bytes, target_ids.len());
     GroupMeasurement {
         workload_id: pattern.to_string(),
+        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+        placement_strategy: placement_strategy.to_string(),
         target_ids,
         pattern: pattern.to_string(),
         operation_family: operation_family.to_string(),
@@ -582,6 +611,8 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
     let mut specs = vec![
         WorkloadSpec {
             workload_id: "cpu_reference_serialized_small_payload".to_string(),
+            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+            placement_strategy: "single_target_serial".to_string(),
             pattern: "serialized_small_payload".to_string(),
             format: "u8_synthetic".to_string(),
             participant_count: 1,
@@ -593,6 +624,8 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
         },
         WorkloadSpec {
             workload_id: "cpu_reference_layer_split_small_payload".to_string(),
+            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+            placement_strategy: "two_stage_serial_reference".to_string(),
             pattern: "synthetic_layer_split_small_payload".to_string(),
             format: "u8_synthetic".to_string(),
             participant_count: 1,
@@ -604,6 +637,8 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
         },
         WorkloadSpec {
             workload_id: "cpu_reference_tensor_split_small_payload".to_string(),
+            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+            placement_strategy: "two_shard_parallel_reference".to_string(),
             pattern: "synthetic_tensor_split_small_payload".to_string(),
             format: "u8_synthetic".to_string(),
             participant_count: 1,
@@ -615,6 +650,8 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
         },
         WorkloadSpec {
             workload_id: "single_target_gpu_small_payload".to_string(),
+            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+            placement_strategy: "single_target_serial".to_string(),
             pattern: "single_target_gpu_compute".to_string(),
             format: "backend_selected".to_string(),
             participant_count: 1,
@@ -626,6 +663,8 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
         },
         WorkloadSpec {
             workload_id: "ordered_activation_transfer".to_string(),
+            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+            placement_strategy: "activation_transfer_only".to_string(),
             pattern: "ordered_activation_transfer".to_string(),
             format: "backend_selected".to_string(),
             participant_count: 2,
@@ -637,6 +676,8 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
         },
         WorkloadSpec {
             workload_id: "synthetic_layer_split_small_payload".to_string(),
+            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+            placement_strategy: "two_target_serial".to_string(),
             pattern: "synthetic_layer_split_small_payload".to_string(),
             format: "backend_selected".to_string(),
             participant_count: 2,
@@ -648,6 +689,8 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
         },
         WorkloadSpec {
             workload_id: "synthetic_tensor_split_small_payload".to_string(),
+            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+            placement_strategy: "two_target_parallel".to_string(),
             pattern: "synthetic_tensor_split_small_payload".to_string(),
             format: "backend_selected".to_string(),
             participant_count: 2,
@@ -662,6 +705,8 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
         let third_payload = payload_bytes / 3;
         specs.push(WorkloadSpec {
             workload_id: "synthetic_layer_split_group_small_payload".to_string(),
+            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+            placement_strategy: "three_target_serial".to_string(),
             pattern: "synthetic_layer_split_group_small_payload".to_string(),
             format: "backend_selected".to_string(),
             participant_count: 3,
@@ -673,6 +718,8 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
         });
         specs.push(WorkloadSpec {
             workload_id: "synthetic_tensor_split_group_small_payload".to_string(),
+            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+            placement_strategy: "three_target_parallel".to_string(),
             pattern: "synthetic_tensor_split_group_small_payload".to_string(),
             format: "backend_selected".to_string(),
             participant_count: 3,
@@ -809,8 +856,18 @@ mod tests {
             .find(|spec| spec.workload_id == "synthetic_layer_split_small_payload")
             .unwrap();
         assert_eq!(layer.participant_count, 2);
+        assert_eq!(layer.comparison_group, SMALL_PAYLOAD_COMPARISON_GROUP);
+        assert_eq!(layer.placement_strategy, "two_target_serial");
         assert_eq!(layer.parameter_bytes_per_participant, 2_621_440);
         assert!(layer.activation_bytes <= 256 * 1024);
+
+        let strategies = specs
+            .iter()
+            .map(|spec| spec.placement_strategy.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(strategies.contains("single_target_serial"));
+        assert!(strategies.contains("two_target_serial"));
+        assert!(strategies.contains("two_target_parallel"));
     }
 
     #[test]
