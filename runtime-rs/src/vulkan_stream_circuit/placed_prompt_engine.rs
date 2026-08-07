@@ -456,11 +456,71 @@ impl VulkanResidentInProcessPlacedPromptEngine {
     {
         let input_event_id = event.id.clone();
         let queued_input_event = self.enqueue_input_event(stream_id, event)?;
-        let engine_run = self.run_until_idle_bounded_abortable_with_output(
+        let mut engine_run = self.run_until_idle_bounded_abortable_with_output(
             usize::MAX,
             abort_requested,
             on_output_event,
         )?;
+        if abort_requested.get()
+            && !engine_run.input_runs.iter().any(|input_run| {
+                input_run.stream_id == stream_id
+                    && input_run.submitted_run.input_event.id == input_event_id
+            })
+        {
+            // A streaming protocol boundary is an intentional early end to a
+            // transactional generation branch. Finalize the active event in
+            // branch state so callers receive its real execution report;
+            // the enclosing stream transaction will still restore canonical
+            // model and scheduler state after this method returns.
+            let interrupted = self.interrupt_stream(
+                stream_id,
+                format!("output callback ended input event {input_event_id:?}"),
+            )?;
+            let submitted_run = interrupted
+                .stream_control_run
+                .completed_input_run
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedPromptEngineError::Stream(
+                        placed_scheduler_divergence(format!(
+                            "output callback ended input event {input_event_id:?}, but interrupting stream {stream_id:?} did not complete it"
+                        )),
+                    )
+                })?;
+            if submitted_run.input_event.id != input_event_id {
+                return Err(VulkanResidentInProcessPlacedPromptEngineError::Stream(
+                    placed_scheduler_divergence(format!(
+                        "output callback ended input event {input_event_id:?}, but interrupting stream {stream_id:?} completed {:?}",
+                        submitted_run.input_event.id,
+                    )),
+                ));
+            }
+            let input_output_events = engine_run
+                .output_events
+                .iter()
+                .filter(|event| {
+                    event.stream_id == stream_id
+                        && event.output_event.input_event_id == input_event_id
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let generated_token_ids = submitted_run.generated_token_ids.clone();
+            engine_run
+                .input_runs
+                .push(VulkanResidentInProcessPlacedPromptEngineInputRun {
+                    stream_id: stream_id.to_string(),
+                    submitted_run,
+                    output_events: input_output_events,
+                    generated_token_ids,
+                });
+            engine_run.processed_input_event_count = engine_run.input_runs.len();
+            engine_run.end_snapshot = self.snapshot();
+            engine_run.stop_condition = if engine_run.end_snapshot.idle {
+                VulkanResidentInProcessPlacedPromptEngineRunStopCondition::Idle
+            } else {
+                VulkanResidentInProcessPlacedPromptEngineRunStopCondition::InputEventBudget
+            };
+            engine_run.prefix_state_cache = self.resident_prefix_state_cache.stats();
+        }
         let output_events = engine_run
             .output_events
             .iter()

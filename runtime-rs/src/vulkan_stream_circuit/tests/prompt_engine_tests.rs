@@ -382,6 +382,18 @@ fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
         "abort callback observed {observed} token(s) after the engine had already generated {}",
         aborted.generated_token_ids.len(),
     );
+    let aborted_input_run = aborted
+        .engine_run
+        .input_runs
+        .iter()
+        .find(|input_run| input_run.submitted_run.input_event.id == "aborted_branch")
+        .expect("an output-requested abort must still return the submitted event run");
+    assert_eq!(
+        aborted_input_run.generated_token_ids,
+        aborted.generated_token_ids
+    );
+    assert_eq!(aborted.engine_run.processed_input_event_count, 1);
+    assert!(aborted.engine_run.end_snapshot.idle);
     assert_eq!(engine.snapshot().streams[0], stream_before);
     assert_eq!(
         engine
@@ -729,6 +741,19 @@ fn chat_generation_rejection_restores_state_and_allows_canonical_retry() {
     assert_eq!(retry.generation_run.generated_token_ids.len(), 2);
     assert_eq!(retry.generated_token_ids.len(), 1);
     assert!(retry.generation_terminated_by_protocol);
+    let generation_input_run = retry
+        .generation_run
+        .engine_run
+        .input_runs
+        .iter()
+        .find(|input_run| {
+            input_run.submitted_run.input_event.id == retry.generation_event_id
+        })
+        .expect("protocol termination must retain the generation event report");
+    assert_eq!(
+        generation_input_run.generated_token_ids,
+        retry.generation_run.generated_token_ids
+    );
     assert_eq!(
         retry_phases,
         vec![
