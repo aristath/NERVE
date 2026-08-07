@@ -15,6 +15,7 @@ include!("vulkan_compute/device_local_memory_budget.rs");
 include!("vulkan_compute/resident_buffers.rs");
 include!("vulkan_compute/resident_buffer_pool.rs");
 include!("vulkan_compute/kernel_sequence.rs");
+include!("vulkan_compute/kernel_sequence_invocation.rs");
 include!("vulkan_compute/buffer_copies.rs");
 include!("vulkan_compute/resident_transfer_stream.rs");
 include!("vulkan_compute/stable_resource_address_space.rs");
