@@ -1397,6 +1397,16 @@ mod tests {
         vec!["f32".to_string()]
     }
 
+    fn model_storage_formats() -> Vec<String> {
+        vec![
+            "mxfp4".to_string(),
+            "nvfp4".to_string(),
+            "fp8_e4m3".to_string(),
+            "q4_k".to_string(),
+            "iq2_xs".to_string(),
+        ]
+    }
+
     fn workloads() -> Vec<String> {
         vec!["dense_projection".to_string()]
     }
@@ -1537,6 +1547,53 @@ mod tests {
         assert!(ids.contains(&"synthetic_tensor_split_group_small_payload:dense_projection:f32"));
         let split = split_bytes(10, 3);
         assert_eq!(split, [4, 3, 3]);
+    }
+
+    #[test]
+    fn model_storage_formats_are_workload_and_comparison_axes() {
+        let formats = model_storage_formats();
+        let workloads = vec![
+            "dense_projection".to_string(),
+            "router_reduction".to_string(),
+        ];
+        let specs = build_workload_specs(5 * 1024 * 1024, &formats, &workloads, 3);
+        for format in &formats {
+            assert!(specs.iter().any(|spec| {
+                spec.workload_id
+                    == format_workload_id("single_target_small_payload", "dense_projection", format)
+                    && spec.format == *format
+                    && spec.placement_strategy == "single_target_serial"
+            }));
+            assert!(specs.iter().any(|spec| {
+                spec.workload_id
+                    == format_workload_id(
+                        "synthetic_tensor_split_group_small_payload",
+                        "router_reduction",
+                        format,
+                    )
+                    && spec.format == *format
+                    && spec.placement_strategy == "three_target_parallel"
+            }));
+        }
+
+        let targets = vec![
+            target("gpu:a", "discrete_gpu"),
+            target("gpu:b", "discrete_gpu"),
+        ];
+        let target_refs = targets.iter().collect::<Vec<_>>();
+        let comparison_sets = build_comparison_sets(&target_refs, true, &formats, &workloads, 2);
+        assert_eq!(comparison_sets.len(), formats.len() * workloads.len());
+        let mxfp4 = comparison_sets
+            .iter()
+            .find(|comparison| {
+                comparison.workload_class == "dense_projection" && comparison.format == "mxfp4"
+            })
+            .unwrap();
+        assert!(mxfp4.candidates.iter().any(|candidate| {
+            candidate.placement_strategy == "two_target_parallel"
+                && candidate.workload_id
+                    == "synthetic_tensor_split_small_payload:dense_projection:mxfp4"
+        }));
     }
 
     #[test]

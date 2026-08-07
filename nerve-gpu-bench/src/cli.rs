@@ -296,13 +296,17 @@ mod tests {
     #[test]
     fn parses_run_defaults() {
         let command = parse_args(["run".to_string()]).unwrap();
+        let default_formats = default_benchmark_formats();
+        for expected in ["mxfp4", "nvfp4", "fp8_e4m3", "q4_k", "iq2_xs", "f32"] {
+            assert!(default_formats.contains(&expected.to_string()));
+        }
         assert_eq!(
             command,
             Command::Run {
                 output: None,
                 payload_bytes: DEFAULT_PAYLOAD_BYTES,
                 samples: DEFAULT_SAMPLES,
-                benchmark_formats: default_benchmark_formats(),
+                benchmark_formats: default_formats,
                 benchmark_workloads: DEFAULT_BENCHMARK_WORKLOADS
                     .iter()
                     .map(|workload| (*workload).to_string())

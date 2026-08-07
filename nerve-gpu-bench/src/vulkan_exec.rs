@@ -955,13 +955,26 @@ mod tests {
 
     #[test]
     fn maps_model_storage_formats_to_packed_dense_kernel() {
-        for format in [
-            "f16", "bf16", "fp8_e4m3", "fp8_e5m2", "mxfp4", "nvfp4", "int4", "q5_1", "q4_k",
-            "iq4_xs", "iq2_xs",
+        for (format, logical_elements) in [
+            ("f16", 2),
+            ("bf16", 2),
+            ("fp8_e4m3", 4),
+            ("fp8_e5m2", 4),
+            ("mxfp4", 8),
+            ("nvfp4", 8),
+            ("int4", 8),
+            ("q5_1", 6),
+            ("q4_k", 8),
+            ("iq4_xs", 8),
+            ("iq2_xs", 16),
         ] {
             let kernel = dense_format_kernel(format).unwrap();
             assert_eq!(kernel.format, format);
             assert_eq!(kernel.pattern, "single_target_packed_emulated_compute");
+            assert_eq!(
+                kernel.logical_elements_per_storage_element,
+                logical_elements
+            );
         }
     }
 

@@ -335,4 +335,19 @@ mod tests {
             2_000_000_000
         );
     }
+
+    #[test]
+    fn cpu_and_passive_pci_capabilities_cover_model_storage_formats_once() {
+        for capabilities in [cpu_format_capabilities(), passive_pci_format_capabilities()] {
+            let formats = capabilities
+                .iter()
+                .map(|capability| capability.format.as_str())
+                .collect::<Vec<_>>();
+            for expected in ["mxfp4", "nvfp4", "fp8_e5m2", "q5_1", "q4_k", "iq2_xs"] {
+                assert!(formats.contains(&expected), "missing {expected}");
+            }
+            let unique = formats.iter().collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(formats.len(), unique.len());
+        }
+    }
 }
