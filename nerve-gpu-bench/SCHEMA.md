@@ -68,10 +68,10 @@ or GPU measurements.
 logical devices. When true, selected Vulkan targets may attempt the execution
 boundary. Current Vulkan single-target measurements can complete
 `dense_projection`, `moe_expert`, and `router_reduction` paths with timestamped
-compute samples for F32, feature-gated native F16, and packed-emulated
-lower-precision or quantized storage formats. Raw INT8 uses native 8-bit integer
-arithmetic when `shaderInt8` is available; block-quantized Q8 remains a separate
-format path. Current Vulkan pair measurements can complete ordered host-staged
+compute samples for F32, feature-gated native F16, feature-gated native raw
+INT8, and format-specific dequant kernels for lower-precision or quantized
+storage formats. Block-quantized Q8 remains a separate format path from raw
+INT8. Current Vulkan pair measurements can complete ordered host-staged
 activation transfer, two-target serial, and two-target parallel rows for those
 executable workload/format axes. Current Vulkan triplet measurements can
 complete three-target serial and three-target parallel rows for the same
@@ -154,12 +154,11 @@ include the physical-device index because Vulkan device order is driver-defined.
 Discovery creates a Vulkan instance only; it does not create logical devices or
 run GPU workloads.
 F16 capability uses the shaderFloat16 feature bit. BF16 and FP8 variant
-capabilities use extension presence as conservative native-path probes. Raw INT8
-capability uses the shaderInt8 feature bit. FP4, MXFP4, NVFP4, GGUF Q-family,
-and IQ-family formats can be marked
-`emulated` when the generic packed-u32 baseline can run, but native
-format-specific math/dequant kernels beyond F16 and raw INT8 still require
-separate measurements.
+capabilities are marked as emulated because the benchmark executes
+format-specific dequant kernels for them. Raw INT8 capability uses the
+shaderInt8 feature bit. FP4, MXFP4, NVFP4, GGUF Q-family, and IQ-family formats
+can be marked `emulated` when the format-specific dequant benchmark path can
+run.
 
 Format capability is not a speed claim. A target can lack native FP4/MXFP4 but
 still win F16, BF16, FP8, routing, logits, sampler, or fallback/dequantized

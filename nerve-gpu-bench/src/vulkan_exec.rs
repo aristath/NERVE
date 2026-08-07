@@ -35,31 +35,6 @@ const F32_TRANSFORM_SHADER_SPV: &[u32] = &[
     65789, 65592,
 ];
 
-const PACKED_U32_TRANSFORM_SHADER_SPV: &[u32] = &[
-    119734787, 65536, 851979, 54, 0, 131089, 1, 393227, 1, 1280527431, 1685353262, 808793134, 0,
-    196622, 0, 1, 393231, 5, 4, 1852399981, 0, 11, 393232, 4, 17, 64, 1, 1, 196611, 2, 450, 655364,
-    1197427783, 1279741775, 1885560645, 1953718128, 1600482425, 1701734764, 1919509599, 1769235301,
-    25974, 524292, 1197427783, 1279741775, 1852399429, 1685417059, 1768185701, 1952671090, 6649449,
-    262149, 4, 1852399981, 0, 196613, 8, 7890025, 524293, 11, 1197436007, 1633841004, 1986939244,
-    1952539503, 1231974249, 68, 262149, 17, 1752397136, 0, 262150, 17, 0, 7234924, 262149, 19,
-    1752397168, 0, 196613, 29, 120, 262149, 31, 1635017028, 0, 327686, 31, 0, 1970037110, 29541,
-    262149, 33, 1635017060, 0, 262215, 11, 11, 28, 196679, 17, 2, 327752, 17, 0, 35, 0, 262215, 30,
-    6, 4, 196679, 31, 3, 327752, 31, 0, 35, 0, 262215, 33, 33, 0, 262215, 33, 34, 0, 262215, 53,
-    11, 25, 131091, 2, 196641, 3, 2, 262165, 6, 32, 0, 262176, 7, 7, 6, 262167, 9, 6, 3, 262176,
-    10, 1, 9, 262203, 10, 11, 1, 262187, 6, 12, 0, 262176, 13, 1, 6, 196638, 17, 6, 262176, 18, 9,
-    17, 262203, 18, 19, 9, 262165, 20, 32, 1, 262187, 20, 21, 0, 262176, 22, 9, 6, 131092, 25,
-    196637, 30, 6, 196638, 31, 30, 262176, 32, 2, 31, 262203, 32, 33, 2, 262176, 35, 2, 6, 262187,
-    6, 39, 1664525, 262187, 6, 41, 1013904223, 262187, 20, 45, 16, 262187, 6, 51, 64, 262187, 6,
-    52, 1, 393260, 9, 53, 51, 52, 52, 327734, 2, 4, 0, 3, 131320, 5, 262203, 7, 8, 7, 262203, 7,
-    29, 7, 327745, 13, 14, 11, 12, 262205, 6, 15, 14, 196670, 8, 15, 262205, 6, 16, 8, 327745, 22,
-    23, 19, 21, 262205, 6, 24, 23, 327856, 25, 26, 16, 24, 196855, 28, 0, 262394, 26, 27, 28,
-    131320, 27, 262205, 6, 34, 8, 393281, 35, 36, 33, 21, 34, 262205, 6, 37, 36, 196670, 29, 37,
-    262205, 6, 38, 29, 327812, 6, 40, 38, 39, 327808, 6, 42, 40, 41, 196670, 29, 42, 262205, 6, 43,
-    29, 262205, 6, 44, 29, 327874, 6, 46, 44, 45, 327878, 6, 47, 43, 46, 196670, 29, 47, 262205, 6,
-    48, 8, 262205, 6, 49, 29, 393281, 35, 50, 33, 21, 48, 196670, 50, 49, 131321, 28, 131320, 28,
-    65789, 65592,
-];
-
 const F32_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_moe_expert.spv");
 const F32_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_router_reduction.spv");
 const F16_DENSE_PROJECTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_dense_projection.spv");
@@ -68,9 +43,7 @@ const F16_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_route
 const INT8_DENSE_PROJECTION_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_dense_projection.spv");
 const INT8_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_moe_expert.spv");
 const INT8_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_router_reduction.spv");
-const PACKED_MOE_EXPERT_SHADER_SPV: &[u8] = include_bytes!("shaders/packed_moe_expert.spv");
-const PACKED_ROUTER_REDUCTION_SHADER_SPV: &[u8] =
-    include_bytes!("shaders/packed_router_reduction.spv");
+const FORMAT_DEQUANT_SHADER_SPV: &[u8] = include_bytes!("shaders/format_dequant.spv");
 
 #[derive(Clone, Copy)]
 enum ShaderCode {
@@ -87,6 +60,7 @@ struct DenseFormatKernel {
     operations_per_storage_element: u64,
     pattern: &'static str,
     required_feature: Option<&'static str>,
+    format_kind: u32,
 }
 
 fn workload_format_kernel(workload_class: &str, format: &str) -> Option<DenseFormatKernel> {
@@ -108,6 +82,7 @@ fn dense_format_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 2,
             pattern: "single_target_compute",
             required_feature: None,
+            format_kind: 0,
         }),
         "f16" => Some(DenseFormatKernel {
             format: "f16".to_string(),
@@ -117,9 +92,11 @@ fn dense_format_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 4,
             pattern: "single_target_f16_native_compute",
             required_feature: Some("shader_float16"),
+            format_kind: 0,
         }),
-        "bf16" => Some(packed_dense_kernel("bf16", 2)),
-        "fp8" | "fp8_e4m3" | "fp8_e5m2" => Some(packed_dense_kernel(format, 4)),
+        "bf16" => Some(format_dequant_kernel("bf16", 2, 1)),
+        "fp8" | "fp8_e4m3" => Some(format_dequant_kernel(format, 4, 2)),
+        "fp8_e5m2" => Some(format_dequant_kernel(format, 4, 3)),
         "int8" => Some(DenseFormatKernel {
             format: "int8".to_string(),
             shader: ShaderCode::Bytes(INT8_DENSE_PROJECTION_SHADER_SPV),
@@ -128,33 +105,39 @@ fn dense_format_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 12,
             pattern: "single_target_int8_native_compute",
             required_feature: Some("shader_int8"),
+            format_kind: 0,
         }),
-        "q8_0" => Some(packed_dense_kernel(format, 4)),
-        "q6_k" => Some(packed_dense_kernel(format, 5)),
-        "q5_0" | "q5_1" | "q5_k" => Some(packed_dense_kernel(format, 6)),
-        "int4" | "q4_0" | "q4_1" | "q4_k" | "iq4_nl" | "iq4_xs" => {
-            Some(packed_dense_kernel(format, 8))
-        }
-        "q3_k" | "iq3_s" => Some(packed_dense_kernel(format, 10)),
-        "q2_k" | "iq2_xs" => Some(packed_dense_kernel(format, 16)),
-        "fp4" => Some(packed_dense_kernel("fp4", 8)),
-        "mxfp4" | "nvfp4" => Some(packed_dense_kernel(format, 8)),
+        "q8_0" => Some(format_dequant_kernel(format, 4, 8)),
+        "q6_k" => Some(format_dequant_kernel(format, 5, 9)),
+        "q5_0" | "q5_1" | "q5_k" => Some(format_dequant_kernel(format, 6, 10)),
+        "int4" => Some(format_dequant_kernel(format, 8, 7)),
+        "q4_0" | "q4_1" | "q4_k" => Some(format_dequant_kernel(format, 8, 11)),
+        "q3_k" => Some(format_dequant_kernel(format, 10, 12)),
+        "q2_k" => Some(format_dequant_kernel(format, 16, 13)),
+        "iq4_nl" | "iq4_xs" => Some(format_dequant_kernel(format, 8, 14)),
+        "iq3_s" => Some(format_dequant_kernel(format, 10, 15)),
+        "iq2_xs" => Some(format_dequant_kernel(format, 16, 16)),
+        "fp4" => Some(format_dequant_kernel("fp4", 8, 4)),
+        "mxfp4" => Some(format_dequant_kernel(format, 8, 5)),
+        "nvfp4" => Some(format_dequant_kernel(format, 8, 6)),
         _ => None,
     }
 }
 
-fn packed_dense_kernel(
+fn format_dequant_kernel(
     format: &str,
     logical_elements_per_storage_element: u64,
+    format_kind: u32,
 ) -> DenseFormatKernel {
     DenseFormatKernel {
         format: format.to_string(),
-        shader: ShaderCode::Words(PACKED_U32_TRANSFORM_SHADER_SPV),
+        shader: ShaderCode::Bytes(FORMAT_DEQUANT_SHADER_SPV),
         bytes_per_storage_element: mem::size_of::<u32>(),
         logical_elements_per_storage_element,
-        operations_per_storage_element: 4,
-        pattern: "single_target_packed_emulated_compute",
+        operations_per_storage_element: logical_elements_per_storage_element * 8,
+        pattern: "single_target_format_dequant_compute",
         required_feature: None,
+        format_kind,
     }
 }
 
@@ -168,6 +151,7 @@ fn moe_expert_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 10,
             pattern: "moe_expert_compute",
             required_feature: None,
+            format_kind: 0,
         }),
         "f16" => Some(DenseFormatKernel {
             format: "f16".to_string(),
@@ -177,6 +161,7 @@ fn moe_expert_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 14,
             pattern: "moe_expert_f16_native_compute",
             required_feature: Some("shader_float16"),
+            format_kind: 0,
         }),
         "int8" => Some(DenseFormatKernel {
             format: "int8".to_string(),
@@ -186,13 +171,9 @@ fn moe_expert_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 18,
             pattern: "moe_expert_int8_native_compute",
             required_feature: Some("shader_int8"),
+            format_kind: 0,
         }),
-        _ => packed_workload_kernel(
-            format,
-            PACKED_MOE_EXPERT_SHADER_SPV,
-            "moe_expert_packed_emulated_compute",
-            12,
-        ),
+        _ => format_dequant_workload_kernel(format, "moe_expert_format_dequant_compute", 12),
     }
 }
 
@@ -206,6 +187,7 @@ fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 8,
             pattern: "router_reduction_compute",
             required_feature: None,
+            format_kind: 0,
         }),
         "f16" => Some(DenseFormatKernel {
             format: "f16".to_string(),
@@ -215,6 +197,7 @@ fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 10,
             pattern: "router_reduction_f16_native_compute",
             required_feature: Some("shader_float16"),
+            format_kind: 0,
         }),
         "int8" => Some(DenseFormatKernel {
             format: "int8".to_string(),
@@ -224,25 +207,20 @@ fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
             operations_per_storage_element: 12,
             pattern: "router_reduction_int8_native_compute",
             required_feature: Some("shader_int8"),
+            format_kind: 0,
         }),
-        _ => packed_workload_kernel(
-            format,
-            PACKED_ROUTER_REDUCTION_SHADER_SPV,
-            "router_reduction_packed_emulated_compute",
-            8,
-        ),
+        _ => format_dequant_workload_kernel(format, "router_reduction_format_dequant_compute", 8),
     }
 }
 
-fn packed_workload_kernel(
+fn format_dequant_workload_kernel(
     format: &str,
-    shader: &'static [u8],
     pattern: &'static str,
-    operations_per_storage_element: u64,
+    operation_multiplier: u64,
 ) -> Option<DenseFormatKernel> {
     dense_format_kernel(format).map(|base| DenseFormatKernel {
-        shader: ShaderCode::Bytes(shader),
-        operations_per_storage_element,
+        operations_per_storage_element: base.logical_elements_per_storage_element
+            * operation_multiplier,
         pattern,
         ..base
     })
@@ -1341,6 +1319,7 @@ fn submit_dense_compute_sample(
         context.readback.buffer,
         context.buffer_size,
         context.storage_elements as u32,
+        context.kernel.format_kind,
         context.dispatch_groups,
     )?;
     unsafe {
@@ -1484,6 +1463,7 @@ fn run_vulkan_dense_parallel_pair(
             left_context.readback.buffer,
             left_context.buffer_size,
             left_context.storage_elements as u32,
+            left_context.kernel.format_kind,
             left_context.dispatch_groups,
         )?;
         record_compute_dispatch(
@@ -1496,6 +1476,7 @@ fn run_vulkan_dense_parallel_pair(
             right_context.readback.buffer,
             right_context.buffer_size,
             right_context.storage_elements as u32,
+            right_context.kernel.format_kind,
             right_context.dispatch_groups,
         )?;
         let started = Instant::now();
@@ -1809,6 +1790,7 @@ fn run_vulkan_dense_parallel_triplet(
                 contexts[index].readback.buffer,
                 contexts[index].buffer_size,
                 contexts[index].storage_elements as u32,
+                contexts[index].kernel.format_kind,
                 contexts[index].dispatch_groups,
             )?;
         }
@@ -2058,7 +2040,7 @@ fn create_compute_resources(
     let push_ranges = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
         .offset(0)
-        .size(mem::size_of::<u32>() as u32)];
+        .size((mem::size_of::<u32>() * 2) as u32)];
     let set_layouts = [descriptor_set_layout];
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
@@ -2162,6 +2144,7 @@ fn record_compute_dispatch(
     readback_buffer: vk::Buffer,
     buffer_size: vk::DeviceSize,
     elements: u32,
+    format_kind: u32,
     dispatch_groups: u32,
 ) -> Result<(), String> {
     let device = &compute_device.device;
@@ -2216,9 +2199,10 @@ fn record_compute_dispatch(
             &[resources.descriptor_set],
             &[],
         );
+        let push_constants = [elements, format_kind];
         let push_bytes = std::slice::from_raw_parts(
-            (&elements as *const u32).cast::<u8>(),
-            mem::size_of::<u32>(),
+            push_constants.as_ptr().cast::<u8>(),
+            mem::size_of_val(&push_constants),
         );
         device.cmd_push_constants(
             command_buffer,
@@ -2664,23 +2648,29 @@ mod tests {
     }
 
     #[test]
-    fn maps_model_storage_formats_to_packed_dense_kernel() {
-        for (format, logical_elements) in [
-            ("bf16", 2),
-            ("fp8_e4m3", 4),
-            ("fp8_e5m2", 4),
-            ("q8_0", 4),
-            ("mxfp4", 8),
-            ("nvfp4", 8),
-            ("int4", 8),
-            ("q5_1", 6),
-            ("q4_k", 8),
-            ("iq4_xs", 8),
-            ("iq2_xs", 16),
+    fn maps_model_storage_formats_to_format_dequant_kernels() {
+        for (format, logical_elements, format_kind) in [
+            ("bf16", 2, 1),
+            ("fp8_e4m3", 4, 2),
+            ("fp8_e5m2", 4, 3),
+            ("fp4", 8, 4),
+            ("mxfp4", 8, 5),
+            ("nvfp4", 8, 6),
+            ("int4", 8, 7),
+            ("q8_0", 4, 8),
+            ("q6_k", 5, 9),
+            ("q5_1", 6, 10),
+            ("q4_k", 8, 11),
+            ("q3_k", 10, 12),
+            ("q2_k", 16, 13),
+            ("iq4_xs", 8, 14),
+            ("iq3_s", 10, 15),
+            ("iq2_xs", 16, 16),
         ] {
             let kernel = dense_format_kernel(format).unwrap();
             assert_eq!(kernel.format, format);
-            assert_eq!(kernel.pattern, "single_target_packed_emulated_compute");
+            assert_eq!(kernel.pattern, "single_target_format_dequant_compute");
+            assert_eq!(kernel.format_kind, format_kind);
             assert_eq!(
                 kernel.logical_elements_per_storage_element,
                 logical_elements
@@ -2737,10 +2727,10 @@ mod tests {
             assert_eq!(f32_kernel.format, "f32");
             assert!(f32_kernel.operations_per_storage_element > 0);
 
-            let packed_kernel = workload_format_kernel(workload, "mxfp4").unwrap();
-            assert_eq!(packed_kernel.format, "mxfp4");
-            assert_eq!(packed_kernel.logical_elements_per_storage_element, 8);
-            assert!(packed_kernel.pattern.contains("compute"));
+            let dequant_kernel = workload_format_kernel(workload, "mxfp4").unwrap();
+            assert_eq!(dequant_kernel.format, "mxfp4");
+            assert_eq!(dequant_kernel.logical_elements_per_storage_element, 8);
+            assert!(dequant_kernel.pattern.contains("compute"));
         }
         assert!(workload_format_kernel("unknown_workload", "f32").is_none());
         assert!(workload_format_kernel("dense_projection", "unknown_format").is_none());

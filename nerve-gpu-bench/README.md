@@ -23,7 +23,8 @@ This first implementation provides:
   unimplemented CPU formats;
 - opt-in Vulkan dense-projection, MoE expert, and router/reduction dispatches
   with GPU timestamp samples for F32, native F16 and raw INT8 when available,
-  and packed-emulated baselines for other lower-precision and quantized formats;
+  and format-specific dequant kernels for lower-precision and quantized model
+  storage formats;
 - opt-in Vulkan ordered activation transfer, two-target serial dense, and
   two-target parallel dense measurements for small pair comparisons;
 - workload specs and comparison candidates for single-target, pair, and triplet
@@ -37,13 +38,12 @@ path submits small workload-specific compute dispatches over the requested
 payload, measured with Vulkan timestamps. F32 uses float shader paths. F16 uses
 feature-gated native 16-bit arithmetic when `shaderFloat16` is available. Raw
 INT8 uses feature-gated native 8-bit integer arithmetic when `shaderInt8` is
-available. BF16, FP8 variants, FP4/MXFP4/NVFP4, GGUF-style Q/IQ storage
-families, and block-quantized Q8 use packed-u32 emulation baselines until native
-format-specific kernels exist. Peer activation transfer, dense/MoE/router
-layer-split, and dense/MoE/router tensor-split pair and triplet paths run when
-`--execute` and pair measurements are active. Native format-specific kernels
-beyond F16 and raw INT8 still produce no measurement rows until their backend
-kernels exist; their absence is reported as missing comparison coverage.
+available. BF16, FP8 variants, FP4/MXFP4/NVFP4, INT4, GGUF-style Q/IQ storage
+families, and block-quantized Q8 use format-specific dequant kernels. Peer
+activation transfer, dense/MoE/router layer-split, and dense/MoE/router
+tensor-split pair and triplet paths run when `--execute` and pair measurements
+are active. Unsupported workload or format paths are still omitted rather than
+guessed, and comparison coverage reports their absence.
 CPU reference versions of the small compound patterns execute today so the
 logical workload contracts stay testable while GPU coverage grows.
 For CPU single-target comparisons, requested F32 workload records already use
@@ -52,10 +52,10 @@ the same workload IDs as device-backed single-target candidates.
 Discovery creates a Vulkan instance and enumerates physical devices. It records
 device name/type, API and driver versions, memory heaps, queue families,
 advertised device extensions, and conservative format capabilities. F16 support
-is classified from the Vulkan shaderFloat16 feature bit. BF16 and FP8 variant
-capabilities still use extension presence as conservative native-path probes.
-Packed low-bit and quantized storage formats are marked as emulated baselines
-when the generic packed-u32 benchmark path can cover them. When
+is classified from the Vulkan shaderFloat16 feature bit. Raw INT8 support is
+classified from the Vulkan shaderInt8 feature bit. BF16, FP8 variants,
+FP4/MXFP4/NVFP4, INT4, and GGUF Q/IQ storage formats are marked as emulated
+when the format-specific dequant benchmark path can cover them. When
 `VK_EXT_pci_bus_info` is available, Vulkan targets use the PCI address in their
 stable target ID. Discovery does not create logical devices, allocate GPU
 memory, submit queues, or run kernels.
@@ -65,8 +65,7 @@ opens logical devices for selected Vulkan targets and submits single-target
 workload dispatches for the requested executable formats. Pair execution also
 measures ordered host-staged activation transfer, ordered layer-split execution,
 and tensor-split execution for selected pairs. Triplet execution measures
-ordered three-stage layer-split and three-target tensor-split execution. Native
-format-specific kernels beyond F16 and raw INT8 are omitted rather than guessed.
+ordered three-stage layer-split and three-target tensor-split execution.
 
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,

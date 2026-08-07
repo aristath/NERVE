@@ -268,9 +268,6 @@ fn vulkan_format_capabilities(
     extension_names: &[String],
     feature_flags: &[String],
 ) -> Vec<FormatCapability> {
-    let supports_bf16 = extension_names
-        .iter()
-        .any(|extension| extension == "VK_KHR_shader_bfloat16");
     let supports_fp8 = extension_names
         .iter()
         .any(|extension| extension == "VK_EXT_shader_float8");
@@ -296,78 +293,66 @@ fn vulkan_format_capabilities(
         ),
         format_capability(
             "bf16",
-            if supports_bf16 {
-                "unmeasured"
-            } else {
-                "unsupported"
-            },
-            "vulkan_device_extensions",
-            if supports_bf16 {
-                "VK_KHR_shader_bfloat16 advertised; feature bits not queried yet"
-            } else {
-                "VK_KHR_shader_bfloat16 not advertised"
-            },
+            "emulated",
+            "vulkan_format_dequant_kernel",
+            "BF16 storage is decoded by the format-specific dequant benchmark path",
         ),
         fp8_format_capability("fp8_e4m3", supports_fp8),
         fp8_format_capability("fp8_e5m2", supports_fp8),
-        packed_format_capability("int8", supports_int8),
-        packed_format_capability("int4", supports_int8),
-        packed_format_capability("fp4", false),
-        packed_format_capability("mxfp4", false),
-        packed_format_capability("nvfp4", false),
-        packed_quant_format_capability("q8_0"),
-        packed_quant_format_capability("q6_k"),
-        packed_quant_format_capability("q5_0"),
-        packed_quant_format_capability("q5_1"),
-        packed_quant_format_capability("q5_k"),
-        packed_quant_format_capability("q4_0"),
-        packed_quant_format_capability("q4_1"),
-        packed_quant_format_capability("q4_k"),
-        packed_quant_format_capability("q3_k"),
-        packed_quant_format_capability("q2_k"),
-        packed_quant_format_capability("iq4_nl"),
-        packed_quant_format_capability("iq4_xs"),
-        packed_quant_format_capability("iq3_s"),
-        packed_quant_format_capability("iq2_xs"),
+        format_capability(
+            "int8",
+            if supports_int8 {
+                "native"
+            } else {
+                "unsupported"
+            },
+            "vulkan_feature_chain",
+            if supports_int8 {
+                "shaderInt8 feature bit is set"
+            } else {
+                "shaderInt8 feature bit is not set"
+            },
+        ),
+        format_dequant_capability("int4"),
+        format_dequant_capability("fp4"),
+        format_dequant_capability("mxfp4"),
+        format_dequant_capability("nvfp4"),
+        format_dequant_capability("q8_0"),
+        format_dequant_capability("q6_k"),
+        format_dequant_capability("q5_0"),
+        format_dequant_capability("q5_1"),
+        format_dequant_capability("q5_k"),
+        format_dequant_capability("q4_0"),
+        format_dequant_capability("q4_1"),
+        format_dequant_capability("q4_k"),
+        format_dequant_capability("q3_k"),
+        format_dequant_capability("q2_k"),
+        format_dequant_capability("iq4_nl"),
+        format_dequant_capability("iq4_xs"),
+        format_dequant_capability("iq3_s"),
+        format_dequant_capability("iq2_xs"),
     ]
 }
 
 fn fp8_format_capability(format: &str, supports_fp8: bool) -> FormatCapability {
     format_capability(
         format,
+        "emulated",
+        "vulkan_format_dequant_kernel",
         if supports_fp8 {
-            "unmeasured"
+            "VK_EXT_shader_float8 advertised; benchmark currently uses a format-specific dequant path"
         } else {
-            "unsupported"
-        },
-        "vulkan_device_extensions",
-        if supports_fp8 {
-            "VK_EXT_shader_float8 advertised; feature bits not queried yet"
-        } else {
-            "VK_EXT_shader_float8 not advertised"
+            "VK_EXT_shader_float8 not advertised; benchmark uses a format-specific dequant path"
         },
     )
 }
 
-fn packed_format_capability(format: &str, native_integer_feature: bool) -> FormatCapability {
+fn format_dequant_capability(format: &str) -> FormatCapability {
     format_capability(
         format,
         "emulated",
-        "vulkan_packed_u32_baseline",
-        if native_integer_feature {
-            "packed storage benchmark path can run; native feature bit is also present"
-        } else {
-            "packed storage benchmark path can run; native format-specific kernel is not implemented yet"
-        },
-    )
-}
-
-fn packed_quant_format_capability(format: &str) -> FormatCapability {
-    format_capability(
-        format,
-        "emulated",
-        "vulkan_packed_u32_baseline",
-        "packed storage benchmark path can run; native dequant kernel is not implemented yet",
+        "vulkan_format_dequant_kernel",
+        "format-specific dequant benchmark path can run",
     )
 }
 
@@ -513,7 +498,20 @@ mod tests {
     }
 
     #[test]
-    fn int4_has_emulated_packed_baseline_without_native_int8() {
+    fn bf16_and_fp8_use_format_dequant_capabilities() {
+        let capabilities = vulkan_format_capabilities(&[], &[]);
+        for format in ["bf16", "fp8_e4m3", "fp8_e5m2"] {
+            let capability = capabilities
+                .iter()
+                .find(|capability| capability.format == format)
+                .unwrap();
+            assert_eq!(capability.support, "emulated");
+            assert_eq!(capability.source, "vulkan_format_dequant_kernel");
+        }
+    }
+
+    #[test]
+    fn int4_uses_format_dequant_without_native_int8() {
         let capabilities = vulkan_format_capabilities(&[], &["shader_int8".to_string()]);
         let int4 = capabilities
             .iter()

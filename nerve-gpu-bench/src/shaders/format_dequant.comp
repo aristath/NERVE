@@ -1,0 +1,122 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform Params {
+    uint elements;
+    uint format_kind;
+} params;
+layout(std430, binding = 0) buffer Data {
+    uint words[];
+} data;
+
+float bf16_lane(uint value, uint lane) {
+    return uintBitsToFloat(((value >> (lane * 16u)) & 0xffffu) << 16u);
+}
+
+float fp8_lane(uint value, uint lane, uint exponent_bits, uint mantissa_bits, int bias) {
+    uint byte_value = (value >> (lane * 8u)) & 0xffu;
+    float sign = (byte_value & 0x80u) != 0u ? -1.0 : 1.0;
+    uint exponent_mask = (1u << exponent_bits) - 1u;
+    uint mantissa_mask = (1u << mantissa_bits) - 1u;
+    uint exponent = (byte_value >> mantissa_bits) & exponent_mask;
+    uint mantissa = byte_value & mantissa_mask;
+    if (exponent == 0u) {
+        return sign * float(mantissa) / float(1u << mantissa_bits) * exp2(float(1 - bias));
+    }
+    return sign * (1.0 + float(mantissa) / float(1u << mantissa_bits)) * exp2(float(int(exponent) - bias));
+}
+
+float signed_bits(uint value, uint bit_width) {
+    uint sign_bit = 1u << (bit_width - 1u);
+    uint mask = (1u << bit_width) - 1u;
+    uint masked = value & mask;
+    int signed_value = (masked & sign_bit) != 0u ? int(masked | (~mask)) : int(masked);
+    return float(signed_value);
+}
+
+float fp4_lane(uint value, uint lane) {
+    uint nibble = (value >> (lane * 4u)) & 0x0fu;
+    float sign = (nibble & 0x08u) != 0u ? -1.0 : 1.0;
+    uint exponent = (nibble >> 1u) & 0x03u;
+    uint mantissa = nibble & 0x01u;
+    return sign * (1.0 + float(mantissa) * 0.5) * exp2(float(int(exponent) - 1));
+}
+
+float mx_like_fp4_lane(uint value, uint lane, float base_scale) {
+    uint scale_bits = (value >> 28u) & 0x0fu;
+    float scale = base_scale * (1.0 + float(scale_bits) * 0.125);
+    return fp4_lane(value, lane) * scale;
+}
+
+float q_lane(uint value, uint lane, uint bit_width, float scale) {
+    uint mask = (1u << bit_width) - 1u;
+    return signed_bits(value >> (lane * bit_width), bit_width) * scale;
+}
+
+float iq_lane(uint value, uint lane, uint bit_width, float scale) {
+    float q = q_lane(value, lane, bit_width, scale);
+    return sign(q) * sqrt(abs(q) + 0.25);
+}
+
+float decode_lane(uint format_kind, uint value, uint lane) {
+    if (format_kind == 1u) {
+        return bf16_lane(value, lane & 1u);
+    }
+    if (format_kind == 2u) {
+        return fp8_lane(value, lane & 3u, 4u, 3u, 7);
+    }
+    if (format_kind == 3u) {
+        return fp8_lane(value, lane & 3u, 5u, 2u, 15);
+    }
+    if (format_kind == 4u) {
+        return fp4_lane(value, lane & 7u);
+    }
+    if (format_kind == 5u) {
+        return mx_like_fp4_lane(value, lane & 7u, 0.75);
+    }
+    if (format_kind == 6u) {
+        return mx_like_fp4_lane(value, lane & 7u, 0.625);
+    }
+    if (format_kind == 7u) {
+        return q_lane(value, lane & 7u, 4u, 0.125);
+    }
+    if (format_kind == 8u) {
+        return signed_bits((value >> ((lane & 3u) * 8u)) & 0xffu, 8u) * 0.03125;
+    }
+    if (format_kind == 9u) {
+        return q_lane(value, lane % 5u, 6u, 0.03125);
+    }
+    if (format_kind == 10u) {
+        return q_lane(value, lane % 6u, 5u, 0.0625);
+    }
+    if (format_kind == 11u) {
+        return q_lane(value, lane & 7u, 4u, 0.125);
+    }
+    if (format_kind == 12u) {
+        return q_lane(value, lane % 10u, 3u, 0.25);
+    }
+    if (format_kind == 13u) {
+        return q_lane(value, lane & 15u, 2u, 0.5);
+    }
+    if (format_kind == 14u) {
+        return iq_lane(value, lane & 7u, 4u, 0.125);
+    }
+    if (format_kind == 15u) {
+        return iq_lane(value, lane % 10u, 3u, 0.25);
+    }
+    return iq_lane(value, lane & 15u, 2u, 0.5);
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= params.elements) {
+        return;
+    }
+    uint word = data.words[index];
+    float accum = 0.0;
+    for (uint lane = 0u; lane < 16u; lane++) {
+        float decoded = decode_lane(params.format_kind, word, lane);
+        accum = fma(decoded, 0.0625 + float(lane) * 0.00390625, accum);
+    }
+    data.words[index] = floatBitsToUint(accum + float(index & 255u) * 0.0009765625);
+}
