@@ -350,14 +350,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 tick_count,
                 stop_token_ids,
             )?;
-            let maximum_resume_count = tick_count
-                .checked_mul(demand.checkpoint_count_per_tick)
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                        "demand feedback checkpoint resume bound overflowed".to_string(),
-                    ))
-                })?;
-            let mut resolved_checkpoints = BTreeSet::new();
+            let maximum_resolution_count = demand
+                .resolution_bound(&self.device_slices, tick_count)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            let mut resolved_checkpoints = BTreeMap::new();
+            let mut resolved_resource_count = 0usize;
             let mut aggregate_transport_stats = VulkanPlacedEdgeTransportStats::default();
             let mut prepared_execution_guards = None;
             let mut requires_commit_replay = false;
@@ -394,7 +391,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 }
                 drop(execution_guards);
                 aggregate_transport_stats.accumulate(&mounted.pending.transport_stats);
-                let Some(checkpoint) = demand.resolve_first_miss(
+                let Some((checkpoint, resource_indices)) = demand.resolve_first_miss(
                     &self.device_slices,
                     devices,
                     tick_count,
@@ -430,20 +427,27 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     }
                     mounted.pending.transport_stats = aggregate_transport_stats;
                     mounted.pending.demand_resolved_checkpoints =
-                        resolved_checkpoints.iter().copied().collect();
+                        resolved_checkpoints.keys().copied().collect();
                     return Ok(mounted.pending);
                 };
-                if !resolved_checkpoints.insert(checkpoint) {
+                resolved_resource_count = resolved_resource_count
+                    .checked_add(
+                        record_demand_feedback_resolution(
+                            &mut resolved_checkpoints,
+                            checkpoint,
+                            &resource_indices,
+                        )
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    )
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "demand feedback resolved-resource count overflowed".to_string(),
+                        ))
+                    })?;
+                if resolved_resource_count > maximum_resolution_count {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                         VulkanError(format!(
-                            "demand feedback checkpoint {checkpoint:?} missed again after its resources were loaded"
-                        )),
-                    ));
-                }
-                if resolved_checkpoints.len() > maximum_resume_count {
-                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                        VulkanError(format!(
-                            "demand feedback exceeded its {maximum_resume_count} checkpoint continuation bound"
+                            "demand feedback exceeded its compiled resource-domain resolution bound of {maximum_resolution_count}"
                         )),
                     ));
                 }

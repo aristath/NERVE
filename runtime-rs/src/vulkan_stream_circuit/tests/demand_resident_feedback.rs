@@ -107,6 +107,105 @@ fn demand_feedback_never_commits_an_attempt_that_resolved_a_residency_checkpoint
 }
 
 #[test]
+fn demand_feedback_pipeline_predicate_skips_only_fully_resident_queue_scans() {
+    assert!(!demand_feedback_pipeline_has_pending_miss([
+        ("gpu0", 1),
+        ("gpu1", 1),
+        ("gpu2", 1),
+    ])
+    .unwrap());
+    assert!(demand_feedback_pipeline_has_pending_miss([
+        ("gpu0", 1),
+        ("gpu1", 0),
+        ("gpu2", 1),
+    ])
+    .unwrap());
+
+    let invalid = demand_feedback_pipeline_has_pending_miss([("gpu0", 2)]).unwrap_err();
+    assert_eq!(
+        invalid,
+        VulkanError(
+            "demand feedback pipeline predicate on \"gpu0\" has invalid value 2".to_string()
+        )
+    );
+    assert!(demand_feedback_pipeline_has_pending_miss(std::iter::empty()).is_err());
+}
+
+#[test]
+fn demand_feedback_allows_one_checkpoint_to_discover_distinct_resource_sets() {
+    let checkpoint = VulkanDemandFeedbackCheckpoint {
+        feedback_lane: 1,
+        slice_index: 2,
+        segment_index: 3,
+        gate_index: 4,
+    };
+    let mut resolved = BTreeMap::new();
+    assert_eq!(
+        record_demand_feedback_resolution(&mut resolved, checkpoint, &[4, 68]).unwrap(),
+        2
+    );
+    assert_eq!(
+        record_demand_feedback_resolution(&mut resolved, checkpoint, &[51, 89, 138]).unwrap(),
+        3
+    );
+    assert_eq!(
+        resolved.get(&checkpoint),
+        Some(&BTreeSet::from([4, 51, 68, 89, 138]))
+    );
+}
+
+#[test]
+fn demand_feedback_rejects_a_resource_that_faults_twice_at_one_checkpoint() {
+    let checkpoint = VulkanDemandFeedbackCheckpoint {
+        feedback_lane: 1,
+        slice_index: 2,
+        segment_index: 3,
+        gate_index: 4,
+    };
+    let mut resolved = BTreeMap::new();
+    record_demand_feedback_resolution(&mut resolved, checkpoint, &[4, 68]).unwrap();
+    let error = record_demand_feedback_resolution(&mut resolved, checkpoint, &[68, 89])
+        .unwrap_err();
+    assert!(error.0.contains("missed resources [68] again"));
+    assert_eq!(resolved.get(&checkpoint), Some(&BTreeSet::from([4, 68])));
+}
+
+#[test]
+fn demand_feedback_resolution_bound_covers_every_checkpoint_resource_pair() {
+    assert_eq!(
+        demand_feedback_resolution_bound(8, [256, 128, 64]).unwrap(),
+        3_584
+    );
+    assert!(demand_feedback_resolution_bound(0, [256]).is_err());
+    assert!(demand_feedback_resolution_bound(1, [0]).is_err());
+    assert!(demand_feedback_resolution_bound(1, []).is_err());
+    assert!(demand_feedback_resolution_bound(2, [usize::MAX]).is_err());
+}
+
+#[test]
+fn demand_residency_loads_the_immutable_gpu_miss_record_not_mutable_selector_state() {
+    let requests = [
+        VulkanGpuResidencyMissingRequest {
+            checkpoint_tag: 7,
+            resource_index: 19,
+        },
+        VulkanGpuResidencyMissingRequest {
+            checkpoint_tag: 7,
+            resource_index: 3,
+        },
+        VulkanGpuResidencyMissingRequest {
+            checkpoint_tag: 7,
+            resource_index: 19,
+        },
+    ];
+    assert_eq!(
+        exact_demand_miss_resource_indices(&requests).unwrap(),
+        vec![3, 19]
+    );
+    assert!(exact_demand_miss_resource_indices(&[]).is_err());
+}
+
+#[test]
 fn scalar_and_feedback_demand_chains_have_distinct_predicate_ownership() {
     assert!(!VulkanDemandResidencyChainLane::Scalar.uses_shared_pipeline_guard());
     assert!(

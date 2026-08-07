@@ -1,7 +1,6 @@
 struct VulkanResidentDemandFeedbackState {
     predicates_by_device: BTreeMap<String, Arc<VulkanResidentBuffer>>,
     state_transactions: Vec<VulkanResidentStateTransactionBank>,
-    checkpoint_count_per_tick: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,6 +41,91 @@ fn demand_feedback_attempt_completion(
     } else {
         VulkanDemandFeedbackAttemptCompletion::Commit
     }
+}
+
+fn demand_feedback_pipeline_has_pending_miss<'a>(
+    predicates: impl IntoIterator<Item = (&'a str, u32)>,
+) -> Result<bool, VulkanError> {
+    let mut predicate_count = 0usize;
+    let mut has_pending_miss = false;
+    for (device_id, value) in predicates {
+        predicate_count += 1;
+        match value {
+            0 => has_pending_miss = true,
+            1 => {}
+            _ => {
+                return Err(VulkanError(format!(
+                    "demand feedback pipeline predicate on {device_id:?} has invalid value {value}"
+                )));
+            }
+        }
+    }
+    if predicate_count == 0 {
+        return Err(VulkanError(
+            "demand feedback pipeline predicate is absent".to_string(),
+        ));
+    }
+    Ok(has_pending_miss)
+}
+
+fn demand_feedback_resolution_bound(
+    tick_count: usize,
+    resource_domain_counts: impl IntoIterator<Item = usize>,
+) -> Result<usize, VulkanError> {
+    if tick_count == 0 {
+        return Err(VulkanError(
+            "demand feedback resolution bound requires at least one tick".to_string(),
+        ));
+    }
+    let resource_count_per_tick = resource_domain_counts
+        .into_iter()
+        .try_fold(0usize, |total, resource_count| {
+            if resource_count == 0 {
+                return Err(VulkanError(
+                    "demand feedback checkpoint has an empty resource domain".to_string(),
+                ));
+            }
+            total.checked_add(resource_count).ok_or_else(|| {
+                VulkanError(
+                    "demand feedback resource-domain count overflowed".to_string(),
+                )
+            })
+        })?;
+    if resource_count_per_tick == 0 {
+        return Err(VulkanError(
+            "demand feedback has no resource domains".to_string(),
+        ));
+    }
+    tick_count
+        .checked_mul(resource_count_per_tick)
+        .ok_or_else(|| {
+            VulkanError("demand feedback resolution bound overflowed".to_string())
+        })
+}
+
+fn record_demand_feedback_resolution(
+    resolved: &mut BTreeMap<VulkanDemandFeedbackCheckpoint, BTreeSet<usize>>,
+    checkpoint: VulkanDemandFeedbackCheckpoint,
+    resource_indices: &[usize],
+) -> Result<usize, VulkanError> {
+    if resource_indices.is_empty() {
+        return Err(VulkanError(format!(
+            "demand feedback checkpoint {checkpoint:?} resolved no resources"
+        )));
+    }
+    let prior = resolved.entry(checkpoint).or_default();
+    let repeated = resource_indices
+        .iter()
+        .copied()
+        .filter(|resource_index| prior.contains(resource_index))
+        .collect::<Vec<_>>();
+    if !repeated.is_empty() {
+        return Err(VulkanError(format!(
+            "demand feedback checkpoint {checkpoint:?} missed resources {repeated:?} again after they were loaded; previously_resolved={prior:?}; current_resources={resource_indices:?}"
+        )));
+    }
+    prior.extend(resource_indices.iter().copied());
+    Ok(resource_indices.len())
 }
 
 struct VulkanDemandFeedbackStageTopology {
@@ -464,7 +548,6 @@ impl VulkanResidentDemandFeedbackState {
         Ok(Self {
             predicates_by_device,
             state_transactions,
-            checkpoint_count_per_tick,
         })
     }
 
@@ -485,6 +568,33 @@ impl VulkanResidentDemandFeedbackState {
                 Ok((device_id.clone(), value))
             })
             .collect()
+    }
+
+    fn pipeline_has_pending_miss(&self) -> Result<bool, VulkanError> {
+        let predicates = self.pipeline_predicate_diagnostic()?;
+        demand_feedback_pipeline_has_pending_miss(
+            predicates
+                .iter()
+                .map(|(device_id, value)| (device_id.as_str(), *value)),
+        )
+    }
+
+    fn resolution_bound(
+        &self,
+        device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
+        tick_count: usize,
+    ) -> Result<usize, VulkanError> {
+        demand_feedback_resolution_bound(
+            tick_count,
+            device_slices.iter().flat_map(|slice| {
+                slice
+                    .resident_execution_plan
+                    .dispatch_segments
+                    .iter()
+                    .filter_map(|segment| segment.demand_residency.as_ref())
+                    .flat_map(VulkanDemandResidencySegment::resource_domain_counts)
+            }),
+        )
     }
 
     fn capture_window_baseline(
@@ -566,8 +676,24 @@ impl VulkanResidentDemandFeedbackState {
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         tick_count: usize,
         sequence_variant: u8,
-    ) -> Result<Option<VulkanDemandFeedbackCheckpoint>, VulkanResidentInProcessPlacedRuntimeError>
+    ) -> Result<
+        Option<(VulkanDemandFeedbackCheckpoint, Vec<usize>)>,
+        VulkanResidentInProcessPlacedRuntimeError,
+    >
     {
+        // Every feedback gate shares the window's continuation predicate. A
+        // fully resident traversal leaves that compact signal enabled, so it
+        // is both necessary and sufficient to prove that no per-lane miss
+        // queue can contain a new notification. Keep the detailed queue scan
+        // for the exceptional miss path only. Without this fast path, steady
+        // decode performs one host-visible BAR read for every
+        // (feedback-lane, demand-segment) pair even though no resource needs
+        // service.
+        if !self.pipeline_has_pending_miss().map_err(
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
+        )? {
+            return Ok(None);
+        }
         let mut pending = Vec::new();
         for feedback_lane in 0..tick_count {
             for (slice_index, slice) in device_slices.iter().enumerate() {
@@ -607,7 +733,7 @@ impl VulkanResidentDemandFeedbackState {
             .demand_residency
             .as_ref()
             .expect("pending demand feedback segment remains mounted");
-        let gate_index = demand
+        let (gate_index, resource_indices) = demand
             .resolve_feedback_lane_miss(device, sequence_variant, feedback_lane)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?
             .ok_or_else(|| {
@@ -615,12 +741,15 @@ impl VulkanResidentDemandFeedbackState {
                     "demand feedback miss disappeared before it was resolved".to_string(),
                 ))
             })?;
-        Ok(Some(VulkanDemandFeedbackCheckpoint {
-            feedback_lane,
-            slice_index,
-            segment_index,
-            gate_index,
-        }))
+        Ok(Some((
+            VulkanDemandFeedbackCheckpoint {
+                feedback_lane,
+                slice_index,
+                segment_index,
+                gate_index,
+            },
+            resource_indices,
+        )))
     }
 }
 

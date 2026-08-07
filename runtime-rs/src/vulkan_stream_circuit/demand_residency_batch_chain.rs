@@ -903,25 +903,8 @@ impl VulkanDemandResidencyBatchChain {
                         gate.selector_id
                     ))
                 })?;
-            let missing_resource_indices = missing
-                .requests
-                .iter()
-                .map(|request| request.resource_index)
-                .collect::<BTreeSet<_>>();
-            let selected_resource_indices = gate
-                .gate
-                .selected_resource_indices(gate.selection_count)
+            let resource_indices = exact_demand_miss_resource_indices(&missing.requests)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            if !missing_resource_indices
-                .is_subset(&selected_resource_indices)
-            {
-                return Err(demand_batch_error(
-                    "GPU batch residency misses are not a subset of the selector output",
-                ));
-            }
-            let resource_indices = selected_resource_indices
-                .into_iter()
-                .collect::<Vec<_>>();
             let (_, _execution) = context
                 .store
                 .load_selector_resources_for_execution(

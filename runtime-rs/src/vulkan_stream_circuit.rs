@@ -55,11 +55,12 @@ use crate::vulkan_compute::{
     VulkanDeviceLocalMemoryPermit, VulkanDeviceLocalMemoryReclaimer,
     VulkanDeviceLocalMemoryReclaimerRegistration, VulkanError, VulkanGpuResidencyAddressMapping,
     VulkanGpuResidencyGate, VulkanGpuResidencyGateConfig, VulkanGpuResidencyMissQueue,
-    VulkanResidentBuffer, VulkanResidentBufferCopy, VulkanResidentBufferCopyBatch,
-    VulkanResidentBufferPool, VulkanResidentBufferPoolAllocation, VulkanResidentBufferPoolKey,
-    VulkanResidentBufferRangeCopy, VulkanResidentBufferReadRange, VulkanResidentBufferWriteRange,
-    VulkanResidentExecutionQuantumMeasurement, VulkanResidentKernelBufferAccess,
-    VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
+    VulkanGpuResidencyMissingRequest, VulkanResidentBuffer, VulkanResidentBufferCopy,
+    VulkanResidentBufferCopyBatch, VulkanResidentBufferPool, VulkanResidentBufferPoolAllocation,
+    VulkanResidentBufferPoolKey, VulkanResidentBufferRangeCopy, VulkanResidentBufferReadRange,
+    VulkanResidentBufferWriteRange, VulkanResidentExecutionQuantumMeasurement,
+    VulkanResidentKernelBufferAccess, VulkanResidentKernelBufferBinding,
+    VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
     VulkanResidentKernelSequenceInputCopy, VulkanResidentKernelSequenceSnapshotCopy,
     VulkanResidentKernelSequenceStep, VulkanResidentMappedBufferCopy,
     VulkanResidentQueueSubmissionBatch, VulkanResidentQueueSubmissionTemplate,
@@ -74,7 +75,7 @@ use crate::vulkan_compute::{
 };
 #[cfg(test)]
 use crate::vulkan_compute::{
-    VulkanComputeDeviceCatalog, VulkanGpuResidencyMissingRequest, VulkanStableResourceArenaStats,
+    VulkanComputeDeviceCatalog, VulkanStableResourceArenaStats,
     reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
 };
 use crate::vulkan_distributed::{

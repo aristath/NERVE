@@ -89,7 +89,30 @@ struct VulkanDemandResidencySegment {
     chains: RefCell<BTreeMap<(u8, VulkanDemandResidencyChainLane), VulkanDemandResidencyDispatchChain>>,
 }
 
+fn exact_demand_miss_resource_indices(
+    requests: &[VulkanGpuResidencyMissingRequest],
+) -> Result<Vec<usize>, VulkanError> {
+    let resource_indices = requests
+        .iter()
+        .map(|request| request.resource_index)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if resource_indices.is_empty() {
+        return Err(VulkanError(
+            "GPU residency miss notification contains no resources".to_string(),
+        ));
+    }
+    Ok(resource_indices)
+}
+
 impl VulkanDemandResidencySegment {
+    fn resource_domain_counts(&self) -> impl Iterator<Item = usize> + '_ {
+        self.gate_specs
+            .iter()
+            .map(|gate| gate.address_mapping.resource_count())
+    }
+
     fn feedback_dispatch_count(&self, model_dispatch_count: usize) -> Result<usize, VulkanError> {
         model_dispatch_count
             .checked_add(self.gate_specs.len())
@@ -530,7 +553,7 @@ impl VulkanDemandResidencySegment {
         device: &VulkanComputeDevice,
         sequence_variant: u8,
         feedback_lane: usize,
-    ) -> Result<Option<usize>, VulkanMountedPlacedResidentKernelDispatchError> {
+    ) -> Result<Option<(usize, Vec<usize>)>, VulkanMountedPlacedResidentKernelDispatchError> {
         self.chains
             .borrow()
             .get(&(
@@ -812,25 +835,15 @@ impl VulkanDemandResidencyDispatchChain {
                         gate.selector_id
                     ))
                 })?;
-            let missing_resource_indices = missing
-                .requests
-                .iter()
-                .map(|request| request.resource_index)
-                .collect::<BTreeSet<_>>();
-            let selected_resource_indices = gate
-                .gate
-                .selected_resource_indices(gate.selection_count)
+            // The queue is the immutable record of the gate invocation that
+            // faulted. The selector buffer is shared working memory and a
+            // later feedback lane may already have overwritten it by the time
+            // the host resolves this checkpoint. Loading from that mutable
+            // selector can materialize the wrong experts and make the same
+            // checkpoint fault again. Consume only the exact resource indices
+            // published by the gate.
+            let resource_indices = exact_demand_miss_resource_indices(&missing.requests)
                 .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-            if !missing_resource_indices
-                .is_subset(&selected_resource_indices)
-            {
-                return Err(demand_dispatch_error(
-                    "GPU residency misses are not a subset of the selector output",
-                ));
-            }
-            let resource_indices = selected_resource_indices
-                .into_iter()
-                .collect::<Vec<_>>();
             let (_, _execution) = context
                 .store
                 .load_selector_resources_for_execution(
@@ -964,7 +977,7 @@ impl VulkanDemandResidencyDispatchChain {
         &self,
         device: &VulkanComputeDevice,
         context: &VulkanDemandResidencyExecutionContext,
-    ) -> Result<Option<usize>, VulkanMountedPlacedResidentKernelDispatchError> {
+    ) -> Result<Option<(usize, Vec<usize>)>, VulkanMountedPlacedResidentKernelDispatchError> {
         if !self.has_pending_miss()? {
             return Ok(None);
         }
@@ -1015,21 +1028,8 @@ impl VulkanDemandResidencyDispatchChain {
                     gate.selector_id
                 ))
             })?;
-        let missing_resource_indices = missing
-            .requests
-            .iter()
-            .map(|request| request.resource_index)
-            .collect::<BTreeSet<_>>();
-        let selected_resource_indices = gate
-            .gate
-            .selected_resource_indices(gate.selection_count)
+        let resource_indices = exact_demand_miss_resource_indices(&missing.requests)
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-        if !missing_resource_indices.is_subset(&selected_resource_indices) {
-            return Err(demand_dispatch_error(
-                "GPU feedback residency misses are not a subset of the selector output",
-            ));
-        }
-        let resource_indices = selected_resource_indices.into_iter().collect::<Vec<_>>();
         let _ = context
             .store
             .load_selector_resources_for_execution(
@@ -1049,7 +1049,7 @@ impl VulkanDemandResidencyDispatchChain {
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         self.observed_notification_epoch
             .set(missing.notification_epoch);
-        Ok(Some(gate_index))
+        Ok(Some((gate_index, resource_indices)))
     }
 
     #[allow(clippy::too_many_arguments)]
