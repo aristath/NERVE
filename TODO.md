@@ -50,6 +50,14 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   attention schedules were rejected: subgroup-per-token changed product output,
   while an exact reduction-order-preserving tiled version was slower at both
   tiny and production geometry (1.79814 vs 1.57616 ms).
+- Three further exact local-kernel candidates were rejected after the refined
+  trace. Paired packed-BF16 state reads were 1.1% slower, and parallel tile
+  exponentials were 0.5% slower; both preserved every BF16 output bit. A
+  subgroup-tree hyper-connection reduction was 36% faster in isolation (0.16316
+  vs 0.25456 ms) and byte-exact, but failed the complete product gate at 7.800
+  mean decode tok/s versus the accepted 8.4228 baseline. It was removed from
+  source and the compiled package was restored. Local shader wins are not
+  promotion evidence when the complete routed stream does not improve.
 - Demand-paged residency correctness, immutable miss records, causal suffix
   resume, complete-conversation convergence, shared bounded host caching, and
   exact teardown are implemented. Resident FP8 coexistence is also implemented
@@ -61,14 +69,16 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
 1. Optimize the hottest refined DeepSeek device kernels without changing model
    semantics.
 
-   - Start with indexed sparse-attention read, the largest measured device phase.
-     Eliminate redundant state-address translation, duplicate key/value reads,
+   - Indexed sparse-attention read is the largest measured device phase. The
+     exact local scheduling/load candidates tried so far are exhausted or slower;
+     pursue a materially different compiled attention transaction rather than
+     another barrier-for-barrier shader rewrite. Eliminate redundant
+     state-address translation, duplicate key/value reads,
      serial score reduction, barriers, and full-score materialization where an
      exact fused or tiled schedule is faster. Preserve score accumulation order,
      online-softmax semantics, sink handling, compressed-index ordering, and
      BF16 output bits.
-   - Continue with hyper-connections and native compact-MXFP4 expert gate/up in
-     measured order. Measure whether repeated
+   - Continue with native compact-MXFP4 expert gate/up. Measure whether repeated
      selector-address validation and indirection can be resolved once per routed
      expert by the residency gate and consumed as a compact device-resident route
      table by all expert workgroups.
