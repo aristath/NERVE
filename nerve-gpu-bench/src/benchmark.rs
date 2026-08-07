@@ -114,6 +114,7 @@ pub fn run_benchmarks(
             measurements.extend(run_device_single_target_measurements(
                 target,
                 policy.payload_bytes,
+                policy.samples,
                 &policy.benchmark_formats,
                 &policy.benchmark_workloads,
                 policy.execute,
@@ -158,7 +159,7 @@ pub fn run_benchmarks(
 
     let mut diagnostics = selection.diagnostics.clone();
     diagnostics.push(
-        "GPU discovery is passive; GPU benchmark workloads are unmeasured until the Vulkan backend is implemented."
+        "GPU execution is opt-in; --execute currently runs Vulkan F32 dense single-target work and leaves other GPU paths unmeasured."
             .to_string(),
     );
     diagnostics.push(format!(
@@ -698,12 +699,19 @@ fn compound_operations(
 fn run_device_single_target_measurements(
     target: &Target,
     payload_bytes: usize,
+    samples: usize,
     formats: &[String],
     workloads: &[String],
     execute: bool,
 ) -> Vec<Measurement> {
     if execute && target.backend == "vulkan" {
-        return run_vulkan_single_target_measurements(target, payload_bytes, formats, workloads);
+        return run_vulkan_single_target_measurements(
+            target,
+            payload_bytes,
+            samples,
+            formats,
+            workloads,
+        );
     }
     single_target_status_measurements(
         &target.stable_target_id,
@@ -718,12 +726,14 @@ fn run_device_single_target_measurements(
 fn run_vulkan_single_target_measurements(
     target: &Target,
     payload_bytes: usize,
+    samples: usize,
     formats: &[String],
     workloads: &[String],
 ) -> Vec<Measurement> {
     crate::vulkan_exec::run_vulkan_single_target_measurements(
         target,
         payload_bytes,
+        samples,
         formats,
         workloads,
     )

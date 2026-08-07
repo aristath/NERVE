@@ -21,17 +21,21 @@ This first implementation provides:
 - requested CPU F32 single-target workload measurements for dense projection,
   MoE expert, and router/reduction classes, with unsupported records for
   unimplemented CPU formats;
-- placeholder `unmeasured` GPU and pair records for the upcoming Vulkan backend;
-  group placeholders up to triplets;
-  and
+- opt-in Vulkan F32 single-target dense-projection dispatches with GPU
+  timestamp samples;
+- placeholder `unmeasured` GPU records for unimplemented workload/format paths,
+  plus pair/group placeholders up to triplets; and
 - JSON output with discovered targets, selected targets, skipped targets,
   measurements, pair/group candidates, and provenance.
 
-The package does not initialize Vulkan yet. GPU targets are discovered and
-reported, but GPU compute, peer transfer, tensor-split, and layer-split GPU
-measurements are deliberately marked `unmeasured` until backend kernels exist.
+Default runs keep GPU work passive. GPU targets are discovered and reported, but
+GPU compute only runs when `run --execute` is provided. The first executable
+Vulkan path is a small F32 dense-projection-shaped compute dispatch over the
+requested payload, measured with Vulkan timestamps. Peer transfer,
+tensor-split, layer-split, non-F32 formats, and non-dense GPU workloads remain
+`unmeasured` or `unsupported` until their backend kernels exist.
 CPU reference versions of the small compound patterns execute today so the
-logical workload contracts are testable before GPU backend work starts.
+logical workload contracts stay testable while GPU coverage grows.
 For CPU single-target comparisons, requested F32 workload records already use
 the same workload IDs as device-backed single-target candidates.
 
@@ -45,10 +49,10 @@ extension-presence probes until their feature bits are queried. When
 stable target ID. Discovery does not create logical devices, allocate GPU
 memory, submit queues, or run kernels.
 
-`run --execute` is an explicit opt-in for Vulkan execution scaffolding.
-At this stage it opens a logical device for the selected Vulkan target and
-records that the compute kernel is not implemented yet; it still does not submit
-GPU work.
+`run --execute` is an explicit opt-in for Vulkan execution. At this stage it
+opens a logical device for the selected Vulkan target and submits the first F32
+single-target dense compute dispatch. Other Vulkan measurement families are
+still reported as unmeasured or unsupported rather than guessed.
 
 The benchmark schema treats placement strategy as first-class data. The initial
 small-payload comparison records distinguish one-target serialized execution,

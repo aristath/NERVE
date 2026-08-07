@@ -63,9 +63,10 @@ or GPU measurements.
 
 `policy.execute` records whether the run was allowed to open Vulkan
 logical devices. When true, selected Vulkan targets may attempt the execution
-boundary. Current Vulkan single-target measurements stop after logical-device
-creation and remain `status: "unmeasured"` until compute kernels are
-implemented.
+boundary. Current Vulkan single-target measurements can complete the F32
+`dense_projection` path with timestamped compute samples. Other Vulkan workload
+or format paths remain `status: "unmeasured"` or `status: "unsupported"` until
+their kernels are implemented.
 
 ## Workload Specs
 
@@ -119,10 +120,11 @@ Current workload spec families:
   logical payload across three targets, broadcast activation, compute shards,
   collect output.
 
-Device-backed specs are emitted before the Vulkan backend exists. Their
-measurements use `status: "unmeasured"` until a backend can execute them. CPU
-reference compound measurements use the same small payload to keep the
-serialized/layer-split/tensor-split semantics executable.
+Device-backed specs are emitted even before every backend path exists. Vulkan
+F32 dense-projection single-target measurements can complete when `--execute`
+is active. Other device-backed measurements use `status: "unmeasured"` until a
+backend can execute them. CPU reference compound measurements use the same small
+payload to keep the serialized/layer-split/tensor-split semantics executable.
 CPU F32 single-target measurements use
 `single_target_small_payload:<workload_class>:f32` so they can resolve the same
 candidate family as GPU or accelerator targets. CPU formats that are not
