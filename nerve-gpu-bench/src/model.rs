@@ -1134,7 +1134,7 @@ mod tests {
                         candidate_id: "cmp:single".to_string(),
                         placement_strategy: "single_target_serial".to_string(),
                         measurement_kind: "single".to_string(),
-                        workload_id: "single_target_gpu_small_payload".to_string(),
+                        workload_id: "single_target_small_payload".to_string(),
                         target_ids: vec!["gpu:a".to_string()],
                         notes: String::new(),
                     },
@@ -1149,7 +1149,7 @@ mod tests {
                 ],
             }],
             measurements: vec![Measurement {
-                workload_id: "single_target_gpu_small_payload".to_string(),
+                workload_id: "single_target_small_payload".to_string(),
                 comparison_group: "small_payload_placement_comparison".to_string(),
                 workload_class: "dense_projection".to_string(),
                 placement_strategy: "single_target_serial".to_string(),

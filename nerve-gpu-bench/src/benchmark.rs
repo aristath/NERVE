@@ -473,16 +473,12 @@ fn unmeasured_single_target(
         .iter()
         .flat_map(|format| {
             workloads.iter().map(|workload| Measurement {
-                workload_id: format_workload_id(
-                    "single_target_gpu_small_payload",
-                    workload,
-                    format,
-                ),
+                workload_id: format_workload_id("single_target_small_payload", workload, format),
                 comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
                 workload_class: workload.clone(),
                 placement_strategy: "single_target_serial".to_string(),
                 target_id: target_id.to_string(),
-                pattern: "single_target_gpu_compute".to_string(),
+                pattern: "single_target_compute".to_string(),
                 operation_family: workload.clone(),
                 regime: "small_payload".to_string(),
                 format: format.clone(),
@@ -602,7 +598,7 @@ fn build_comparison_sets(
                                 "single_target_serial",
                                 "single",
                                 &format_workload_id(
-                                    "single_target_gpu_small_payload",
+                                    "single_target_small_payload",
                                     workload,
                                     format,
                                 ),
@@ -615,7 +611,7 @@ fn build_comparison_sets(
                                 "single_target_serial",
                                 "single",
                                 &format_workload_id(
-                                    "single_target_gpu_small_payload",
+                                    "single_target_small_payload",
                                     workload,
                                     format,
                                 ),
@@ -865,15 +861,11 @@ fn build_workload_specs(
     for format in formats {
         for workload in workloads {
             specs.push(WorkloadSpec {
-                workload_id: format_workload_id(
-                    "single_target_gpu_small_payload",
-                    workload,
-                    format,
-                ),
+                workload_id: format_workload_id("single_target_small_payload", workload, format),
                 comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
                 workload_class: workload.clone(),
                 placement_strategy: "single_target_serial".to_string(),
-                pattern: "single_target_gpu_compute".to_string(),
+                pattern: "single_target_compute".to_string(),
                 format: format.clone(),
                 participant_count: 1,
                 payload_bytes,
@@ -1090,7 +1082,7 @@ mod tests {
                 "cpu_reference_serialized_small_payload",
                 "cpu_reference_layer_split_small_payload",
                 "cpu_reference_tensor_split_small_payload",
-                "single_target_gpu_small_payload:dense_projection:f32",
+                "single_target_small_payload:dense_projection:f32",
                 "ordered_activation_transfer:dense_projection:f32",
                 "synthetic_layer_split_small_payload:dense_projection:f32",
                 "synthetic_tensor_split_small_payload:dense_projection:f32",

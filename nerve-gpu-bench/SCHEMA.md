@@ -73,7 +73,7 @@ BF16, FP8, INT4, or FP4.
 
 Current workload spec families:
 
-- `single_target_gpu_small_payload:<workload_class>:<format>`: full logical
+- `single_target_small_payload:<workload_class>:<format>`: full logical
   payload on one target.
 - `cpu_reference_serialized_small_payload`: CPU reference execution of the full
   logical payload as one serialized pattern.
@@ -96,7 +96,7 @@ Current workload spec families:
   logical payload across three targets, broadcast activation, compute shards,
   collect output.
 
-GPU-backed specs are emitted before the Vulkan backend exists. Their
+Device-backed specs are emitted before the Vulkan backend exists. Their
 measurements use `status: "unmeasured"` until a backend can execute them. CPU
 reference compound measurements use the same small payload to keep the
 serialized/layer-split/tensor-split semantics executable.
