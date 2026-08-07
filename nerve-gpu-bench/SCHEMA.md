@@ -117,10 +117,10 @@ for CPU, integrated GPU, discrete GPU, AMD, NVIDIA, Intel, or any other target
 class.
 
 When compiled with the `vulkan` feature, Vulkan targets are additional detected
-targets. Their stable IDs include the physical-device index because Vulkan
-device order is driver-defined until a PCI/UUID mapping layer is added.
-Discovery creates a Vulkan instance only; it does not create logical devices or
-run GPU workloads.
+targets. Their stable IDs use `vulkan:pci:<address>` when `VK_EXT_pci_bus_info`
+is available. Otherwise they include the physical-device index because Vulkan
+device order is driver-defined. Discovery creates a Vulkan instance only; it
+does not create logical devices or run GPU workloads.
 
 Format capability is not a speed claim. A target can lack native FP4 but still
 win F32, BF16, routing, logits, sampler, or fallback/dequantized work. Placement

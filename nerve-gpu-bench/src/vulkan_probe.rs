@@ -46,12 +46,14 @@ unsafe fn discover_physical_devices(instance: &ash::Instance) -> Result<Vec<Targ
             .map_err(|error| {
                 format!("could not enumerate Vulkan device extensions for index {index}: {error:?}")
             })?;
+        let pci_address = unsafe { vulkan_pci_address(instance, physical_device, &extensions) };
         targets.push(vulkan_target(
             index,
             properties,
             &memory_properties,
             &queue_properties,
             &extensions,
+            pci_address,
         ));
     }
     Ok(targets)
@@ -63,6 +65,7 @@ fn vulkan_target(
     memory_properties: &vk::PhysicalDeviceMemoryProperties,
     queue_properties: &[vk::QueueFamilyProperties],
     extensions: &[vk::ExtensionProperties],
+    pci_address: Option<String>,
 ) -> Target {
     let device_name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
         .to_string_lossy()
@@ -75,9 +78,12 @@ fn vulkan_target(
     let format_capabilities = vulkan_format_capabilities(&extension_names);
     let memory_heaps = vulkan_memory_heaps(memory_properties);
     let queue_families = vulkan_queue_families(queue_properties);
-    let stable_target_id = format!(
-        "vulkan:{index}:{vendor_id}:{device_id}:{}",
-        stable_name_fragment(&device_name)
+    let stable_target_id = vulkan_stable_target_id(
+        index,
+        &vendor_id,
+        &device_id,
+        &device_name,
+        pci_address.as_deref(),
     );
     let has_compute = queue_families
         .iter()
@@ -101,8 +107,13 @@ fn vulkan_target(
         vendor_id: Some(vendor_id.clone()),
         vendor_name: Some(vendor_name(properties.vendor_id).to_string()),
         device_id: Some(device_id.clone()),
-        pci_address: None,
-        physical_location: Some(format!("vulkan:{index}")),
+        pci_address: pci_address.clone(),
+        physical_location: Some(
+            pci_address
+                .as_deref()
+                .map(|address| format!("pci:{address}"))
+                .unwrap_or_else(|| format!("vulkan:{index}")),
+        ),
         numa_node: None,
         boot_vga: None,
         pci_link: None,
@@ -125,6 +136,46 @@ fn vulkan_target(
             "vulkan_probe_does_not_create_logical_device_or_run_workloads".to_string(),
         ],
     }
+}
+
+unsafe fn vulkan_pci_address(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    extensions: &[vk::ExtensionProperties],
+) -> Option<String> {
+    let supports_pci_info = extensions.iter().any(|extension| {
+        (unsafe { CStr::from_ptr(extension.extension_name.as_ptr()) })
+            == ash::ext::pci_bus_info::NAME
+    });
+    if !supports_pci_info {
+        return None;
+    }
+    let mut pci = vk::PhysicalDevicePCIBusInfoPropertiesEXT::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut pci);
+    unsafe {
+        instance.get_physical_device_properties2(physical_device, &mut properties);
+    }
+    Some(format!(
+        "{:04x}:{:02x}:{:02x}.{:x}",
+        pci.pci_domain, pci.pci_bus, pci.pci_device, pci.pci_function
+    ))
+}
+
+fn vulkan_stable_target_id(
+    index: usize,
+    vendor_id: &str,
+    device_id: &str,
+    device_name: &str,
+    pci_address: Option<&str>,
+) -> String {
+    pci_address
+        .map(|address| format!("vulkan:pci:{address}"))
+        .unwrap_or_else(|| {
+            format!(
+                "vulkan:{index}:{vendor_id}:{device_id}:{}",
+                stable_name_fragment(device_name)
+            )
+        })
 }
 
 fn vulkan_unavailable_target(message: String) -> Target {
@@ -347,6 +398,18 @@ mod tests {
         assert_eq!(
             stable_name_fragment("AMD Radeon RX 7900 XTX"),
             "amd-radeon-rx-7900-xtx"
+        );
+    }
+
+    #[test]
+    fn stable_target_ids_prefer_pci_addresses() {
+        assert_eq!(
+            vulkan_stable_target_id(2, "0x1002", "0x744c", "AMD Radeon", Some("0000:03:00.0")),
+            "vulkan:pci:0000:03:00.0"
+        );
+        assert_eq!(
+            vulkan_stable_target_id(2, "0x1002", "0x744c", "AMD Radeon", None),
+            "vulkan:2:0x1002:0x744c:amd-radeon"
         );
     }
 
