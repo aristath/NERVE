@@ -18,7 +18,18 @@ pub enum RuntimeCriticalPathPhase {
     Routing,
     ResidencyGate,
     ExpertCompute,
-    AttentionIndexCompute,
+    DenseProjection,
+    GroupedProjection,
+    Normalization,
+    Quantization,
+    StateMemory,
+    IndexTransform,
+    AttentionScore,
+    AttentionSelection,
+    AttentionRead,
+    PositionalEncoding,
+    HyperConnection,
+    PointwiseActivation,
     CrossDeviceTransfer,
     OutputProjection,
     Sampling,
@@ -30,7 +41,7 @@ pub enum RuntimeCriticalPathPhase {
 }
 
 impl RuntimeCriticalPathPhase {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 29] = [
         Self::Protocol,
         Self::SchedulerControl,
         Self::InputPreparation,
@@ -40,7 +51,18 @@ impl RuntimeCriticalPathPhase {
         Self::Routing,
         Self::ResidencyGate,
         Self::ExpertCompute,
-        Self::AttentionIndexCompute,
+        Self::DenseProjection,
+        Self::GroupedProjection,
+        Self::Normalization,
+        Self::Quantization,
+        Self::StateMemory,
+        Self::IndexTransform,
+        Self::AttentionScore,
+        Self::AttentionSelection,
+        Self::AttentionRead,
+        Self::PositionalEncoding,
+        Self::HyperConnection,
+        Self::PointwiseActivation,
         Self::CrossDeviceTransfer,
         Self::OutputProjection,
         Self::Sampling,
@@ -62,7 +84,18 @@ impl RuntimeCriticalPathPhase {
             Self::Routing => "routing",
             Self::ResidencyGate => "residency_gate",
             Self::ExpertCompute => "expert_compute",
-            Self::AttentionIndexCompute => "attention_index_compute",
+            Self::DenseProjection => "dense_projection",
+            Self::GroupedProjection => "grouped_projection",
+            Self::Normalization => "normalization",
+            Self::Quantization => "quantization",
+            Self::StateMemory => "state_memory",
+            Self::IndexTransform => "index_transform",
+            Self::AttentionScore => "attention_score",
+            Self::AttentionSelection => "attention_selection",
+            Self::AttentionRead => "attention_read",
+            Self::PositionalEncoding => "positional_encoding",
+            Self::HyperConnection => "hyper_connection",
+            Self::PointwiseActivation => "pointwise_activation",
             Self::CrossDeviceTransfer => "cross_device_transfer",
             Self::OutputProjection => "output_projection",
             Self::Sampling => "sampling",
@@ -496,7 +529,7 @@ mod tests {
                 );
             }
             record_runtime_critical_path_device_duration(
-                RuntimeCriticalPathPhase::AttentionIndexCompute,
+                RuntimeCriticalPathPhase::AttentionRead,
                 40,
             );
         }
@@ -516,7 +549,7 @@ mod tests {
             30
         );
         assert_eq!(
-            phase(&report, RuntimeCriticalPathPhase::AttentionIndexCompute).device_duration_ns,
+            phase(&report, RuntimeCriticalPathPhase::AttentionRead).device_duration_ns,
             0
         );
     }

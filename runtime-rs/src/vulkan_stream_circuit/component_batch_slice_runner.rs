@@ -53,37 +53,56 @@ fn critical_path_phase_for_component_operation(
     component: &str,
     operation: &str,
 ) -> RuntimeCriticalPathPhase {
-    if operation.contains("sparse_moe")
-        || operation == "grouped_linear"
-        || operation == "moe_reduce"
-        || component.split(['.', '/', ':']).any(|part| {
-            part == "expert" || part == "experts"
-        })
-    {
-        RuntimeCriticalPathPhase::ExpertCompute
-    } else if operation == "top_k" || operation == "moe_route" {
-        RuntimeCriticalPathPhase::Routing
-    } else if operation.contains("attention")
-        || operation.contains("rotary")
-        || operation.contains("rope")
-        || operation.contains("compressed_index")
-        || operation.contains("index_scores")
-        || operation == "radix_topk_index"
-        || operation == "learned_gated_kv_pool"
-        || operation == "compressed_index_kv_finalize"
-        || operation == "compressed_kv_finalize"
-    {
-        RuntimeCriticalPathPhase::AttentionIndexCompute
-    } else if operation == "embedding_lookup" {
+    let component_parts = || component.split(['.', '/', ':']);
+    if operation == "embedding_lookup" {
         RuntimeCriticalPathPhase::InputPreparation
     } else if operation == "sample_token" {
         RuntimeCriticalPathPhase::Sampling
     } else if operation == "output_transducer"
-        || component
-            .split(['.', '/', ':'])
-            .any(|part| part == "output_stream_adapter")
+        || component_parts().any(|part| part == "output_stream_adapter")
     {
         RuntimeCriticalPathPhase::OutputProjection
+    } else if operation.contains("sparse_moe")
+        || operation == "moe_reduce"
+        || component_parts().any(|part| part == "expert" || part == "experts")
+    {
+        RuntimeCriticalPathPhase::ExpertCompute
+    } else if operation == "top_k" || operation == "moe_route" {
+        RuntimeCriticalPathPhase::Routing
+    } else if operation == "index_vector_transform" {
+        RuntimeCriticalPathPhase::IndexTransform
+    } else if operation.contains("index_scores") {
+        RuntimeCriticalPathPhase::AttentionScore
+    } else if operation == "radix_topk_index" || operation == "chronological_compressed_index" {
+        RuntimeCriticalPathPhase::AttentionSelection
+    } else if operation.contains("attention") {
+        RuntimeCriticalPathPhase::AttentionRead
+    } else if operation.contains("rotary") || operation.contains("rope") {
+        RuntimeCriticalPathPhase::PositionalEncoding
+    } else if operation == "rolling_state_update"
+        || operation == "conditional_append_state_update"
+        || operation == "learned_gated_kv_pool"
+        || operation == "compressed_index_kv_finalize"
+        || operation == "compressed_kv_finalize"
+    {
+        RuntimeCriticalPathPhase::StateMemory
+    } else if operation == "grouped_linear" {
+        RuntimeCriticalPathPhase::GroupedProjection
+    } else if operation == "linear"
+        || operation == "linear_residual"
+        || operation.starts_with("parallel_linear")
+    {
+        RuntimeCriticalPathPhase::DenseProjection
+    } else if operation.starts_with("rms_norm") {
+        RuntimeCriticalPathPhase::Normalization
+    } else if operation.starts_with("quantize_") {
+        RuntimeCriticalPathPhase::Quantization
+    } else if operation.starts_with("hyper_connection")
+        || operation.starts_with("sinkhorn_hyper_connection")
+    {
+        RuntimeCriticalPathPhase::HyperConnection
+    } else if operation.contains("silu") {
+        RuntimeCriticalPathPhase::PointwiseActivation
     } else {
         RuntimeCriticalPathPhase::MixedDeviceCompute
     }
@@ -108,13 +127,13 @@ fn semantic_kernel_phase_classification_uses_structure_not_model_identity() {
         critical_path_phase_for_semantic_label(
             "kernel=k component=block_3 node=n op=indexed_sparse_attention"
         ),
-        RuntimeCriticalPathPhase::AttentionIndexCompute,
+        RuntimeCriticalPathPhase::AttentionRead,
     );
     assert_eq!(
         critical_path_phase_for_semantic_label(
             "kernel=k component=block_3 node=n op=chronological_compressed_index"
         ),
-        RuntimeCriticalPathPhase::AttentionIndexCompute,
+        RuntimeCriticalPathPhase::AttentionSelection,
     );
     assert_eq!(
         critical_path_phase_for_semantic_label(
@@ -126,18 +145,30 @@ fn semantic_kernel_phase_classification_uses_structure_not_model_identity() {
         critical_path_phase_for_semantic_label(
             "kernel=k component=expertise node=n op=linear"
         ),
-        RuntimeCriticalPathPhase::MixedDeviceCompute,
+        RuntimeCriticalPathPhase::DenseProjection,
+    );
+    assert_eq!(
+        critical_path_phase_for_semantic_label(
+            "kernel=k component=block_3 node=n op=grouped_linear"
+        ),
+        RuntimeCriticalPathPhase::GroupedProjection,
+    );
+    assert_eq!(
+        critical_path_phase_for_semantic_label(
+            "kernel=k component=block_3.experts node=n op=linear"
+        ),
+        RuntimeCriticalPathPhase::ExpertCompute,
     );
     assert_eq!(
         contiguous_critical_path_regions(&[
-            RuntimeCriticalPathPhase::AttentionIndexCompute,
-            RuntimeCriticalPathPhase::AttentionIndexCompute,
+            RuntimeCriticalPathPhase::AttentionRead,
+            RuntimeCriticalPathPhase::AttentionRead,
             RuntimeCriticalPathPhase::Routing,
             RuntimeCriticalPathPhase::ExpertCompute,
             RuntimeCriticalPathPhase::ExpertCompute,
         ]),
         vec![
-            RuntimeCriticalPathPhase::AttentionIndexCompute,
+            RuntimeCriticalPathPhase::AttentionRead,
             RuntimeCriticalPathPhase::Routing,
             RuntimeCriticalPathPhase::ExpertCompute,
         ],
