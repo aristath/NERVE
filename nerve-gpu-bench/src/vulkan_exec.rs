@@ -10,7 +10,7 @@ use crate::benchmark::{
     activation_bytes_for_payload, format_workload_id, output_bytes_for_payload,
     single_target_status_measurement, single_target_status_measurements,
 };
-use crate::model::{Measurement, PairMeasurement, Sample, Summary, Target};
+use crate::model::{GroupMeasurement, Measurement, PairMeasurement, Sample, Summary, Target};
 
 const F32_TRANSFORM_SHADER_SPV: &[u32] = &[
     119734787, 65536, 851979, 47, 0, 131089, 1, 393227, 1, 1280527431, 1685353262, 808793134, 0,
@@ -457,6 +457,134 @@ fn run_vulkan_parallel_pair_measurements(
                 })
             })
         })
+        .collect()
+}
+
+pub fn run_vulkan_group_measurements(
+    targets: &[&Target],
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<GroupMeasurement> {
+    let mut measurements = Vec::new();
+    for first_index in 0..targets.len() {
+        for second_index in (first_index + 1)..targets.len() {
+            for third_index in (second_index + 1)..targets.len() {
+                measurements.extend(run_vulkan_triplet_measurements(
+                    targets[first_index],
+                    targets[second_index],
+                    targets[third_index],
+                    payload_bytes,
+                    samples,
+                    formats,
+                    workloads,
+                ));
+            }
+        }
+    }
+    measurements
+}
+
+fn run_vulkan_triplet_measurements(
+    first: &Target,
+    second: &Target,
+    third: &Target,
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<GroupMeasurement> {
+    let target_ids = [
+        first.stable_target_id.clone(),
+        second.stable_target_id.clone(),
+        third.stable_target_id.clone(),
+    ];
+    let first_device = match open_compute_device(first) {
+        Ok(device) => device,
+        Err(message) => {
+            return failed_triplet_measurements(
+                &target_ids,
+                payload_bytes,
+                formats,
+                workloads,
+                &message,
+            );
+        }
+    };
+    let second_device = match open_compute_device(second) {
+        Ok(device) => device,
+        Err(message) => {
+            return failed_triplet_measurements(
+                &target_ids,
+                payload_bytes,
+                formats,
+                workloads,
+                &message,
+            );
+        }
+    };
+    let third_device = match open_compute_device(third) {
+        Ok(device) => device,
+        Err(message) => {
+            return failed_triplet_measurements(
+                &target_ids,
+                payload_bytes,
+                formats,
+                workloads,
+                &message,
+            );
+        }
+    };
+
+    formats
+        .iter()
+        .flat_map(|format| {
+            workloads.iter().filter_map(|workload| {
+                workload_format_kernel(workload, format).map(|kernel| {
+                    let serial = run_vulkan_dense_serial_triplet(
+                        [&first_device, &second_device, &third_device],
+                        &target_ids,
+                        payload_bytes,
+                        samples,
+                        workload,
+                        kernel.clone(),
+                    )
+                    .unwrap_or_else(|message| {
+                        failed_triplet_measurement(
+                            &target_ids,
+                            "synthetic_layer_split_group_small_payload",
+                            "three_target_serial",
+                            payload_bytes,
+                            workload,
+                            format,
+                            &message,
+                        )
+                    });
+                    let parallel = run_vulkan_dense_parallel_triplet(
+                        [&first_device, &second_device, &third_device],
+                        &target_ids,
+                        payload_bytes,
+                        samples,
+                        workload,
+                        kernel,
+                    )
+                    .unwrap_or_else(|message| {
+                        failed_triplet_measurement(
+                            &target_ids,
+                            "synthetic_tensor_split_group_small_payload",
+                            "three_target_parallel",
+                            payload_bytes,
+                            workload,
+                            format,
+                            &message,
+                        )
+                    });
+                    [serial, parallel]
+                })
+            })
+        })
+        .flatten()
         .collect()
 }
 
@@ -1382,6 +1510,302 @@ fn failed_dense_pair_measurement(
     }
 }
 
+fn run_vulkan_dense_serial_triplet(
+    devices: [&OpenVulkanComputeDevice; 3],
+    target_ids: &[String; 3],
+    payload_bytes: usize,
+    samples: usize,
+    workload_class: &str,
+    kernel: DenseFormatKernel,
+) -> Result<GroupMeasurement, String> {
+    let payload_split = split_three_payload_bytes(payload_bytes);
+    let activation_bytes = activation_bytes_for_payload(payload_bytes);
+    let contexts = [
+        create_dense_compute_context(devices[0], payload_split[0], kernel.clone())?,
+        create_dense_compute_context(devices[1], payload_split[1], kernel.clone())?,
+        create_dense_compute_context(devices[2], payload_split[2], kernel.clone())?,
+    ];
+    let mut first_transfer = create_host_staged_transfer(devices[0], devices[1], activation_bytes)?;
+    let mut second_transfer =
+        create_host_staged_transfer(devices[1], devices[2], activation_bytes)?;
+    let mut measured_samples = Vec::with_capacity(samples);
+    for sample_index in 0..samples {
+        let started = Instant::now();
+        let first_sample = submit_dense_compute_sample(devices[0], &contexts[0], sample_index)?;
+        let first_transfer_sample =
+            run_host_staged_transfer_sample(devices[0], devices[1], &mut first_transfer)?;
+        let second_sample = submit_dense_compute_sample(devices[1], &contexts[1], sample_index)?;
+        let second_transfer_sample =
+            run_host_staged_transfer_sample(devices[1], devices[2], &mut second_transfer)?;
+        let third_sample = submit_dense_compute_sample(devices[2], &contexts[2], sample_index)?;
+        let duration = started.elapsed();
+        black_box(read_first_storage_word(
+            &devices[2].device,
+            &contexts[2].readback,
+            &contexts[2].kernel,
+        )?);
+        measured_samples.push(Sample {
+            sample_index,
+            duration_ns: duration.as_nanos(),
+            iterations: 1,
+            bytes_read: first_sample.bytes_read
+                + second_sample.bytes_read
+                + third_sample.bytes_read
+                + first_transfer_sample.bytes_read
+                + second_transfer_sample.bytes_read,
+            bytes_written: first_sample.bytes_written
+                + second_sample.bytes_written
+                + third_sample.bytes_written
+                + first_transfer_sample.bytes_written
+                + second_transfer_sample.bytes_written,
+            operations: first_sample.operations
+                + second_sample.operations
+                + third_sample.operations,
+        });
+    }
+
+    let summary = summarize_samples(&measured_samples);
+    Ok(GroupMeasurement {
+        workload_id: format_workload_id(
+            "synthetic_layer_split_group_small_payload",
+            workload_class,
+            &kernel.format,
+        ),
+        comparison_group: "small_payload_placement_comparison".to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: "three_target_serial".to_string(),
+        target_ids: target_ids.to_vec(),
+        pattern: "synthetic_layer_split_group_small_payload".to_string(),
+        operation_family: workload_class.to_string(),
+        regime: "small_payload".to_string(),
+        format: kernel.format,
+        status: "completed".to_string(),
+        reason: None,
+        participant_count: 3,
+        payload_bytes,
+        payload_bytes_per_participant: payload_split,
+        activation_bytes,
+        output_bytes: output_bytes_for_payload(payload_bytes),
+        samples: measured_samples,
+        summary,
+    })
+}
+
+fn run_vulkan_dense_parallel_triplet(
+    devices: [&OpenVulkanComputeDevice; 3],
+    target_ids: &[String; 3],
+    payload_bytes: usize,
+    samples: usize,
+    workload_class: &str,
+    kernel: DenseFormatKernel,
+) -> Result<GroupMeasurement, String> {
+    let payload_split = split_three_payload_bytes(payload_bytes);
+    let activation_bytes = activation_bytes_for_payload(payload_bytes);
+    let output_bytes = output_bytes_for_payload(payload_bytes);
+    let contexts = [
+        create_dense_compute_context(devices[0], payload_split[0], kernel.clone())?,
+        create_dense_compute_context(devices[1], payload_split[1], kernel.clone())?,
+        create_dense_compute_context(devices[2], payload_split[2], kernel.clone())?,
+    ];
+    let mut outputs = contexts
+        .iter()
+        .map(|context| vec![0_u8; output_bytes.min(context.readback.size as usize)])
+        .collect::<Vec<_>>();
+    let mut measured_samples = Vec::with_capacity(samples);
+    for sample_index in 0..samples {
+        for index in 0..3 {
+            record_compute_dispatch(
+                devices[index],
+                &contexts[index].resources,
+                contexts[index].command_buffer,
+                contexts[index].query_pool,
+                contexts[index].upload.buffer,
+                contexts[index].storage.buffer,
+                contexts[index].readback.buffer,
+                contexts[index].buffer_size,
+                contexts[index].storage_elements as u32,
+                contexts[index].dispatch_groups,
+            )?;
+        }
+        let started = Instant::now();
+        for index in 0..3 {
+            unsafe {
+                devices[index]
+                    .device
+                    .reset_fences(&[contexts[index].fence])
+                    .map_err(|error| {
+                        format!("could not reset Vulkan triplet fence {index}: {error:?}")
+                    })?;
+                devices[index]
+                    .device
+                    .queue_submit(
+                        devices[index].queue,
+                        &[vk::SubmitInfo::default()
+                            .command_buffers(&[contexts[index].command_buffer])],
+                        contexts[index].fence,
+                    )
+                    .map_err(|error| {
+                        format!("could not submit Vulkan triplet work {index}: {error:?}")
+                    })?;
+            }
+        }
+        for index in 0..3 {
+            unsafe {
+                devices[index]
+                    .device
+                    .wait_for_fences(&[contexts[index].fence], true, u64::MAX)
+                    .map_err(|error| {
+                        format!("could not wait for Vulkan triplet work {index}: {error:?}")
+                    })?;
+            }
+        }
+        let timestamp_durations = [
+            read_timestamp_duration_ns(devices[0], contexts[0].query_pool)?,
+            read_timestamp_duration_ns(devices[1], contexts[1].query_pool)?,
+            read_timestamp_duration_ns(devices[2], contexts[2].query_pool)?,
+        ];
+        for index in 0..3 {
+            read_buffer_bytes(
+                &devices[index].device,
+                &contexts[index].readback,
+                &mut outputs[index],
+            )?;
+            black_box(checksum_bytes(&outputs[index]));
+        }
+        let duration = started.elapsed();
+        measured_samples.push(Sample {
+            sample_index,
+            duration_ns: timestamp_durations
+                .into_iter()
+                .fold(duration.as_nanos(), u128::max),
+            iterations: 1,
+            bytes_read: contexts
+                .iter()
+                .map(|context| context.buffer_size as u64)
+                .sum::<u64>()
+                + activation_bytes as u64
+                + output_bytes as u64,
+            bytes_written: contexts
+                .iter()
+                .map(|context| context.buffer_size as u64)
+                .sum::<u64>()
+                + output_bytes as u64,
+            operations: contexts
+                .iter()
+                .map(|context| {
+                    (context.storage_elements as u64)
+                        * context.kernel.logical_elements_per_storage_element
+                        * context.kernel.operations_per_storage_element
+                })
+                .sum(),
+        });
+    }
+
+    let summary = summarize_samples(&measured_samples);
+    Ok(GroupMeasurement {
+        workload_id: format_workload_id(
+            "synthetic_tensor_split_group_small_payload",
+            workload_class,
+            &kernel.format,
+        ),
+        comparison_group: "small_payload_placement_comparison".to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: "three_target_parallel".to_string(),
+        target_ids: target_ids.to_vec(),
+        pattern: "synthetic_tensor_split_group_small_payload".to_string(),
+        operation_family: workload_class.to_string(),
+        regime: "small_payload".to_string(),
+        format: kernel.format,
+        status: "completed".to_string(),
+        reason: None,
+        participant_count: 3,
+        payload_bytes,
+        payload_bytes_per_participant: payload_split,
+        activation_bytes,
+        output_bytes,
+        samples: measured_samples,
+        summary,
+    })
+}
+
+fn failed_triplet_measurements(
+    target_ids: &[String; 3],
+    payload_bytes: usize,
+    formats: &[String],
+    workloads: &[String],
+    reason: &str,
+) -> Vec<GroupMeasurement> {
+    formats
+        .iter()
+        .flat_map(|format| {
+            workloads.iter().filter_map(move |workload| {
+                if workload_format_kernel(workload, format).is_none() {
+                    return None;
+                }
+                Some([
+                    failed_triplet_measurement(
+                        target_ids,
+                        "synthetic_layer_split_group_small_payload",
+                        "three_target_serial",
+                        payload_bytes,
+                        workload,
+                        format,
+                        reason,
+                    ),
+                    failed_triplet_measurement(
+                        target_ids,
+                        "synthetic_tensor_split_group_small_payload",
+                        "three_target_parallel",
+                        payload_bytes,
+                        workload,
+                        format,
+                        reason,
+                    ),
+                ])
+            })
+        })
+        .flatten()
+        .collect()
+}
+
+fn failed_triplet_measurement(
+    target_ids: &[String; 3],
+    workload_prefix: &str,
+    placement_strategy: &str,
+    payload_bytes: usize,
+    workload_class: &str,
+    format: &str,
+    reason: &str,
+) -> GroupMeasurement {
+    GroupMeasurement {
+        workload_id: format_workload_id(workload_prefix, workload_class, format),
+        comparison_group: "small_payload_placement_comparison".to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: placement_strategy.to_string(),
+        target_ids: target_ids.to_vec(),
+        pattern: workload_prefix.to_string(),
+        operation_family: workload_class.to_string(),
+        regime: "small_payload".to_string(),
+        format: format.to_string(),
+        status: "failed".to_string(),
+        reason: Some(reason.to_string()),
+        participant_count: 3,
+        payload_bytes,
+        payload_bytes_per_participant: split_three_payload_bytes(payload_bytes),
+        activation_bytes: activation_bytes_for_payload(payload_bytes),
+        output_bytes: output_bytes_for_payload(payload_bytes),
+        samples: Vec::new(),
+        summary: None,
+    }
+}
+
+fn split_three_payload_bytes(payload_bytes: usize) -> Vec<usize> {
+    let first = payload_bytes.div_ceil(3);
+    let remaining = payload_bytes - first;
+    let second = remaining.div_ceil(2);
+    vec![first, second, remaining - second]
+}
+
 struct ComputeResources {
     device: ash::Device,
     descriptor_set_layout: vk::DescriptorSetLayout,
@@ -2132,6 +2556,33 @@ mod tests {
                 && measurement.status == "failed"
                 && measurement.source_target_id == "left"
                 && measurement.destination_target_id == "right"
+        }));
+    }
+
+    #[test]
+    fn triplet_payload_split_preserves_total_bytes() {
+        assert_eq!(split_three_payload_bytes(10), [4, 3, 3]);
+        assert_eq!(split_three_payload_bytes(11), [4, 4, 3]);
+        assert_eq!(split_three_payload_bytes(12), [4, 4, 4]);
+    }
+
+    #[test]
+    fn failed_triplet_measurements_cover_serial_and_parallel_axes() {
+        let target_ids = ["a".to_string(), "b".to_string(), "c".to_string()];
+        let formats = vec!["f32".to_string(), "unknown_format".to_string()];
+        let workloads = vec!["moe_expert".to_string()];
+        let measurements =
+            failed_triplet_measurements(&target_ids, 10, &formats, &workloads, "no device");
+        let strategies = measurements
+            .iter()
+            .map(|measurement| measurement.placement_strategy.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(strategies, ["three_target_serial", "three_target_parallel"]);
+        assert!(measurements.iter().all(|measurement| {
+            measurement.target_ids == target_ids
+                && measurement.participant_count == 3
+                && measurement.payload_bytes_per_participant == [4, 3, 3]
+                && measurement.status == "failed"
         }));
     }
 

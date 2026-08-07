@@ -134,7 +134,18 @@ pub fn run_benchmarks(
         } else {
             Vec::new()
         };
-    let group_measurements = Vec::new();
+    let group_measurements =
+        if policy.execute && policy.pair_measurements && policy.max_group_size >= 3 {
+            run_vulkan_group_measurements(
+                &selected_targets,
+                policy.payload_bytes,
+                policy.samples,
+                &policy.benchmark_formats,
+                &policy.benchmark_workloads,
+            )
+        } else {
+            Vec::new()
+        };
     let workload_specs = build_workload_specs(
         policy.payload_bytes,
         &policy.benchmark_formats,
@@ -737,6 +748,27 @@ fn run_vulkan_pair_measurements(
         .filter(|target| target.backend == "vulkan")
         .collect::<Vec<_>>();
     crate::vulkan_exec::run_vulkan_pair_measurements(
+        &vulkan_targets,
+        payload_bytes,
+        samples,
+        formats,
+        workloads,
+    )
+}
+
+fn run_vulkan_group_measurements(
+    targets: &[&Target],
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<crate::model::GroupMeasurement> {
+    let vulkan_targets = targets
+        .iter()
+        .copied()
+        .filter(|target| target.backend == "vulkan")
+        .collect::<Vec<_>>();
+    crate::vulkan_exec::run_vulkan_group_measurements(
         &vulkan_targets,
         payload_bytes,
         samples,

@@ -49,8 +49,10 @@ rejoining the full sample list first.
 - `pair_measurements`: ordered pair and two-target placement measurements.
   Current Vulkan execution can emit ordered activation transfer, ordered serial
   pair, and parallel pair rows when `policy.execute` is true.
-- `group_measurements`: three-target synthetic placement measurements when
-  enough targets are selected and `--max-group-size 3` is active.
+- `group_measurements`: three-target placement measurements when enough targets
+  are selected and `--max-group-size 3` is active. Current Vulkan execution can
+  emit ordered three-stage serial and three-target parallel rows when
+  `policy.execute` is true.
 - `diagnostics`: non-fatal implementation notes.
 
 ## Dry Plan Fields
@@ -69,9 +71,11 @@ boundary. Current Vulkan single-target measurements can complete
 compute samples for F32 and packed-emulated lower-precision or quantized storage
 formats. Current Vulkan pair measurements can complete ordered host-staged
 activation transfer, two-target serial, and two-target parallel rows for those
-executable workload/format axes. Other Vulkan workload or format paths are
-omitted from measurements until their kernels are implemented. Comparison
-candidate summaries report those absent records as `missing`.
+executable workload/format axes. Current Vulkan triplet measurements can
+complete three-target serial and three-target parallel rows for the same
+executable axes. Other Vulkan workload or format paths are omitted from
+measurements until their kernels are implemented. Comparison candidate summaries
+report those absent records as `missing`.
 
 ## Workload Specs
 
@@ -126,10 +130,10 @@ Current workload spec families:
   collect output.
 
 Device-backed specs are emitted even before every backend path exists. Vulkan
-single-target and two-target pair measurements can complete for executable
-workload/format axes when `--execute` is active. Other device-backed specs have
-no measurement row until a backend can execute them. CPU reference compound
-measurements use the same small payload to keep the
+single-target, two-target pair, and three-target group measurements can complete
+for executable workload/format axes when `--execute` is active. Other
+device-backed specs have no measurement row until a backend can execute them.
+CPU reference compound measurements use the same small payload to keep the
 serialized/layer-split/tensor-split semantics executable.
 CPU F32 single-target measurements use
 `single_target_small_payload:<workload_class>:f32` so they can resolve the same
