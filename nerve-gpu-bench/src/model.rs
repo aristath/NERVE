@@ -1013,7 +1013,8 @@ impl Implementation {
         Self {
             name: "nerve-gpu-bench".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            backend_status: "cpu_benchmarks_only_gpu_backend_unmeasured".to_string(),
+            backend_status: "cpu_reference_plus_opt_in_vulkan_single_pair_and_group_execution"
+                .to_string(),
         }
     }
 }
