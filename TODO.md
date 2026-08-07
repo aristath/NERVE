@@ -69,6 +69,23 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   gate/up by only 2.9% (0.42648 vs 0.43876 ms), which cannot justify changing
   the activation representation and model numerics. All four candidates were
   removed; no experimental runtime path remains.
+- A generic mounted execution-graph phase now records all of its component
+  dispatches as one ordered resident sequence. Exact Vulkan tests prove byte-for-
+  byte output and state equivalence while reducing a colocated graph from one
+  host submission per dispatch to one submission for the phase. In the identical
+  cold DeepSeek `hi` probe this reduced direct sequence submissions from 4,276 to
+  3,284 and total host queue-submit calls from 5,430 to 4,438 without changing
+  generated tokens or residency decisions. It is one transaction segment, not
+  completion of the persistent stream transaction.
+- Device-to-host output ranges can now be mounted as a reusable packed readback
+  transaction with retained command resources and persistently mapped staging.
+  The attached parallel decoder uses one two-range transaction for token and
+  confidence outputs instead of rebuilding two independent read paths. Its exact
+  test replays changed source data twice with one transfer per replay. The
+  deterministic cold DeepSeek probe improved from 2.027 to 2.077 decode tok/s and
+  reduced host synchronization from 17.763 to 17.310 seconds. Qwen3.6-35B-A3B
+  passed at 59.4312 decode tok/s and Qwen3.5-9B at 48.6694, with correct recall
+  and exact VRAM restoration.
 - Demand-paged residency correctness, immutable miss records, causal suffix
   resume, complete-conversation convergence, shared bounded host caching, and
   exact teardown are implemented. Resident FP8 coexistence is also implemented
@@ -117,6 +134,11 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      layers, selected experts, or graph nodes. Command-buffer caching alone is not
      completion; a previous template experiment reused almost every command buffer
      but fell to 1.205 tok/s because it retained the fragmented submission graph.
+   - The mounted input and output graph phases and packed host readback are now
+     reusable transaction segments. Fold source taps, ingress/egress copies,
+     demand-resident processor segments, and terminal readback into the same
+     timeline topology; the remaining copy submissions and completion waits still
+     scale with speculative cycles.
 
 3. Make a resident sparse-expert hit completely device-owned.
 
