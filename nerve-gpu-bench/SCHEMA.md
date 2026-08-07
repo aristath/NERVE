@@ -39,6 +39,8 @@ rejoining the full sample list first.
 - `comparison_sets`: planner-facing candidate sets. For each selected pair, the
   set currently compares first-target-only, second-target-only, serial
   first-to-second, serial second-to-first, and parallel two-target execution.
+  When triplets are active, selected triplets compare each single-target option,
+  three-target serial, and three-target parallel.
 - `measurements`: single-target measurements.
 - `pair_measurements`: ordered pair and two-target synthetic placement
   measurements.

@@ -812,6 +812,95 @@ fn build_comparison_sets(
                     });
                 }
             }
+            if max_group_size >= 3 {
+                for first_index in 0..targets.len() {
+                    for second_index in (first_index + 1)..targets.len() {
+                        for third_index in (second_index + 1)..targets.len() {
+                            let first = &targets[first_index].stable_target_id;
+                            let second = &targets[second_index].stable_target_id;
+                            let third = &targets[third_index].stable_target_id;
+                            let comparison_id = format!(
+                                "{SMALL_PAYLOAD_COMPARISON_GROUP}:{workload}:{format}:{first}|{second}|{third}"
+                            );
+                            comparisons.push(ComparisonSet {
+                                comparison_id: comparison_id.clone(),
+                                comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+                                workload_class: workload.clone(),
+                                regime: "small_payload".to_string(),
+                                format: format.clone(),
+                                target_ids: vec![first.clone(), second.clone(), third.clone()],
+                                candidates: vec![
+                                    comparison_candidate(
+                                        &comparison_id,
+                                        "single_first",
+                                        "single_target_serial",
+                                        "single",
+                                        &format_workload_id(
+                                            "single_target_small_payload",
+                                            workload,
+                                            format,
+                                        ),
+                                        vec![first.clone()],
+                                        "Run the whole payload on the first target only.",
+                                    ),
+                                    comparison_candidate(
+                                        &comparison_id,
+                                        "single_second",
+                                        "single_target_serial",
+                                        "single",
+                                        &format_workload_id(
+                                            "single_target_small_payload",
+                                            workload,
+                                            format,
+                                        ),
+                                        vec![second.clone()],
+                                        "Run the whole payload on the second target only.",
+                                    ),
+                                    comparison_candidate(
+                                        &comparison_id,
+                                        "single_third",
+                                        "single_target_serial",
+                                        "single",
+                                        &format_workload_id(
+                                            "single_target_small_payload",
+                                            workload,
+                                            format,
+                                        ),
+                                        vec![third.clone()],
+                                        "Run the whole payload on the third target only.",
+                                    ),
+                                    comparison_candidate(
+                                        &comparison_id,
+                                        "serial_triplet",
+                                        "three_target_serial",
+                                        "group",
+                                        &format_workload_id(
+                                            "synthetic_layer_split_group_small_payload",
+                                            workload,
+                                            format,
+                                        ),
+                                        vec![first.clone(), second.clone(), third.clone()],
+                                        "Run thirds of the payload as ordered stages across the three targets.",
+                                    ),
+                                    comparison_candidate(
+                                        &comparison_id,
+                                        "parallel_triplet",
+                                        "three_target_parallel",
+                                        "group",
+                                        &format_workload_id(
+                                            "synthetic_tensor_split_group_small_payload",
+                                            workload,
+                                            format,
+                                        ),
+                                        vec![first.clone(), second.clone(), third.clone()],
+                                        "Split the same logical payload across all three targets in parallel.",
+                                    ),
+                                ],
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
     comparisons
@@ -1393,6 +1482,65 @@ mod tests {
             .filter(|measurement| measurement.placement_strategy == "two_target_serial")
             .count();
         assert_eq!(serial_pair_count, 2);
+    }
+
+    #[test]
+    fn triplet_comparison_sets_include_single_serial_and_parallel_candidates() {
+        let targets = vec![
+            target("gpu:a", "discrete_gpu"),
+            target("gpu:b", "discrete_gpu"),
+            target("gpu:c", "discrete_gpu"),
+        ];
+        let selection = Selection {
+            selected_target_ids: targets
+                .iter()
+                .map(|target| target.stable_target_id.clone())
+                .collect(),
+            skipped_targets: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let policy = RunPolicy {
+            payload_bytes: 5 * 1024 * 1024,
+            samples: 1,
+            benchmark_formats: formats(),
+            benchmark_workloads: workloads(),
+            include_targets: Vec::new(),
+            exclude_targets: Vec::new(),
+            exclude_pci: Vec::new(),
+            exclude_kinds: Vec::new(),
+            pair_measurements: true,
+            max_group_size: 3,
+        };
+        let run = run_benchmarks(targets, selection, policy);
+        assert_eq!(run.comparison_sets.len(), 4);
+        let triplet = run
+            .comparison_sets
+            .iter()
+            .find(|comparison| comparison.target_ids.len() == 3)
+            .unwrap();
+        let strategies = triplet
+            .candidates
+            .iter()
+            .map(|candidate| candidate.placement_strategy.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            strategies,
+            [
+                "single_target_serial",
+                "single_target_serial",
+                "single_target_serial",
+                "three_target_serial",
+                "three_target_parallel",
+            ]
+        );
+        let summary = run.summary();
+        assert!(summary.candidate_statuses.iter().any(|candidate| {
+            candidate.comparison_id == triplet.comparison_id
+                && candidate.placement_strategy == "three_target_parallel"
+                && candidate.measurement_kind == "group"
+                && candidate.status == "unmeasured"
+                && candidate.matched_measurement_count == 1
+        }));
     }
 
     #[test]
