@@ -15,6 +15,9 @@ pub enum Command {
     List {
         json: bool,
     },
+    Validate {
+        input: PathBuf,
+    },
     Run {
         output: Option<PathBuf>,
         payload_bytes: usize,
@@ -50,12 +53,37 @@ where
     match command.as_str() {
         "-h" | "--help" | "help" => Ok(Command::Help),
         "list" => parse_list(args.collect()),
+        "validate" => parse_validate(args.collect()),
         "run" => parse_run(args.collect()),
         other => Err(CliError(format!(
             "unknown command {other:?}\n\n{}",
             usage()
         ))),
     }
+}
+
+fn parse_validate(arguments: Vec<String>) -> Result<Command, CliError> {
+    let mut input = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--input" => {
+                input = Some(PathBuf::from(required_value(
+                    &arguments, &mut index, "--input",
+                )?));
+            }
+            other => {
+                return Err(CliError(format!(
+                    "unknown validate argument {other:?}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+        index += 1;
+    }
+    let input = input.ok_or_else(|| CliError("validate requires --input PATH".to_string()))?;
+    Ok(Command::Validate { input })
 }
 
 fn parse_list(arguments: Vec<String>) -> Result<Command, CliError> {
@@ -184,7 +212,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs]\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -249,6 +277,20 @@ mod tests {
         match command {
             Command::Run { max_group_size, .. } => assert_eq!(max_group_size, 2),
             _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_validate() {
+        let command = parse_args([
+            "validate".to_string(),
+            "--input".to_string(),
+            "result.json".to_string(),
+        ])
+        .unwrap();
+        match command {
+            Command::Validate { input } => assert_eq!(input, PathBuf::from("result.json")),
+            _ => panic!("expected validate command"),
         }
     }
 }

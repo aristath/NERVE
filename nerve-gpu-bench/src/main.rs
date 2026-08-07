@@ -34,6 +34,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                 print_target_table(&targets)?;
             }
         }
+        Command::Validate { input } => {
+            let payload = fs::read_to_string(&input)?;
+            let run = model::parse_benchmark_run_json(&payload)?;
+            run.validate_basic()
+                .map_err(|message| format!("invalid benchmark JSON: {message}"))?;
+            println!("valid {}", input.display());
+        }
         Command::Run {
             output,
             payload_bytes,

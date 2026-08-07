@@ -5,6 +5,8 @@ The benchmark output schema is currently identified as
 
 This document is descriptive rather than a formal JSON Schema file. The Rust
 types in `src/model.rs` are the source of truth for the first implementation.
+Use `nerve-gpu-bench validate --input <path>` to parse and run basic structural
+validation on a saved result.
 
 ## Top-Level Fields
 
@@ -32,6 +34,12 @@ The default payload is 5 MiB. Workload specs scale with
 Current workload specs:
 
 - `single_target_gpu_small_payload`: full logical payload on one target.
+- `cpu_reference_serialized_small_payload`: CPU reference execution of the full
+  logical payload as one serialized pattern.
+- `cpu_reference_layer_split_small_payload`: CPU reference execution of the same
+  logical payload using the layer-split dataflow shape.
+- `cpu_reference_tensor_split_small_payload`: CPU reference execution of the
+  same logical payload using the tensor-split dataflow shape.
 - `ordered_activation_transfer`: activation-sized movement from one target to
   another.
 - `synthetic_layer_split_small_payload`: first half of the logical payload on
@@ -44,7 +52,9 @@ Current workload specs:
   three targets, broadcast activation, compute shards, collect output.
 
 GPU-backed specs are emitted before the Vulkan backend exists. Their
-measurements use `status: "unmeasured"` until a backend can execute them.
+measurements use `status: "unmeasured"` until a backend can execute them. CPU
+reference compound measurements use the same small payload to keep the
+serialized/layer-split/tensor-split semantics executable.
 
 ## Target Policy
 

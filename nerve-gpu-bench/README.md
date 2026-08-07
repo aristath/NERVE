@@ -15,7 +15,8 @@ This first implementation provides:
 - explicit include/exclude run policy;
 - no hard-coded global bans for CPU, integrated GPU, discrete GPU, AMD, NVIDIA,
   Intel, or other target classes;
-- small CPU-only synthetic measurements using a default 5 MiB payload;
+- small CPU-only synthetic measurements using a default 5 MiB payload,
+  including serialized, layer-split, and tensor-split reference patterns;
 - placeholder `unmeasured` GPU and pair records for the upcoming Vulkan backend;
   group placeholders up to triplets;
   and
@@ -23,8 +24,10 @@ This first implementation provides:
   measurements, pair/group candidates, and provenance.
 
 The package does not initialize Vulkan yet. GPU targets are discovered and
-reported, but GPU compute, peer transfer, tensor-split, and layer-split
+reported, but GPU compute, peer transfer, tensor-split, and layer-split GPU
 measurements are deliberately marked `unmeasured` until backend kernels exist.
+CPU reference versions of the small compound patterns execute today so the
+logical workload contracts are testable before GPU backend work starts.
 
 ## Commands
 
@@ -39,6 +42,13 @@ Run small benchmarks and write JSON:
 ```sh
 cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- run \
   --output benchmark-results.json
+```
+
+Validate a saved result:
+
+```sh
+cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- validate \
+  --input benchmark-results.json
 ```
 
 Select or exclude targets:

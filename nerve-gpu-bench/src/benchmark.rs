@@ -84,10 +84,16 @@ pub fn run_benchmarks(
 }
 
 fn run_cpu_measurements(target_id: &str, payload_bytes: usize, samples: usize) -> Vec<Measurement> {
-    vec![
+    let mut measurements = vec![
         run_cpu_copy(target_id, payload_bytes, samples),
         run_cpu_f32_dot(target_id, payload_bytes, samples),
-    ]
+    ];
+    measurements.extend(run_cpu_compound_reference(
+        target_id,
+        payload_bytes,
+        samples,
+    ));
+    measurements
 }
 
 fn run_cpu_copy(target_id: &str, payload_bytes: usize, samples: usize) -> Measurement {
@@ -179,6 +185,239 @@ fn dot_product(left: &[f32], right: &[f32]) -> f32 {
     left.iter()
         .zip(right.iter())
         .fold(0.0_f32, |sum, (left, right)| sum + left * right)
+}
+
+fn run_cpu_compound_reference(
+    target_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+) -> Vec<Measurement> {
+    vec![
+        run_cpu_compound_pattern(
+            target_id,
+            payload_bytes,
+            samples,
+            CpuCompoundPattern::Serialized,
+        ),
+        run_cpu_compound_pattern(
+            target_id,
+            payload_bytes,
+            samples,
+            CpuCompoundPattern::LayerSplit,
+        ),
+        run_cpu_compound_pattern(
+            target_id,
+            payload_bytes,
+            samples,
+            CpuCompoundPattern::TensorSplit,
+        ),
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuCompoundPattern {
+    Serialized,
+    LayerSplit,
+    TensorSplit,
+}
+
+impl CpuCompoundPattern {
+    fn workload_id(self) -> &'static str {
+        match self {
+            Self::Serialized => "cpu_reference_serialized_small_payload",
+            Self::LayerSplit => "cpu_reference_layer_split_small_payload",
+            Self::TensorSplit => "cpu_reference_tensor_split_small_payload",
+        }
+    }
+
+    fn pattern(self) -> &'static str {
+        match self {
+            Self::Serialized => "serialized_small_payload",
+            Self::LayerSplit => "synthetic_layer_split_small_payload",
+            Self::TensorSplit => "synthetic_tensor_split_small_payload",
+        }
+    }
+}
+
+fn run_cpu_compound_pattern(
+    target_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    pattern: CpuCompoundPattern,
+) -> Measurement {
+    let source = patterned_payload(payload_bytes);
+    let activation_bytes = activation_bytes_for_payload(payload_bytes);
+    let output_bytes = output_bytes_for_payload(payload_bytes);
+    let mut scratch = vec![0_u8; payload_bytes];
+    let mut activation = vec![0_u8; activation_bytes];
+    let mut output = vec![0_u8; output_bytes];
+
+    execute_cpu_compound_pattern(pattern, &source, &mut scratch, &mut activation, &mut output);
+    black_box(checksum(&output));
+
+    let mut measured_samples = Vec::with_capacity(samples);
+    for sample_index in 0..samples {
+        let started = Instant::now();
+        execute_cpu_compound_pattern(pattern, &source, &mut scratch, &mut activation, &mut output);
+        black_box(checksum(&output));
+        let duration = started.elapsed();
+        measured_samples.push(Sample {
+            sample_index,
+            duration_ns: duration.as_nanos(),
+            iterations: 1,
+            bytes_read: compound_bytes_read(payload_bytes, activation_bytes, pattern),
+            bytes_written: compound_bytes_written(payload_bytes, activation_bytes, output_bytes),
+            operations: compound_operations(payload_bytes, output_bytes, pattern),
+        });
+    }
+
+    Measurement {
+        workload_id: pattern.workload_id().to_string(),
+        target_id: target_id.to_string(),
+        pattern: pattern.pattern().to_string(),
+        operation_family: "cpu_reference_compound".to_string(),
+        regime: "small_payload".to_string(),
+        format: "u8_synthetic".to_string(),
+        status: "completed".to_string(),
+        reason: None,
+        payload_bytes,
+        working_set_bytes: payload_bytes + scratch.len() + activation.len() + output.len(),
+        summary: summarize(&measured_samples),
+        samples: measured_samples,
+    }
+}
+
+fn execute_cpu_compound_pattern(
+    pattern: CpuCompoundPattern,
+    source: &[u8],
+    scratch: &mut [u8],
+    activation: &mut [u8],
+    output: &mut [u8],
+) {
+    match pattern {
+        CpuCompoundPattern::Serialized => {
+            transform_bytes(source, scratch, 17);
+            fill_activation_from_payload(scratch, activation);
+            fill_output_from_payload(scratch, activation, output);
+        }
+        CpuCompoundPattern::LayerSplit => {
+            let split = source.len() / 2;
+            transform_bytes(&source[..split], &mut scratch[..split], 29);
+            fill_activation_from_payload(&scratch[..split], activation);
+            transform_bytes(&source[split..], &mut scratch[split..], 43);
+            fill_output_from_payload(&scratch[split..], activation, output);
+        }
+        CpuCompoundPattern::TensorSplit => {
+            let split = source.len() / 2;
+            transform_bytes(&source[..split], &mut scratch[..split], 61);
+            transform_bytes(&source[split..], &mut scratch[split..], 79);
+            fill_activation_from_payload(scratch, activation);
+            fill_output_from_tensor_shards(
+                &scratch[..split],
+                &scratch[split..],
+                activation,
+                output,
+            );
+        }
+    }
+}
+
+fn patterned_payload(payload_bytes: usize) -> Vec<u8> {
+    (0..payload_bytes)
+        .map(|index| ((index.wrapping_mul(37).wrapping_add(11)) & 0xff) as u8)
+        .collect()
+}
+
+fn transform_bytes(source: &[u8], destination: &mut [u8], salt: u8) {
+    debug_assert_eq!(source.len(), destination.len());
+    for (index, (source, destination)) in source.iter().zip(destination.iter_mut()).enumerate() {
+        let index_byte = (index & 0xff) as u8;
+        *destination = source
+            .wrapping_mul(3)
+            .wrapping_add(salt)
+            .rotate_left((index_byte & 7) as u32);
+    }
+}
+
+fn fill_activation_from_payload(payload: &[u8], activation: &mut [u8]) {
+    if payload.is_empty() {
+        activation.fill(0);
+        return;
+    }
+    for (index, activation_byte) in activation.iter_mut().enumerate() {
+        let first = payload[index % payload.len()];
+        let second = payload[(index.wrapping_mul(17).wrapping_add(5)) % payload.len()];
+        *activation_byte = first ^ second.rotate_left((index & 7) as u32);
+    }
+}
+
+fn fill_output_from_payload(payload: &[u8], activation: &[u8], output: &mut [u8]) {
+    if payload.is_empty() || activation.is_empty() {
+        output.fill(0);
+        return;
+    }
+    for (index, output_byte) in output.iter_mut().enumerate() {
+        let value = payload[(index.wrapping_mul(13)) % payload.len()]
+            .wrapping_add(activation[index % activation.len()]);
+        *output_byte = value.rotate_right((index & 7) as u32);
+    }
+}
+
+fn fill_output_from_tensor_shards(left: &[u8], right: &[u8], activation: &[u8], output: &mut [u8]) {
+    if left.is_empty() || right.is_empty() || activation.is_empty() {
+        output.fill(0);
+        return;
+    }
+    for (index, output_byte) in output.iter_mut().enumerate() {
+        let left_value = left[(index.wrapping_mul(7)) % left.len()];
+        let right_value = right[(index.wrapping_mul(11)) % right.len()];
+        *output_byte = left_value
+            .wrapping_add(right_value)
+            .wrapping_add(activation[index % activation.len()])
+            .rotate_left((index & 7) as u32);
+    }
+}
+
+fn checksum(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0_u64, |sum, byte| {
+        sum.rotate_left(5).wrapping_add(u64::from(*byte))
+    })
+}
+
+fn compound_bytes_read(
+    payload_bytes: usize,
+    activation_bytes: usize,
+    pattern: CpuCompoundPattern,
+) -> u64 {
+    let output_bytes = output_bytes_for_payload(payload_bytes);
+    let payload_reads = match pattern {
+        CpuCompoundPattern::Serialized => payload_bytes * 3,
+        CpuCompoundPattern::LayerSplit => payload_bytes * 2,
+        CpuCompoundPattern::TensorSplit => payload_bytes * 3,
+    };
+    (payload_reads + activation_bytes + output_bytes) as u64
+}
+
+fn compound_bytes_written(
+    payload_bytes: usize,
+    activation_bytes: usize,
+    output_bytes: usize,
+) -> u64 {
+    (payload_bytes + activation_bytes + output_bytes) as u64
+}
+
+fn compound_operations(
+    payload_bytes: usize,
+    output_bytes: usize,
+    pattern: CpuCompoundPattern,
+) -> u64 {
+    let transform_operations = payload_bytes as u64 * 4;
+    let output_operations = output_bytes as u64
+        * match pattern {
+            CpuCompoundPattern::Serialized | CpuCompoundPattern::LayerSplit => 3,
+            CpuCompoundPattern::TensorSplit => 5,
+        };
+    transform_operations + output_operations
 }
 
 fn unmeasured_single_target(target_id: &str, payload_bytes: usize, reason: &str) -> Measurement {
@@ -341,6 +580,39 @@ fn build_workload_specs(payload_bytes: usize, max_group_size: usize) -> Vec<Work
     let activation_bytes = activation_bytes_for_payload(payload_bytes);
     let output_bytes = output_bytes_for_payload(payload_bytes);
     let mut specs = vec![
+        WorkloadSpec {
+            workload_id: "cpu_reference_serialized_small_payload".to_string(),
+            pattern: "serialized_small_payload".to_string(),
+            format: "u8_synthetic".to_string(),
+            participant_count: 1,
+            payload_bytes,
+            parameter_bytes_per_participant: payload_bytes,
+            activation_bytes,
+            output_bytes,
+            description: "Run the full small logical payload through the CPU reference serialized dataflow.".to_string(),
+        },
+        WorkloadSpec {
+            workload_id: "cpu_reference_layer_split_small_payload".to_string(),
+            pattern: "synthetic_layer_split_small_payload".to_string(),
+            format: "u8_synthetic".to_string(),
+            participant_count: 1,
+            payload_bytes,
+            parameter_bytes_per_participant: half_payload,
+            activation_bytes,
+            output_bytes,
+            description: "Run the same small logical payload through the CPU reference layer-split dataflow.".to_string(),
+        },
+        WorkloadSpec {
+            workload_id: "cpu_reference_tensor_split_small_payload".to_string(),
+            pattern: "synthetic_tensor_split_small_payload".to_string(),
+            format: "u8_synthetic".to_string(),
+            participant_count: 1,
+            payload_bytes,
+            parameter_bytes_per_participant: half_payload,
+            activation_bytes,
+            output_bytes,
+            description: "Run the same small logical payload through the CPU reference tensor-split dataflow.".to_string(),
+        },
         WorkloadSpec {
             workload_id: "single_target_gpu_small_payload".to_string(),
             pattern: "single_target_gpu_compute".to_string(),
@@ -523,6 +795,9 @@ mod tests {
         assert_eq!(
             ids,
             [
+                "cpu_reference_serialized_small_payload",
+                "cpu_reference_layer_split_small_payload",
+                "cpu_reference_tensor_split_small_payload",
                 "single_target_gpu_small_payload",
                 "ordered_activation_transfer",
                 "synthetic_layer_split_small_payload",
@@ -536,6 +811,33 @@ mod tests {
         assert_eq!(layer.participant_count, 2);
         assert_eq!(layer.parameter_bytes_per_participant, 2_621_440);
         assert!(layer.activation_bytes <= 256 * 1024);
+    }
+
+    #[test]
+    fn cpu_compound_reference_runs_all_small_patterns() {
+        let measurements = run_cpu_compound_reference("cpu:host", 64 * 1024, 1);
+        let ids = measurements
+            .iter()
+            .map(|measurement| measurement.workload_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "cpu_reference_serialized_small_payload",
+                "cpu_reference_layer_split_small_payload",
+                "cpu_reference_tensor_split_small_payload",
+            ]
+        );
+        assert!(
+            measurements
+                .iter()
+                .all(|measurement| measurement.status == "completed")
+        );
+        assert!(
+            measurements
+                .iter()
+                .all(|measurement| measurement.summary.is_some())
+        );
     }
 
     #[test]
