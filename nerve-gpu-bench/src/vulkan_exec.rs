@@ -2,7 +2,7 @@ use std::ffi::CString;
 
 use ash::{Entry, vk};
 
-use crate::benchmark::single_target_status_measurements;
+use crate::benchmark::{single_target_status_measurement, single_target_status_measurements};
 use crate::model::{Measurement, Target};
 
 pub fn run_vulkan_single_target_measurements(
@@ -12,12 +12,11 @@ pub fn run_vulkan_single_target_measurements(
     workloads: &[String],
 ) -> Vec<Measurement> {
     match open_compute_device(target) {
-        Ok(device) => single_target_status_measurements(
+        Ok(device) => vulkan_opened_status_measurements(
             &target.stable_target_id,
             payload_bytes,
             formats,
             workloads,
-            "unmeasured",
             &format!(
                 "vulkan_compute_kernel_not_implemented_after_opening_physical_device_{}_queue_family_{}",
                 device.physical_device_index, device.compute_queue_family_index
@@ -32,6 +31,41 @@ pub fn run_vulkan_single_target_measurements(
             &message,
         ),
     }
+}
+
+fn vulkan_opened_status_measurements(
+    target_id: &str,
+    payload_bytes: usize,
+    formats: &[String],
+    workloads: &[String],
+    f32_reason: &str,
+) -> Vec<Measurement> {
+    formats
+        .iter()
+        .flat_map(|format| {
+            workloads.iter().map(move |workload| {
+                if format == "f32" {
+                    single_target_status_measurement(
+                        target_id,
+                        payload_bytes,
+                        workload,
+                        format,
+                        "unmeasured",
+                        f32_reason,
+                    )
+                } else {
+                    single_target_status_measurement(
+                        target_id,
+                        payload_bytes,
+                        workload,
+                        format,
+                        "unsupported",
+                        "vulkan_execution_backend_currently_supports_f32_only",
+                    )
+                }
+            })
+        })
+        .collect()
 }
 
 struct OpenVulkanComputeDevice {
@@ -178,5 +212,23 @@ mod tests {
             },
         ];
         assert_eq!(compute_queue_family_index(&queue_families), None);
+    }
+
+    #[test]
+    fn opened_vulkan_backend_marks_only_f32_as_pending_kernel() {
+        let formats = vec!["f32".to_string(), "fp8".to_string()];
+        let workloads = vec!["dense_projection".to_string()];
+        let measurements = vulkan_opened_status_measurements(
+            "vulkan:test",
+            1024,
+            &formats,
+            &workloads,
+            "kernel_missing",
+        );
+        assert_eq!(measurements.len(), 2);
+        assert_eq!(measurements[0].format, "f32");
+        assert_eq!(measurements[0].status, "unmeasured");
+        assert_eq!(measurements[1].format, "fp8");
+        assert_eq!(measurements[1].status, "unsupported");
     }
 }

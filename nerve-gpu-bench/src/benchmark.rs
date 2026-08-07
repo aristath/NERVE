@@ -758,25 +758,45 @@ pub(crate) fn single_target_status_measurements(
     formats
         .iter()
         .flat_map(|format| {
-            workloads.iter().map(|workload| Measurement {
-                workload_id: format_workload_id("single_target_small_payload", workload, format),
-                comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-                workload_class: workload.clone(),
-                placement_strategy: "single_target_serial".to_string(),
-                target_id: target_id.to_string(),
-                pattern: "single_target_compute".to_string(),
-                operation_family: workload.clone(),
-                regime: "small_payload".to_string(),
-                format: format.clone(),
-                status: status.to_string(),
-                reason: Some(reason.to_string()),
-                payload_bytes,
-                working_set_bytes: payload_bytes,
-                samples: Vec::new(),
-                summary: None,
+            workloads.iter().map(|workload| {
+                single_target_status_measurement(
+                    target_id,
+                    payload_bytes,
+                    workload,
+                    format,
+                    status,
+                    reason,
+                )
             })
         })
         .collect()
+}
+
+pub(crate) fn single_target_status_measurement(
+    target_id: &str,
+    payload_bytes: usize,
+    workload: &str,
+    format: &str,
+    status: &str,
+    reason: &str,
+) -> Measurement {
+    Measurement {
+        workload_id: format_workload_id("single_target_small_payload", workload, format),
+        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+        workload_class: workload.to_string(),
+        placement_strategy: "single_target_serial".to_string(),
+        target_id: target_id.to_string(),
+        pattern: "single_target_compute".to_string(),
+        operation_family: workload.to_string(),
+        regime: "small_payload".to_string(),
+        format: format.to_string(),
+        status: status.to_string(),
+        reason: Some(reason.to_string()),
+        payload_bytes,
+        working_set_bytes: payload_bytes,
+        samples: Vec::new(),
+        summary: None,
+    }
 }
 
 fn build_pair_placeholders(
