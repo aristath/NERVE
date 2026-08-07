@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -175,6 +175,19 @@ pub struct BenchmarkRunSummary {
     pub single_measurement_count: usize,
     pub pair_measurement_count: usize,
     pub group_measurement_count: usize,
+    pub completed_count: usize,
+    pub unmeasured_count: usize,
+    pub failed_count: usize,
+    pub unsupported_count: usize,
+    pub skipped_count: usize,
+    pub strategy_statuses: Vec<StrategyStatusSummary>,
+    pub coverage_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrategyStatusSummary {
+    pub comparison_group: String,
+    pub placement_strategy: String,
     pub completed_count: usize,
     pub unmeasured_count: usize,
     pub failed_count: usize,
@@ -380,33 +393,131 @@ impl BenchmarkRun {
             failed_count: 0,
             unsupported_count: 0,
             skipped_count: 0,
+            strategy_statuses: Vec::new(),
+            coverage_warnings: Vec::new(),
         };
-        for status in self
-            .measurements
-            .iter()
-            .map(|measurement| measurement.status.as_str())
-            .chain(
-                self.pair_measurements
-                    .iter()
-                    .map(|measurement| measurement.status.as_str()),
-            )
-            .chain(
-                self.group_measurements
-                    .iter()
-                    .map(|measurement| measurement.status.as_str()),
-            )
-        {
-            match status {
-                "completed" => summary.completed_count += 1,
-                "unmeasured" => summary.unmeasured_count += 1,
-                "failed" => summary.failed_count += 1,
-                "unsupported" => summary.unsupported_count += 1,
-                "skipped" => summary.skipped_count += 1,
-                _ => {}
-            }
+        let mut strategy_statuses = BTreeMap::<(String, String), StrategyStatusSummary>::new();
+        for measurement in &self.measurements {
+            increment_summary_status(&mut summary, &measurement.status);
+            increment_strategy_status(
+                &mut strategy_statuses,
+                &measurement.comparison_group,
+                &measurement.placement_strategy,
+                &measurement.status,
+            );
         }
+        for measurement in &self.pair_measurements {
+            increment_summary_status(&mut summary, &measurement.status);
+            increment_strategy_status(
+                &mut strategy_statuses,
+                &measurement.comparison_group,
+                &measurement.placement_strategy,
+                &measurement.status,
+            );
+        }
+        for measurement in &self.group_measurements {
+            increment_summary_status(&mut summary, &measurement.status);
+            increment_strategy_status(
+                &mut strategy_statuses,
+                &measurement.comparison_group,
+                &measurement.placement_strategy,
+                &measurement.status,
+            );
+        }
+        summary.coverage_warnings = coverage_warnings_for_run(self, &strategy_statuses);
+        summary.strategy_statuses = strategy_statuses.into_values().collect();
         summary
     }
+}
+
+fn increment_summary_status(summary: &mut BenchmarkRunSummary, status: &str) {
+    match status {
+        "completed" => summary.completed_count += 1,
+        "unmeasured" => summary.unmeasured_count += 1,
+        "failed" => summary.failed_count += 1,
+        "unsupported" => summary.unsupported_count += 1,
+        "skipped" => summary.skipped_count += 1,
+        _ => {}
+    }
+}
+
+fn increment_strategy_status(
+    statuses: &mut BTreeMap<(String, String), StrategyStatusSummary>,
+    comparison_group: &str,
+    placement_strategy: &str,
+    status: &str,
+) {
+    let entry = statuses
+        .entry((comparison_group.to_string(), placement_strategy.to_string()))
+        .or_insert_with(|| StrategyStatusSummary {
+            comparison_group: comparison_group.to_string(),
+            placement_strategy: placement_strategy.to_string(),
+            completed_count: 0,
+            unmeasured_count: 0,
+            failed_count: 0,
+            unsupported_count: 0,
+            skipped_count: 0,
+        });
+    match status {
+        "completed" => entry.completed_count += 1,
+        "unmeasured" => entry.unmeasured_count += 1,
+        "failed" => entry.failed_count += 1,
+        "unsupported" => entry.unsupported_count += 1,
+        "skipped" => entry.skipped_count += 1,
+        _ => {}
+    }
+}
+
+fn coverage_warnings_for_run(
+    run: &BenchmarkRun,
+    strategy_statuses: &BTreeMap<(String, String), StrategyStatusSummary>,
+) -> Vec<String> {
+    const SMALL_GROUP: &str = "small_payload_placement_comparison";
+    let has_small_payload_group = run
+        .workload_specs
+        .iter()
+        .any(|spec| spec.comparison_group == SMALL_GROUP)
+        || strategy_statuses
+            .keys()
+            .any(|(comparison_group, _)| comparison_group == SMALL_GROUP);
+    if !has_small_payload_group {
+        return Vec::new();
+    }
+
+    let mut expected = vec!["single_target_serial"];
+    if run.policy.pair_measurements
+        && run.policy.max_group_size >= 2
+        && run.selected_target_ids.len() >= 2
+    {
+        expected.push("two_target_serial");
+        expected.push("two_target_parallel");
+    }
+    if run.policy.pair_measurements
+        && run.policy.max_group_size >= 3
+        && run.selected_target_ids.len() >= 3
+    {
+        expected.push("three_target_serial");
+        expected.push("three_target_parallel");
+    }
+
+    let mut warnings = Vec::new();
+    for placement_strategy in expected {
+        let key = (SMALL_GROUP.to_string(), placement_strategy.to_string());
+        match strategy_statuses.get(&key) {
+            Some(status) if status.completed_count > 0 => {}
+            Some(status) => warnings.push(format!(
+                "placement strategy {placement_strategy:?} has no completed measurements: unmeasured={} failed={} unsupported={} skipped={}",
+                status.unmeasured_count,
+                status.failed_count,
+                status.unsupported_count,
+                status.skipped_count
+            )),
+            None => warnings.push(format!(
+                "placement strategy {placement_strategy:?} is missing from small_payload_placement_comparison"
+            )),
+        }
+    }
+    warnings
 }
 
 pub fn parse_benchmark_run_json(input: &str) -> Result<BenchmarkRun, serde_json::Error> {
@@ -578,5 +689,94 @@ mod tests {
         assert_eq!(summary.discovered_target_count, 1);
         assert_eq!(summary.completed_count, 1);
         assert_eq!(summary.unmeasured_count, 0);
+        assert_eq!(summary.strategy_statuses.len(), 1);
+        assert_eq!(
+            summary.strategy_statuses[0].placement_strategy,
+            "single_target_serial"
+        );
+        assert_eq!(summary.strategy_statuses[0].completed_count, 1);
+        assert!(summary.coverage_warnings.is_empty());
+    }
+
+    #[test]
+    fn warns_when_required_pair_strategy_has_no_completed_measurement() {
+        let mut run = BenchmarkRun {
+            schema: RUN_SCHEMA.to_string(),
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: 2,
+            implementation: Implementation::current(),
+            policy: RunPolicy {
+                payload_bytes: 1024,
+                samples: 1,
+                include_targets: Vec::new(),
+                exclude_targets: Vec::new(),
+                exclude_pci: Vec::new(),
+                exclude_kinds: Vec::new(),
+                pair_measurements: true,
+                max_group_size: 2,
+            },
+            discovered_targets: vec![
+                Target {
+                    stable_target_id: "gpu:a".to_string(),
+                    backend: "test".to_string(),
+                    kind: "discrete_gpu".to_string(),
+                    name: "gpu:a".to_string(),
+                    vendor_id: None,
+                    vendor_name: None,
+                    device_id: None,
+                    pci_address: None,
+                    physical_location: None,
+                    numa_node: None,
+                    boot_vga: None,
+                    capabilities: Vec::new(),
+                    diagnostics: Vec::new(),
+                },
+                Target {
+                    stable_target_id: "gpu:b".to_string(),
+                    backend: "test".to_string(),
+                    kind: "discrete_gpu".to_string(),
+                    name: "gpu:b".to_string(),
+                    vendor_id: None,
+                    vendor_name: None,
+                    device_id: None,
+                    pci_address: None,
+                    physical_location: None,
+                    numa_node: None,
+                    boot_vga: None,
+                    capabilities: Vec::new(),
+                    diagnostics: Vec::new(),
+                },
+            ],
+            selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
+            skipped_targets: Vec::new(),
+            workload_specs: Vec::new(),
+            measurements: Vec::new(),
+            pair_measurements: Vec::new(),
+            group_measurements: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        run.measurements.push(Measurement {
+            workload_id: "single".to_string(),
+            comparison_group: "small_payload_placement_comparison".to_string(),
+            placement_strategy: "single_target_serial".to_string(),
+            target_id: "gpu:a".to_string(),
+            pattern: "single".to_string(),
+            operation_family: "test".to_string(),
+            regime: "small_payload".to_string(),
+            format: "backend_selected".to_string(),
+            status: "unmeasured".to_string(),
+            reason: Some("backend missing".to_string()),
+            payload_bytes: 1024,
+            working_set_bytes: 1024,
+            samples: Vec::new(),
+            summary: None,
+        });
+        let summary = run.summary();
+        assert!(
+            summary
+                .coverage_warnings
+                .iter()
+                .any(|warning| warning.contains("two_target_parallel"))
+        );
     }
 }

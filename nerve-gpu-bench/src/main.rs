@@ -112,6 +112,28 @@ fn print_run_summary(run: &model::BenchmarkRun) -> Result<(), Box<dyn Error>> {
         summary.unsupported_count,
         summary.skipped_count
     )?;
+    if !summary.strategy_statuses.is_empty() {
+        writeln!(stdout, "placement_strategies:")?;
+        for strategy in &summary.strategy_statuses {
+            writeln!(
+                stdout,
+                "  {} / {}: completed={} unmeasured={} failed={} unsupported={} skipped={}",
+                strategy.comparison_group,
+                strategy.placement_strategy,
+                strategy.completed_count,
+                strategy.unmeasured_count,
+                strategy.failed_count,
+                strategy.unsupported_count,
+                strategy.skipped_count
+            )?;
+        }
+    }
+    if !summary.coverage_warnings.is_empty() {
+        writeln!(stdout, "coverage_warnings:")?;
+        for warning in &summary.coverage_warnings {
+            writeln!(stdout, "  {warning}")?;
+        }
+    }
     if !run.selected_target_ids.is_empty() {
         writeln!(stdout, "selected_targets:")?;
         for target_id in &run.selected_target_ids {

@@ -64,6 +64,11 @@ cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- summarize \
   --input benchmark-results.json
 ```
 
+The summary includes placement-strategy coverage so a result can be checked for
+the key alternatives: one-target serialized, two-target serialized, and
+two-target parallel. It also reports coverage warnings when an expected
+strategy has no completed measurement.
+
 Select or exclude targets:
 
 ```sh
