@@ -17,6 +17,7 @@ use smallvec::SmallVec;
 
 use crate::critical_path::{
     RuntimeCriticalPathPhase, record_runtime_critical_path_device_duration,
+    runtime_critical_path_device_detail_enabled, runtime_critical_path_device_detail_sample_scope,
     runtime_critical_path_device_phase_scope, runtime_critical_path_span,
 };
 #[cfg(test)]

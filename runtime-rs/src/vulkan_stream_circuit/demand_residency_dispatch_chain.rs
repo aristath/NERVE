@@ -85,13 +85,13 @@ struct VulkanDemandResidencyDispatchChain {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VulkanDemandResidencySequencePurpose {
-    Feedback,
-    BlockingProfile,
+    Unprofiled,
+    Profiled,
 }
 
 impl VulkanDemandResidencySequencePurpose {
     const fn records_critical_path(self) -> bool {
-        matches!(self, Self::BlockingProfile)
+        matches!(self, Self::Profiled)
     }
 }
 
@@ -1012,7 +1012,7 @@ impl VulkanDemandResidencyDispatchChain {
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
         self.with_prepared_steps(
             None,
-            VulkanDemandResidencySequencePurpose::Feedback,
+            VulkanDemandResidencySequencePurpose::Unprofiled,
             dispatches,
             control,
             prefix_dispatches,
@@ -1053,7 +1053,7 @@ impl VulkanDemandResidencyDispatchChain {
         self.continuation_enabled.set(true);
         self.with_prepared_steps(
             Some(gate_index),
-            VulkanDemandResidencySequencePurpose::Feedback,
+            VulkanDemandResidencySequencePurpose::Unprofiled,
             dispatches,
             control,
             prefix_dispatches,
@@ -1185,9 +1185,14 @@ impl VulkanDemandResidencyDispatchChain {
         let region_phases = contiguous_critical_path_regions(
             &self.command_critical_path_phases[start_command_index..],
         );
+        let sequence_purpose = if runtime_critical_path_device_detail_enabled() {
+            VulkanDemandResidencySequencePurpose::Profiled
+        } else {
+            VulkanDemandResidencySequencePurpose::Unprofiled
+        };
         self.with_prepared_steps(
             resume_gate_index,
-            VulkanDemandResidencySequencePurpose::BlockingProfile,
+            sequence_purpose,
             dispatches,
             control,
             prefix_dispatches,
@@ -1239,22 +1244,24 @@ impl VulkanDemandResidencyDispatchChain {
                         .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
                 };
                 execution_result?;
-                let region_durations = device
-                    .read_recorded_resident_kernel_critical_path_region_durations_ns(sequence)
-                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-                if region_durations.len() != region_phases.len() {
-                    return Err(demand_dispatch_error(format!(
-                        "demand critical-path sequence reported {} region durations for {} semantic regions",
-                        region_durations.len(),
-                        region_phases.len(),
-                    )));
-                }
-                for (phase, duration_ns) in region_phases
-                    .iter()
-                    .copied()
-                    .zip(region_durations)
-                {
-                    record_runtime_critical_path_device_duration(phase, duration_ns);
+                if sequence_purpose.records_critical_path() {
+                    let region_durations = device
+                        .read_recorded_resident_kernel_critical_path_region_durations_ns(sequence)
+                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+                    if region_durations.len() != region_phases.len() {
+                        return Err(demand_dispatch_error(format!(
+                            "demand critical-path sequence reported {} region durations for {} semantic regions",
+                            region_durations.len(),
+                            region_phases.len(),
+                        )));
+                    }
+                    for (phase, duration_ns) in region_phases
+                        .iter()
+                        .copied()
+                        .zip(region_durations)
+                    {
+                        record_runtime_critical_path_device_duration(phase, duration_ns);
+                    }
                 }
                 Ok(())
             },
@@ -1297,10 +1304,10 @@ impl VulkanDemandResidencyDispatchChain {
                         gate.command_index,
                         gate.command_index,
                         match sequence_purpose {
-                            VulkanDemandResidencySequencePurpose::Feedback => {
+                            VulkanDemandResidencySequencePurpose::Unprofiled => {
                                 &self.feedback_resume_sequences
                             }
-                            VulkanDemandResidencySequencePurpose::BlockingProfile => {
+                            VulkanDemandResidencySequencePurpose::Profiled => {
                                 &self.profiled_resume_sequences
                             }
                         }
@@ -1316,10 +1323,10 @@ impl VulkanDemandResidencyDispatchChain {
                     0,
                     self.first_gate_command_index,
                     match sequence_purpose {
-                        VulkanDemandResidencySequencePurpose::Feedback => {
+                        VulkanDemandResidencySequencePurpose::Unprofiled => {
                             &self.feedback_full_sequence
                         }
-                        VulkanDemandResidencySequencePurpose::BlockingProfile => {
+                        VulkanDemandResidencySequencePurpose::Profiled => {
                             &self.profiled_full_sequence
                         }
                     },

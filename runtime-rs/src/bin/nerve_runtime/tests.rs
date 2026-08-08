@@ -1325,6 +1325,7 @@ mod tests {
             device_timestamp_duration_ns: 20_000_000,
             generated_token_count: 2,
             execution_window_count: 1,
+            device_sampled_execution_window_count: 1,
             phases: vec![
                 nerve_runtime::RuntimeCriticalPathPhaseReport {
                     phase: "queue_submission".to_string(),
@@ -1339,6 +1340,7 @@ mod tests {
                     device_per_generated_token_ns: Some(0),
                     host_exclusive_per_execution_window_ns: Some(1_000_000),
                     device_per_execution_window_ns: Some(0),
+                    device_per_sampled_execution_window_ns: Some(0),
                 },
                 nerve_runtime::RuntimeCriticalPathPhaseReport {
                     phase: "unused".to_string(),
@@ -1353,6 +1355,11 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line.contains("reported separately") && line.contains("device intervals may overlap")
         }));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("device_detail_sampled_windows=1"))
+        );
         assert!(
             lines
                 .iter()

@@ -131,6 +131,7 @@ pub struct RuntimeCriticalPathPhaseReport {
     pub device_per_generated_token_ns: Option<u64>,
     pub host_exclusive_per_execution_window_ns: Option<u64>,
     pub device_per_execution_window_ns: Option<u64>,
+    pub device_per_sampled_execution_window_ns: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +145,7 @@ pub struct RuntimeCriticalPathReport {
     pub device_timestamp_duration_ns: u64,
     pub generated_token_count: usize,
     pub execution_window_count: usize,
+    pub device_sampled_execution_window_count: usize,
     pub phases: Vec<RuntimeCriticalPathPhaseReport>,
 }
 
@@ -155,15 +157,23 @@ impl RuntimeCriticalPathReport {
     ) -> Self {
         self.generated_token_count = generated_token_count;
         self.execution_window_count = execution_window_count;
+        let complete_device_coverage = self.device_sampled_execution_window_count == 0
+            || self.device_sampled_execution_window_count == execution_window_count;
         for phase in &mut self.phases {
             phase.host_exclusive_per_generated_token_ns =
                 per_unit(phase.host_exclusive_duration_ns, generated_token_count);
-            phase.device_per_generated_token_ns =
-                per_unit(phase.device_duration_ns, generated_token_count);
+            phase.device_per_generated_token_ns = complete_device_coverage
+                .then(|| per_unit(phase.device_duration_ns, generated_token_count))
+                .flatten();
             phase.host_exclusive_per_execution_window_ns =
                 per_unit(phase.host_exclusive_duration_ns, execution_window_count);
-            phase.device_per_execution_window_ns =
-                per_unit(phase.device_duration_ns, execution_window_count);
+            phase.device_per_execution_window_ns = complete_device_coverage
+                .then(|| per_unit(phase.device_duration_ns, execution_window_count))
+                .flatten();
+            phase.device_per_sampled_execution_window_ns = per_unit(
+                phase.device_duration_ns,
+                self.device_sampled_execution_window_count,
+            );
         }
         self
     }
@@ -206,6 +216,9 @@ impl PhaseCounters {
 
 static CRITICAL_PATH_EPOCH: AtomicU64 = AtomicU64::new(1);
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_DEVICE_EXECUTION_WINDOW: AtomicU64 = AtomicU64::new(0);
+static DEVICE_SAMPLED_EXECUTION_WINDOWS: AtomicU64 = AtomicU64::new(0);
+const DEVICE_DETAIL_SAMPLE_INTERVAL: u64 = 128;
 static PHASE_COUNTERS: [PhaseCounters; RuntimeCriticalPathPhase::ALL.len()] =
     [const { PhaseCounters::new() }; RuntimeCriticalPathPhase::ALL.len()];
 
@@ -222,9 +235,16 @@ struct ActiveDevicePhaseOverride {
     phase: RuntimeCriticalPathPhase,
 }
 
+struct ActiveDeviceDetailSample {
+    id: u64,
+    epoch: u64,
+    enabled: bool,
+}
+
 thread_local! {
     static ACTIVE_SPANS: RefCell<Vec<ActiveSpan>> = const { RefCell::new(Vec::new()) };
     static ACTIVE_DEVICE_PHASE_OVERRIDES: RefCell<Vec<ActiveDevicePhaseOverride>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_DEVICE_DETAIL_SAMPLES: RefCell<Vec<ActiveDeviceDetailSample>> = const { RefCell::new(Vec::new()) };
 }
 
 #[must_use = "the critical-path span must be held for the duration of the measured operation"]
@@ -240,6 +260,26 @@ pub struct RuntimeCriticalPathDevicePhaseScope {
     id: u64,
     epoch: u64,
     _not_send: PhantomData<Rc<()>>,
+}
+
+#[must_use = "the device-detail sample scope must cover one complete execution window"]
+pub struct RuntimeCriticalPathDeviceDetailSampleScope {
+    id: u64,
+    epoch: u64,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl Drop for RuntimeCriticalPathDeviceDetailSampleScope {
+    fn drop(&mut self) {
+        ACTIVE_DEVICE_DETAIL_SAMPLES.with(|samples| {
+            let mut samples = samples.borrow_mut();
+            let Some(index) = samples.iter().rposition(|sample| sample.id == self.id) else {
+                return;
+            };
+            let sample = samples.remove(index);
+            debug_assert_eq!(sample.epoch, self.epoch);
+        });
+    }
 }
 
 impl Drop for RuntimeCriticalPathDevicePhaseScope {
@@ -335,6 +375,51 @@ pub fn runtime_critical_path_device_phase_scope(
     }
 }
 
+/// Selects a bounded automatic sample of complete execution windows for
+/// detailed device timestamp attribution. Host timing and user-facing
+/// throughput remain continuous; expensive per-dispatch timestamps are only
+/// enabled for the first window and then once per fixed interval.
+pub fn runtime_critical_path_device_detail_sample_scope()
+-> RuntimeCriticalPathDeviceDetailSampleScope {
+    let epoch = CRITICAL_PATH_EPOCH.load(Ordering::Relaxed);
+    let id = NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed);
+    ACTIVE_DEVICE_DETAIL_SAMPLES.with(|samples| {
+        let mut samples = samples.borrow_mut();
+        samples.retain(|sample| sample.epoch == epoch);
+        let inherited = samples.last().map(|sample| sample.enabled);
+        let enabled = inherited.unwrap_or_else(|| {
+            let window = NEXT_DEVICE_EXECUTION_WINDOW.fetch_add(1, Ordering::Relaxed);
+            let enabled = window.is_multiple_of(DEVICE_DETAIL_SAMPLE_INTERVAL);
+            if enabled {
+                DEVICE_SAMPLED_EXECUTION_WINDOWS.fetch_add(1, Ordering::Relaxed);
+            }
+            enabled
+        });
+        samples.push(ActiveDeviceDetailSample { id, epoch, enabled });
+    });
+    RuntimeCriticalPathDeviceDetailSampleScope {
+        id,
+        epoch,
+        _not_send: PhantomData,
+    }
+}
+
+/// Detailed device timing remains enabled outside a managed chat execution
+/// window so explicit calibration and diagnostic paths retain their exact
+/// behavior. Normal inference enters a bounded sample scope per window.
+pub fn runtime_critical_path_device_detail_enabled() -> bool {
+    let epoch = CRITICAL_PATH_EPOCH.load(Ordering::Relaxed);
+    ACTIVE_DEVICE_DETAIL_SAMPLES.with(|samples| {
+        samples
+            .borrow()
+            .iter()
+            .rev()
+            .find(|sample| sample.epoch == epoch)
+            .map(|sample| sample.enabled)
+            .unwrap_or(true)
+    })
+}
+
 pub fn reset_runtime_critical_path_counters() {
     CRITICAL_PATH_EPOCH.fetch_add(1, Ordering::Relaxed);
     for counters in &PHASE_COUNTERS {
@@ -342,6 +427,9 @@ pub fn reset_runtime_critical_path_counters() {
     }
     ACTIVE_SPANS.with(|active_spans| active_spans.borrow_mut().clear());
     ACTIVE_DEVICE_PHASE_OVERRIDES.with(|overrides| overrides.borrow_mut().clear());
+    NEXT_DEVICE_EXECUTION_WINDOW.store(0, Ordering::Relaxed);
+    DEVICE_SAMPLED_EXECUTION_WINDOWS.store(0, Ordering::Relaxed);
+    ACTIVE_DEVICE_DETAIL_SAMPLES.with(|samples| samples.borrow_mut().clear());
 }
 
 pub fn record_runtime_critical_path_device_duration(
@@ -395,6 +483,7 @@ pub fn runtime_critical_path_report(wall_duration_ns: u64) -> RuntimeCriticalPat
                 device_per_generated_token_ns: None,
                 host_exclusive_per_execution_window_ns: None,
                 device_per_execution_window_ns: None,
+                device_per_sampled_execution_window_ns: None,
             }
         })
         .collect::<Vec<_>>();
@@ -428,6 +517,10 @@ pub fn runtime_critical_path_report(wall_duration_ns: u64) -> RuntimeCriticalPat
         device_timestamp_duration_ns,
         generated_token_count: 0,
         execution_window_count: 0,
+        device_sampled_execution_window_count: usize::try_from(
+            DEVICE_SAMPLED_EXECUTION_WINDOWS.load(Ordering::Relaxed),
+        )
+        .unwrap_or(usize::MAX),
         phases,
     }
 }
@@ -514,6 +607,51 @@ mod tests {
         assert_eq!(
             phase(&report, RuntimeCriticalPathPhase::ExpertCompute).device_duration_ns,
             90_000
+        );
+    }
+
+    #[test]
+    fn device_detail_sampling_profiles_the_first_window_and_then_stays_bounded() {
+        reset_runtime_critical_path_counters();
+        let mut selected = Vec::new();
+        for window in 0..=DEVICE_DETAIL_SAMPLE_INTERVAL {
+            let _sample = runtime_critical_path_device_detail_sample_scope();
+            if runtime_critical_path_device_detail_enabled() {
+                selected.push(window);
+                record_runtime_critical_path_device_duration(
+                    RuntimeCriticalPathPhase::ExpertCompute,
+                    10,
+                );
+            }
+        }
+        let report = runtime_critical_path_report(1);
+        assert_eq!(selected, vec![0, DEVICE_DETAIL_SAMPLE_INTERVAL]);
+        assert_eq!(report.device_sampled_execution_window_count, 2);
+        assert_eq!(
+            phase(&report, RuntimeCriticalPathPhase::ExpertCompute).device_timestamp_count,
+            2
+        );
+    }
+
+    #[test]
+    fn sampled_device_durations_are_not_misreported_as_full_stream_per_token_costs() {
+        reset_runtime_critical_path_counters();
+        {
+            let _sample = runtime_critical_path_device_detail_sample_scope();
+            assert!(runtime_critical_path_device_detail_enabled());
+            record_runtime_critical_path_device_duration(
+                RuntimeCriticalPathPhase::AttentionRead,
+                90_000,
+            );
+        }
+        let report = runtime_critical_path_report(1_000_000).with_normalization(10, 10);
+        let attention = phase(&report, RuntimeCriticalPathPhase::AttentionRead);
+        assert_eq!(report.device_sampled_execution_window_count, 1);
+        assert_eq!(attention.device_per_generated_token_ns, None);
+        assert_eq!(attention.device_per_execution_window_ns, None);
+        assert_eq!(
+            attention.device_per_sampled_execution_window_ns,
+            Some(90_000)
         );
     }
 

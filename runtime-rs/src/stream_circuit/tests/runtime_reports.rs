@@ -822,6 +822,7 @@
                 device_timestamp_duration_ns: 70,
                 generated_token_count: 1,
                 execution_window_count: 1,
+                device_sampled_execution_window_count: 1,
                 phases: vec![crate::RuntimeCriticalPathPhaseReport {
                     phase: "host_synchronization".to_string(),
                     host_invocation_count: 1,
@@ -835,6 +836,7 @@
                     device_per_generated_token_ns: Some(0),
                     host_exclusive_per_execution_window_ns: Some(60),
                     device_per_execution_window_ns: Some(0),
+                    device_per_sampled_execution_window_ns: Some(0),
                 }],
             },
             component_timings: vec![RuntimePlacedComponentTimingReport {

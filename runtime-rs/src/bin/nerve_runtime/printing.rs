@@ -292,8 +292,10 @@ fn runtime_critical_path_lines(report: &RuntimeCriticalPathReport) -> Vec<String
             nanos_to_millis(report.device_timestamp_duration_ns),
         ),
         format!(
-            "  normalization_generated_tokens={} normalization_execution_windows={}",
-            report.generated_token_count, report.execution_window_count,
+            "  normalization_generated_tokens={} normalization_execution_windows={} device_detail_sampled_windows={}",
+            report.generated_token_count,
+            report.execution_window_count,
+            report.device_sampled_execution_window_count,
         ),
     ];
     for phase in &report.phases {
@@ -301,7 +303,7 @@ fn runtime_critical_path_lines(report: &RuntimeCriticalPathReport) -> Vec<String
             continue;
         }
         lines.push(format!(
-            "  phase={} host_calls={} host_exclusive_ms={:.3} host_inclusive_ms={:.3} host_max_ms={:.3} device_timestamps={} device_ms={:.3} device_max_ms={:.3} host_us/token={} device_us/token={} host_us/window={} device_us/window={}",
+            "  phase={} host_calls={} host_exclusive_ms={:.3} host_inclusive_ms={:.3} host_max_ms={:.3} device_timestamps={} device_ms={:.3} device_max_ms={:.3} host_us/token={} device_us/token={} host_us/window={} device_us/window={} device_us/sampled_window={}",
             phase.phase,
             phase.host_invocation_count,
             nanos_to_millis(phase.host_exclusive_duration_ns),
@@ -314,6 +316,7 @@ fn runtime_critical_path_lines(report: &RuntimeCriticalPathReport) -> Vec<String
             optional_nanos_to_micros(phase.device_per_generated_token_ns),
             optional_nanos_to_micros(phase.host_exclusive_per_execution_window_ns),
             optional_nanos_to_micros(phase.device_per_execution_window_ns),
+            optional_nanos_to_micros(phase.device_per_sampled_execution_window_ns),
         ));
     }
     lines

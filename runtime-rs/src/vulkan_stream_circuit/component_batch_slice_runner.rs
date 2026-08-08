@@ -14,11 +14,49 @@ struct VulkanResidentComponentBatchSliceRunner {
         BTreeMap<usize, VulkanDemandResidencyBatchExecutionSegment>,
     pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
     submission_template_catalog:
-        RefCell<BTreeMap<(usize, usize), VulkanResidentQueueSubmissionTemplate>>,
+        RefCell<BTreeMap<(usize, usize, VulkanComponentBatchSequenceDetail), VulkanResidentQueueSubmissionTemplate>>,
     execution_shape_class_catalog: RefCell<BTreeMap<usize, String>>,
-    sequence_catalog: RefCell<BTreeMap<(usize, usize), VulkanResidentKernelSequence>>,
+    sequence_catalog:
+        RefCell<BTreeMap<(usize, usize, VulkanComponentBatchSequenceDetail), VulkanResidentKernelSequence>>,
     causal_state_snapshots: VulkanCausalStateSnapshotBank,
     quantum_calibrator: Rc<RefCell<RuntimeExecutionQuantumCalibrator>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum VulkanComponentBatchSequenceDetail {
+    Unprofiled,
+    Timestamped,
+    Profiled,
+}
+
+impl VulkanComponentBatchSequenceDetail {
+    fn for_execution(completion_mode: VulkanComponentBatchCompletionMode) -> Self {
+        Self::for_policy(
+            completion_mode,
+            std::env::var_os("NERVE_VK_PERF_LOGGER").is_some(),
+            runtime_critical_path_device_detail_enabled(),
+        )
+    }
+
+    fn for_policy(
+        completion_mode: VulkanComponentBatchCompletionMode,
+        detailed_profiler_enabled: bool,
+        device_detail_sampled: bool,
+    ) -> Self {
+        if detailed_profiler_enabled {
+            Self::Profiled
+        } else if completion_mode == VulkanComponentBatchCompletionMode::Blocking
+            && device_detail_sampled
+        {
+            Self::Timestamped
+        } else {
+            Self::Unprofiled
+        }
+    }
+
+    const fn records_duration(self) -> bool {
+        !matches!(self, Self::Unprofiled)
+    }
 }
 
 fn critical_path_phase_for_dispatches<'a>(
@@ -1181,41 +1219,48 @@ impl VulkanResidentComponentBatchSliceRunner {
         &self,
         device: &VulkanComputeDevice,
         sequence_shape_keys: &[usize],
+        sequence_detail: VulkanComponentBatchSequenceDetail,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         for (sequence_index, shape_key) in sequence_shape_keys.iter().copied().enumerate() {
             if self
                 .sequence_catalog
                 .borrow()
-                .contains_key(&(sequence_index, shape_key))
+                .contains_key(&(sequence_index, shape_key, sequence_detail))
             {
                 continue;
             }
-            let sequence = if std::env::var_os("NERVE_VK_PERF_LOGGER").is_some() {
-                let (step_start, step_end) = self
-                    .execution_units
-                    .iter()
-                    .filter_map(|unit| match unit {
-                        VulkanComponentBatchExecutionUnit::LocalComponent {
-                            step_start,
-                            step_end,
-                            ..
-                        } => Some((*step_start, *step_end)),
-                        VulkanComponentBatchExecutionUnit::DistributedDispatch { .. } => None,
-                    })
-                    .nth(sequence_index)
-                    .expect("component batch sequence maps to a local execution unit");
-                let step_count = self.steps[step_start..step_end]
-                    .iter()
-                    .filter(|step| step.lane_index.is_none_or(|lane| lane < shape_key))
-                    .count();
-                device.create_profiled_resident_kernel_sequence(step_count)
-            } else {
-                device.create_timestamped_resident_kernel_sequence()
+            let sequence = match sequence_detail {
+                VulkanComponentBatchSequenceDetail::Unprofiled => {
+                    device.create_resident_kernel_sequence()
+                }
+                VulkanComponentBatchSequenceDetail::Timestamped => {
+                    device.create_timestamped_resident_kernel_sequence()
+                }
+                VulkanComponentBatchSequenceDetail::Profiled => {
+                    let (step_start, step_end) = self
+                        .execution_units
+                        .iter()
+                        .filter_map(|unit| match unit {
+                            VulkanComponentBatchExecutionUnit::LocalComponent {
+                                step_start,
+                                step_end,
+                                ..
+                            } => Some((*step_start, *step_end)),
+                            VulkanComponentBatchExecutionUnit::DistributedDispatch { .. } => None,
+                        })
+                        .nth(sequence_index)
+                        .expect("component batch sequence maps to a local execution unit");
+                    let step_count = self.steps[step_start..step_end]
+                        .iter()
+                        .filter(|step| step.lane_index.is_none_or(|lane| lane < shape_key))
+                        .count();
+                    device.create_profiled_resident_kernel_sequence(step_count)
+                }
             }
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             self.sequence_catalog
                 .borrow_mut()
-                .insert((sequence_index, shape_key), sequence);
+                .insert((sequence_index, shape_key, sequence_detail), sequence);
         }
         Ok(())
     }
@@ -1385,8 +1430,16 @@ impl VulkanResidentComponentBatchSliceRunner {
                 ))
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }
+        let completion_mode = if completion_mode == VulkanComponentBatchCompletionMode::Deferred
+            && self.supports_deferred_completion()
+        {
+            VulkanComponentBatchCompletionMode::Deferred
+        } else {
+            VulkanComponentBatchCompletionMode::Blocking
+        };
+        let sequence_detail = VulkanComponentBatchSequenceDetail::for_execution(completion_mode);
         let sequence_shape_keys = self.sequence_shape_keys(batch_width);
-        self.ensure_sequence_shapes(device, &sequence_shape_keys)?;
+        self.ensure_sequence_shapes(device, &sequence_shape_keys, sequence_detail)?;
         self.execution_shape_class_catalog
             .borrow_mut()
             .entry(batch_width)
@@ -1405,13 +1458,6 @@ impl VulkanResidentComponentBatchSliceRunner {
         let mut measurements = Vec::new();
         let mut local_submission_batch = VulkanResidentQueueSubmissionBatch::new();
         let mut pending_timed_sequences = Vec::new();
-        let completion_mode = if completion_mode == VulkanComponentBatchCompletionMode::Deferred
-            && self.supports_deferred_completion()
-        {
-            VulkanComponentBatchCompletionMode::Deferred
-        } else {
-            VulkanComponentBatchCompletionMode::Blocking
-        };
         if deferred_submission_batch.is_some()
             && (completion_mode != VulkanComponentBatchCompletionMode::Deferred
                 || !self.has_pipeline_deferred_demand_segment())
@@ -1465,11 +1511,13 @@ impl VulkanResidentComponentBatchSliceRunner {
                                 true,
                                 timeline_value_offset,
                                 completion_mode,
+                                sequence_detail,
                             )?;
                             self.record_completed_component_sequence_timings(
                                 device,
                                 &mut pending_timed_sequences,
                                 completion_mode,
+                                sequence_detail,
                             )?;
                             measurements.extend(batch_measurements);
                             local_group_index += 1;
@@ -1568,7 +1616,11 @@ impl VulkanResidentComponentBatchSliceRunner {
                         Vec::new()
                     };
                     let sequence = sequence_catalog
-                        .get(&(sequence_index, sequence_shape_keys[sequence_index]))
+                        .get(&(
+                            sequence_index,
+                            sequence_shape_keys[sequence_index],
+                            sequence_detail,
+                        ))
                         .expect("component batch sequence shape was inserted");
                     let sequence_was_enqueued = self.run_segment(
                         device,
@@ -1577,6 +1629,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                         dynamic_state_capacity_activations,
                         component_id,
                         sequence,
+                        sequence_detail,
                         *step_start,
                         *step_end,
                         Some(&local_submission_batch),
@@ -1584,7 +1637,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                         &signal_points,
                         flush_after_segment,
                     )?;
-                    if sequence_was_enqueued {
+                    if sequence_was_enqueued && sequence_detail.records_duration() {
                         pending_timed_sequences.push((
                             sequence,
                             critical_path_phase_for_dispatches(
@@ -1615,11 +1668,13 @@ impl VulkanResidentComponentBatchSliceRunner {
                             true,
                             timeline_value_offset,
                             completion_mode,
+                            sequence_detail,
                         )?;
                         self.record_completed_component_sequence_timings(
                             device,
                             &mut pending_timed_sequences,
                             completion_mode,
+                            sequence_detail,
                         )?;
                         measurements.extend(batch_measurements);
                         local_group_index += 1;
@@ -1673,11 +1728,13 @@ impl VulkanResidentComponentBatchSliceRunner {
             true,
             timeline_value_offset,
             completion_mode,
+            sequence_detail,
         )?;
         self.record_completed_component_sequence_timings(
             device,
             &mut pending_timed_sequences,
             completion_mode,
+            sequence_detail,
         )?;
         measurements.extend(batch_measurements);
         debug_assert_eq!(sequence_index, sequence_shape_keys.len());
@@ -1702,7 +1759,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                 };
                 let shape_key = sequence_shape_keys[sequence_index];
                 let sequence = sequence_catalog
-                    .get(&(sequence_index, shape_key))
+                    .get(&(sequence_index, shape_key, sequence_detail))
                     .expect("component batch sequence shape was inserted");
                 let duration_ns = device
                     .read_recorded_resident_kernel_sequence_duration_ns(sequence)
@@ -1775,6 +1832,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         dynamic_state_capacity_activations: u32,
         component_id: &str,
         sequence: &VulkanResidentKernelSequence,
+        sequence_detail: VulkanComponentBatchSequenceDetail,
         step_start: usize,
         step_end: usize,
         submission_batch: Option<&VulkanResidentQueueSubmissionBatch<'a>>,
@@ -1909,11 +1967,13 @@ impl VulkanResidentComponentBatchSliceRunner {
             device
                 .run_resident_kernel_sequence(sequence, &sequence_steps)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            let duration_ns = device
-                .read_recorded_resident_kernel_sequence_duration_ns(sequence)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            record_vulkan_resident_component_sequence_device_duration(duration_ns);
-            record_runtime_critical_path_device_duration(critical_path_phase, duration_ns);
+            if sequence_detail.records_duration() {
+                let duration_ns = device
+                    .read_recorded_resident_kernel_sequence_duration_ns(sequence)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                record_vulkan_resident_component_sequence_device_duration(duration_ns);
+                record_runtime_critical_path_device_duration(critical_path_phase, duration_ns);
+            }
             Ok(false)
         }
     }
@@ -1926,8 +1986,11 @@ impl VulkanResidentComponentBatchSliceRunner {
             RuntimeCriticalPathPhase,
         )>,
         completion_mode: VulkanComponentBatchCompletionMode,
+        sequence_detail: VulkanComponentBatchSequenceDetail,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        if completion_mode != VulkanComponentBatchCompletionMode::Blocking {
+        if completion_mode != VulkanComponentBatchCompletionMode::Blocking
+            || !sequence_detail.records_duration()
+        {
             sequences.clear();
             return Ok(());
         }
@@ -1951,6 +2014,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         reusable: bool,
         timeline_value_offset: u64,
         completion_mode: VulkanComponentBatchCompletionMode,
+        sequence_detail: VulkanComponentBatchSequenceDetail,
     ) -> Result<
         Vec<VulkanResidentExecutionQuantumMeasurement>,
         VulkanResidentInProcessPlacedRuntimeError,
@@ -1958,7 +2022,7 @@ impl VulkanResidentComponentBatchSliceRunner {
         if submission_batch.pending_submission_count() == 0 {
             return Ok(Vec::new());
         }
-        let template_key = (batch_width, local_group_index);
+        let template_key = (batch_width, local_group_index, sequence_detail);
         if reusable
             && let Some(template) = self
                 .submission_template_catalog

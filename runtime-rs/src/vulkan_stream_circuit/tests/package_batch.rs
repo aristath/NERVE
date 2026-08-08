@@ -482,6 +482,42 @@ fn component_batch_execution_uses_standalone_component_submissions() {
 }
 
 #[test]
+fn component_batch_sequence_detail_profiles_only_sampled_or_explicit_runs() {
+    assert_eq!(
+        VulkanComponentBatchSequenceDetail::for_policy(
+            VulkanComponentBatchCompletionMode::Deferred,
+            false,
+            true,
+        ),
+        VulkanComponentBatchSequenceDetail::Unprofiled,
+    );
+    assert_eq!(
+        VulkanComponentBatchSequenceDetail::for_policy(
+            VulkanComponentBatchCompletionMode::Blocking,
+            false,
+            true,
+        ),
+        VulkanComponentBatchSequenceDetail::Timestamped,
+    );
+    assert_eq!(
+        VulkanComponentBatchSequenceDetail::for_policy(
+            VulkanComponentBatchCompletionMode::Blocking,
+            false,
+            false,
+        ),
+        VulkanComponentBatchSequenceDetail::Unprofiled,
+    );
+    assert_eq!(
+        VulkanComponentBatchSequenceDetail::for_policy(
+            VulkanComponentBatchCompletionMode::Deferred,
+            true,
+            false,
+        ),
+        VulkanComponentBatchSequenceDetail::Profiled,
+    );
+}
+
+#[test]
 fn component_batch_execution_does_not_create_empty_local_submissions() {
     let spans = vec![
         VulkanComponentBatchDispatchSpan {

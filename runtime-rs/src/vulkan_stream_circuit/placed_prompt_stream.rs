@@ -571,6 +571,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let sample_last = block_end_index == active.input_event.token_ids.len()
             && active.remaining_public_outputs > 0;
         let start_stream_tick = self.session.next_stream_tick;
+        let _device_detail_sample = runtime_critical_path_device_detail_sample_scope();
         let block_run = self.processor.run_temporal_prompt_block(
             &self.devices,
             &input_token_ids,
@@ -694,6 +695,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 activation.input_is_feedback,
             ))?;
         }
+        let _device_detail_sample = runtime_critical_path_device_detail_sample_scope();
         let placed_run = self
             .processor
             .execute_prepared_token_id_stream_tick_on_bound_devices_in_process_with_transport(
