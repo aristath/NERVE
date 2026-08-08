@@ -118,6 +118,17 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   into one queue therefore destroys useful device overlap. The integration was
   removed; the generic retained-copy and owned-invocation primitives remain as
   building blocks for an asynchronous hardware execution graph.
+- Splitting each device's existing per-token command graph between independent
+  compute and transfer queues was also rejected. An initial bridge-submission
+  topology was behaviorally exact but measured 7.9682 mean decode tok/s. A
+  direct timeline-handoff version removed the empty compute bridges and reached
+  only 8.1466 tok/s, still 3.28% below the accepted 8.4228 baseline after three
+  complete warmups and with zero measured residency loads. Both variants
+  restored every GPU reservation exactly and were removed in full. Two queue
+  submissions per device per token cost more than the roughly 0.1-ms staged
+  activation edge can recover; independent hardware queues only become useful
+  when a bounded resident window exposes genuine inter-token or inter-stream
+  overlap instead of repartitioning the current serialized token schedule.
 - Demand-paged residency correctness, immutable miss records, causal suffix
   resume, complete-conversation convergence, shared bounded host caching, and
   exact teardown are implemented. Resident FP8 coexistence is also implemented
@@ -171,6 +182,10 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      selected experts, or graph nodes. Command-buffer caching alone is not
      completion; a previous template experiment reused almost every command buffer
      but fell to 1.205 tok/s because it retained the fragmented submission graph.
+     Do not retry the rejected per-token compute/transfer split: even direct
+     timeline handoffs regressed the complete gate to 8.1466 tok/s. The next
+     topology must span a bounded resident window and overlap independent token
+     streams or proposal lanes before paying for additional queue submissions.
    - The mounted input and output graph phases and packed host readback are now
      reusable transaction segments. Compose their dispatches, ingress/egress
      copies, demand gates, processor dispatches, and terminal readback into the
