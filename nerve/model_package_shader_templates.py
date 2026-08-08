@@ -4292,7 +4292,7 @@ if (
     independent_mxfp4_expert_shape = re.fullmatch(
         r"independent_sparse_moe_(gate_up|down)(?:_(batch1))?"
         r"(?:_(prequant))?_"
-        r"mxfp4_e2m1(?:_(resident_fp8_e4m3))?_g32_"
+        r"mxfp4_e2m1(?:_(resident_fp8_e4m3|adaptive_fp8_e4m3))?_g32_"
         r"h(\d+)_i(\d+)_e(\d+)_k(\d+)"
         r"(?:_limit([0-9eE+.-]+))?\.comp",
         shader_file,
@@ -4302,7 +4302,7 @@ if (
             stage,
             batch_mode,
             prequant,
-            resident_fp8,
+            weight_representation,
             hidden_size,
             intermediate_size,
             num_experts,
@@ -4336,7 +4336,12 @@ if (
                 "TILE_ROWS": str(32 if stage == "gate_up" else 64),
                 "SWIGLU_LIMIT": swiglu_limit or "0",
                 "PREQUANTIZED_INPUT": "1" if prequant is not None else "0",
-                "PREEXPANDED_FP8": "1" if resident_fp8 is not None else "0",
+                "PREEXPANDED_FP8": (
+                    "1" if weight_representation == "resident_fp8_e4m3" else "0"
+                ),
+                "DYNAMIC_WEIGHT_REPRESENTATION": (
+                    "1" if weight_representation == "adaptive_fp8_e4m3" else "0"
+                ),
             },
         )
 

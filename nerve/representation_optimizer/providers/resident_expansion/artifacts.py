@@ -18,7 +18,7 @@ PRODUCT_CONVERSATION_FIXTURE_PATH = "fixtures/product_conversation.json"
 MODEL_LIMITS_PATH = "fixtures/model_limits.json"
 
 
-def resident_shader_artifact_path(source_shader_path: str) -> str:
+def adaptive_shader_artifact_path(source_shader_path: str) -> str:
     path = PurePosixPath(source_shader_path)
     if (
         path.is_absolute()
@@ -26,13 +26,14 @@ def resident_shader_artifact_path(source_shader_path: str) -> str:
         or path.suffix != ".spv"
         or "_mxfp4_e2m1_" not in path.name
         or "_resident_fp8_e4m3_" in path.name
+        or "_adaptive_fp8_e4m3_" in path.name
     ):
         raise ModelCompileError(
             f"unsupported compact MXFP4 shader path {source_shader_path!r}"
         )
     target_name = path.name.replace(
         "_mxfp4_e2m1_",
-        "_mxfp4_e2m1_resident_fp8_e4m3_",
+        "_mxfp4_e2m1_adaptive_fp8_e4m3_",
         1,
     )
     return f"kernels/{target_name}"
@@ -114,5 +115,5 @@ __all__ = [
     "conversation_fixture",
     "model_limits_fixture",
     "product_conversation_fixture",
-    "resident_shader_artifact_path",
+    "adaptive_shader_artifact_path",
 ]

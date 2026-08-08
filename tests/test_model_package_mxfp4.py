@@ -221,6 +221,22 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
         "mxfp4_e2m1_g32",
         "mxfp4_e2m1_resident_fp8_e4m3_g32",
     )
+    adaptive_gate_shader = gate_shader.replace(
+        "mxfp4_e2m1_g32",
+        "mxfp4_e2m1_adaptive_fp8_e4m3_g32",
+    )
+    adaptive_gate_batch_shader = gate_batch_shader.replace(
+        "mxfp4_e2m1_g32",
+        "mxfp4_e2m1_adaptive_fp8_e4m3_g32",
+    )
+    adaptive_down_shader = down_shader.replace(
+        "mxfp4_e2m1_g32",
+        "mxfp4_e2m1_adaptive_fp8_e4m3_g32",
+    )
+    adaptive_down_batch_shader = down_batch_shader.replace(
+        "mxfp4_e2m1_g32",
+        "mxfp4_e2m1_adaptive_fp8_e4m3_g32",
+    )
     assert shader_file_for_node(circuit, gate, tensor_index, dimensions) == gate_shader
     assert shader_file_for_node(circuit, down, tensor_index, dimensions) == down_shader
     assert physical_input_prequantization_spec(
@@ -277,6 +293,10 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
             down_batch_shader,
             resident_gate_shader,
             resident_down_shader,
+            adaptive_gate_shader,
+            adaptive_gate_batch_shader,
+            adaptive_down_shader,
+            adaptive_down_batch_shader,
         },
     )
     gate_source = (tmp_path / gate_shader).read_text()
@@ -286,6 +306,10 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     down_source = (tmp_path / down_shader).read_text()
     resident_gate_source = (tmp_path / resident_gate_shader).read_text()
     resident_down_source = (tmp_path / resident_down_shader).read_text()
+    adaptive_gate_source = (tmp_path / adaptive_gate_shader).read_text()
+    adaptive_gate_batch_source = (tmp_path / adaptive_gate_batch_shader).read_text()
+    adaptive_down_source = (tmp_path / adaptive_down_shader).read_text()
+    adaptive_down_batch_source = (tmp_path / adaptive_down_batch_shader).read_text()
     assert "const uint DYNAMIC_PARAMETER_COUNT = 4u;" in gate_source
     assert "const uint DYNAMIC_PARAMETER_COUNT = 2u;" in down_source
     assert "const uint MXFP4_E4M3_BITS[8]" in gate_source
@@ -313,6 +337,19 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     assert "#define PREEXPANDED_FP8 0" in gate_source
     assert "#define PREEXPANDED_FP8 1" in resident_gate_source
     assert "#define PREEXPANDED_FP8 1" in resident_down_source
+    for adaptive_source in (
+        adaptive_gate_source,
+        adaptive_gate_batch_source,
+        adaptive_down_source,
+        adaptive_down_batch_source,
+    ):
+        assert "#define PREEXPANDED_FP8 0" in adaptive_source
+        assert "#define DYNAMIC_WEIGHT_REPRESENTATION 1" in adaptive_source
+        assert "dynamic_parameter_representation" in adaptive_source
+        assert "read_compact_mxfp4x4" in adaptive_source
+        assert "read_expanded_fp8x4" in adaptive_source
+    assert "gate_preexpanded == up_preexpanded" in adaptive_gate_source
+    assert "gate_preexpanded == up_preexpanded" in adaptive_gate_batch_source
     assert "column) >> 2u" in resident_gate_source
     assert "column) >> 2u" in resident_down_source
     assert "quantized_hidden.words[word]" in prequant_gate_source
@@ -327,4 +364,8 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     assert "{{" not in down_source
     assert "{{" not in resident_gate_source
     assert "{{" not in resident_down_source
+    assert "{{" not in adaptive_gate_source
+    assert "{{" not in adaptive_gate_batch_source
+    assert "{{" not in adaptive_down_source
+    assert "{{" not in adaptive_down_batch_source
     compile_shader_artifacts(tmp_path)

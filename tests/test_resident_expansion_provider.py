@@ -37,7 +37,7 @@ from nerve.representation_optimizer.providers.resident_expansion import (
 from nerve.representation_optimizer.providers.resident_expansion.artifacts import (
     PROOF_PATH,
     component_overlay_path,
-    resident_shader_artifact_path,
+    adaptive_shader_artifact_path,
 )
 from nerve.representation_optimizer.providers.resident_expansion.contracts import (
     PROOF_VERIFIER_ID,
@@ -305,7 +305,7 @@ def _opportunity(package: Path) -> ResidentExpansionOpportunity:
             ("scalar", kernel["shader_path"]),
             ("batch", kernel["batch_implementations"][0]["stages"][0]["shader_path"]),
         ):
-            artifact_path = resident_shader_artifact_path(source_path)
+            artifact_path = adaptive_shader_artifact_path(source_path)
             stem = artifact_path.rsplit("/", 1)[-1][:-4]
             stem = stem.replace("__pbc31", "")
             replacements.append(
@@ -590,9 +590,9 @@ def _construct(tmp_path: Path, monkeypatch):
 
 def test_resident_shader_artifacts_reject_unsafe_or_recursive_paths() -> None:
     source = "shaders/independent_sparse_moe_down_mxfp4_e2m1_g32_h128_i128_e1_k1.spv"
-    assert resident_shader_artifact_path(source) == (
+    assert adaptive_shader_artifact_path(source) == (
         "kernels/independent_sparse_moe_down_mxfp4_e2m1_"
-        "resident_fp8_e4m3_g32_h128_i128_e1_k1.spv"
+        "adaptive_fp8_e4m3_g32_h128_i128_e1_k1.spv"
     )
     for invalid in (
         "../independent_sparse_moe_down_mxfp4_e2m1.spv",
@@ -601,7 +601,7 @@ def test_resident_shader_artifacts_reject_unsafe_or_recursive_paths() -> None:
         "shaders/unrelated.spv",
     ):
         with pytest.raises(ModelCompileError):
-            resident_shader_artifact_path(invalid)
+            adaptive_shader_artifact_path(invalid)
 
 
 def test_registry_discovers_a_generic_sparse_component_without_model_identity(

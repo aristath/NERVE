@@ -14,7 +14,7 @@ from nerve.quantized_transforms import (
 )
 from nerve.representation_optimizer.providers.resident_expansion.artifacts import (
     component_overlay_path,
-    resident_shader_artifact_path,
+    adaptive_shader_artifact_path,
 )
 from nerve.representation_optimizer.contracts import contract_digest
 from nerve.representation_optimizer.providers.codebook.shaders import compile_spirv
@@ -534,7 +534,7 @@ def _verify_source_coverage(
     )
     if actual_replacements != expected_replacements or any(
         item.get("artifact_path")
-        != resident_shader_artifact_path(item.get("source_path"))
+        != adaptive_shader_artifact_path(item.get("source_path"))
         for item in lowering["shader_replacements"]
     ):
         raise ModelCompileError(

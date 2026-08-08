@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.providers.resident_expansion.artifacts import (
-    resident_shader_artifact_path,
+    adaptive_shader_artifact_path,
 )
 from nerve.representation_optimizer.providers.types import ProviderContext
 from nerve.resident_representations import (
@@ -711,7 +711,7 @@ def _shader_replacement(
     source_path: str,
     execution_kind: str,
 ) -> ResidentShaderReplacement:
-    artifact_path = resident_shader_artifact_path(source_path)
+    artifact_path = adaptive_shader_artifact_path(source_path)
     stem = artifact_path.rsplit("/", 1)[-1][:-4]
     template_name = f"{_CONTROL_SUFFIX.sub('', stem)}.comp"
     if execution_kind == "batch" and "_batch1_" not in template_name:

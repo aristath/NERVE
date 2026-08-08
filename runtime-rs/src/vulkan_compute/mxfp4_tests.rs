@@ -347,6 +347,24 @@ mod mxfp4_tests {
             &[("{{TILE_ROWS}}", "64")],
             false,
         );
+        let adaptive_fp8_gate_shader = render_adaptive_fp8_shader_geometry(
+            "independent_sparse_moe_gate_up_batch1_mxfp4.comp.template",
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            &[("{{TILE_ROWS}}", "32"), ("{{SWIGLU_LIMIT}}", "10.0")],
+            true,
+        );
+        let adaptive_fp8_down_shader = render_adaptive_fp8_shader_geometry(
+            "independent_sparse_moe_down_batch1_mxfp4.comp.template",
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            &[("{{TILE_ROWS}}", "64")],
+            false,
+        );
 
         let hidden_fp8_words = hidden_size / 4;
         let hidden_blocks = hidden_size / 128;
@@ -600,6 +618,127 @@ mod mxfp4_tests {
         outputs
             .write_bytes(&vec![0; outputs.byte_capacity()])
             .unwrap();
+        let adaptive_compact_gate_dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &adaptive_fp8_gate_shader,
+                &[
+                    read_binding(0, &quantized_hidden, batch_width * hidden_size),
+                    read_binding(
+                        1,
+                        &hidden_scales,
+                        batch_width * hidden_blocks * size_of::<f32>(),
+                    ),
+                    read_binding(
+                        2,
+                        &routes,
+                        batch_width * experts_per_token * size_of::<u32>(),
+                    ),
+                    write_binding(
+                        3,
+                        &intermediates,
+                        batch_width * expert_frame_words * size_of::<u32>(),
+                    ),
+                    read_binding(4, gate_addresses.buffer(), gate_addresses.byte_capacity()),
+                    read_binding(5, &gate_slots, num_experts * 4 * size_of::<u32>()),
+                    read_binding(31, &gate_batch_control, 28),
+                ],
+                gate_dispatch_x as u32,
+                batch_width as u32,
+                512,
+                0,
+            )
+            .unwrap();
+        let adaptive_compact_down_dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &adaptive_fp8_down_shader,
+                &[
+                    read_binding(
+                        0,
+                        &intermediates,
+                        batch_width * expert_frame_words * size_of::<u32>(),
+                    ),
+                    read_binding(
+                        1,
+                        &routes,
+                        batch_width * experts_per_token * size_of::<u32>(),
+                    ),
+                    write_binding(2, &outputs, outputs.byte_capacity()),
+                    read_binding(3, down_addresses.buffer(), down_addresses.byte_capacity()),
+                    read_binding(4, &down_slots, num_experts * 2 * size_of::<u32>()),
+                    read_binding(31, &down_batch_control, 28),
+                ],
+                down_dispatch_x as u32,
+                batch_width as u32,
+                512,
+                0,
+            )
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&adaptive_compact_gate_dispatch, &[])
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&adaptive_compact_down_dispatch, &[])
+            .unwrap();
+        assert_eq!(
+            outputs.read_bytes(outputs.byte_capacity()).unwrap(),
+            native_output_bytes,
+            "adaptive sparse experts must preserve the compact MXFP4 path bit-for-bit"
+        );
+        let adaptive_compact_gate_sequence = device
+            .create_timestamped_resident_kernel_sequence()
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &adaptive_compact_gate_sequence,
+                &[VulkanResidentKernelSequenceStep::new(
+                    &adaptive_compact_gate_dispatch,
+                    &[],
+                )],
+            )
+            .unwrap();
+        let adaptive_compact_down_sequence = device
+            .create_timestamped_resident_kernel_sequence()
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &adaptive_compact_down_sequence,
+                &[VulkanResidentKernelSequenceStep::new(
+                    &adaptive_compact_down_dispatch,
+                    &[],
+                )],
+            )
+            .unwrap();
+        device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &adaptive_compact_gate_sequence,
+                timeout,
+            )
+            .unwrap();
+        device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &adaptive_compact_down_sequence,
+                timeout,
+            )
+            .unwrap();
+        let adaptive_compact_gate_ns = device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &adaptive_compact_gate_sequence,
+                timeout,
+            )
+            .unwrap();
+        let adaptive_compact_down_ns = device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &adaptive_compact_down_sequence,
+                timeout,
+            )
+            .unwrap();
+
+        intermediates
+            .write_bytes(&u32_bytes(&intermediate_storage))
+            .unwrap();
+        outputs
+            .write_bytes(&vec![0; outputs.byte_capacity()])
+            .unwrap();
         let preexpanded_gate_weight_bytes = hidden_size * intermediate_size;
         let preexpanded_gate_groups = (0..experts_per_token)
             .map(|_| {
@@ -613,6 +752,12 @@ mod mxfp4_tests {
             .collect::<Vec<_>>();
         let (_preexpanded_gate_arena, preexpanded_gate_addresses) =
             stable_resource_table(&device, &preexpanded_gate_groups, 256);
+        set_stable_resource_representation_tags(
+            &preexpanded_gate_addresses,
+            &(0..experts_per_token)
+                .flat_map(|_| [1u32, 0, 1, 0])
+                .collect::<Vec<_>>(),
+        );
         let preexpanded_gate_dispatch = device
             .create_resident_kernel_dispatch_2d(
                 &preexpanded_fp8_gate_shader,
@@ -658,9 +803,78 @@ mod mxfp4_tests {
             .collect::<Vec<_>>();
         let (_preexpanded_down_arena, preexpanded_down_addresses) =
             stable_resource_table(&device, &preexpanded_down_groups, 256);
+        set_stable_resource_representation_tags(
+            &preexpanded_down_addresses,
+            &(0..experts_per_token)
+                .flat_map(|_| [1u32, 0])
+                .collect::<Vec<_>>(),
+        );
         let preexpanded_down_dispatch = device
             .create_resident_kernel_dispatch_2d(
                 &preexpanded_fp8_down_shader,
+                &[
+                    read_binding(
+                        0,
+                        &intermediates,
+                        batch_width * expert_frame_words * size_of::<u32>(),
+                    ),
+                    read_binding(
+                        1,
+                        &routes,
+                        batch_width * experts_per_token * size_of::<u32>(),
+                    ),
+                    write_binding(2, &outputs, outputs.byte_capacity()),
+                    read_binding(
+                        3,
+                        preexpanded_down_addresses.buffer(),
+                        preexpanded_down_addresses.byte_capacity(),
+                    ),
+                    read_binding(4, &down_slots, num_experts * 2 * size_of::<u32>()),
+                    read_binding(31, &down_batch_control, 28),
+                ],
+                down_dispatch_x as u32,
+                batch_width as u32,
+                512,
+                0,
+            )
+            .unwrap();
+        let adaptive_expanded_gate_dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &adaptive_fp8_gate_shader,
+                &[
+                    read_binding(0, &quantized_hidden, batch_width * hidden_size),
+                    read_binding(
+                        1,
+                        &hidden_scales,
+                        batch_width * hidden_blocks * size_of::<f32>(),
+                    ),
+                    read_binding(
+                        2,
+                        &routes,
+                        batch_width * experts_per_token * size_of::<u32>(),
+                    ),
+                    write_binding(
+                        3,
+                        &intermediates,
+                        batch_width * expert_frame_words * size_of::<u32>(),
+                    ),
+                    read_binding(
+                        4,
+                        preexpanded_gate_addresses.buffer(),
+                        preexpanded_gate_addresses.byte_capacity(),
+                    ),
+                    read_binding(5, &gate_slots, num_experts * 4 * size_of::<u32>()),
+                    read_binding(31, &gate_batch_control, 28),
+                ],
+                gate_dispatch_x as u32,
+                batch_width as u32,
+                512,
+                0,
+            )
+            .unwrap();
+        let adaptive_expanded_down_dispatch = device
+            .create_resident_kernel_dispatch_2d(
+                &adaptive_fp8_down_shader,
                 &[
                     read_binding(
                         0,
@@ -697,6 +911,23 @@ mod mxfp4_tests {
             outputs.read_bytes(outputs.byte_capacity()).unwrap(),
             native_output_bytes,
             "pre-expanded FP8 sparse experts must preserve native MXFP4 BF16 boundaries"
+        );
+        intermediates
+            .write_bytes(&u32_bytes(&intermediate_storage))
+            .unwrap();
+        outputs
+            .write_bytes(&vec![0; outputs.byte_capacity()])
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&adaptive_expanded_gate_dispatch, &[])
+            .unwrap();
+        device
+            .run_resident_kernel_dispatch(&adaptive_expanded_down_dispatch, &[])
+            .unwrap();
+        assert_eq!(
+            outputs.read_bytes(outputs.byte_capacity()).unwrap(),
+            native_output_bytes,
+            "adaptive sparse experts must preserve the expanded FP8 path bit-for-bit"
         );
         let preexpanded_gate_sequence = device
             .create_timestamped_resident_kernel_sequence()
@@ -746,16 +977,74 @@ mod mxfp4_tests {
                 timeout,
             )
             .unwrap();
+        let adaptive_expanded_gate_sequence = device
+            .create_timestamped_resident_kernel_sequence()
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &adaptive_expanded_gate_sequence,
+                &[VulkanResidentKernelSequenceStep::new(
+                    &adaptive_expanded_gate_dispatch,
+                    &[],
+                )],
+            )
+            .unwrap();
+        let adaptive_expanded_down_sequence = device
+            .create_timestamped_resident_kernel_sequence()
+            .unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &adaptive_expanded_down_sequence,
+                &[VulkanResidentKernelSequenceStep::new(
+                    &adaptive_expanded_down_dispatch,
+                    &[],
+                )],
+            )
+            .unwrap();
+        device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &adaptive_expanded_gate_sequence,
+                timeout,
+            )
+            .unwrap();
+        device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &adaptive_expanded_down_sequence,
+                timeout,
+            )
+            .unwrap();
+        let adaptive_expanded_gate_ns = device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &adaptive_expanded_gate_sequence,
+                timeout,
+            )
+            .unwrap();
+        let adaptive_expanded_down_ns = device
+            .run_timestamped_recorded_resident_kernel_sequence_for(
+                &adaptive_expanded_down_sequence,
+                timeout,
+            )
+            .unwrap();
         eprintln!(
-            "native_mxfp4_batch_real_geometry width={batch_width} routes={} gate_ms={:.6} down_ms={:.6} total_ms={:.6} preexpanded_fp8_gate_ms={:.6} preexpanded_fp8_down_ms={:.6} preexpanded_fp8_total_ms={:.6} ratio={:.6} elapsed_ms={:.3}",
+            "native_mxfp4_batch_real_geometry width={batch_width} routes={} gate_ms={:.6} down_ms={:.6} total_ms={:.6} adaptive_compact_gate_ms={:.6} adaptive_compact_down_ms={:.6} adaptive_compact_total_ms={:.6} adaptive_compact_ratio={:.6} preexpanded_fp8_gate_ms={:.6} preexpanded_fp8_down_ms={:.6} preexpanded_fp8_total_ms={:.6} preexpanded_ratio={:.6} adaptive_expanded_gate_ms={:.6} adaptive_expanded_down_ms={:.6} adaptive_expanded_total_ms={:.6} adaptive_expanded_ratio={:.6} elapsed_ms={:.3}",
             batch_width * experts_per_token,
             gate_ns as f64 / 1_000_000.0,
             down_ns as f64 / 1_000_000.0,
             (gate_ns + down_ns) as f64 / 1_000_000.0,
+            adaptive_compact_gate_ns as f64 / 1_000_000.0,
+            adaptive_compact_down_ns as f64 / 1_000_000.0,
+            (adaptive_compact_gate_ns + adaptive_compact_down_ns) as f64 / 1_000_000.0,
+            (adaptive_compact_gate_ns + adaptive_compact_down_ns) as f64
+                / (gate_ns + down_ns) as f64,
             preexpanded_gate_ns as f64 / 1_000_000.0,
             preexpanded_down_ns as f64 / 1_000_000.0,
             (preexpanded_gate_ns + preexpanded_down_ns) as f64 / 1_000_000.0,
             (preexpanded_gate_ns + preexpanded_down_ns) as f64 / (gate_ns + down_ns) as f64,
+            adaptive_expanded_gate_ns as f64 / 1_000_000.0,
+            adaptive_expanded_down_ns as f64 / 1_000_000.0,
+            (adaptive_expanded_gate_ns + adaptive_expanded_down_ns) as f64 / 1_000_000.0,
+            (adaptive_expanded_gate_ns + adaptive_expanded_down_ns) as f64
+                / (preexpanded_gate_ns + preexpanded_down_ns) as f64,
             started.elapsed().as_secs_f64() * 1_000.0,
         );
         assert!(
@@ -1127,6 +1416,7 @@ mod mxfp4_tests {
                 if prequantized { "1" } else { "0" },
             ),
             ("{{PREEXPANDED_FP8}}", "0"),
+            ("{{DYNAMIC_WEIGHT_REPRESENTATION}}", "0"),
         ]
         .into_iter()
         .chain(stage_replacements.iter().copied())
@@ -1169,6 +1459,7 @@ mod mxfp4_tests {
             stage_replacements,
             prequantized,
             false,
+            false,
         );
         compile_rendered_shader(template_name, source)
     }
@@ -1191,6 +1482,30 @@ mod mxfp4_tests {
             stage_replacements,
             prequantized,
             true,
+            false,
+        );
+        compile_rendered_shader(template_name, source)
+    }
+
+    fn render_adaptive_fp8_shader_geometry(
+        template_name: &str,
+        hidden_size: usize,
+        intermediate_size: usize,
+        num_experts: usize,
+        experts_per_token: usize,
+        stage_replacements: &[(&str, &str)],
+        prequantized: bool,
+    ) -> Vec<u32> {
+        let source = render_mxfp4_shader_source(
+            template_name,
+            hidden_size,
+            intermediate_size,
+            num_experts,
+            experts_per_token,
+            stage_replacements,
+            prequantized,
+            false,
+            true,
         );
         compile_rendered_shader(template_name, source)
     }
@@ -1204,6 +1519,7 @@ mod mxfp4_tests {
         stage_replacements: &[(&str, &str)],
         prequantized: bool,
         preexpanded_fp8: bool,
+        adaptive_fp8: bool,
     ) -> String {
         let shader_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders");
         let mut source = std::fs::read_to_string(shader_dir.join(template_name)).unwrap();
@@ -1223,6 +1539,10 @@ mod mxfp4_tests {
             (
                 "{{PREEXPANDED_FP8}}",
                 if preexpanded_fp8 { "1" } else { "0" },
+            ),
+            (
+                "{{DYNAMIC_WEIGHT_REPRESENTATION}}",
+                if adaptive_fp8 { "1" } else { "0" },
             ),
         ]
         .into_iter()
@@ -1393,6 +1713,19 @@ mod mxfp4_tests {
                 .unwrap();
         }
         (arena, table)
+    }
+
+    fn set_stable_resource_representation_tags(
+        table: &VulkanStableResourceAddressTable,
+        tags: &[u32],
+    ) {
+        assert_eq!(tags.len(), table.slot_count());
+        let mut bytes = table.buffer().read_bytes(table.byte_capacity()).unwrap();
+        for (slot, tag) in tags.iter().copied().enumerate() {
+            let offset = slot * VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT + 28;
+            bytes[offset..offset + size_of::<u32>()].copy_from_slice(&tag.to_le_bytes());
+        }
+        table.buffer().write_bytes(&bytes).unwrap();
     }
 
     fn read_binding<'a>(

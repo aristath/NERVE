@@ -19,6 +19,7 @@ float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
 layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
 
 #define PREEXPANDED_FP8 {{PREEXPANDED_FP8}}
+#define DYNAMIC_WEIGHT_REPRESENTATION {{DYNAMIC_WEIGHT_REPRESENTATION}}
 
 layout(set = 0, binding = 0) readonly buffer ExpertIntermediates { uint words[]; } expert_intermediates;
 layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
@@ -52,7 +53,8 @@ const uint INTERMEDIATE_FP8_WORDS = INTERMEDIATE_SIZE / 4u;
 const uint INTERMEDIATE_BLOCKS = INTERMEDIATE_SIZE / 128u;
 const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
 const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
-const uint WEIGHT_ROW_BYTES = PREEXPANDED_FP8 != 0 ? INTERMEDIATE_SIZE : INTERMEDIATE_SIZE / 2u;
+const uint COMPACT_WEIGHT_ROW_BYTES = INTERMEDIATE_SIZE / 2u;
+const uint EXPANDED_WEIGHT_ROW_BYTES = INTERMEDIATE_SIZE;
 const uint SCALE_ROW_BYTES = INTERMEDIATE_SIZE / 32u;
 const uint ADDRESS_RECORD_WORDS = 8u;
 const uint DYNAMIC_PARAMETER_COUNT = 2u;
@@ -114,10 +116,41 @@ bool dynamic_parameter_record_is_valid(
     return address_record_is_resident(slot * ADDRESS_RECORD_WORDS, required_byte_count);
 }
 
+uint dynamic_parameter_representation(uint expert, uint parameter) {
+    uint parameter_index = expert * DYNAMIC_PARAMETER_COUNT + parameter;
+    if (parameter_index >= dynamic_parameter_slots.words.length()) return 0u;
+    uint slot = dynamic_parameter_slots.words[parameter_index];
+    if (slot == UNBOUND_PARAMETER_SLOT || slot >= address_table_slot_count()) return 0u;
+    uint record = slot * ADDRESS_RECORD_WORDS;
+    return dynamic_resource_addresses.words[record + 7u];
+}
+
+bool dynamic_weight_representation_is_valid(uint expert, uint parameter) {
+#if DYNAMIC_WEIGHT_REPRESENTATION
+    return dynamic_parameter_representation(expert, parameter) <= 1u;
+#else
+    return true;
+#endif
+}
+
+bool dynamic_weight_is_preexpanded(uint expert, uint parameter) {
+#if PREEXPANDED_FP8
+    return true;
+#elif DYNAMIC_WEIGHT_REPRESENTATION
+    return dynamic_parameter_representation(expert, parameter) == 1u;
+#else
+    return false;
+#endif
+}
+
 bool dynamic_expert_is_valid(uint expert) {
-    uint64_t weight_bytes = uint64_t(HIDDEN_SIZE) * uint64_t(WEIGHT_ROW_BYTES);
+    bool down_preexpanded = dynamic_weight_is_preexpanded(expert, 0u);
+    uint64_t weight_bytes = uint64_t(HIDDEN_SIZE) * uint64_t(
+        down_preexpanded ? EXPANDED_WEIGHT_ROW_BYTES : COMPACT_WEIGHT_ROW_BYTES
+    );
     uint64_t scale_bytes = uint64_t(HIDDEN_SIZE) * uint64_t(SCALE_ROW_BYTES);
-    return dynamic_parameter_record_is_valid(expert, 0u, weight_bytes)
+    return dynamic_weight_representation_is_valid(expert, 0u)
+        && dynamic_parameter_record_is_valid(expert, 0u, weight_bytes)
         && dynamic_parameter_record_is_valid(expert, 1u, scale_bytes);
 }
 
@@ -136,17 +169,26 @@ uint mxfp4_e4m3_bits(uint nibble) {
     return MXFP4_E4M3_BITS[nibble & 7u] | ((nibble & 8u) << 4u);
 }
 
-fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {
-#if PREEXPANDED_FP8
-    uint packed = weight.words[(row * WEIGHT_ROW_BYTES + column) >> 2u];
+fe4m3vec4 read_expanded_fp8x4(
+    DynamicU32Buffer weight,
+    uint row,
+    uint column
+) {
+    uint packed = weight.words[(row * EXPANDED_WEIGHT_ROW_BYTES + column) >> 2u];
     return uintBitsToFloate4m3EXT(u8vec4(
         uint8_t(packed),
         uint8_t(packed >> 8u),
         uint8_t(packed >> 16u),
         uint8_t(packed >> 24u)
     ));
-#else
-    uint byte_index = row * WEIGHT_ROW_BYTES + column / 2u;
+}
+
+fe4m3vec4 read_compact_mxfp4x4(
+    DynamicU32Buffer weight,
+    uint row,
+    uint column
+) {
+    uint byte_index = row * COMPACT_WEIGHT_ROW_BYTES + column / 2u;
     uint lo = read_u8(weight, byte_index);
     uint hi = read_u8(weight, byte_index + 1u);
     return uintBitsToFloate4m3EXT(u8vec4(
@@ -155,6 +197,18 @@ fe4m3vec4 read_mxfp4x4(DynamicU32Buffer weight, uint row, uint column) {
         uint8_t(mxfp4_e4m3_bits(hi & 0x0fu)),
         uint8_t(mxfp4_e4m3_bits(hi >> 4u))
     ));
+}
+
+fe4m3vec4 read_mxfp4x4(
+    DynamicU32Buffer weight,
+    uint row,
+    uint column,
+    bool preexpanded
+) {
+#if PREEXPANDED_FP8
+    return read_expanded_fp8x4(weight, row, column);
+#else
+    return read_compact_mxfp4x4(weight, row, column);
 #endif
 }
 
@@ -201,6 +255,62 @@ void quantize_intermediate(uint lane, uint batch_index, uint route) {
     }
 }
 
+#if DYNAMIC_WEIGHT_REPRESENTATION
+void accumulate_down_compact(
+    DynamicU32Buffer down_weight,
+    DynamicU32Buffer down_scale,
+    uint row,
+    inout float value
+) {
+    for (
+        uint word = gl_SubgroupInvocationID;
+        word < INTERMEDIATE_FP8_WORDS;
+        word += gl_SubgroupSize
+    ) {
+        uint column = word * 4u;
+        uint activation_block = column / 128u;
+        uint weight_block = column / 32u;
+        value = fma(
+            fp8_dot4_acc32(
+                quantized_intermediate[word],
+                read_compact_mxfp4x4(down_weight, row, column),
+                0.0
+            ),
+            intermediate_scales[activation_block]
+                * read_e8m0_scale(down_scale, row, weight_block),
+            value
+        );
+    }
+}
+
+void accumulate_down_expanded(
+    DynamicU32Buffer down_weight,
+    DynamicU32Buffer down_scale,
+    uint row,
+    inout float value
+) {
+    for (
+        uint word = gl_SubgroupInvocationID;
+        word < INTERMEDIATE_FP8_WORDS;
+        word += gl_SubgroupSize
+    ) {
+        uint column = word * 4u;
+        uint activation_block = column / 128u;
+        uint weight_block = column / 32u;
+        value = fma(
+            fp8_dot4_acc32(
+                quantized_intermediate[word],
+                read_expanded_fp8x4(down_weight, row, column),
+                0.0
+            ),
+            intermediate_scales[activation_block]
+                * read_e8m0_scale(down_scale, row, weight_block),
+            value
+        );
+    }
+}
+#endif
+
 void main() {
     uint group = gl_WorkGroupID.x;
     uint linear_route = group / TILES_PER_ROUTE;
@@ -231,6 +341,7 @@ void main() {
     if (expert >= NUM_EXPERTS || !dynamic_expert_is_valid(expert)) return;
     DynamicU32Buffer down_weight = dynamic_parameter(expert, 0u);
     DynamicU32Buffer down_scale = dynamic_parameter(expert, 1u);
+    bool down_preexpanded = dynamic_weight_is_preexpanded(expert, 0u);
     float route_weight = bf16_to_f32(packed_route >> 16u);
 
     uint lane = gl_LocalInvocationID.x;
@@ -245,6 +356,13 @@ void main() {
         uint row = first_row + local_row;
         float value = 0.0;
         if (row < HIDDEN_SIZE) {
+#if DYNAMIC_WEIGHT_REPRESENTATION
+            if (down_preexpanded) {
+                accumulate_down_expanded(down_weight, down_scale, row, value);
+            } else {
+                accumulate_down_compact(down_weight, down_scale, row, value);
+            }
+#else
             for (
                 uint word = gl_SubgroupInvocationID;
                 word < INTERMEDIATE_FP8_WORDS;
@@ -256,7 +374,7 @@ void main() {
                 value = fma(
                     fp8_dot4_acc32(
                         quantized_intermediate[word],
-                        read_mxfp4x4(down_weight, row, column),
+                        read_mxfp4x4(down_weight, row, column, down_preexpanded),
                         0.0
                     ),
                     intermediate_scales[activation_block]
@@ -264,6 +382,7 @@ void main() {
                     value
                 );
             }
+#endif
         }
         value = subgroupAdd(value);
         if (gl_SubgroupInvocationID == 0u) {
