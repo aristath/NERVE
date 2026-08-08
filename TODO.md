@@ -129,6 +129,16 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   activation edge can recover; independent hardware queues only become useful
   when a bounded resident window exposes genuine inter-token or inter-stream
   overlap instead of repartitioning the current serialized token schedule.
+- Replaying the stable initial demand-gated feedback topology was also tested
+  and removed. The implementation correctly keyed fresh-input and carried-input
+  shapes separately, survived real miss rollback/resume, replayed three warmed
+  calibration windows, preserved exact long-form behavior and recall, and
+  restored every GPU reservation. It still measured only 8.1736 mean decode
+  tok/s versus the accepted 8.4228 baseline. Normal adaptive execution selected
+  scalar decode after calibration, so the cached transaction was absent from
+  steady-state truth turns and could not improve them. Do not add more caching
+  around an execution candidate that does not win; the resident transaction
+  itself must remove device work or expose useful overlap before replay matters.
 - Demand-paged residency correctness, immutable miss records, causal suffix
   resume, complete-conversation convergence, shared bounded host caching, and
   exact teardown are implemented. Resident FP8 coexistence is also implemented
@@ -186,6 +196,10 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      timeline handoffs regressed the complete gate to 8.1466 tok/s. The next
      topology must span a bounded resident window and overlap independent token
      streams or proposal lanes before paying for additional queue submissions.
+     Caching the current demand-gated resident window is likewise exhausted: it
+     replayed correctly but remained slower than scalar execution and the
+     complete gate fell to 8.1736 tok/s. Change the executed device topology,
+     not merely how the losing topology is recorded.
    - The mounted input and output graph phases and packed host readback are now
      reusable transaction segments. Compose their dispatches, ingress/egress
      copies, demand gates, processor dispatches, and terminal readback into the
