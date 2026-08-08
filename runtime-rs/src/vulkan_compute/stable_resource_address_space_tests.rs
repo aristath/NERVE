@@ -24,7 +24,7 @@ fn stable_resource_address_contract_validates_alignment_and_layout() {
         byte_count: 0x1112_1314_1516_1718,
         generation: 0x2122_2324_2526_2728,
         resident: 0x3132_3334,
-        reserved: 0x4142_4344,
+        representation: 0x4142_4344,
     };
     assert_eq!(
         record.bytes(),
@@ -501,11 +501,18 @@ fn stable_resource_groups_atomically_exchange_physical_backing() {
 
     let mut table = VulkanStableResourceAddressTable::new(&device, &mut transfer, 2).unwrap();
     let device_publications = table
-        .publish_group(&mut transfer, &[(0, Arc::clone(&device_allocation))])
+        .publish_tagged_group(
+            &mut transfer,
+            &[(0, Arc::clone(&device_allocation), 7)],
+        )
         .unwrap();
     let host_publications = table
-        .publish_group(&mut transfer, &[(1, Arc::clone(&host_allocation))])
+        .publish_tagged_group(&mut transfer, &[(1, Arc::clone(&host_allocation), 9)])
         .unwrap();
+    assert_eq!(device_publications[0].representation(), 7);
+    assert_eq!(host_publications[0].representation(), 9);
+    assert_eq!(table.record(0).unwrap().representation, 7);
+    assert_eq!(table.record(1).unwrap().representation, 9);
     let output = device.create_resident_buffer(16).unwrap();
     output.write_bytes(&[0; 16]).unwrap();
     let dispatch = device
@@ -550,11 +557,15 @@ fn stable_resource_groups_atomically_exchange_physical_backing() {
         exchanged_device_publications[0].device_address(),
         host_allocation.device_address()
     );
+    assert_eq!(exchanged_device_publications[0].representation(), 9);
+    assert_eq!(table.record(0).unwrap().representation, 9);
     assert_eq!(exchanged_host_publications[0].generation(), 2);
     assert_eq!(
         exchanged_host_publications[0].device_address(),
         device_allocation.device_address()
     );
+    assert_eq!(exchanged_host_publications[0].representation(), 7);
+    assert_eq!(table.record(1).unwrap().representation, 7);
     assert!(table
         .swap_groups(
             &mut transfer,
@@ -940,7 +951,7 @@ fn stable_resource_address_space_is_visible_stable_and_transactional() {
             byte_count: 1024,
             generation: 1,
             resident: 1,
-            reserved: 0,
+            representation: 0,
         }
     );
     assert_eq!(table.record(3).unwrap().generation, 1);

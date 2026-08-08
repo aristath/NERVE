@@ -1012,7 +1012,7 @@ pub struct VulkanStableResourceAddressRecord {
     pub byte_count: u64,
     pub generation: u64,
     pub resident: u32,
-    pub reserved: u32,
+    pub representation: u32,
 }
 
 impl VulkanStableResourceAddressRecord {
@@ -1022,7 +1022,7 @@ impl VulkanStableResourceAddressRecord {
         bytes[8..16].copy_from_slice(&self.byte_count.to_le_bytes());
         bytes[16..24].copy_from_slice(&self.generation.to_le_bytes());
         bytes[24..28].copy_from_slice(&self.resident.to_le_bytes());
-        bytes[28..32].copy_from_slice(&self.reserved.to_le_bytes());
+        bytes[28..32].copy_from_slice(&self.representation.to_le_bytes());
         bytes
     }
 }
@@ -1033,6 +1033,7 @@ pub struct VulkanStableResourceAddressPublication {
     generation: u64,
     allocation_id: u64,
     device_address: u64,
+    representation: u32,
 }
 
 impl VulkanStableResourceAddressPublication {
@@ -1046,6 +1047,10 @@ impl VulkanStableResourceAddressPublication {
 
     pub fn device_address(&self) -> u64 {
         self.device_address
+    }
+
+    pub fn representation(&self) -> u32 {
+        self.representation
     }
 }
 
@@ -1120,6 +1125,18 @@ impl VulkanStableResourceAddressTable {
         transfer: &mut VulkanResidentTransferStream,
         resources: &[(usize, Arc<VulkanStableResourceAllocation>)],
     ) -> Result<Vec<VulkanStableResourceAddressPublication>, VulkanError> {
+        let tagged = resources
+            .iter()
+            .map(|(slot, allocation)| (*slot, Arc::clone(allocation), 0u32))
+            .collect::<Vec<_>>();
+        self.publish_tagged_group(transfer, &tagged)
+    }
+
+    pub fn publish_tagged_group(
+        &mut self,
+        transfer: &mut VulkanResidentTransferStream,
+        resources: &[(usize, Arc<VulkanStableResourceAllocation>, u32)],
+    ) -> Result<Vec<VulkanStableResourceAddressPublication>, VulkanError> {
         if resources.is_empty() {
             return Err(VulkanError(
                 "stable resource publication group must not be empty".to_string(),
@@ -1128,7 +1145,7 @@ impl VulkanStableResourceAddressTable {
         let mut slots = BTreeSet::new();
         let mut updates = Vec::with_capacity(resources.len());
         let mut publications = Vec::with_capacity(resources.len());
-        for (slot, allocation) in resources {
+        for (slot, allocation, representation) in resources {
             if !slots.insert(*slot) {
                 return Err(VulkanError(format!(
                     "stable resource publication repeats slot {slot}"
@@ -1162,7 +1179,7 @@ impl VulkanStableResourceAddressTable {
                 byte_count,
                 generation,
                 resident: 1,
-                reserved: 0,
+                representation: *representation,
             };
             updates.push((*slot, record, Some(Arc::clone(allocation))));
             publications.push(VulkanStableResourceAddressPublication {
@@ -1170,6 +1187,7 @@ impl VulkanStableResourceAddressTable {
                 generation,
                 allocation_id: allocation.allocation_id(),
                 device_address: allocation.device_address(),
+                representation: *representation,
             });
         }
         self.submit_updates(transfer, &updates)?;
@@ -1276,7 +1294,7 @@ impl VulkanStableResourceAddressTable {
                     byte_count,
                     generation: left_generation,
                     resident: 1,
-                    reserved: 0,
+                    representation: right_publication.representation,
                 },
                 Some(Arc::clone(right_allocation)),
             ));
@@ -1287,7 +1305,7 @@ impl VulkanStableResourceAddressTable {
                     byte_count,
                     generation: right_generation,
                     resident: 1,
-                    reserved: 0,
+                    representation: left_publication.representation,
                 },
                 Some(Arc::clone(left_allocation)),
             ));
@@ -1296,12 +1314,14 @@ impl VulkanStableResourceAddressTable {
                 generation: left_generation,
                 allocation_id: right_allocation.allocation_id(),
                 device_address: right_allocation.device_address(),
+                representation: right_publication.representation,
             });
             exchanged_right.push(VulkanStableResourceAddressPublication {
                 slot: right_publication.slot,
                 generation: right_generation,
                 allocation_id: left_allocation.allocation_id(),
                 device_address: left_allocation.device_address(),
+                representation: left_publication.representation,
             });
         }
         self.submit_updates(transfer, &updates)?;
@@ -1337,6 +1357,7 @@ impl VulkanStableResourceAddressTable {
             if record.resident != 1
                 || record.generation != publication.generation
                 || record.device_address != publication.device_address
+                || record.representation != publication.representation
                 || self.resident_allocations[publication.slot]
                     .as_ref()
                     .map(|allocation| allocation.allocation_id())
@@ -1441,6 +1462,7 @@ impl VulkanStableResourceAddressTable {
         if record.resident != 1
             || record.generation != publication.generation
             || record.device_address != publication.device_address
+            || record.representation != publication.representation
             || allocation.allocation_id() != publication.allocation_id
         {
             return Err(VulkanError(format!(
