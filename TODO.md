@@ -76,6 +76,18 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   selection, and value consumption into one compiled transaction and improve the
   whole attributed attention phase; do not materialize all scores between
   independently scheduled kernels.
+- Caching one paged-state base address per token in the existing fused indexed-
+  attention workgroup was byte-exact and 10.9% faster in the exact
+  q64/kv1/d512/r128/k8192 microbenchmark (2.67260 versus 3.00004 ms), but it too
+  failed the complete product gate. After three full warmup conversations, the
+  measured conversation was fully resident, preserved coherent answers and turn
+  recall, and restored every GPU reservation, yet reached only 7.9096 decode and
+  7.9520 prefill tok/s versus the accepted 8.4228/8.3570 baseline. The 6.09%
+  decode regression proves that removing redundant address translation inside
+  this barrier topology does not improve the complete stream. The shader,
+  renderer selection, exact fixture, and compiled package were removed. Do not
+  retry state-base caching without also replacing the serial full-width reduction
+  and barrier schedule as one materially different fused transaction.
 - Three further exact local-kernel candidates were rejected after the refined
   trace. Paired packed-BF16 state reads were 1.1% slower, and parallel tile
   exponentials were 0.5% slower; both preserved every BF16 output bit. A
