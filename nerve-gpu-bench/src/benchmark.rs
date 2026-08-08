@@ -1192,14 +1192,6 @@ pub(crate) fn format_workload_id(base: &str, workload_class: &str, format: &str)
     format!("{base}:{workload_class}:{format}")
 }
 
-fn split_bytes(total: usize, parts: usize) -> Vec<usize> {
-    let base = total / parts;
-    let remainder = total % parts;
-    (0..parts)
-        .map(|index| base + usize::from(index < remainder))
-        .collect()
-}
-
 pub(crate) fn activation_bytes_for_payload(payload_bytes: usize) -> usize {
     payload_bytes.clamp(4 * 1024, 256 * 1024)
 }
@@ -1392,8 +1384,15 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(ids.contains(&"synthetic_layer_split_group_small_payload:dense_projection:f32"));
         assert!(ids.contains(&"synthetic_tensor_split_group_small_payload:dense_projection:f32"));
-        let split = split_bytes(10, 3);
-        assert_eq!(split, [4, 3, 3]);
+        let triplet_specs = specs
+            .iter()
+            .filter(|spec| spec.participant_count == 3)
+            .collect::<Vec<_>>();
+        assert!(
+            triplet_specs
+                .iter()
+                .all(|spec| spec.parameter_bytes_per_participant == (5 * 1024 * 1024) / 3)
+        );
     }
 
     #[test]

@@ -885,6 +885,7 @@ fn feature_flags_include(feature_flags: &[String], required_feature: &str) -> bo
 }
 
 struct OpenVulkanComputeDevice {
+    _entry: Entry,
     device: ash::Device,
     instance: ash::Instance,
     compute_queue_family_index: u32,
@@ -898,6 +899,7 @@ struct OpenVulkanComputeDevice {
 impl Drop for OpenVulkanComputeDevice {
     fn drop(&mut self) {
         unsafe {
+            let _ = self.device.device_wait_idle();
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
@@ -2667,6 +2669,7 @@ fn open_compute_device(target: &Target) -> Result<OpenVulkanComputeDevice, Strin
     .map_err(|error| format!("could not create Vulkan instance: {error:?}"))?;
     let result = unsafe {
         open_compute_device_from_instance(
+            entry,
             instance,
             vulkan.physical_device_index,
             vulkan.feature_flags.clone(),
@@ -2682,6 +2685,7 @@ fn open_compute_device(target: &Target) -> Result<OpenVulkanComputeDevice, Strin
 }
 
 unsafe fn open_compute_device_from_instance(
+    entry: Entry,
     instance: ash::Instance,
     physical_device_index: usize,
     feature_flags: Vec<String>,
@@ -2742,6 +2746,7 @@ unsafe fn open_compute_device_from_instance(
     )?;
     let queue = unsafe { device.get_device_queue(compute_queue_family_index, 0) };
     Ok(OpenVulkanComputeDevice {
+        _entry: entry,
         device,
         instance,
         compute_queue_family_index,
