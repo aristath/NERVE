@@ -180,6 +180,7 @@ include!("vulkan_stream_circuit/physical_residency_checkpoint.rs");
 include!("vulkan_stream_circuit/residency_backpressure_scheduler.rs");
 include!("vulkan_stream_circuit/runtime_residency_plan.rs");
 include!("vulkan_stream_circuit/runtime_auto_placement.rs");
+include!("vulkan_stream_circuit/runtime_placement_calibration.rs");
 include!("vulkan_stream_circuit/resource_backing_store.rs");
 include!("vulkan_stream_circuit/device_resource_residency.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_upload.rs");

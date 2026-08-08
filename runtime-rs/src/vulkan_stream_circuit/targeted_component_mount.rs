@@ -3,81 +3,99 @@ pub struct VulkanResidentTargetedModelPackageDeviceSlice {
     demand_context: Option<VulkanDemandResidencyExecutionContext>,
 }
 
-impl VulkanResidentTargetedModelPackageDeviceSlice {
-    pub fn from_runtime_model_for_device_with_parameter_pool(
+#[derive(Clone)]
+struct VulkanResidentTargetedModelPackageDeviceSlicePlan {
+    component_id: String,
+    device_id: String,
+    execution_scope: String,
+    tensor_index: Arc<TensorIndex>,
+    contract: Arc<CompiledResourceResidencyContract>,
+    residency_plan: VulkanRuntimeResidencyPlan,
+    slice_plan: VulkanResidentModelPackageDeviceSlicePlan,
+}
+
+impl VulkanResidentTargetedModelPackageDeviceSlicePlan {
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
         device: &VulkanComputeDevice,
-        manifest_dir: impl AsRef<Path>,
-        runtime_model: VulkanResidentRuntimeModel,
-        component_id: impl AsRef<str>,
-        device_id: impl AsRef<str>,
-        dynamic_state_capacity_activations: Option<usize>,
-        parameter_pool: &VulkanResidentBufferPool,
+        manifest_dir: &Path,
+        runtime_model: &VulkanResidentRuntimeModel,
+        component_id: &str,
+        device_id: &str,
+        capacity: usize,
+        tensor_index: Arc<TensorIndex>,
+        contract: Arc<CompiledResourceResidencyContract>,
+        residency_plan: VulkanRuntimeResidencyPlan,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
-        let manifest_dir = manifest_dir.as_ref();
-        let component_id = component_id.as_ref();
-        let device_id = device_id.as_ref();
-        let execution_scope = runtime_model.execution_scope.clone();
-        let capacity = dynamic_state_capacity_activations
-            .unwrap_or(runtime_model.package.max_context_activations);
-        let tensor_index = runtime_model.load_runtime_tensor_index(manifest_dir)?;
-        let contract = Arc::new(
-            instantiate_runtime_resource_contract(&runtime_model).map_err(|error| {
-                targeted_component_error_value(format!(
-                    "failed to instantiate targeted runtime resource contract: {error}"
-                ))
-            })?,
-        );
-        let residency_plan = plan_vulkan_runtime_residency_with_contract(
+        let slice_plan = VulkanResidentModelPackageDeviceSlicePlan::prepare(
+            device,
             manifest_dir,
-            &runtime_model,
-            &tensor_index,
-            capacity,
-            0,
-            ResourceResidencyPolicy::DemandRetained,
+            runtime_model,
             &contract,
-        )
-        .map_err(|error| {
-            targeted_component_error_value(format!(
-                "failed to plan targeted demand residency: {error}"
-            ))
-        })?;
-        let mut slice = VulkanResidentModelPackageDeviceSlice::
-            from_runtime_model_for_device_with_parameter_pool(
-                device,
-                manifest_dir,
-                runtime_model,
-                device_id,
-                Some(capacity),
-                parameter_pool,
-            )?;
+            &tensor_index,
+            device_id,
+            capacity,
+        )?;
+        Ok(Self {
+            component_id: component_id.to_string(),
+            device_id: device_id.to_string(),
+            execution_scope: runtime_model.execution_scope.clone(),
+            tensor_index,
+            contract,
+            residency_plan,
+            slice_plan,
+        })
+    }
+
+    fn materialize(
+        &self,
+        device: &VulkanComputeDevice,
+        manifest_dir: &Path,
+        parameter_pool: &VulkanResidentBufferPool,
+    ) -> Result<VulkanResidentTargetedModelPackageDeviceSlice, VulkanResidentTokenModelPackageError>
+    {
+        let mut slice = self.slice_plan.clone().materialize(
+            device,
+            &self.tensor_index,
+            &BTreeSet::new(),
+            Some(parameter_pool),
+        )?;
         if slice.physical_residency_schedule().checkpoints.is_empty() {
-            return Ok(Self {
+            return Ok(VulkanResidentTargetedModelPackageDeviceSlice {
                 slice,
                 demand_context: None,
             });
         }
 
-        let allowed_selector_ids =
-            targeted_demand_selector_ids(&contract.selectors, &execution_scope, component_id);
+        let allowed_selector_ids = targeted_demand_selector_ids(
+            &self.contract.selectors,
+            &self.execution_scope,
+            &self.component_id,
+        );
         if allowed_selector_ids.is_empty() {
             return targeted_component_error(format!(
-                "targeted demand-resident component {component_id:?} has no owned selectors"
+                "targeted demand-resident component {:?} has no owned selectors",
+                self.component_id,
             ));
         }
         let layout = Arc::new(
-            VulkanCompiledResourceAddressLayout::from_contract(&contract).map_err(|error| {
-                targeted_component_error_value(format!(
-                    "failed to lower targeted compiled-resource addresses: {error}"
-                ))
-            })?,
+            VulkanCompiledResourceAddressLayout::from_contract(&self.contract).map_err(
+                |error| {
+                    targeted_component_error_value(format!(
+                        "failed to lower targeted compiled-resource addresses: {error}"
+                    ))
+                },
+            )?,
         );
-        let parameter_residency = residency_plan
+        let parameter_residency = self
+            .residency_plan
             .device_plans
             .iter()
-            .find(|plan| plan.device_id == device_id)
+            .find(|plan| plan.device_id == self.device_id)
             .ok_or_else(|| {
                 targeted_component_error_value(format!(
-                    "targeted residency plan omitted device {device_id:?}"
+                    "targeted residency plan omitted device {:?}",
+                    self.device_id,
                 ))
             })?;
         let maximum_dynamic_bytes = parameter_residency
@@ -104,17 +122,17 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
                 "targeted demand-resident component has no upload staging headroom",
             );
         }
-        let upload_alignment = compiled_resource_upload_alignment(&contract, device)
+        let upload_alignment = compiled_resource_upload_alignment(&self.contract, device)
             .map_err(|error| targeted_component_error_value(error.to_string()))?;
         let store_residency = plan_compiled_resource_store_residency(
-            &contract,
+            &self.contract,
             &layout,
             &allowed_selector_ids,
             maximum_group_bytes,
             upload_alignment,
         )
         .map_err(|error| targeted_component_error_value(error.to_string()))?;
-        let component_ids = BTreeSet::from([component_id.to_string()]);
+        let component_ids = BTreeSet::from([self.component_id.clone()]);
         let working_set_bytes = parameter_residency
             .working_set
             .transient_state_bytes
@@ -134,8 +152,7 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
         let admission = device
             .admit_device_local_memory(u64::try_from(pending_fixed_bytes).unwrap_or(u64::MAX))
             .map_err(|error| targeted_component_error_value(error.to_string()))?;
-        let safe_dynamic_bytes =
-            usize::try_from(admission.allocatable_bytes).unwrap_or(usize::MAX);
+        let safe_dynamic_bytes = usize::try_from(admission.allocatable_bytes).unwrap_or(usize::MAX);
         let addressable_slot_count = layout
             .addressable_slot_count_for_selectors(&allowed_selector_ids)
             .map_err(|error| targeted_component_error_value(error.to_string()))?;
@@ -153,11 +170,12 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
                 "targeted demand residency can admit {resident_payload_capacity} payload bytes but one selected group requires {maximum_group_bytes}"
             ));
         }
-        let maximum_ranges_per_group = compiled_resource_maximum_ranges_per_group(&contract)
-            .map_err(|error| targeted_component_error_value(error.to_string()))?;
+        let maximum_ranges_per_group =
+            compiled_resource_maximum_ranges_per_group(&self.contract)
+                .map_err(|error| targeted_component_error_value(error.to_string()))?;
         let store_id = format!(
-            "{}:targeted:{device_id}:{execution_scope}:{component_id}",
-            slice.package_id,
+            "{}:targeted:{}:{}:{}",
+            slice.package_id, self.device_id, self.execution_scope, self.component_id,
         );
         let store = Arc::new(
             VulkanCompiledResourceDeviceStore::new(
@@ -165,9 +183,9 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
                 ResourceResidencyPolicy::DemandRetained,
                 store_id.clone(),
                 device.physical_device_id(),
-                vec![device_id.to_string()],
+                vec![self.device_id.clone()],
                 manifest_dir,
-                Arc::clone(&contract),
+                Arc::clone(&self.contract),
                 Arc::clone(&layout),
                 allowed_selector_ids,
                 resident_payload_capacity,
@@ -195,7 +213,7 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
             })?;
         slice.dynamic_resource_buffers = Some(
             store
-                .dynamic_buffers_for_components(device, &execution_scope, &component_ids)
+                .dynamic_buffers_for_components(device, &self.execution_scope, &component_ids)
                 .map_err(|error| {
                     targeted_component_error_value(format!(
                         "failed to bind targeted dynamic resources: {error}"
@@ -208,17 +226,69 @@ impl VulkanResidentTargetedModelPackageDeviceSlice {
             ))
         })?;
         let demand_context = VulkanDemandResidencyExecutionContext {
-            execution_scope,
-            contract,
+            execution_scope: self.execution_scope.clone(),
+            contract: Arc::clone(&self.contract),
             layout,
             store,
             owner: DeviceResourceResidencyOwnerId::new(format!("{store_id}:session"))
                 .map_err(|error| targeted_component_error_value(error.to_string()))?,
         };
-        Ok(Self {
+        Ok(VulkanResidentTargetedModelPackageDeviceSlice {
             slice,
             demand_context: Some(demand_context),
         })
+    }
+}
+
+impl VulkanResidentTargetedModelPackageDeviceSlice {
+    pub fn from_runtime_model_for_device_with_parameter_pool(
+        device: &VulkanComputeDevice,
+        manifest_dir: impl AsRef<Path>,
+        runtime_model: VulkanResidentRuntimeModel,
+        component_id: impl AsRef<str>,
+        device_id: impl AsRef<str>,
+        dynamic_state_capacity_activations: Option<usize>,
+        parameter_pool: &VulkanResidentBufferPool,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        let manifest_dir = manifest_dir.as_ref();
+        let component_id = component_id.as_ref();
+        let device_id = device_id.as_ref();
+        let capacity = dynamic_state_capacity_activations
+            .unwrap_or(runtime_model.package.max_context_activations);
+        let tensor_index = Arc::new(runtime_model.load_runtime_tensor_index(manifest_dir)?);
+        let contract = Arc::new(
+            instantiate_runtime_resource_contract(&runtime_model).map_err(|error| {
+                targeted_component_error_value(format!(
+                    "failed to instantiate targeted runtime resource contract: {error}"
+                ))
+            })?,
+        );
+        let residency_plan = plan_vulkan_runtime_residency_with_contract(
+            manifest_dir,
+            &runtime_model,
+            &tensor_index,
+            capacity,
+            0,
+            ResourceResidencyPolicy::DemandRetained,
+            &contract,
+        )
+        .map_err(|error| {
+            targeted_component_error_value(format!(
+                "failed to plan targeted demand residency: {error}"
+            ))
+        })?;
+        VulkanResidentTargetedModelPackageDeviceSlicePlan::prepare(
+            device,
+            manifest_dir,
+            &runtime_model,
+            component_id,
+            device_id,
+            capacity,
+            tensor_index,
+            contract,
+            residency_plan,
+        )?
+        .materialize(device, manifest_dir, parameter_pool)
     }
 }
 

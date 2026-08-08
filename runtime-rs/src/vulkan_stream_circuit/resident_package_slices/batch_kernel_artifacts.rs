@@ -1,3 +1,4 @@
+#[derive(Clone)]
 struct VulkanResidentComponentBatchKernelArtifact {
     component_id: String,
     node_id: String,
@@ -18,16 +19,13 @@ impl VulkanResidentComponentBatchKernelArtifact {
             VulkanComponentBatchExecutionMode::IndependentStreams => {
                 self.independent_candidate_compatible
             }
-            VulkanComponentBatchExecutionMode::CausalSequence => {
-                self.causal_sequence_compatible
-            }
-            VulkanComponentBatchExecutionMode::ParallelBlock => {
-                self.parallel_block_compatible
-            }
+            VulkanComponentBatchExecutionMode::CausalSequence => self.causal_sequence_compatible,
+            VulkanComponentBatchExecutionMode::ParallelBlock => self.parallel_block_compatible,
         }
     }
 }
 
+#[derive(Clone)]
 struct VulkanResidentComponentBatchStageArtifact {
     shader_path: String,
     spirv_words: Vec<u32>,

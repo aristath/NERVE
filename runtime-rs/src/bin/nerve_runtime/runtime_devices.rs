@@ -76,20 +76,23 @@ fn runtime_auto_placement_device_is_eligible(device: &VulkanComputeDeviceInfo) -
 }
 
 fn rank_runtime_auto_placement_candidates_across_capability_classes(
-    mut measured: Vec<(bool, usize, String, VulkanRuntimePlacementCandidate)>,
+    mut measured: Vec<(u128, bool, usize, String, VulkanRuntimePlacementCandidate)>,
     primary_capability_class: Option<&str>,
 ) -> Vec<VulkanRuntimePlacementCandidate> {
-    measured.sort_by_key(|(selected_by_default, index, capability_class, candidate)| {
-        (
-            primary_capability_class.is_some_and(|primary| capability_class != primary),
-            std::cmp::Reverse(candidate.safe_capacity_bytes),
-            !*selected_by_default,
-            *index,
-        )
-    });
+    measured.sort_by_key(
+        |(execution_cost, selected_by_default, index, capability_class, candidate)| {
+            (
+                *execution_cost,
+                primary_capability_class.is_some_and(|primary| capability_class != primary),
+                std::cmp::Reverse(candidate.safe_capacity_bytes),
+                !*selected_by_default,
+                *index,
+            )
+        },
+    );
     measured
         .into_iter()
-        .map(|(_, _, _, candidate)| candidate)
+        .map(|(_, _, _, _, candidate)| candidate)
         .collect()
 }
 
@@ -134,9 +137,7 @@ fn runtime_capacity_packed_model(
         }
         let profile = profiles
             .iter()
-            .find(|profile| {
-                profile.hardware_identity.stable_device_id == device.physical_device_id
-            })
+            .find(|profile| profile.hardware_identity.stable_device_id == device.physical_device_id)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -175,9 +176,7 @@ fn runtime_capacity_packed_model(
         editor_device.runtime_device_id = Some(physical_device_id.clone());
         editor_device.hardware_profile = profiles
             .iter()
-            .find(|profile| {
-                profile.hardware_identity.stable_device_id == physical_device_id
-            })
+            .find(|profile| profile.hardware_identity.stable_device_id == physical_device_id)
             .cloned();
     }
     let compatibility_editor =
@@ -210,20 +209,110 @@ fn runtime_capacity_packed_model(
     for incompatibility in incompatibilities {
         eprintln!("nerve runtime auto-placement: excluded {incompatibility}");
     }
+    let calibration_started = Instant::now();
+    let mut calibration_suite = VulkanRuntimePlacementCalibrationSuite::prepare(
+        manifest_dir,
+        &runtime_model,
+        context_capacity_activations,
+    )?;
+    eprintln!(
+        "nerve runtime placement calibration: execution_signatures={}",
+        calibration_suite.targets().len(),
+    );
+    let mut calibration_evidence = BTreeMap::<String, (String, String)>::new();
+    let mut placement_costs = VulkanRuntimePlacementCostModel::default();
     let mut measured_candidates = Vec::with_capacity(eligible_devices.len());
     let mut opened_devices = Vec::with_capacity(eligible_devices.len());
     for (device_info, profile) in eligible_devices {
-        let device = catalog.open_physical_device_index(device_info.physical_device_index)?;
-        let safe_capacity_bytes = usize::try_from(
-            device.device_local_memory_budget().reservable_bytes,
-        )
-        .map_err(|_| {
+        if calibration_started.elapsed() >= VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "runtime package-specific placement calibration exceeded its one-minute bound",
+            )
+            .into());
+        }
+        let device =
+            Rc::new(catalog.open_physical_device_index(device_info.physical_device_index)?);
+        let budget = device.device_local_memory_budget();
+        let available_before = device.available_device_local_memory_bytes();
+        let safe_capacity_bytes = usize::try_from(budget.reservable_bytes).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Vulkan reservable device memory exceeds usize",
             )
         })?;
+        eprintln!(
+            "nerve runtime placement calibration: device={}, name={:?}, total_bytes={}, available_before_bytes={}, reservable_bytes={}, protected_headroom_bytes={}",
+            device_info.physical_device_id,
+            device_info.device_name,
+            device.device_local_memory_bytes(),
+            available_before,
+            budget.reservable_bytes,
+            budget.protected_headroom_bytes,
+        );
+        let calibrations = calibrate_vulkan_runtime_placement_candidate(
+            Rc::clone(&device),
+            manifest_dir,
+            &profile.capability_class,
+            &mut calibration_suite,
+        )?;
+        let available_after = device.available_device_local_memory_bytes();
+        for calibration in calibrations {
+            if calibration.output_digest.is_empty() || calibration.state_digest.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "runtime placement calibration omitted deterministic output evidence",
+                )
+                .into());
+            }
+            let evidence = (
+                calibration.output_digest.clone(),
+                calibration.state_digest.clone(),
+            );
+            if calibration_evidence
+                .get(&calibration.target.signature_id)
+                .is_some_and(|expected| expected != &evidence)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "runtime placement calibration produced different output or state across compatible devices for execution signature {}",
+                        calibration.target.signature_id,
+                    ),
+                )
+                .into());
+            }
+            calibration_evidence
+                .entry(calibration.target.signature_id.clone())
+                .or_insert(evidence);
+            placement_costs.record_calibration(
+                &calibration.physical_device_id,
+                &calibration.target,
+                calibration.measured_ns_per_activation,
+            )?;
+            eprintln!(
+                "nerve runtime placement calibration: device={}, signature={}, representative={}.{}, occurrences={}, implementation={}, shared_prepare_ns={}, slice_plan_prepare_ns={}, slice_materialize_ns={}, session_mount_ns={}, warmup_ns={}, measured_ns={}, measured_ns_per_activation={}, dispatches={}, available_after_bytes={}",
+                calibration.physical_device_id,
+                calibration.target.signature_id,
+                calibration.target.component_id,
+                calibration.target.terminal_node_id,
+                calibration.target.component_ids.len(),
+                calibration.target.implementation,
+                calibration.shared_prepare_ns,
+                calibration.slice_plan_prepare_ns,
+                calibration.slice_materialize_ns,
+                calibration.session_mount_ns,
+                calibration.warmup_execution_ns,
+                calibration.measured_execution_ns,
+                calibration.measured_ns_per_activation,
+                calibration.physical_dispatch_count,
+                available_after,
+            );
+        }
+        let aggregate_execution_ns =
+            placement_costs.aggregate_device_execution_ns(&device_info.physical_device_id)?;
         measured_candidates.push((
+            aggregate_execution_ns,
             device_info.selected_by_default,
             device_info.physical_device_index,
             profile.capability_class.clone(),
@@ -233,6 +322,13 @@ fn runtime_capacity_packed_model(
             },
         ));
         opened_devices.push(device);
+    }
+    if calibration_started.elapsed() > VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "runtime package-specific placement calibration exceeded its one-minute bound",
+        )
+        .into());
     }
     // A smaller model stays on the primary capability class, but every other
     // compatible discrete class remains available as a contiguous spill
@@ -246,6 +342,7 @@ fn runtime_capacity_packed_model(
         manifest_dir,
         &runtime_model,
         &candidates,
+        Some(&placement_costs),
         &profiles_by_physical_device,
         context_capacity_activations,
         speculative_draft_tokens,
@@ -284,11 +381,8 @@ fn runtime_capacity_packed_model(
         .device_plans
         .iter()
         .map(|plan| {
-            vulkan_runtime_device_capacity_admission_bytes(
-                plan,
-                args.resource_residency_policy,
-            )
-            .map(|bytes| format!("{}={bytes}", plan.device_id))
+            vulkan_runtime_device_capacity_admission_bytes(plan, args.resource_residency_policy)
+                .map(|bytes| format!("{}={bytes}", plan.device_id))
         })
         .collect::<Result<Vec<_>, _>>()?;
     eprintln!(
@@ -402,8 +496,7 @@ fn runtime_bound_vulkan_devices(
         let hardware_profile = available_profiles
             .iter()
             .find(|profile| {
-                profile.hardware_identity.stable_device_id
-                    == available_device.physical_device_id
+                profile.hardware_identity.stable_device_id == available_device.physical_device_id
             })
             .ok_or_else(|| {
                 io::Error::new(
@@ -414,10 +507,7 @@ fn runtime_bound_vulkan_devices(
                     ),
                 )
             })?;
-        hardware_profiles.insert(
-            logical_device_id.clone(),
-            hardware_profile.clone(),
-        );
+        hardware_profiles.insert(logical_device_id.clone(), hardware_profile.clone());
     }
 
     Ok(RuntimeBoundVulkanDevices {
@@ -543,12 +633,10 @@ fn runtime_target_for_logical_device(
     available_devices: &[VulkanComputeDeviceInfo],
 ) -> RuntimeEdgeRouteTarget {
     if let Some(target) = args.device_bindings.get(logical_device_id) {
-        let physical_device_index = resolve_runtime_vulkan_physical_device_ref_in(
-            target,
-            available_devices,
-        )
-            .ok()
-            .flatten();
+        let physical_device_index =
+            resolve_runtime_vulkan_physical_device_ref_in(target, available_devices)
+                .ok()
+                .flatten();
         return RuntimeEdgeRouteTarget {
             target: Some(target.clone()),
             physical_device_index,

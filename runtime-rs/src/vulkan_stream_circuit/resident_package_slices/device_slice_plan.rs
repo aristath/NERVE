@@ -1,3 +1,4 @@
+#[derive(Clone)]
 struct VulkanResidentModelPackageDeviceSlicePlan {
     package_id: String,
     device_id: String,
@@ -13,6 +14,7 @@ struct VulkanResidentModelPackageDeviceSlicePlan {
     targeted_output: Option<VulkanResidentTargetedOutputTransducerPlan>,
 }
 
+#[derive(Clone)]
 struct VulkanResidentTargetedOutputTransducerPlan {
     parameter_plan: VulkanPermanentParameterBufferPlan,
     embedding_norm_spirv_words: Vec<u32>,
@@ -122,64 +124,60 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             &prepared_plan,
         )?;
         let targeted_output = hosts_targeted_output
-        .then(|| {
-            Ok(VulkanResidentTargetedOutputTransducerPlan {
-                parameter_plan:
-                    VulkanPermanentParameterBufferPlan::from_transducer_parameters_for(
-                        device_id,
-                        &resource_plan,
-                        Some(tensor_index),
-                        output_component_id,
-                    )
-                    .map_err(|error| {
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "failed to plan targeted output-transducer parameters: {error}"
-                        ))
-                    })?,
-                embedding_norm_spirv_words:
-                    load_required_resident_model_package_shader(
+            .then(|| {
+                Ok(VulkanResidentTargetedOutputTransducerPlan {
+                    parameter_plan:
+                        VulkanPermanentParameterBufferPlan::from_transducer_parameters_for(
+                            device_id,
+                            &resource_plan,
+                            Some(tensor_index),
+                            output_component_id,
+                        )
+                        .map_err(|error| {
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to plan targeted output-transducer parameters: {error}"
+                            ))
+                        })?,
+                    embedding_norm_spirv_words: load_required_resident_model_package_shader(
                         manifest_dir,
                         &runtime_model
                             .package
                             .output_transducer
                             .embedding_norm_shader_path,
                     )?,
-                embedding_norm_batch_spirv_words:
-                    load_required_resident_model_package_shader(
+                    embedding_norm_batch_spirv_words: load_required_resident_model_package_shader(
                         manifest_dir,
                         &runtime_model
                             .package
                             .output_transducer
                             .embedding_norm_batch_shader_path,
                     )?,
-                projection_spirv_words:
-                    load_required_resident_model_package_shader(
+                    projection_spirv_words: load_required_resident_model_package_shader(
                         manifest_dir,
                         &runtime_model
                             .package
                             .output_transducer
                             .projection_shader_path,
                     )?,
-                projection_batch_spirv_words:
-                    load_required_resident_model_package_shader(
+                    projection_batch_spirv_words: load_required_resident_model_package_shader(
                         manifest_dir,
                         &runtime_model
                             .package
                             .output_transducer
                             .projection_batch_shader_path,
                     )?,
-                embedding_norm_batch_lane_tile_width: runtime_model
-                    .package
-                    .output_transducer
-                    .embedding_norm_batch_lane_tile_width,
-                projection_batch_lane_tile_width: runtime_model
-                    .package
-                    .output_transducer
-                    .projection_batch_lane_tile_width,
-                spec: runtime_model.package.output_transducer.spec.clone(),
+                    embedding_norm_batch_lane_tile_width: runtime_model
+                        .package
+                        .output_transducer
+                        .embedding_norm_batch_lane_tile_width,
+                    projection_batch_lane_tile_width: runtime_model
+                        .package
+                        .output_transducer
+                        .projection_batch_lane_tile_width,
+                    spec: runtime_model.package.output_transducer.spec.clone(),
+                })
             })
-        })
-        .transpose()?;
+            .transpose()?;
 
         Ok(Self {
             package_id: runtime_model.package.package_id.clone(),

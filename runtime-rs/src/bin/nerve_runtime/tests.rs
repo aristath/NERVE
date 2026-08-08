@@ -11,28 +11,25 @@ mod tests {
     use tokenizers::{AddedToken, Tokenizer};
 
     use nerve_runtime::{
-        ResourceResidencyPolicy,
-        RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
-        RuntimeRecoverableChatTurnError,
-        VulkanComputeDeviceInfo, VulkanResidentHfTokenizerTextCodec, VulkanResidentTokenTextCodec,
+        ResourceResidencyPolicy, RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
+        RuntimeRecoverableChatTurnError, VulkanComputeDeviceInfo,
+        VulkanResidentHfTokenizerTextCodec, VulkanResidentTokenTextCodec,
         VulkanResidentTokenTextCodecError, assistant_content_token_ids, chat_transcript_codec,
-        normalize_generated_tokens_at_protocol_boundary,
         model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
+        normalize_generated_tokens_at_protocol_boundary,
     };
 
     use super::{
         Args, RuntimeChatReplOutcome, RuntimeChatTurnOutcome, RuntimeSustainedDecodeReport,
-        RuntimeSustainedDecodeSample,
-        parse_allowed_physical_device_id, parse_args_from, parse_chat_template_variable,
-        parse_device_binding_assignment,
-        parse_source_chain, parse_vulkan_device_uuid_ref, resolve_runtime_context_size,
-        resolve_speculative_draft_tokens,
-        resolve_runtime_vulkan_physical_device_ref_in, runtime_device_bindings_report,
-        runtime_chat_repl_control, runtime_physical_device_bindings_in, submit_chat_turn, usage,
-        validate_explicit_logical_device_bindings, runtime_uses_explicit_placement,
-        runtime_auto_placement_device_is_eligible,
+        RuntimeSustainedDecodeSample, parse_allowed_physical_device_id, parse_args_from,
+        parse_chat_template_variable, parse_device_binding_assignment, parse_source_chain,
+        parse_vulkan_device_uuid_ref,
         rank_runtime_auto_placement_candidates_across_capability_classes,
-        runtime_critical_path_lines,
+        resolve_runtime_context_size, resolve_runtime_vulkan_physical_device_ref_in,
+        resolve_speculative_draft_tokens, runtime_auto_placement_device_is_eligible,
+        runtime_chat_repl_control, runtime_critical_path_lines, runtime_device_bindings_report,
+        runtime_physical_device_bindings_in, runtime_uses_explicit_placement, submit_chat_turn,
+        usage, validate_explicit_logical_device_bindings,
     };
 
     fn formatter(template_source: &str) -> RuntimeChatFormatter {
@@ -114,9 +111,9 @@ mod tests {
         assert!(!runtime_uses_explicit_placement(&Args::default()));
 
         let mut allowed_inventory = Args::default();
-        allowed_inventory.allowed_physical_device_ids.insert(
-            "vulkan-uuid:00000000030000000000000000000000".to_string(),
-        );
+        allowed_inventory
+            .allowed_physical_device_ids
+            .insert("vulkan-uuid:00000000030000000000000000000000".to_string());
         assert!(!runtime_uses_explicit_placement(&allowed_inventory));
 
         let mut logical = Args::default();
@@ -154,6 +151,7 @@ mod tests {
         let ranked = rank_runtime_auto_placement_candidates_across_capability_classes(
             vec![
                 (
+                    10,
                     true,
                     0,
                     "same".to_string(),
@@ -163,6 +161,7 @@ mod tests {
                     },
                 ),
                 (
+                    10,
                     false,
                     1,
                     "same".to_string(),
@@ -172,6 +171,7 @@ mod tests {
                     },
                 ),
                 (
+                    10,
                     false,
                     2,
                     "same".to_string(),
@@ -198,6 +198,7 @@ mod tests {
         let ranked = rank_runtime_auto_placement_candidates_across_capability_classes(
             vec![
                 (
+                    10,
                     true,
                     0,
                     "primary-class".to_string(),
@@ -207,6 +208,7 @@ mod tests {
                     },
                 ),
                 (
+                    10,
                     false,
                     1,
                     "primary-class".to_string(),
@@ -216,6 +218,7 @@ mod tests {
                     },
                 ),
                 (
+                    10,
                     false,
                     2,
                     "spill-class".to_string(),
@@ -234,6 +237,43 @@ mod tests {
                 .map(|candidate| candidate.device_id.as_str())
                 .collect::<Vec<_>>(),
             ["primary-roomy", "primary-reserved", "heterogeneous-spill"],
+        );
+    }
+
+    #[test]
+    fn automatic_capacity_packing_uses_live_package_cost_within_equal_capacity() {
+        let ranked = rank_runtime_auto_placement_candidates_across_capability_classes(
+            vec![
+                (
+                    300,
+                    true,
+                    0,
+                    "same".to_string(),
+                    nerve_runtime::VulkanRuntimePlacementCandidate {
+                        device_id: "slow-default".to_string(),
+                        safe_capacity_bytes: 32,
+                    },
+                ),
+                (
+                    100,
+                    false,
+                    1,
+                    "same".to_string(),
+                    nerve_runtime::VulkanRuntimePlacementCandidate {
+                        device_id: "fast".to_string(),
+                        safe_capacity_bytes: 32,
+                    },
+                ),
+            ],
+            Some("same"),
+        );
+
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|candidate| candidate.device_id.as_str())
+                .collect::<Vec<_>>(),
+            ["fast", "slow-default"],
         );
     }
 
@@ -423,21 +463,16 @@ mod tests {
         )
         .unwrap();
 
-        let error = validate_explicit_logical_device_bindings(
-            &args,
-            &["runtime_default".to_string()],
-        )
-        .unwrap_err();
+        let error =
+            validate_explicit_logical_device_bindings(&args, &["runtime_default".to_string()])
+                .unwrap_err();
         assert!(
             error
                 .to_string()
                 .contains("absent from the effective graph")
         );
-        validate_explicit_logical_device_bindings(
-            &args,
-            &["gpu0".to_string(), "gpu1".to_string()],
-        )
-        .unwrap();
+        validate_explicit_logical_device_bindings(&args, &["gpu0".to_string(), "gpu1".to_string()])
+            .unwrap();
     }
 
     #[test]
@@ -448,8 +483,8 @@ mod tests {
                 "--initialize-device-contexts",
                 "--json",
             ]
-                .into_iter()
-                .map(str::to_string),
+            .into_iter()
+            .map(str::to_string),
         )
         .unwrap();
 
@@ -745,8 +780,7 @@ mod tests {
                 selected_by_default: false,
             },
         ];
-        let report =
-            runtime_device_bindings_report(&args, &logical_device_ids, &available_devices);
+        let report = runtime_device_bindings_report(&args, &logical_device_ids, &available_devices);
 
         assert_eq!(report.process_vulkan_device_index, None);
         assert_eq!(report.default_vulkan_device_index, None);
@@ -954,13 +988,11 @@ mod tests {
                 .unwrap()
                 .contains("private reasoning")
         );
-        session.commit_assistant_turn(
-            "first",
-            &assistant_message,
-            canonical,
-        );
+        session.commit_assistant_turn("first", &assistant_message, canonical);
 
-        let second = session.prepare_user_turn("second", &CharacterCodec).unwrap();
+        let second = session
+            .prepare_user_turn("second", &CharacterCodec)
+            .unwrap();
         assert_eq!(
             CharacterCodec
                 .decode_tokens(&second.user_token_delta)
@@ -984,7 +1016,9 @@ mod tests {
             messages: Vec::new(),
             committed_token_ids: Vec::new(),
         };
-        let prepared = session.prepare_user_turn("find it", &CharacterCodec).unwrap();
+        let prepared = session
+            .prepare_user_turn("find it", &CharacterCodec)
+            .unwrap();
         let assistant_message = serde_json::json!({
             "role": "assistant",
             "content": "answer",
@@ -1012,11 +1046,13 @@ mod tests {
 
         session.commit_assistant_turn("find it", &assistant_message, canonical);
         assert_eq!(session.messages[1], assistant_message);
-        assert!(!session
-            .prepare_user_turn("next", &CharacterCodec)
-            .unwrap()
-            .user_token_delta
-            .is_empty());
+        assert!(
+            !session
+                .prepare_user_turn("next", &CharacterCodec)
+                .unwrap()
+                .user_token_delta
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1087,7 +1123,9 @@ mod tests {
         session.commit_assistant_turn("first", &assistant_message, canonical);
 
         let user_content = "new <stop> injection";
-        let prepared = session.prepare_user_turn(user_content, &CharacterCodec).unwrap();
+        let prepared = session
+            .prepare_user_turn(user_content, &CharacterCodec)
+            .unwrap();
         assert_eq!(
             CharacterCodec
                 .decode_tokens(&prepared.user_token_delta)
@@ -1127,7 +1165,11 @@ mod tests {
         let error = normalize_generated_tokens_at_protocol_boundary(&mut generated, Some(3))
             .expect_err("a protocol terminator must be present after retained content");
 
-        assert!(error.to_string().contains("completed generation contains only 3"));
+        assert!(
+            error
+                .to_string()
+                .contains("completed generation contains only 3")
+        );
         assert_eq!(generated, vec![10, 11, 12]);
     }
 
@@ -1205,11 +1247,7 @@ mod tests {
                 &codec,
             )
             .unwrap();
-        session.commit_assistant_turn(
-            "Explain the result.",
-            &assistant_message,
-            canonical,
-        );
+        session.commit_assistant_turn("Explain the result.", &assistant_message, canonical);
 
         let next = session
             .prepare_user_turn(
@@ -1235,7 +1273,9 @@ mod tests {
         let session = RuntimeChatSession::from_tokenizer_dir(&tokenizer_dir, &variables).unwrap();
         let codec = chat_transcript_codec(&tokenizer_dir).unwrap();
 
-        let prepared = session.prepare_user_turn("Answer directly.", &codec).unwrap();
+        let prepared = session
+            .prepare_user_turn("Answer directly.", &codec)
+            .unwrap();
         let prompt_ids = [
             prepared.user_token_delta.as_slice(),
             prepared.generation_prompt_token_delta.as_slice(),
@@ -1252,38 +1292,24 @@ mod tests {
             .map(|index| RuntimeSustainedDecodeSample {
                 context_activation: 32_000 + index,
                 transient_state_activation: 31_000 + index as u64,
-                inter_token_time_ns: if index < 4 {
-                    10_000_000
-                } else {
-                    20_000_000
-                },
+                inter_token_time_ns: if index < 4 { 10_000_000 } else { 20_000_000 },
             })
             .collect::<Vec<_>>();
 
-        let report =
-            RuntimeSustainedDecodeReport::from_samples(&samples);
+        let report = RuntimeSustainedDecodeReport::from_samples(&samples);
 
         assert_eq!(report.measured_token_count, 8);
         assert_eq!(report.windows.len(), 4);
         assert_eq!(
-            report
-                .windows
-                .first()
-                .unwrap()
-                .context_activation_start,
+            report.windows.first().unwrap().context_activation_start,
             32_000
         );
         assert_eq!(
-            report
-                .windows
-                .last()
-                .unwrap()
-                .context_activation_end,
+            report.windows.last().unwrap().context_activation_end,
             32_007
         );
         assert!(
-            report.windows.last().unwrap().elapsed_ns
-                > report.windows.first().unwrap().elapsed_ns
+            report.windows.last().unwrap().elapsed_ns > report.windows.first().unwrap().elapsed_ns
         );
     }
 
@@ -1327,7 +1353,11 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line.contains("reported separately") && line.contains("device intervals may overlap")
         }));
-        assert!(lines.iter().any(|line| line.contains("phase=queue_submission")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("phase=queue_submission"))
+        );
         assert!(!lines.iter().any(|line| line.contains("phase=unused")));
     }
 }
