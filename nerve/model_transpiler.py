@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from nerve.model_transpiler_types import *
 from nerve.model_transpiler_discovery import *
+from nerve.model_transpiler_generation import load_source_generation_config
 from nerve.model_transpiler_graph import *
 from nerve.model_transpiler_tensor_index import *
 from nerve.model_transpiler_quantization import *
@@ -16,10 +17,7 @@ def transpile_model(
 ) -> ModelStructure:
     model_dir = model_dir.expanduser()
     config = read_json(model_dir / "config.json")
-    generation_config_path = model_dir / "generation_config.json"
-    generation_config = (
-        read_json(generation_config_path) if generation_config_path.is_file() else {}
-    )
+    generation_config = load_source_generation_config(model_dir)
     tensor_index = make_tensor_index(model_dir)
     structure = discover_model_structure(
         model_dir,
