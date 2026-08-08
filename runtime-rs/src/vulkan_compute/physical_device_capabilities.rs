@@ -1224,32 +1224,14 @@ unsafe fn copy_buffer_immediately(
         unsafe { device.end_command_buffer(command_buffer) }.map_err(|error| {
             VulkanError(format!("failed to end staging command buffer: {error:?}"))
         })?;
-        let command_buffers = [command_buffer];
-        let submit_info = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
-        let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }
-            .map_err(|error| VulkanError(format!("failed to create staging-copy fence: {error:?}")))?;
-        let submit_result = unsafe { device.queue_submit(queue, &submit_info, fence) };
-        if let Err(error) = submit_result {
-            unsafe { device.destroy_fence(fence, None) };
-            let mapped = VulkanError(format!("failed to submit staging copy: {error:?}"));
-            return Err(vulkan_error_with_device_quarantine(
-                device_health,
-                error,
-                mapped,
-            ));
-        }
-        let wait_result = wait_for_vulkan_fences_with_progress_watchdog(
+        submit_vulkan_command_buffers_and_wait_with_progress_watchdog(
             device,
-            &[fence],
-            true,
+            queue,
+            &[command_buffer],
             device_health,
             "immediate staging copy",
             |error| VulkanError(format!("failed waiting for staging copy: {error:?}")),
-        );
-        if wait_result.is_ok() {
-            unsafe { device.destroy_fence(fence, None) };
-        }
-        wait_result
+        )
     })();
     if !device_health.is_quarantined() {
         unsafe { device.destroy_command_pool(command_pool, None) };

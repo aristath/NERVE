@@ -22,15 +22,17 @@ pub struct VulkanResidentKernelSequence {
     device: ash::Device,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
-    completion_fence: vk::Fence,
+    completion: Rc<VulkanMonotonicQueueCompletion>,
     timestamp_period_ns: f32,
     timestamp_query_pool: Option<vk::QueryPool>,
     profiling_timestamp_query_pool: Option<(vk::QueryPool, u32)>,
     critical_path_timestamp_query_pool: Option<(vk::QueryPool, u32)>,
+    pending_wait_points: RefCell<Vec<(vk::Semaphore, u64)>>,
     recorded_input_copies: RefCell<Option<Vec<VulkanResidentKernelRecordedInputCopy>>>,
     recorded_steps: RefCell<Option<Vec<VulkanResidentKernelRecordedStep>>>,
     recorded_snapshot_copies: RefCell<Option<Vec<VulkanResidentKernelRecordedSnapshotCopy>>>,
 }
+
 
 #[derive(Clone, PartialEq, Eq)]
 struct VulkanResidentKernelRecordedInputCopy {
@@ -52,6 +54,10 @@ struct VulkanResidentKernelRecordedStep {
     condition: Option<VulkanResidentKernelRecordedCondition>,
     critical_path_region_index: Option<u32>,
     push_constants: Vec<u8>,
+    execution_family: String,
+    semantic_label: Option<String>,
+    estimated_work_units: u64,
+    estimated_memory_bytes: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

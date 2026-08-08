@@ -1887,9 +1887,9 @@ fn add_counters(
     total.resident_sequence_queue_submits = total
         .resident_sequence_queue_submits
         .saturating_add(value.resident_sequence_queue_submits);
-    total.resident_sequence_fence_waits = total
-        .resident_sequence_fence_waits
-        .saturating_add(value.resident_sequence_fence_waits);
+    total.resident_sequence_completion_waits = total
+        .resident_sequence_completion_waits
+        .saturating_add(value.resident_sequence_completion_waits);
     total.resident_queue_batch_submits = total
         .resident_queue_batch_submits
         .saturating_add(value.resident_queue_batch_submits);

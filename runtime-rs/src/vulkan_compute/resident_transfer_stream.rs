@@ -9,6 +9,7 @@ pub struct VulkanResidentTransferStream {
     command_pool: vk::CommandPool,
     slots: Vec<VulkanResidentTransferSlot>,
     timeline: VulkanTimelineSemaphore,
+    consumer_completion: VulkanMonotonicQueueCompletion,
     next_timeline_value: u64,
     next_slot_index: usize,
     staging_byte_capacity: usize,
@@ -101,6 +102,16 @@ impl VulkanComputeDevice {
                     return Err(error);
                 }
             };
+            let consumer_completion = match self.create_timeline_semaphore(0) {
+                Ok(timeline) => VulkanMonotonicQueueCompletion::new(
+                    timeline,
+                    self.device_health.clone(),
+                ),
+                Err(error) => {
+                    self.device.destroy_command_pool(command_pool, None);
+                    return Err(error);
+                }
+            };
             let mut slots = Vec::with_capacity(staging_slot_count);
             for command_buffer in command_buffers {
                 let mut staging =
@@ -133,6 +144,7 @@ impl VulkanComputeDevice {
                 command_pool,
                 slots,
                 timeline,
+                consumer_completion,
                 next_timeline_value: 0,
                 next_slot_index: 0,
                 staging_byte_capacity,
@@ -432,26 +444,24 @@ impl VulkanResidentTransferStream {
                         false,
                     )
                 })?;
-            let fence = self
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .map_err(|error| {
-                    (
-                        VulkanError(format!(
-                            "failed to create consumer-serialized transfer fence: {error:?}"
-                        )),
-                        false,
-                    )
-                })?;
+            let completion_value = self
+                .consumer_completion
+                .reserve("consumer-serialized resident transfer")
+                .map_err(|error| (error, false))?;
             let command_infos = [vk::CommandBufferSubmitInfo::default()
                 .command_buffer(slot.command_buffer)];
+            let signal_infos = [vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.consumer_completion.semaphore())
+                .value(completion_value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
             if let Err(error) = self.device.queue_submit2(
                 self.consumer_queue,
                 &[vk::SubmitInfo2::default()
-                    .command_buffer_infos(&command_infos)],
-                fence,
+                    .command_buffer_infos(&command_infos)
+                    .signal_semaphore_infos(&signal_infos)],
+                vk::Fence::null(),
             ) {
-                self.device.destroy_fence(fence, None);
+                self.consumer_completion.cancel(completion_value);
                 let mapped = vulkan_operation_error_with_device_fault(
                     "failed to submit consumer-serialized resident transfer",
                     error,
@@ -463,10 +473,11 @@ impl VulkanResidentTransferStream {
                     false,
                 ));
             }
-            let wait_result = wait_for_vulkan_fences_with_progress_watchdog(
+            let wait_result = wait_for_vulkan_timeline_points_with_progress_watchdog(
                 &self.device,
-                &[fence],
-                true,
+                &[self.consumer_completion.semaphore()],
+                &[completion_value],
+                false,
                 &self.device_health,
                 "consumer-serialized resident transfer",
                 |error| {
@@ -484,7 +495,9 @@ impl VulkanResidentTransferStream {
                     true,
                 ));
             }
-            self.device.destroy_fence(fence, None);
+            self.consumer_completion
+                .complete(completion_value)
+                .map_err(|error| (error, true))?;
         }
         RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
@@ -583,26 +596,26 @@ impl VulkanResidentTransferStream {
         let _wait = runtime_critical_path_span(RuntimeCriticalPathPhase::HostSynchronization);
         self.device_health.require_healthy()?;
         unsafe {
-            let fence = self
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to create resident transfer consumer fence: {error:?}"
-                    ))
-                })?;
+            let completion_value = self
+                .consumer_completion
+                .reserve("resident transfer compute-queue bridge")?;
             let wait_infos = [vk::SemaphoreSubmitInfo::default()
                 .semaphore(self.timeline.semaphore)
                 .value(value)
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+            let signal_infos = [vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.consumer_completion.semaphore())
+                .value(completion_value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
             let submit_result = self.device.queue_submit2(
                 self.consumer_queue,
                 &[vk::SubmitInfo2::default()
-                    .wait_semaphore_infos(&wait_infos)],
-                fence,
+                    .wait_semaphore_infos(&wait_infos)
+                    .signal_semaphore_infos(&signal_infos)],
+                vk::Fence::null(),
             );
             if let Err(error) = submit_result {
-                self.device.destroy_fence(fence, None);
+                self.consumer_completion.cancel(completion_value);
                 let mapped = vulkan_operation_error_with_device_fault(
                     &format!("failed to bridge resident transfer timeline value {value} to the compute queue"),
                     error,
@@ -615,10 +628,11 @@ impl VulkanResidentTransferStream {
                     mapped,
                 ));
             }
-            let wait_result = wait_for_vulkan_fences_with_progress_watchdog(
+            wait_for_vulkan_timeline_points_with_progress_watchdog(
                 &self.device,
-                &[fence],
-                true,
+                &[self.consumer_completion.semaphore()],
+                &[completion_value],
+                false,
                 &self.device_health,
                 "resident transfer compute-queue bridge",
                 |error| {
@@ -629,11 +643,8 @@ impl VulkanResidentTransferStream {
                         &self.device_address_registry,
                     )
                 },
-            );
-            if let Err(error) = wait_result {
-                return Err(error);
-            }
-            self.device.destroy_fence(fence, None);
+            )?;
+            self.consumer_completion.complete(completion_value)?;
         }
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
         self.device_health.require_healthy()

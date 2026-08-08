@@ -101,24 +101,27 @@ fn test_command_exists(command: &str) -> bool {
 
 #[cfg(test)]
 fn selected_test_vulkan_device() -> Result<VulkanComputeDevice, VulkanError> {
-    match std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX") {
-        Ok(raw_index) => {
-            let index = raw_index.parse::<usize>().unwrap_or_else(|error| {
-                panic!("invalid NERVE_TEST_VULKAN_DEVICE_INDEX {raw_index:?}: {error}")
-            });
-            let device = VulkanComputeDevice::new_for_physical_device_index(index)
-                .unwrap_or_else(|error| {
-                    panic!("explicit Vulkan test device index {index} could not be opened: {error}")
-                });
-            Ok(device)
-        }
-        Err(std::env::VarError::NotPresent) => Err(VulkanError(
-            "NERVE_TEST_VULKAN_DEVICE_INDEX is required for every Vulkan test".to_string(),
-        )),
-        Err(error) => Err(VulkanError(format!(
-            "could not read NERVE_TEST_VULKAN_DEVICE_INDEX: {error}"
-        ))),
+    let physical_device_id = std::env::var("NERVE_TEST_VULKAN_DEVICE_UUID").map_err(|error| {
+        VulkanError(format!(
+            "NERVE_TEST_VULKAN_DEVICE_UUID must select an approved discrete AMD UUID: {error}"
+        ))
+    })?;
+    let encoded = physical_device_id.strip_prefix("vulkan-uuid:").ok_or_else(|| {
+        VulkanError("Vulkan test UUID must use a vulkan-uuid: prefix".to_string())
+    })?;
+    if encoded.len() != vk::UUID_SIZE * 2 {
+        return Err(VulkanError(format!(
+            "Vulkan test UUID must contain {} hexadecimal digits",
+            vk::UUID_SIZE * 2
+        )));
     }
+    let mut uuid = [0u8; vk::UUID_SIZE];
+    for (index, byte) in uuid.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16).map_err(|error| {
+            VulkanError(format!("Vulkan test UUID must be hexadecimal: {error}"))
+        })?;
+    }
+    VulkanComputeDevice::new_for_device_uuid(uuid)
 }
 
 #[cfg(test)]
@@ -1194,6 +1197,141 @@ mod tests {
     }
 
     #[test]
+    fn timestamped_resident_sequence_exposes_progress_without_changing_replay() {
+        let spirv_words = compile_test_shader_words()
+            .expect("timestamp progress test requires GLSL to SPIR-V tooling");
+        let device = selected_test_vulkan_device().unwrap();
+        let buffer = device.create_resident_buffer(12).unwrap();
+        buffer.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
+        let dispatch = device
+            .create_resident_kernel_dispatch_labeled(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &buffer, 12)],
+                1,
+                64,
+                0,
+                Some("op=test_progress node=test_sequence".to_string()),
+            )
+            .unwrap();
+        let sequence = device.create_timestamped_resident_kernel_sequence().unwrap();
+        let steps = [VulkanResidentKernelSequenceStep::new(&dispatch, &[])];
+
+        device.run_resident_kernel_sequence(&sequence, &steps).unwrap();
+        assert!(device
+            .read_recorded_resident_kernel_sequence_duration_ns(&sequence)
+            .unwrap()
+            > 0);
+        device
+            .submit_recorded_resident_kernel_sequence(&sequence)
+            .unwrap();
+        assert!(
+            device
+                .submit_recorded_resident_kernel_sequence(&sequence)
+                .unwrap_err()
+                .0
+                .contains("pending completion")
+        );
+        device.wait_resident_kernel_sequence(&sequence).unwrap();
+        assert_eq!(
+            bytes_to_u32(&buffer.read_bytes(12).unwrap()),
+            vec![3, 4, 43]
+        );
+        assert!(sequence.pending_wait_points.borrow().is_empty());
+        assert!(sequence.completion.state.pending_value.get().is_none());
+        assert_eq!(sequence.completion.state.last_reserved_value.get(), 2);
+        assert_eq!(
+            unsafe {
+                device
+                    .device
+                    .get_semaphore_counter_value(sequence.completion.semaphore())
+            }
+            .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn deferred_resident_queue_batch_reserves_completion_per_replay() {
+        let spirv_words = compile_test_shader_words()
+            .expect("deferred completion test requires GLSL to SPIR-V tooling");
+        let device = selected_test_vulkan_device().unwrap();
+        let buffer = device.create_resident_buffer(12).unwrap();
+        buffer.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
+        let dispatch = device
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &buffer, 12)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let sequence = device.create_resident_kernel_sequence().unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &sequence,
+                &[VulkanResidentKernelSequenceStep::new(&dispatch, &[])],
+            )
+            .unwrap();
+        let batch = VulkanResidentQueueSubmissionBatch::new();
+        batch
+            .enqueue_recorded_sequence(&device, &sequence, &[], &[], true)
+            .unwrap();
+        let template = batch.mount().unwrap();
+        assert!(sequence.completion.state.pending_value.get().is_none());
+
+        for expected in [vec![2, 3, 42], vec![3, 4, 43]] {
+            template.submit_with_timeline_value_offset(0).unwrap();
+            assert!(sequence.completion.state.pending_value.get().is_some());
+            device.wait_resident_kernel_sequence(&sequence).unwrap();
+            assert!(sequence.completion.state.pending_value.get().is_none());
+            assert_eq!(bytes_to_u32(&buffer.read_bytes(12).unwrap()), expected);
+        }
+    }
+
+    #[test]
+    fn completed_queue_resource_can_replay_after_an_external_epoch_join() {
+        let spirv_words = compile_test_shader_words()
+            .expect("queue completion replay test requires GLSL to SPIR-V tooling");
+        let device = selected_test_vulkan_device().unwrap();
+        let buffer = device.create_resident_buffer(12).unwrap();
+        buffer.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
+        let dispatch = device
+            .create_resident_kernel_dispatch(
+                &spirv_words,
+                &[VulkanResidentKernelBufferBinding::new(0, &buffer, 12)],
+                1,
+                64,
+                0,
+            )
+            .unwrap();
+        let sequence = device.create_resident_kernel_sequence().unwrap();
+        device
+            .record_resident_kernel_sequence(
+                &sequence,
+                &[VulkanResidentKernelSequenceStep::new(&dispatch, &[])],
+            )
+            .unwrap();
+        let batch = VulkanResidentQueueSubmissionBatch::new();
+        batch
+            .enqueue_recorded_sequence(&device, &sequence, &[], &[], true)
+            .unwrap();
+        let template = batch.mount().unwrap();
+
+        template.submit_with_timeline_value_offset(0).unwrap();
+        device.quiesce().unwrap();
+        assert_eq!(sequence.completion.pending_value(), Some(1));
+        template.submit_with_timeline_value_offset(0).unwrap();
+        assert_eq!(sequence.completion.pending_value(), Some(2));
+        device.wait_resident_kernel_sequence(&sequence).unwrap();
+
+        assert_eq!(
+            bytes_to_u32(&buffer.read_bytes(12).unwrap()),
+            vec![3, 4, 43]
+        );
+    }
+
+    #[test]
     fn resident_kernel_sequence_rerecords_changed_push_constants() {
         let Some(spirv_words) = compile_test_shader_words() else {
             eprintln!("skipping Vulkan sequence test: no GLSL to SPIR-V compiler found");
@@ -1619,7 +1757,7 @@ mod tests {
         assert_eq!(counters.resident_queue_batch_submits, 2);
         assert_eq!(counters.resident_queue_batch_commands, 3);
         assert_eq!(counters.resident_sequence_queue_submits, 0);
-        assert_eq!(counters.resident_sequence_fence_waits, 1);
+        assert_eq!(counters.resident_sequence_completion_waits, 1);
     }
 
     #[test]
@@ -1960,11 +2098,7 @@ mod tests {
     fn resident_kernel_sequence_combines_input_and_intermediate_snapshot_copies() {
         let spirv_words =
             compile_test_shader_words().expect("Vulkan sequence test requires a GLSL compiler");
-        let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
-            .parse::<usize>()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
-        let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+        let device = selected_test_vulkan_device().unwrap();
         let initial = device.create_resident_buffer(12).unwrap();
         initial.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
         let state = device.create_resident_buffer(12).unwrap();
@@ -2210,11 +2344,7 @@ mod tests {
     fn retained_copy_batches_and_readback_mount_in_one_kernel_sequence() {
         let spirv_words =
             compile_test_shader_words().expect("Vulkan sequence test requires a GLSL compiler");
-        let device_index = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must select a compatible AMD GPU with sufficient safe remaining capacity")
-            .parse::<usize>()
-            .expect("NERVE_TEST_VULKAN_DEVICE_INDEX must be an integer");
-        let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+        let device = selected_test_vulkan_device().unwrap();
         let producer = device.create_resident_buffer(12).unwrap();
         let consumer = device.create_resident_buffer(12).unwrap();
         producer.write_bytes(&u32_bytes(&[1, 2, 41])).unwrap();
@@ -2272,7 +2402,7 @@ mod tests {
         assert_eq!(completed.range_bytes(1).unwrap(), 43u32.to_le_bytes());
         let counters = vulkan_resident_execution_counters();
         assert_eq!(counters.resident_sequence_queue_submits, 1);
-        assert_eq!(counters.resident_sequence_fence_waits, 1);
+        assert_eq!(counters.resident_sequence_completion_waits, 1);
         assert_eq!(counters.resident_copy_queue_submits, 0);
         assert_eq!(counters.resident_copy_waits, 0);
     }
@@ -2436,5 +2566,35 @@ mod tests {
             bytes_to_u32(&destination.read_bytes(12).unwrap()),
             vec![2, 3, 42]
         );
+    }
+
+    #[test]
+    fn resident_copy_replay_can_overlap_without_host_completion() {
+        let device = selected_test_vulkan_device().unwrap();
+        let source = device.create_resident_buffer(12).unwrap();
+        let destination = device.create_resident_buffer(12).unwrap();
+        source.write_bytes(&u32_bytes(&[7, 11, 13])).unwrap();
+        destination.write_bytes(&[0; 12]).unwrap();
+        let copy = device
+            .create_resident_buffer_copy(&source, &destination, 12)
+            .unwrap();
+        let completion = device.create_timeline_semaphore(0).unwrap();
+
+        for value in [1, 2] {
+            device
+                .submit_resident_buffer_copy_with_timeline_semaphores(
+                    &copy,
+                    &[],
+                    &[VulkanTimelineSemaphorePoint::new(&completion, value)],
+                )
+                .unwrap();
+        }
+        device.wait_timeline_semaphore_value(&completion, 2).unwrap();
+
+        assert_eq!(
+            bytes_to_u32(&destination.read_bytes(12).unwrap()),
+            vec![7, 11, 13]
+        );
+        assert!(copy.completion.pending_value().is_none());
     }
 }

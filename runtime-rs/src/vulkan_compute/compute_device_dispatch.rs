@@ -345,15 +345,15 @@ impl VulkanComputeDevice {
                     ))
                 })?
                 .remove(0);
-            let completion_fence = self
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .map_err(|error| {
+            let completion_timeline = match self.create_timeline_semaphore(0) {
+                Ok(semaphore) => semaphore,
+                Err(error) => {
                     self.device.destroy_command_pool(command_pool, None);
-                    VulkanError(format!(
-                        "failed to create resident kernel sequence completion fence: {error:?}"
-                    ))
-                })?;
+                    return Err(VulkanError(format!(
+                        "failed to create resident kernel sequence completion timeline: {error}"
+                    )));
+                }
+            };
             let timestamp_query_pool = if timestamped {
                 match self.device.create_query_pool(
                     &vk::QueryPoolCreateInfo::default()
@@ -363,7 +363,6 @@ impl VulkanComputeDevice {
                 ) {
                     Ok(query_pool) => Some(query_pool),
                     Err(error) => {
-                        self.device.destroy_fence(completion_fence, None);
                         self.device.destroy_command_pool(command_pool, None);
                         return Err(VulkanError(format!(
                             "failed to create resident sequence timestamp pool: {error:?}"
@@ -386,7 +385,6 @@ impl VulkanComputeDevice {
                             if let Some(query_pool) = timestamp_query_pool {
                                 self.device.destroy_query_pool(query_pool, None);
                             }
-                            self.device.destroy_fence(completion_fence, None);
                             self.device.destroy_command_pool(command_pool, None);
                             return Err(VulkanError(format!(
                                 "failed to create resident kernel profile timestamp pool: {error:?}"
@@ -412,7 +410,6 @@ impl VulkanComputeDevice {
                             if let Some(query_pool) = timestamp_query_pool {
                                 self.device.destroy_query_pool(query_pool, None);
                             }
-                            self.device.destroy_fence(completion_fence, None);
                             self.device.destroy_command_pool(command_pool, None);
                             return Err(VulkanError(format!(
                                 "failed to create resident kernel critical-path timestamp pool: {error:?}"
@@ -427,11 +424,15 @@ impl VulkanComputeDevice {
                 device: self.device.clone(),
                 command_pool,
                 command_buffer,
-                completion_fence,
+                completion: Rc::new(VulkanMonotonicQueueCompletion::new(
+                    completion_timeline,
+                    self.device_health.clone(),
+                )),
                 timestamp_period_ns: self.timestamp_period_ns,
                 timestamp_query_pool,
                 profiling_timestamp_query_pool,
                 critical_path_timestamp_query_pool,
+                pending_wait_points: RefCell::new(Vec::new()),
                 recorded_input_copies: RefCell::new(None),
                 recorded_steps: RefCell::new(None),
                 recorded_snapshot_copies: RefCell::new(None),

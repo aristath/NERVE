@@ -175,8 +175,8 @@ fn print_runtime_execution_counters(counters: &VulkanResidentExecutionCounters) 
         counters.resident_sequence_queue_submits
     );
     println!(
-        "  resident_sequence_fence_waits={}",
-        counters.resident_sequence_fence_waits
+        "  resident_sequence_completion_waits={}",
+        counters.resident_sequence_completion_waits
     );
     println!(
         "  resident_queue_batch_submits={}",

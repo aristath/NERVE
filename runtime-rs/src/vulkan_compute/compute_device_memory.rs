@@ -1523,7 +1523,15 @@ impl VulkanComputeDevice {
                 None
             };
 
-            let command_begin = vk::CommandBufferBeginInfo::default();
+            let command_begin = if timestamped {
+                vk::CommandBufferBeginInfo::default()
+            } else {
+                // Stream-edge copies are immutable retained circuits. They may
+                // be submitted again while an earlier queue epoch is still in
+                // flight; dependencies are carried by the caller's timelines.
+                vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE)
+            };
             self.device
                 .begin_command_buffer(command_buffer, &command_begin)
                 .map_err(|error| {
@@ -1619,18 +1627,21 @@ impl VulkanComputeDevice {
                         "failed to end resident byte copy binding command buffer: {error:?}"
                     ))
                 })?;
-            let completion_fence = self
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .map_err(|error| {
+            let completion = match self.create_timeline_semaphore(0) {
+                Ok(timeline) => Rc::new(VulkanMonotonicQueueCompletion::new(
+                    timeline,
+                    self.device_health.clone(),
+                )),
+                Err(error) => {
                     if let Some(query_pool) = timestamp_query_pool {
                         self.device.destroy_query_pool(query_pool, None);
                     }
                     self.device.destroy_command_pool(command_pool, None);
-                    VulkanError(format!(
-                        "failed to create resident byte copy completion fence: {error:?}"
-                    ))
-                })?;
+                    return Err(VulkanError(format!(
+                        "failed to create resident byte copy completion timeline: {error}"
+                    )));
+                }
+            };
 
             Ok(VulkanResidentBufferCopy {
                 device: self.device.clone(),
@@ -1643,7 +1654,7 @@ impl VulkanComputeDevice {
                 source: source.buffer,
                 destination: destination.buffer,
                 byte_len,
-                completion_fence,
+                completion,
                 timestamp_query_pool,
                 timestamp_period_ns: self.timestamp_period_ns,
             })
@@ -1664,40 +1675,12 @@ impl VulkanComputeDevice {
         }
         self.submit_command_buffer_with_timeline_semaphores(
             binding.command_buffer,
-            Some(binding.completion_fence),
             wait_points,
             signal_points,
+            None,
             "resident buffer copy",
             false,
-        )?;
-        Ok(())
-    }
-
-    pub fn wait_resident_buffer_copy(
-        &self,
-        binding: &VulkanResidentBufferCopy,
-    ) -> Result<(), VulkanError> {
-        let _transfer = runtime_critical_path_span(RuntimeCriticalPathPhase::CrossDeviceTransfer);
-        if binding.device.handle() != self.device.handle() {
-            return Err(VulkanError(
-                "resident buffer copy belongs to another logical device".to_string(),
-            ));
-        }
-        wait_for_vulkan_fences_with_progress_watchdog(
-            &self.device,
-            &[binding.completion_fence],
-            true,
-            &self.device_health,
-            "resident buffer copy",
-            |error| {
-                self.vulkan_operation_error(
-                    "failed waiting for resident buffer copy completion",
-                    error,
-                )
-            },
-        )?;
-        RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        )
     }
 
     pub fn wait_resident_buffer_copy_batch(
@@ -1710,12 +1693,21 @@ impl VulkanComputeDevice {
                 "resident buffer copy batch belongs to another logical device".to_string(),
             ));
         }
-        wait_for_vulkan_fences_with_progress_watchdog(
+        let completion_value = binding
+            .completion
+            .pending("resident buffer copy batch")?;
+        let progress_points = [(binding.completion.semaphore(), completion_value)];
+        wait_for_vulkan_timeline_points_with_progress_sources(
             &self.device,
-            &[binding.completion_fence],
-            true,
+            &[binding.completion.semaphore()],
+            &[completion_value],
+            false,
             &self.device_health,
             "resident buffer copy batch",
+            VulkanQueueProgressSources {
+                timeline_points: &progress_points,
+                timestamp_query_pool: None,
+            },
             |error| {
                 self.vulkan_operation_error(
                     "failed waiting for resident buffer copy batch completion",
@@ -1723,6 +1715,7 @@ impl VulkanComputeDevice {
                 )
             },
         )?;
+        binding.completion.complete(completion_value)?;
         RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -1738,28 +1731,33 @@ impl VulkanComputeDevice {
                 "resident buffer copy batch belongs to another logical device".to_string(),
             ));
         }
+        let completion_value = binding
+            .completion
+            .reserve("resident buffer copy batch")?;
         unsafe {
-            self.device
-                .reset_fences(&[binding.completion_fence])
-                .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to reset resident buffer copy batch fence: {error:?}"
-                    ))
-                })?;
-            let command_buffers = [binding.command_buffer];
-            let submit_info = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
-            self.device
-                .queue_submit(self.queue, &submit_info, binding.completion_fence)
-                .map_err(|error| {
-                    vulkan_error_with_device_quarantine(
-                        &self.device_health,
+            let command_buffers =
+                [vk::CommandBufferSubmitInfo::default().command_buffer(binding.command_buffer)];
+            let completion_signal = [vk::SemaphoreSubmitInfo::default()
+                .semaphore(binding.completion.semaphore())
+                .value(completion_value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+            let submit_info = [vk::SubmitInfo2::default()
+                .command_buffer_infos(&command_buffers)
+                .signal_semaphore_infos(&completion_signal)];
+            if let Err(error) =
+                self.device
+                    .queue_submit2(self.queue, &submit_info, vk::Fence::null())
+            {
+                binding.completion.cancel(completion_value);
+                return Err(vulkan_error_with_device_quarantine(
+                    &self.device_health,
+                    error,
+                    self.vulkan_operation_error(
+                        "failed to submit resident buffer copy batch",
                         error,
-                        self.vulkan_operation_error(
-                            "failed to submit resident buffer copy batch",
-                            error,
-                        ),
-                    )
-                })?;
+                    ),
+                ));
+            }
         }
         RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -1801,7 +1799,11 @@ impl VulkanComputeDevice {
                 })?
                 .remove(0);
             self.device
-                .begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())
+                .begin_command_buffer(
+                    command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::SIMULTANEOUS_USE),
+                )
                 .map_err(|error| {
                     self.device.destroy_command_pool(command_pool, None);
                     VulkanError(format!(
@@ -1829,15 +1831,18 @@ impl VulkanComputeDevice {
                         "failed to end resident buffer copy batch command buffer: {error:?}"
                     ))
                 })?;
-            let completion_fence = self
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .map_err(|error| {
+            let completion = match self.create_timeline_semaphore(0) {
+                Ok(timeline) => Rc::new(VulkanMonotonicQueueCompletion::new(
+                    timeline,
+                    self.device_health.clone(),
+                )),
+                Err(error) => {
                     self.device.destroy_command_pool(command_pool, None);
-                    VulkanError(format!(
-                        "failed to create resident buffer copy batch fence: {error:?}"
-                    ))
-                })?;
+                    return Err(VulkanError(format!(
+                        "failed to create resident buffer copy batch completion timeline: {error}"
+                    )));
+                }
+            };
             Ok(VulkanResidentBufferCopyBatch {
                 device: self.device.clone(),
                 device_health: self.device_health.clone(),
@@ -1846,7 +1851,7 @@ impl VulkanComputeDevice {
                 queue: self.queue,
                 command_pool,
                 command_buffer,
-                completion_fence,
+                completion,
                 copies: copies
                     .iter()
                     .map(|copy| VulkanResidentRecordedBufferRangeCopy {

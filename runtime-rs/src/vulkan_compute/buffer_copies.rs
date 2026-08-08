@@ -9,7 +9,7 @@ pub struct VulkanResidentBufferCopy {
     source: vk::Buffer,
     destination: vk::Buffer,
     byte_len: vk::DeviceSize,
-    completion_fence: vk::Fence,
+    completion: Rc<VulkanMonotonicQueueCompletion>,
     timestamp_query_pool: Option<vk::QueryPool>,
     timestamp_period_ns: f32,
 }
@@ -22,7 +22,7 @@ pub struct VulkanResidentBufferCopyBatch {
     queue: vk::Queue,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
-    completion_fence: vk::Fence,
+    completion: Rc<VulkanMonotonicQueueCompletion>,
     copies: Vec<VulkanResidentRecordedBufferRangeCopy>,
 }
 
@@ -288,34 +288,47 @@ impl VulkanResidentBufferCopy {
             )));
         }
 
+        let completion_value = self.completion.reserve("resident byte copy")?;
         unsafe {
-            self.device
-                .reset_fences(&[self.completion_fence])
-                .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to reset resident byte copy completion fence: {error:?}"
-                    ))
-                })?;
-            let command_buffers = [self.command_buffer];
-            let submit_info = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
-            self.device
-                .queue_submit(self.queue, &submit_info, self.completion_fence)
-                .map_err(|error| {
-                    let mapped = vulkan_operation_error_with_device_fault(
-                        "failed to submit resident byte copy",
-                        error,
-                        self.device_fault.as_ref(),
-                        &self.device_address_registry,
-                    );
-                    vulkan_error_with_device_quarantine(&self.device_health, error, mapped)
-                })?;
+            let command_buffers =
+                [vk::CommandBufferSubmitInfo::default().command_buffer(self.command_buffer)];
+            let completion_signal = [vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.completion.semaphore())
+                .value(completion_value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+            let submit_info = [vk::SubmitInfo2::default()
+                .command_buffer_infos(&command_buffers)
+                .signal_semaphore_infos(&completion_signal)];
+            if let Err(error) =
+                self.device
+                    .queue_submit2(self.queue, &submit_info, vk::Fence::null())
+            {
+                self.completion.cancel(completion_value);
+                let mapped = vulkan_operation_error_with_device_fault(
+                    "failed to submit resident byte copy",
+                    error,
+                    self.device_fault.as_ref(),
+                    &self.device_address_registry,
+                );
+                return Err(vulkan_error_with_device_quarantine(
+                    &self.device_health,
+                    error,
+                    mapped,
+                ));
+            }
             RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
-            wait_for_vulkan_fences_with_progress_watchdog(
+            let progress_points = [(self.completion.semaphore(), completion_value)];
+            wait_for_vulkan_timeline_points_with_progress_sources(
                 &self.device,
-                &[self.completion_fence],
-                true,
+                &[self.completion.semaphore()],
+                &[completion_value],
+                false,
                 &self.device_health,
                 "resident byte copy",
+                VulkanQueueProgressSources {
+                    timeline_points: &progress_points,
+                    timestamp_query_pool: self.timestamp_query_pool,
+                },
                 |error| {
                     vulkan_operation_error_with_device_fault(
                         "failed waiting for resident byte copy",
@@ -325,6 +338,7 @@ impl VulkanResidentBufferCopy {
                     )
                 },
             )?;
+            self.completion.complete(completion_value)?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
             self.device_health.require_healthy()?;
             let device_duration_ns = if self.timestamp_query_pool.is_some() {
@@ -376,34 +390,47 @@ impl VulkanResidentBufferCopyBatch {
 
     pub fn run(&self) -> Result<(), VulkanError> {
         self.device_health.require_healthy()?;
+        let completion_value = self.completion.reserve("resident buffer copy batch")?;
         unsafe {
-            self.device
-                .reset_fences(&[self.completion_fence])
-                .map_err(|error| {
-                    VulkanError(format!(
-                        "failed to reset resident buffer copy batch fence: {error:?}"
-                    ))
-                })?;
-            let command_buffers = [self.command_buffer];
-            let submit_info = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
-            self.device
-                .queue_submit(self.queue, &submit_info, self.completion_fence)
-                .map_err(|error| {
-                    let mapped = vulkan_operation_error_with_device_fault(
-                        "failed to submit resident buffer copy batch",
-                        error,
-                        self.device_fault.as_ref(),
-                        &self.device_address_registry,
-                    );
-                    vulkan_error_with_device_quarantine(&self.device_health, error, mapped)
-                })?;
+            let command_buffers =
+                [vk::CommandBufferSubmitInfo::default().command_buffer(self.command_buffer)];
+            let completion_signal = [vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.completion.semaphore())
+                .value(completion_value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+            let submit_info = [vk::SubmitInfo2::default()
+                .command_buffer_infos(&command_buffers)
+                .signal_semaphore_infos(&completion_signal)];
+            if let Err(error) =
+                self.device
+                    .queue_submit2(self.queue, &submit_info, vk::Fence::null())
+            {
+                self.completion.cancel(completion_value);
+                let mapped = vulkan_operation_error_with_device_fault(
+                    "failed to submit resident buffer copy batch",
+                    error,
+                    self.device_fault.as_ref(),
+                    &self.device_address_registry,
+                );
+                return Err(vulkan_error_with_device_quarantine(
+                    &self.device_health,
+                    error,
+                    mapped,
+                ));
+            }
             RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
-            wait_for_vulkan_fences_with_progress_watchdog(
+            let progress_points = [(self.completion.semaphore(), completion_value)];
+            wait_for_vulkan_timeline_points_with_progress_sources(
                 &self.device,
-                &[self.completion_fence],
-                true,
+                &[self.completion.semaphore()],
+                &[completion_value],
+                false,
                 &self.device_health,
                 "resident buffer copy batch",
+                VulkanQueueProgressSources {
+                    timeline_points: &progress_points,
+                    timestamp_query_pool: None,
+                },
                 |error| {
                     vulkan_operation_error_with_device_fault(
                         "failed waiting for resident buffer copy batch",
@@ -413,6 +440,7 @@ impl VulkanResidentBufferCopyBatch {
                     )
                 },
             )?;
+            self.completion.complete(completion_value)?;
             RESIDENT_COPY_WAITS.fetch_add(1, Ordering::Relaxed);
         }
         self.device_health.require_healthy()?;
@@ -426,7 +454,6 @@ impl Drop for VulkanResidentBufferCopy {
             if let Some(query_pool) = self.timestamp_query_pool {
                 self.device.destroy_query_pool(query_pool, None);
             }
-            self.device.destroy_fence(self.completion_fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
         }
     }
@@ -435,7 +462,6 @@ impl Drop for VulkanResidentBufferCopy {
 impl Drop for VulkanResidentBufferCopyBatch {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_fence(self.completion_fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
         }
     }
@@ -512,7 +538,6 @@ impl Drop for VulkanResidentKernelSequence {
             if let Some(query_pool) = self.timestamp_query_pool {
                 self.device.destroy_query_pool(query_pool, None);
             }
-            self.device.destroy_fence(self.completion_fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
         }
     }

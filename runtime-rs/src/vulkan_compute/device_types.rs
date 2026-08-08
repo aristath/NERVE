@@ -55,7 +55,7 @@ pub struct VulkanResidentExecutionCounters {
     pub resident_sequence_recorded_command_buffers: u64,
     pub resident_sequence_reused_command_buffers: u64,
     pub resident_sequence_queue_submits: u64,
-    pub resident_sequence_fence_waits: u64,
+    pub resident_sequence_completion_waits: u64,
     pub resident_queue_batch_submits: u64,
     pub resident_queue_batch_commands: u64,
     pub resident_copy_queue_submits: u64,
@@ -85,7 +85,7 @@ static RESIDENT_SEQUENCE_PREPARE_CALLS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_SEQUENCE_RECORDED_COMMAND_BUFFERS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_SEQUENCE_REUSED_COMMAND_BUFFERS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_SEQUENCE_QUEUE_SUBMITS: AtomicU64 = AtomicU64::new(0);
-static RESIDENT_SEQUENCE_FENCE_WAITS: AtomicU64 = AtomicU64::new(0);
+static RESIDENT_SEQUENCE_COMPLETION_WAITS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_QUEUE_BATCH_SUBMITS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_QUEUE_BATCH_COMMANDS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_COPY_QUEUE_SUBMITS: AtomicU64 = AtomicU64::new(0);
@@ -115,7 +115,7 @@ pub fn reset_vulkan_resident_execution_counters() {
     RESIDENT_SEQUENCE_RECORDED_COMMAND_BUFFERS.store(0, Ordering::Relaxed);
     RESIDENT_SEQUENCE_REUSED_COMMAND_BUFFERS.store(0, Ordering::Relaxed);
     RESIDENT_SEQUENCE_QUEUE_SUBMITS.store(0, Ordering::Relaxed);
-    RESIDENT_SEQUENCE_FENCE_WAITS.store(0, Ordering::Relaxed);
+    RESIDENT_SEQUENCE_COMPLETION_WAITS.store(0, Ordering::Relaxed);
     RESIDENT_QUEUE_BATCH_SUBMITS.store(0, Ordering::Relaxed);
     RESIDENT_QUEUE_BATCH_COMMANDS.store(0, Ordering::Relaxed);
     RESIDENT_COPY_QUEUE_SUBMITS.store(0, Ordering::Relaxed);
@@ -149,7 +149,8 @@ pub fn vulkan_resident_execution_counters() -> VulkanResidentExecutionCounters {
         resident_sequence_reused_command_buffers: RESIDENT_SEQUENCE_REUSED_COMMAND_BUFFERS
             .load(Ordering::Relaxed),
         resident_sequence_queue_submits: RESIDENT_SEQUENCE_QUEUE_SUBMITS.load(Ordering::Relaxed),
-        resident_sequence_fence_waits: RESIDENT_SEQUENCE_FENCE_WAITS.load(Ordering::Relaxed),
+        resident_sequence_completion_waits: RESIDENT_SEQUENCE_COMPLETION_WAITS
+            .load(Ordering::Relaxed),
         resident_queue_batch_submits: RESIDENT_QUEUE_BATCH_SUBMITS.load(Ordering::Relaxed),
         resident_queue_batch_commands: RESIDENT_QUEUE_BATCH_COMMANDS.load(Ordering::Relaxed),
         resident_copy_queue_submits: RESIDENT_COPY_QUEUE_SUBMITS.load(Ordering::Relaxed),
@@ -530,6 +531,7 @@ struct VulkanResidentQueueSubmitter {
     device_health: VulkanDeviceHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
+    completion: Rc<VulkanMonotonicQueueCompletion>,
 }
 
 #[derive(Clone, Copy)]
@@ -558,9 +560,13 @@ struct VulkanPreparedResidentQueueSubmission {
     command_buffer: Option<vk::CommandBuffer>,
     wait_points: Vec<(vk::Semaphore, u64)>,
     signal_points: Vec<(vk::Semaphore, u64)>,
-    completion_fence: vk::Fence,
-    signal_completion: bool,
+    completion: Option<Rc<VulkanMonotonicQueueCompletion>>,
     execution_region: Option<RuntimeExecutionRegion>,
+}
+
+struct VulkanSubmittedResidentQueueBatch {
+    batch_completion_value: Option<u64>,
+    resource_completions: Vec<(Rc<VulkanMonotonicQueueCompletion>, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -636,8 +642,7 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
                 .iter()
                 .map(|point| (point.semaphore.semaphore, point.value))
                 .collect(),
-            completion_fence: vk::Fence::null(),
-            signal_completion: false,
+            completion: None,
             execution_region: None,
         };
         let mut groups = self.groups.borrow_mut();
@@ -682,10 +687,9 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         self.enqueue_command_buffer(
             device,
             sequence.command_buffer,
-            sequence.completion_fence,
+            signal_completion.then(|| Rc::clone(&sequence.completion)),
             wait_points,
             signal_points,
-            signal_completion,
             execution_region,
         )
     }
@@ -708,10 +712,9 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         self.enqueue_command_buffer(
             device,
             binding.command_buffer,
-            binding.completion_fence,
+            None,
             wait_points,
             signal_points,
-            false,
             None,
         )
     }
@@ -736,10 +739,9 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         self.enqueue_command_buffer(
             device,
             binding.command_buffer,
-            binding.completion_fence,
+            signal_completion.then(|| Rc::clone(&binding.completion)),
             wait_points,
             signal_points,
-            signal_completion,
             None,
         )
     }
@@ -749,10 +751,9 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         &self,
         device: &'a VulkanComputeDevice,
         command_buffer: vk::CommandBuffer,
-        completion_fence: vk::Fence,
+        completion: Option<Rc<VulkanMonotonicQueueCompletion>>,
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
-        signal_completion: bool,
         execution_region: Option<RuntimeExecutionRegion>,
     ) -> Result<(), VulkanError> {
         let submission = VulkanPreparedResidentQueueSubmission {
@@ -765,8 +766,7 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
                 .iter()
                 .map(|point| (point.semaphore.semaphore, point.value))
                 .collect(),
-            completion_fence,
-            signal_completion,
+            completion,
             execution_region,
         };
         let mut groups = self.groups.borrow_mut();
@@ -856,22 +856,29 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         })?;
         let groups = groups
             .into_iter()
-            .map(|group| VulkanResidentQueueSubmissionTemplateGroup {
-                submitter: VulkanResidentQueueSubmitter {
-                    device: group.device.device.clone(),
-                    device_handle: group.device.device.handle(),
-                    queue: group.device.queue,
-                    device_health: group.device.device_health.clone(),
-                    device_fault: group.device.device_fault.clone(),
-                    device_address_registry: Arc::clone(
-                        &group.device.device_address_registry,
-                    ),
-                },
-                submissions: group.submissions,
-                quantum_ranges: group.quantum_ranges,
-                quanta: group.quanta,
+            .map(|group| {
+                let completion = Rc::new(VulkanMonotonicQueueCompletion::new(
+                    group.device.create_timeline_semaphore(0)?,
+                    group.device.device_health.clone(),
+                ));
+                Ok(VulkanResidentQueueSubmissionTemplateGroup {
+                    submitter: VulkanResidentQueueSubmitter {
+                        device: group.device.device.clone(),
+                        device_handle: group.device.device.handle(),
+                        queue: group.device.queue,
+                        device_health: group.device.device_health.clone(),
+                        device_fault: group.device.device_fault.clone(),
+                        device_address_registry: Arc::clone(
+                            &group.device.device_address_registry,
+                        ),
+                        completion,
+                    },
+                    submissions: group.submissions,
+                    quantum_ranges: group.quantum_ranges,
+                    quanta: group.quanta,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, VulkanError>>()?;
         Ok(VulkanResidentQueueSubmissionTemplate {
             groups,
             submission_count,
@@ -918,7 +925,7 @@ impl VulkanResidentQueueSubmissionTemplate {
                 group.submitter.submit_prepared_resident_queue_batch(
                     &group.submissions[quantum_range.clone()],
                     VulkanTimelineValueTransform::UniformOffset(timeline_value_offset),
-                    None,
+                    false,
                 )?;
             }
         }
@@ -945,7 +952,7 @@ impl VulkanResidentQueueSubmissionTemplate {
                 group.submitter.submit_prepared_resident_queue_batch(
                     &group.submissions[quantum_range.clone()],
                     VulkanTimelineValueTransform::PerSemaphore(rebase),
-                    None,
+                    false,
                 )?;
             }
         }
@@ -993,19 +1000,21 @@ impl VulkanResidentQueueSubmissionTemplate {
                     )
                 })?;
                 let submissions = &group.submissions[quantum_range.clone()];
-                let completion_fence = submissions
-                    .last()
-                    .map(|submission| submission.completion_fence)
-                    .ok_or_else(|| {
-                        VulkanError("execution quantum contains no submissions".to_string())
-                    })?;
                 let started = Instant::now();
-                group.submitter.submit_prepared_resident_queue_batch(
+                let submitted = group.submitter.submit_prepared_resident_queue_batch(
                     submissions,
                     VulkanTimelineValueTransform::UniformOffset(timeline_value_offset),
-                    Some(completion_fence),
+                    true,
                 )?;
-                group.submitter.wait_for_completion_fence(completion_fence)?;
+                let completion_value = submitted.batch_completion_value.ok_or_else(|| {
+                    VulkanError("execution quantum did not reserve completion".to_string())
+                })?;
+                group
+                    .submitter
+                    .wait_for_batch_completion(completion_value)?;
+                for (completion, value) in submitted.resource_completions {
+                    completion.complete(value)?;
+                }
                 measurements.push(VulkanResidentExecutionQuantumMeasurement {
                     cost: quantum.cost,
                     region_count: quantum.region_count(),

@@ -12,12 +12,12 @@ pub struct VulkanTextureCalibration {
     pipeline: vk::Pipeline,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
-    completion_fence: vk::Fence,
+    completion: Rc<VulkanMonotonicQueueCompletion>,
     timestamp_query_pool: vk::QueryPool,
     timestamp_period_ns: f32,
     queue: vk::Queue,
-    _source: VulkanResidentBuffer,
-    output: VulkanResidentBuffer,
+    source: Option<VulkanResidentBuffer>,
+    output: Option<VulkanResidentBuffer>,
 }
 
 impl VulkanComputeDevice {
@@ -294,10 +294,10 @@ impl VulkanComputeDevice {
                 )
                 .map_err(|error| VulkanError(format!("failed to allocate texture command buffer: {error:?}")))?
                 .remove(0);
-            let completion_fence = self
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .map_err(|error| VulkanError(format!("failed to create texture fence: {error:?}")))?;
+            let completion = Rc::new(VulkanMonotonicQueueCompletion::new(
+                self.create_timeline_semaphore(0)?,
+                self.device_health.clone(),
+            ));
             let timestamp_query_pool = self
                 .device
                 .create_query_pool(
@@ -443,12 +443,12 @@ impl VulkanComputeDevice {
                 pipeline,
                 command_pool,
                 command_buffer,
-                completion_fence,
+                completion,
                 timestamp_query_pool,
                 timestamp_period_ns: self.timestamp_period_ns,
                 queue: self.queue,
-                _source: source,
-                output,
+                source: Some(source),
+                output: Some(output),
             })
         }
     }
@@ -457,27 +457,40 @@ impl VulkanComputeDevice {
 impl VulkanTextureCalibration {
     pub fn run_for(&self, timeout: Duration) -> Result<u64, VulkanError> {
         self.device_health.require_healthy()?;
+        let completion_value = self.completion.reserve("texture calibration")?;
         unsafe {
-            self.device
-                .reset_fences(&[self.completion_fence])
-                .map_err(|error| VulkanError(format!("failed to reset texture fence: {error:?}")))?;
             let command_buffers =
                 [vk::CommandBufferSubmitInfo::default().command_buffer(self.command_buffer)];
-            self.device
-                .queue_submit2(
-                    self.queue(),
-                    &[vk::SubmitInfo2::default().command_buffer_infos(&command_buffers)],
-                    self.completion_fence,
-                )
-                .map_err(|error| VulkanError(format!("failed to submit texture commands: {error:?}")))?;
+            let completion_signal = [vk::SemaphoreSubmitInfo::default()
+                .semaphore(self.completion.semaphore())
+                .value(completion_value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+            let submission = [vk::SubmitInfo2::default()
+                .command_buffer_infos(&command_buffers)
+                .signal_semaphore_infos(&completion_signal)];
+            if let Err(error) =
+                self.device
+                    .queue_submit2(self.queue(), &submission, vk::Fence::null())
+            {
+                self.completion.cancel(completion_value);
+                return Err(VulkanError(format!(
+                    "failed to submit texture commands: {error:?}"
+                )));
+            }
             let timeout_ns = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+            let semaphores = [self.completion.semaphore()];
+            let values = [completion_value];
+            let wait_info = vk::SemaphoreWaitInfo::default()
+                .semaphores(&semaphores)
+                .values(&values);
             self.device
-                .wait_for_fences(&[self.completion_fence], true, timeout_ns)
+                .wait_semaphores(&wait_info, timeout_ns)
                 .map_err(|error| {
                     VulkanError(format!(
                         "texture calibration did not complete within {timeout_ns} ns: {error:?}"
                     ))
                 })?;
+            self.completion.complete(completion_value)?;
             let mut timestamps = [0_u64; 2];
             self.device
                 .get_query_pool_results(
@@ -508,17 +521,47 @@ impl VulkanTextureCalibration {
     }
 
     pub fn output_bytes(&self, byte_count: usize) -> Result<Vec<u8>, VulkanError> {
-        self.output.read_bytes(byte_count)
+        self.output
+            .as_ref()
+            .ok_or_else(|| VulkanError("texture calibration resources were retired".to_string()))?
+            .read_bytes(byte_count)
     }
 }
 
 impl Drop for VulkanTextureCalibration {
     fn drop(&mut self) {
+        if let Some(completion_value) = self.completion.pending_value() {
+            let wait_result = wait_for_vulkan_timeline_points_with_progress_watchdog(
+                &self.device,
+                &[self.completion.semaphore()],
+                &[completion_value],
+                false,
+                &self.device_health,
+                "texture calibration teardown",
+                |error| {
+                    VulkanError(format!(
+                        "failed waiting for texture calibration teardown: {error:?}"
+                    ))
+                },
+            );
+            if wait_result.is_err() {
+                // Queue ownership is uncertain. Preserve every object that may
+                // still be referenced by the submission; the quarantined
+                // logical device is intentionally retained by its owner too.
+                if let Some(source) = self.source.take() {
+                    std::mem::forget(source);
+                }
+                if let Some(output) = self.output.take() {
+                    std::mem::forget(output);
+                }
+                std::mem::forget(Rc::clone(&self.completion));
+                return;
+            }
+            let _ = self.completion.complete(completion_value);
+        }
         unsafe {
-            let _ = self.device.device_wait_idle();
             self.device
                 .destroy_query_pool(self.timestamp_query_pool, None);
-            self.device.destroy_fence(self.completion_fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_shader_module(self.shader_module, None);
