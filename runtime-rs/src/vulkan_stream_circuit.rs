@@ -19,6 +19,8 @@ use crate::critical_path::{
     RuntimeCriticalPathPhase, record_runtime_critical_path_device_duration,
     runtime_critical_path_device_phase_scope, runtime_critical_path_span,
 };
+#[cfg(test)]
+use crate::critical_path::{reset_runtime_critical_path_counters, runtime_critical_path_report};
 use crate::execution_schedule::{
     RuntimeExecutionCost, RuntimeExecutionQuantumCalibrator, RuntimeExecutionRegion,
 };

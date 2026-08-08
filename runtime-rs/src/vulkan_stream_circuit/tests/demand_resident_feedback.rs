@@ -25,6 +25,14 @@ fn demand_feedback_guards_the_entire_initial_pipeline_and_splits_after_gates() {
 }
 
 #[test]
+fn demand_feedback_does_not_record_unconsumed_critical_path_timestamps() {
+    assert!(!VulkanDemandResidencySequencePurpose::Feedback.records_critical_path());
+    assert!(
+        VulkanDemandResidencySequencePurpose::BlockingProfile.records_critical_path()
+    );
+}
+
+#[test]
 fn standalone_demand_execution_leaves_the_selector_prefix_direct() {
     let commands = [
         VulkanDemandResidencyCommand::Prefix(0),

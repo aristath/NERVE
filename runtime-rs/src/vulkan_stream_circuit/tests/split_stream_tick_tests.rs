@@ -715,15 +715,31 @@ fn placed_model_package_runs_split_greedy_feedback_loop() {
     let placed_package = placed_model
         .create_stream_processor_for_devices(&device, 0)
         .unwrap();
+    reset_runtime_critical_path_counters();
     let run = placed_package
         .run_feedback_bounded_in_process(&device, 1, 0, 2)
         .unwrap();
+    let critical_path = runtime_critical_path_report(1);
 
     assert_eq!(run.input_device_id, "gpu0");
     assert_eq!(run.output_device_id, "gpu0");
     assert_eq!(run.initial_token_id, 1);
     assert_eq!(run.sampled_token_ids, vec![16, 16]);
     assert_eq!(run.tick_runs.len(), 2);
+    for phase in [
+        RuntimeCriticalPathPhase::ResidencyGate,
+        RuntimeCriticalPathPhase::ExpertCompute,
+    ] {
+        let phase = critical_path
+            .phases
+            .iter()
+            .find(|candidate| candidate.phase == phase.as_str())
+            .expect("feedback critical-path phase");
+        assert_eq!(
+            phase.device_timestamp_count, 0,
+            "deferred feedback must not write timestamps that its completion path cannot consume"
+        );
+    }
     assert_eq!(run.tick_runs[0].stream_tick, 0);
     assert_eq!(run.tick_runs[0].input_token_id, 1);
     assert_eq!(run.tick_runs[0].sampled_token_id, 16);

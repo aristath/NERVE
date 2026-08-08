@@ -75,10 +75,24 @@ struct VulkanDemandResidencyDispatchChain {
     continuation_enabled: Cell<bool>,
     missing_queue: VulkanGpuResidencyMissQueue,
     gates: Vec<VulkanDemandResidencyGateRuntime>,
-    full_sequence: VulkanResidentKernelSequence,
-    resume_sequences: Vec<VulkanResidentKernelSequence>,
+    feedback_full_sequence: VulkanResidentKernelSequence,
+    feedback_resume_sequences: Vec<VulkanResidentKernelSequence>,
+    profiled_full_sequence: VulkanResidentKernelSequence,
+    profiled_resume_sequences: Vec<VulkanResidentKernelSequence>,
     observed_notification_epoch: Cell<u32>,
     shared_pipeline_guard: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanDemandResidencySequencePurpose {
+    Feedback,
+    BlockingProfile,
+}
+
+impl VulkanDemandResidencySequencePurpose {
+    const fn records_critical_path(self) -> bool {
+        matches!(self, Self::BlockingProfile)
+    }
 }
 
 fn demand_command_critical_path_phase(
@@ -782,12 +796,20 @@ impl VulkanDemandResidencyDispatchChain {
                 gate,
             });
         }
-        let full_sequence = device
+        let feedback_full_sequence = device
+            .create_resident_kernel_sequence()
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        let feedback_resume_sequences = gates
+            .iter()
+            .map(|_| device.create_resident_kernel_sequence())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        let profiled_full_sequence = device
             .create_critical_path_timestamped_resident_kernel_sequence(
                 contiguous_critical_path_regions(&command_critical_path_phases).len(),
             )
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-        let resume_sequences = gates
+        let profiled_resume_sequences = gates
             .iter()
             .map(|gate| {
                 device.create_critical_path_timestamped_resident_kernel_sequence(
@@ -807,8 +829,10 @@ impl VulkanDemandResidencyDispatchChain {
             continuation_enabled: Cell::new(true),
             missing_queue,
             gates,
-            full_sequence,
-            resume_sequences,
+            feedback_full_sequence,
+            feedback_resume_sequences,
+            profiled_full_sequence,
+            profiled_resume_sequences,
             observed_notification_epoch: Cell::new(0),
             shared_pipeline_guard,
         })
@@ -988,6 +1012,7 @@ impl VulkanDemandResidencyDispatchChain {
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
         self.with_prepared_steps(
             None,
+            VulkanDemandResidencySequencePurpose::Feedback,
             dispatches,
             control,
             prefix_dispatches,
@@ -1028,6 +1053,7 @@ impl VulkanDemandResidencyDispatchChain {
         self.continuation_enabled.set(true);
         self.with_prepared_steps(
             Some(gate_index),
+            VulkanDemandResidencySequencePurpose::Feedback,
             dispatches,
             control,
             prefix_dispatches,
@@ -1161,6 +1187,7 @@ impl VulkanDemandResidencyDispatchChain {
         );
         self.with_prepared_steps(
             resume_gate_index,
+            VulkanDemandResidencySequencePurpose::BlockingProfile,
             dispatches,
             control,
             prefix_dispatches,
@@ -1238,6 +1265,7 @@ impl VulkanDemandResidencyDispatchChain {
     fn with_prepared_steps<T, F>(
         &self,
         resume_gate_index: Option<usize>,
+        sequence_purpose: VulkanDemandResidencySequencePurpose,
         dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
         control: VulkanMountedPlacedStreamControl,
         prefix_dispatches: &[&VulkanResidentKernelDispatch],
@@ -1268,7 +1296,16 @@ impl VulkanDemandResidencyDispatchChain {
                     (
                         gate.command_index,
                         gate.command_index,
-                        self.resume_sequences.get(gate_index).ok_or_else(|| {
+                        match sequence_purpose {
+                            VulkanDemandResidencySequencePurpose::Feedback => {
+                                &self.feedback_resume_sequences
+                            }
+                            VulkanDemandResidencySequencePurpose::BlockingProfile => {
+                                &self.profiled_resume_sequences
+                            }
+                        }
+                        .get(gate_index)
+                        .ok_or_else(|| {
                             demand_dispatch_error(format!(
                                 "demand resume sequence {gate_index} is absent"
                             ))
@@ -1278,7 +1315,14 @@ impl VulkanDemandResidencyDispatchChain {
                 None => (
                     0,
                     self.first_gate_command_index,
-                    &self.full_sequence,
+                    match sequence_purpose {
+                        VulkanDemandResidencySequencePurpose::Feedback => {
+                            &self.feedback_full_sequence
+                        }
+                        VulkanDemandResidencySequencePurpose::BlockingProfile => {
+                            &self.profiled_full_sequence
+                        }
+                    },
                 ),
             };
         let gate_push_constants = self
@@ -1417,8 +1461,12 @@ impl VulkanDemandResidencyDispatchChain {
                 .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?
             } else {
                 VulkanResidentKernelSequenceStep::new(dispatch, push_constants)
-            }
-            .with_critical_path_region(critical_path_region_index);
+            };
+            let step = if sequence_purpose.records_critical_path() {
+                step.with_critical_path_region(critical_path_region_index)
+            } else {
+                step
+            };
             let conditional_region = conditional_regions
                 .get(command_index - start_command_index)
                 .copied()
