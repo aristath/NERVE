@@ -542,14 +542,7 @@ fn resource_component_device<'a>(
 fn compiled_resource_bytes(
     resource: &CompiledImmutableResource,
 ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
-    if let Some(derivation) = &resource.resident_derivation {
-        return Ok(derivation.resident_byte_count);
-    }
-    resource.ranges.iter().try_fold(0usize, |total, range| {
-        checked_residency_add(
-            total,
-            range.byte_count,
-            "compiled resource byte count",
-        )
-    })
+    resource
+        .source_byte_count()
+        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))
 }

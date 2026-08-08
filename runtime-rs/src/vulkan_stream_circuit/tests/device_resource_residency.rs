@@ -72,7 +72,7 @@ fn owner(value: &str) -> DeviceResourceResidencyOwnerId {
 }
 
 #[test]
-fn resolved_descriptor_uses_derived_resident_size_not_packed_source_size() {
+fn resolved_descriptor_keeps_source_default_and_sizes_explicit_derivation() {
     let required_features = vec![
         "shader_float8".to_string(),
         "shader_int8".to_string(),
@@ -111,10 +111,17 @@ fn resolved_descriptor_uses_derived_resident_size_not_packed_source_size() {
         },
     );
 
-    let descriptor = DeviceResourceGroupDescriptor::from_resolved(&resolved).unwrap();
+    let source = DeviceResourceGroupDescriptor::from_resolved(&resolved).unwrap();
+    let derived = DeviceResourceGroupDescriptor::from_resolved_representation(
+        &resolved,
+        CompiledResourceRepresentation::ResidentDerivation,
+    )
+    .unwrap();
 
-    assert_eq!(descriptor.byte_count, 16);
-    assert_eq!(descriptor.resources[0].byte_count, 16);
+    assert_eq!(source.byte_count, 8);
+    assert_eq!(source.resources[0].byte_count, 8);
+    assert_eq!(derived.byte_count, 16);
+    assert_eq!(derived.resources[0].byte_count, 16);
 }
 
 #[test]

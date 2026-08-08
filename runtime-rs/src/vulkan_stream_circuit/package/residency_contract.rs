@@ -78,6 +78,16 @@ pub struct CompiledImmutableResource {
     pub resident_derivation: Option<CompiledResourceResidentDerivation>,
 }
 
+impl CompiledImmutableResource {
+    pub fn source_byte_count(&self) -> io::Result<usize> {
+        self.ranges.iter().try_fold(0usize, |total, range| {
+            total.checked_add(range.byte_count).ok_or_else(|| {
+                invalid_residency_error("compiled resource source size overflowed")
+            })
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledResourceResidentDerivation {
@@ -92,6 +102,20 @@ pub struct CompiledResourceResidentDerivation {
 #[serde(rename_all = "snake_case")]
 pub enum CompiledResourceResidentDerivationKind {
     Mxfp4E2m1ToFp8E4m3,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CompiledResourceRepresentation {
+    #[default]
+    Source = 0,
+    ResidentDerivation = 1,
+}
+
+impl CompiledResourceRepresentation {
+    pub fn address_tag(self) -> u32 {
+        self as u32
+    }
 }
 
 impl CompiledResourceResidentDerivation {
@@ -209,6 +233,20 @@ pub struct CompiledPartitionMemberTemplate {
     pub resident_derivation: Option<CompiledResourceResidentDerivation>,
 }
 
+impl CompiledPartitionMemberTemplate {
+    pub fn source_byte_count(&self) -> io::Result<usize> {
+        self.range_templates
+            .iter()
+            .try_fold(0usize, |total, range| {
+                total.checked_add(range.byte_count).ok_or_else(|| {
+                    invalid_residency_error(
+                        "compiled partition source size overflowed",
+                    )
+                })
+            })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledResourceRangeTemplate {
@@ -295,21 +333,8 @@ impl CompiledResourceResidencyContract {
             .resources
             .iter()
             .map(|resource| {
-                resource.resident_derivation.as_ref().map_or_else(
-                    || {
-                        resource.ranges.iter().try_fold(
-                            0usize,
-                            |total, range| {
-                                total.checked_add(range.byte_count).ok_or_else(|| {
-                                    invalid_residency_error(
-                                        "compiled resource inspection byte count overflowed",
-                                    )
-                                })
-                            },
-                        )
-                    },
-                    |derivation| Ok(derivation.resident_byte_count),
-                )
+                resource
+                    .source_byte_count()
                 .map(|bytes| (resource.id.as_str(), bytes))
             })
             .collect::<io::Result<BTreeMap<_, _>>>()?;
@@ -349,21 +374,7 @@ impl CompiledResourceResidencyContract {
                     .member_templates
                     .iter()
                     .try_fold(0usize, |total, member| {
-                        let member_bytes = member.resident_derivation.as_ref().map_or_else(
-                            || {
-                                member.range_templates.iter().try_fold(
-                                    0usize,
-                                    |member_total, range| {
-                                        member_total.checked_add(range.byte_count).ok_or_else(|| {
-                                            invalid_residency_error(
-                                                "compiled partition inspection byte count overflowed",
-                                            )
-                                        })
-                                    },
-                                )
-                            },
-                            |derivation| Ok(derivation.resident_byte_count),
-                        )?;
+                        let member_bytes = member.source_byte_count()?;
                         total.checked_add(member_bytes).ok_or_else(|| {
                             invalid_residency_error(
                                 "compiled partition inspection byte count overflowed",
@@ -604,19 +615,7 @@ fn runtime_resource_residency_class_report(
                 .member_templates
                 .iter()
                 .try_fold(0usize, |unit_total, member| {
-                    let member_bytes = member.resident_derivation.as_ref().map_or_else(
-                        || member.range_templates.iter().try_fold(
-                            0usize,
-                            |member_total, range| {
-                                member_total.checked_add(range.byte_count).ok_or_else(|| {
-                                    invalid_residency_error(
-                                        "compiled residency inspection byte count overflowed",
-                                    )
-                                })
-                            },
-                        ),
-                        |derivation| Ok(derivation.resident_byte_count),
-                    )?;
+                    let member_bytes = member.source_byte_count()?;
                     unit_total.checked_add(member_bytes).ok_or_else(|| {
                         invalid_residency_error(
                             "compiled residency inspection byte count overflowed",

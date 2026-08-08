@@ -20,22 +20,27 @@ impl DeviceResourceGroupDescriptor {
     pub fn from_resolved(
         group: &ResolvedCompiledResourceGroup,
     ) -> Result<Self, DeviceResourceResidencyError> {
+        Self::from_resolved_representation(
+            group,
+            CompiledResourceRepresentation::Source,
+        )
+    }
+
+    pub fn from_resolved_representation(
+        group: &ResolvedCompiledResourceGroup,
+        representation: CompiledResourceRepresentation,
+    ) -> Result<Self, DeviceResourceResidencyError> {
         let resources = group
             .resources()
             .iter()
             .map(|resource| {
-                let byte_count = resource.resident_derivation.as_ref().map_or_else(
-                    || {
-                        resource.ranges.iter().try_fold(0usize, |total, range| {
-                            total.checked_add(range.byte_count).ok_or_else(|| {
-                                DeviceResourceResidencyError::invalid_descriptor(
-                                    "compiled resource byte count overflowed",
-                                )
-                            })
-                        })
-                    },
-                    |derivation| Ok(derivation.resident_byte_count),
-                )?;
+                let byte_count = resource
+                    .resident_byte_count_for(representation)
+                    .map_err(|error| {
+                        DeviceResourceResidencyError::invalid_descriptor(
+                            error.to_string(),
+                        )
+                    })?;
                 Ok(DeviceResourceDescriptor {
                     id: resource.id.clone(),
                     byte_count,

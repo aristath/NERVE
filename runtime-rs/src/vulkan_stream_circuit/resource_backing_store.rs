@@ -144,6 +144,7 @@ pub struct LoadedCompiledResource {
     pub id: String,
     pub ranges: Vec<LoadedCompiledResourceRange>,
     pub compatibility: CompiledResourceCompatibility,
+    pub representation: CompiledResourceRepresentation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -230,6 +231,7 @@ impl CompiledResourceBackingStoreAtomicStatistics {
 
 struct CompiledResourceBackingStoreWork {
     group: ResolvedCompiledResourceGroup,
+    representation: CompiledResourceRepresentation,
     cancellation: CompiledResourceLoadCancellation,
     response: mpsc::Sender<
         Result<LoadedCompiledResourceGroup, CompiledResourceBackingStoreError>,
@@ -420,6 +422,7 @@ impl CompiledResourceBackingStore {
                         let result = read_compiled_resource_group_with_limits(
                             &worker_root,
                             &work.group,
+                            work.representation,
                             &work.cancellation,
                             &worker_limits,
                             &worker_host_memory_budget,
@@ -508,7 +511,26 @@ impl CompiledResourceBackingStore {
     where
         G: Into<ResolvedCompiledResourceGroup>,
     {
-        self.try_load_with_cancellation(group, CompiledResourceLoadCancellation::new())
+        self.try_load_representation_with_cancellation(
+            group,
+            CompiledResourceRepresentation::Source,
+            CompiledResourceLoadCancellation::new(),
+        )
+    }
+
+    pub fn try_load_representation<G>(
+        &self,
+        group: G,
+        representation: CompiledResourceRepresentation,
+    ) -> Result<CompiledResourceLoadTicket, CompiledResourceBackingStoreError>
+    where
+        G: Into<ResolvedCompiledResourceGroup>,
+    {
+        self.try_load_representation_with_cancellation(
+            group,
+            representation,
+            CompiledResourceLoadCancellation::new(),
+        )
     }
 
     pub fn try_load_with_cancellation<G>(
@@ -519,9 +541,34 @@ impl CompiledResourceBackingStore {
     where
         G: Into<ResolvedCompiledResourceGroup>,
     {
+        self.try_load_representation_with_cancellation(
+            group,
+            CompiledResourceRepresentation::Source,
+            cancellation,
+        )
+    }
+
+    pub fn try_load_representation_with_cancellation<G>(
+        &self,
+        group: G,
+        representation: CompiledResourceRepresentation,
+        cancellation: CompiledResourceLoadCancellation,
+    ) -> Result<CompiledResourceLoadTicket, CompiledResourceBackingStoreError>
+    where
+        G: Into<ResolvedCompiledResourceGroup>,
+    {
+        let group = group.into();
+        if representation == CompiledResourceRepresentation::ResidentDerivation
+            && !group.has_resident_derivation()
+        {
+            return Err(CompiledResourceBackingStoreError::configuration(
+                "compiled resource group has no derived resident representation",
+            ));
+        }
         let (response_sender, response_receiver) = mpsc::channel();
         let request = CompiledResourceBackingStoreWork {
-            group: group.into(),
+            group,
+            representation,
             cancellation: cancellation.clone(),
             response: response_sender,
         };
@@ -592,6 +639,7 @@ struct CoalescedPhysicalRead {
 fn read_compiled_resource_group_with_limits(
     package_root: &Path,
     group: &ResolvedCompiledResourceGroup,
+    representation: CompiledResourceRepresentation,
     cancellation: &CompiledResourceLoadCancellation,
     limits: &CompiledResourceBackingStoreLimits,
     host_memory_budget: &Arc<CompiledResourceHostMemoryBudget>,
@@ -633,16 +681,19 @@ fn read_compiled_resource_group_with_limits(
     // for the lifetime of the returned payload can deadlock a valid wave: a
     // completed later ticket holds capacity needed by an earlier ticket that
     // the publisher is waiting to collect.
-    let has_resident_derivation = group
-        .resources()
-        .iter()
-        .any(|resource| resource.resident_derivation.is_some());
+    let has_resident_derivation = representation
+        == CompiledResourceRepresentation::ResidentDerivation
+        && group.has_resident_derivation();
     let expected_resident_byte_count = group.resources().iter().try_fold(
         0usize,
         |total, resource| {
-            let byte_count = resource.resident_byte_count().map_err(|error| {
-                CompiledResourceBackingStoreError::configuration(error.to_string())
-            })?;
+            let byte_count = resource
+                .resident_byte_count_for(representation)
+                .map_err(|error| {
+                    CompiledResourceBackingStoreError::configuration(
+                        error.to_string(),
+                    )
+                })?;
             total.checked_add(byte_count).ok_or_else(|| {
                 CompiledResourceBackingStoreError::configuration(
                     "compiled resident payload size overflowed",
@@ -757,17 +808,21 @@ fn read_compiled_resource_group_with_limits(
                     })
                 })
                 .collect::<Result<Vec<_>, CompiledResourceBackingStoreError>>()?;
-            let ranges = match &resource.resident_derivation {
-                Some(derivation) => derive_resident_resource_ranges(
+            let (ranges, resource_representation) = match (
+                representation,
+                &resource.resident_derivation,
+            ) {
+                (CompiledResourceRepresentation::ResidentDerivation, Some(derivation)) => (derive_resident_resource_ranges(
                     &source_ranges,
                     derivation,
-                )?,
-                None => source_ranges,
+                )?, CompiledResourceRepresentation::ResidentDerivation),
+                _ => (source_ranges, CompiledResourceRepresentation::Source),
             };
             Ok(LoadedCompiledResource {
                 id: resource.id.clone(),
                 ranges,
                 compatibility: resource.compatibility.clone(),
+                representation: resource_representation,
             })
         })
         .collect::<Result<Vec<_>, CompiledResourceBackingStoreError>>()?;
@@ -1152,11 +1207,33 @@ mod resource_backing_store_tests {
         )
         .unwrap();
 
-        let loaded = store.try_load(group).unwrap().wait().unwrap();
+        let source = store.try_load(group.clone()).unwrap().wait().unwrap();
+        assert_eq!(source.resident_byte_count, packed.len());
+        assert_eq!(
+            source.resources[0].representation,
+            CompiledResourceRepresentation::Source
+        );
+        assert_eq!(&*source.resources[0].ranges[0].bytes, &packed);
+        assert_eq!(source.derivation_elapsed, Duration::ZERO);
+        drop(source);
+        assert_eq!(store.retained_payload_bytes(), 0);
+
+        let loaded = store
+            .try_load_representation(
+                group,
+                CompiledResourceRepresentation::ResidentDerivation,
+            )
+            .unwrap()
+            .wait()
+            .unwrap();
 
         assert_eq!(loaded.logical_byte_count, 8);
         assert_eq!(loaded.physical_byte_count, 8);
         assert_eq!(loaded.resident_byte_count, 16);
+        assert_eq!(
+            loaded.resources[0].representation,
+            CompiledResourceRepresentation::ResidentDerivation
+        );
         assert_eq!(store.retained_payload_bytes(), 16);
         assert_eq!(
             &*loaded.resources[0].ranges[0].bytes,
@@ -1167,9 +1244,9 @@ mod resource_backing_store_tests {
         );
         assert!(loaded.derivation_elapsed > Duration::ZERO);
         let statistics = store.statistics();
-        assert_eq!(statistics.logical_bytes, 8);
-        assert_eq!(statistics.physical_bytes, 8);
-        assert_eq!(statistics.resident_bytes, 16);
+        assert_eq!(statistics.logical_bytes, 16);
+        assert_eq!(statistics.physical_bytes, 16);
+        assert_eq!(statistics.resident_bytes, 24);
         assert!(statistics.derivation_time_ns > 0);
         drop(loaded);
         assert_eq!(store.retained_payload_bytes(), 0);
@@ -1211,7 +1288,14 @@ mod resource_backing_store_tests {
         )
         .unwrap();
 
-        let loaded = store.try_load(group).unwrap().wait().unwrap();
+        let loaded = store
+            .try_load_representation(
+                group,
+                CompiledResourceRepresentation::ResidentDerivation,
+            )
+            .unwrap()
+            .wait()
+            .unwrap();
         let ranges = &loaded.resources[0].ranges;
 
         assert_eq!(ranges.len(), 2);
@@ -1258,7 +1342,14 @@ mod resource_backing_store_tests {
         )
         .unwrap();
         let tickets = (0..WAVE_WIDTH)
-            .map(|_| store.try_load(group.clone()).unwrap())
+            .map(|_| {
+                store
+                    .try_load_representation(
+                        group.clone(),
+                        CompiledResourceRepresentation::ResidentDerivation,
+                    )
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
         let loaded = tickets
             .into_iter()
@@ -1311,7 +1402,14 @@ mod resource_backing_store_tests {
         )
         .unwrap();
 
-        let error = store.try_load(group).unwrap().wait().unwrap_err();
+        let error = store
+            .try_load_representation(
+                group,
+                CompiledResourceRepresentation::ResidentDerivation,
+            )
+            .unwrap()
+            .wait()
+            .unwrap_err();
 
         assert_eq!(error.kind(), CompiledResourceBackingStoreErrorKind::Configuration);
         assert!(error.to_string().contains("resident derivation is inconsistent"));

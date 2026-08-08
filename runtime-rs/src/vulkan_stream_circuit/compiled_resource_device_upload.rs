@@ -493,12 +493,17 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
                 .iter()
                 .copied()
                 .zip(resident_group.resources())
-                .map(|(slot, resource)| {
+                .zip(&request.loaded.resources)
+                .map(|((slot, resource), loaded_resource)| {
                     let allocation = resource
                         .payload()
                         .stable_allocation()
                         .expect("stable upload built a direct resource");
-                    (slot, Arc::clone(allocation))
+                    (
+                        slot,
+                        Arc::clone(allocation),
+                        loaded_resource.representation.address_tag(),
+                    )
                 }),
         );
         resident_groups.push(resident_group);
@@ -520,7 +525,7 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
         ));
     }
     let publications =
-        address_table.publish_group(transfer, &address_resources)?;
+        address_table.publish_tagged_group(transfer, &address_resources)?;
     if publications.len() != expected_publication_count {
         if !publications.is_empty() {
             address_table.clear_group(transfer, &publications)?;

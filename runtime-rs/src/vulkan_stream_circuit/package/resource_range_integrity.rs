@@ -32,12 +32,32 @@ impl ResolvedCompiledResource {
     }
 
     pub fn resident_byte_count(&self) -> io::Result<usize> {
-        Ok(self
-            .resident_derivation
-            .as_ref()
-            .map_or(self.source_byte_count()?, |derivation| {
-                derivation.resident_byte_count
-            }))
+        self.resident_byte_count_for(CompiledResourceRepresentation::Source)
+    }
+
+    pub fn resident_byte_count_for(
+        &self,
+        representation: CompiledResourceRepresentation,
+    ) -> io::Result<usize> {
+        match (representation, &self.resident_derivation) {
+            (CompiledResourceRepresentation::ResidentDerivation, Some(derivation)) => {
+                Ok(derivation.resident_byte_count)
+            }
+            _ => self.source_byte_count(),
+        }
+    }
+
+    pub fn address_representation_tag_for(
+        &self,
+        representation: CompiledResourceRepresentation,
+    ) -> u32 {
+        if representation == CompiledResourceRepresentation::ResidentDerivation
+            && self.resident_derivation.is_some()
+        {
+            representation.address_tag()
+        } else {
+            CompiledResourceRepresentation::Source.address_tag()
+        }
     }
 }
 
@@ -107,6 +127,12 @@ impl ResolvedCompiledResourceGroup {
             Self::Atomic(group) => &group.resources,
             Self::Partition(group) => &group.resources,
         }
+    }
+
+    pub fn has_resident_derivation(&self) -> bool {
+        self.resources()
+            .iter()
+            .any(|resource| resource.resident_derivation.is_some())
     }
 }
 
