@@ -390,84 +390,162 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
     }
     let maximum_device_count = candidates.len().min(components.len());
     let manifest_dir = manifest_dir.as_ref();
+    let paged_balance = (residency_policy == ResourceResidencyPolicy::DemandPaged)
+        .then(|| {
+            runtime_paged_placement_balance(
+                runtime_model,
+                tensor_index,
+                &components,
+                speculative_draft_tokens > 0,
+            )
+        })
+        .transpose()?;
     let mut failures = Vec::new();
     for device_count in 1..=maximum_device_count {
         let selected = &candidates[..device_count];
-        match capacity_pack_vulkan_runtime_model_on_devices(
-            manifest_dir,
-            runtime_model,
-            tensor_index,
-            &components,
-            selected,
-            placement_costs,
-            context_capacity_activations,
-            speculative_draft_tokens,
-            residency_policy,
-        ) {
-            Ok(placed) => return Ok(placed),
-            Err(error) => failures.push(format!("{device_count} device(s): {error}")),
-        }
-    }
-    if residency_policy == ResourceResidencyPolicy::DemandPaged {
-        let selected = &candidates[..maximum_device_count];
-        let paged_balance = runtime_paged_placement_balance(
-            runtime_model,
-            tensor_index,
-            &components,
-            speculative_draft_tokens > 0,
-        )?;
-        let (virtual_placement, virtual_candidates) = match placement_costs {
-            Some(costs) => {
-                let placed = cost_aware_contiguous_component_placement(
-                    &components,
-                    selected,
-                    costs,
-                    Some(&paged_balance),
-                )?;
-                let ordered = placed
-                    .ordered_device_ids
-                    .iter()
-                    .map(|device_id| {
-                        selected
-                            .iter()
-                            .find(|candidate| &candidate.device_id == device_id)
-                            .cloned()
-                            .expect("cost-aware placement only returns selected devices")
-                    })
-                    .collect::<Vec<_>>();
-                (Ok(placed.placement), ordered)
+        let attempt = if let Some(balance) = paged_balance.as_ref() {
+            if demand_paged_prefix_has_avoidable_addressable_shortfall(
+                balance,
+                selected,
+                maximum_device_count,
+            )? {
+                failures.push(format!(
+                    "{device_count} device(s): compatible capacity remains available to reduce demand paging",
+                ));
+                continue;
             }
-            None => (
-                proportional_paged_component_placement(
-                    &components,
-                    selected,
-                    Some(&paged_balance),
-                ),
-                selected.to_vec(),
-            ),
-        };
-        match virtual_placement.and_then(|placement| {
-            admit_fixed_vulkan_runtime_placement(
+            capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
                 manifest_dir,
                 runtime_model,
                 tensor_index,
-                &placement,
-                &virtual_candidates,
+                &components,
+                selected,
+                placement_costs,
+                balance,
+                context_capacity_activations,
+                speculative_draft_tokens,
+            )
+        } else {
+            capacity_pack_vulkan_runtime_model_on_devices(
+                manifest_dir,
+                runtime_model,
+                tensor_index,
+                &components,
+                selected,
+                placement_costs,
                 context_capacity_activations,
                 speculative_draft_tokens,
                 residency_policy,
             )
-        }) {
+        };
+        match attempt {
             Ok(placed) => return Ok(placed),
-            Err(error) => failures.push(format!(
-                "{maximum_device_count} device(s) with paged virtual overcommit: {error}"
-            )),
+            Err(error) => failures.push(format!("{device_count} device(s): {error}")),
         }
     }
     Err(VulkanRuntimeResidencyPlanError(format!(
         "no capacity-packed contiguous placement can admit the model working set: {}",
         failures.join("; "),
     )))
+}
+
+/// A demand-paged package may execute inside a cache much smaller than its
+/// addressable resources, but that does not make the smaller cache the best
+/// placement. Keep extending the caller-ranked compatible prefix while doing
+/// so can eliminate an aggregate addressable-capacity shortfall. At the final
+/// prefix paging remains valid and unavoidable.
+fn demand_paged_prefix_has_avoidable_addressable_shortfall(
+    balance: &VulkanRuntimePagedPlacementBalance,
+    selected: &[VulkanRuntimePlacementCandidate],
+    maximum_device_count: usize,
+) -> Result<bool, VulkanRuntimeResidencyPlanError> {
+    if selected.is_empty() || maximum_device_count < selected.len() {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "demand-paged prefix accounting requires a nonempty valid device prefix".to_string(),
+        ));
+    }
+    if selected.len() == maximum_device_count {
+        return Ok(false);
+    }
+    let addressable_bytes = balance
+        .component_weights
+        .iter()
+        .copied()
+        .chain([
+            balance.input_auxiliary_weight_bytes,
+            balance.output_auxiliary_weight_bytes,
+        ])
+        .try_fold(0u128, |total, bytes| {
+            total.checked_add(bytes).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "demand-paged addressable working-set bytes overflowed".to_string(),
+                )
+            })
+        })?;
+    let safe_capacity_bytes = selected.iter().try_fold(0u128, |total, candidate| {
+        total
+            .checked_add(candidate.safe_capacity_bytes as u128)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "demand-paged compatible device capacity overflowed".to_string(),
+                )
+            })
+    })?;
+    Ok(addressable_bytes > safe_capacity_bytes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
+    manifest_dir: &Path,
+    runtime_model: &VulkanResidentRuntimeModel,
+    tensor_index: &TensorIndex,
+    components: &[CapacityPackedPlacementComponent],
+    candidates: &[VulkanRuntimePlacementCandidate],
+    placement_costs: Option<&VulkanRuntimePlacementCostModel>,
+    paged_balance: &VulkanRuntimePagedPlacementBalance,
+    context_capacity_activations: usize,
+    speculative_draft_tokens: usize,
+) -> Result<VulkanRuntimeAutoPlacement, VulkanRuntimeResidencyPlanError> {
+    let (placement, ordered_candidates) = match placement_costs {
+        Some(costs) => {
+            let placed = cost_aware_contiguous_component_placement(
+                components,
+                candidates,
+                costs,
+                Some(paged_balance),
+            )?;
+            let ordered = placed
+                .ordered_device_ids
+                .iter()
+                .map(|device_id| {
+                    candidates
+                        .iter()
+                        .find(|candidate| &candidate.device_id == device_id)
+                        .cloned()
+                        .expect("cost-aware placement only returns candidate devices")
+                })
+                .collect::<Vec<_>>();
+            (placed.placement, ordered)
+        }
+        None => (
+            proportional_paged_component_placement(
+                components,
+                candidates,
+                Some(paged_balance),
+            )?,
+            candidates.to_vec(),
+        ),
+    };
+    admit_fixed_vulkan_runtime_placement(
+        manifest_dir,
+        runtime_model,
+        tensor_index,
+        &placement,
+        &ordered_candidates,
+        context_capacity_activations,
+        speculative_draft_tokens,
+        ResourceResidencyPolicy::DemandPaged,
+    )
 }
 
 /// Minimizes predicted serial decode latency over every device ordering and

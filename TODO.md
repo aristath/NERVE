@@ -248,6 +248,18 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   retained-byte quotas around the capacity-proportional share; the rejected
   upper-only variant caused pathological paging, while the bounded variant
   completed the cold DeepSeek conversation without evictions.
+- Demand-paged prefix selection now distinguishes physical executability from
+  the best compatible residency plan. It keeps adding caller-ranked compatible
+  devices while their aggregate safe capacity can eliminate addressable-set
+  paging, then applies the paged working-set quota before live latency ranking.
+  The real Qwen3.6-35B-A3B auto-placement moved from a calibration-sensitive
+  31/9-layer split with 312 loads and 39.6642 decode tok/s to a stable 19/21
+  split with zero measured loads, reloads, or evictions and 69.2016 decode
+  tok/s. Qwen3.5-9B still selected one GPU and measured 48.8308 decode tok/s.
+  The unchanged fixed DeepSeek control completed three discarded conversations
+  followed by a zero-load, zero-reload truth conversation at 7.9334 decode and
+  7.8914 prefill tok/s with correct recall. Every selected GPU returned to its
+  exact recorded pre-workload reservation.
 - The first endpoint-aware, timeline-only DeepSeek product probe exposed and
   corrected two completion-lifecycle defects rather than hiding them: retained
   stream-edge copies now permit timeline-ordered simultaneous replay without an
@@ -439,12 +451,6 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
       count, advertised capability, or free bytes with execution cost. Retain the
       smallest device prefix only among placements that do not create avoidable
       paging or a materially slower serial bottleneck.
-    - Demand-paged admission must distinguish "can execute with a bounded cache"
-      from "best available residency plan." Do not keep a huge model on one device
-      merely because fixed state plus one selector wave fits when additional
-      compatible VRAM can retain more of the observed working set. Conversely, do
-      not add a device whose transfer and execution cost cannot repay the retained
-      bytes it contributes.
     - Measure activation-transfer costs for each reachable device boundary and
       include them in the same contiguous partition objective. The current solve
       has live component/signature costs but still assigns zero cost to transport;

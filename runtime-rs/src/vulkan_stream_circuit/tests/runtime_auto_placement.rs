@@ -394,6 +394,92 @@ fn cost_aware_paged_placement_cannot_strand_material_retained_capacity() {
 }
 
 #[test]
+fn demand_paged_prefix_expands_while_another_device_can_reduce_paging() {
+    const LAYER_BYTES: u128 = 843_498_240;
+    const DEVICE_BYTES: usize = 27 * 1024 * 1024 * 1024;
+    let balance = VulkanRuntimePagedPlacementBalance {
+        component_weights: vec![LAYER_BYTES; 40],
+        input_auxiliary_weight_bytes: 0,
+        output_auxiliary_weight_bytes: 0,
+    };
+    let candidates = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "first".to_string(),
+            safe_capacity_bytes: DEVICE_BYTES,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "second".to_string(),
+            safe_capacity_bytes: DEVICE_BYTES,
+        },
+    ];
+
+    assert!(demand_paged_prefix_has_avoidable_addressable_shortfall(
+        &balance,
+        &candidates[..1],
+        candidates.len(),
+    )
+    .unwrap());
+    assert!(!demand_paged_prefix_has_avoidable_addressable_shortfall(
+        &balance,
+        &candidates,
+        candidates.len(),
+    )
+    .unwrap());
+}
+
+#[test]
+fn demand_paged_prefix_accounts_for_endpoint_auxiliary_residency() {
+    let balance = VulkanRuntimePagedPlacementBalance {
+        component_weights: vec![40, 40],
+        input_auxiliary_weight_bytes: 15,
+        output_auxiliary_weight_bytes: 15,
+    };
+    let candidates = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "first".to_string(),
+            safe_capacity_bytes: 100,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "second".to_string(),
+            safe_capacity_bytes: 100,
+        },
+    ];
+
+    assert!(demand_paged_prefix_has_avoidable_addressable_shortfall(
+        &balance,
+        &candidates[..1],
+        candidates.len(),
+    )
+    .unwrap());
+    assert!(!demand_paged_prefix_has_avoidable_addressable_shortfall(
+        &balance,
+        &candidates,
+        candidates.len(),
+    )
+    .unwrap());
+}
+
+#[test]
+fn demand_paged_prefix_accepts_unavoidable_shortfall_at_the_last_device() {
+    let balance = VulkanRuntimePagedPlacementBalance {
+        component_weights: vec![100, 100],
+        input_auxiliary_weight_bytes: 0,
+        output_auxiliary_weight_bytes: 0,
+    };
+    let candidate = VulkanRuntimePlacementCandidate {
+        device_id: "only".to_string(),
+        safe_capacity_bytes: 100,
+    };
+
+    assert!(!demand_paged_prefix_has_avoidable_addressable_shortfall(
+        &balance,
+        &[candidate],
+        1,
+    )
+    .unwrap());
+}
+
+#[test]
 fn cost_aware_paged_placement_reserves_auxiliary_graphs_on_the_endpoint() {
     let components = (0..6)
         .map(|index| CapacityPackedPlacementComponent {
