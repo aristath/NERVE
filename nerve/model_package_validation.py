@@ -1,5 +1,8 @@
 from nerve.model_package_integrity import *
 from nerve.model_package_common import *
+from nerve.physical_representations import (
+    fixed_mxfp4_resource_representation_dispatch,
+)
 from nerve.resource_residency import validate_resource_residency_contract
 from nerve.model_package_assets import *
 from nerve.model_package_shaders import *
@@ -627,6 +630,22 @@ def validate_compiled_component_executions(
                     f"compiled package component {component_id!r} kernel {index} does not match its circuit node"
                 )
             validate_kernel_stream_control_contract(circuit, node, kernel)
+            expected_resource_dispatch = (
+                fixed_mxfp4_resource_representation_dispatch()
+                if node.get("op")
+                in {
+                    "independent_sparse_moe_gate_up",
+                    "independent_sparse_moe_down",
+                }
+                else None
+            )
+            if kernel.get("resource_representation_dispatch") != (
+                expected_resource_dispatch
+            ):
+                raise ModelCompileError(
+                    f"compiled package component {component_id!r} kernel {index} "
+                    "has an invalid resource-representation dispatch contract"
+                )
             batch_mode = kernel.get("batch_mode")
             batch_implementations = kernel.get("batch_implementations")
             if batch_mode == "serial_lanes" and batch_implementations == []:

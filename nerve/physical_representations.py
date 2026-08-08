@@ -17,6 +17,29 @@ PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT = (
     "bf16_blockwise_symmetric_int8_pairpacked_f32_scale_i32_sum.v1"
 )
 ATTENTION_PARTIALS_CONTRACT = "bf16_attention_partition_partials_f32.v1"
+KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA = (
+    "nerve.kernel_resource_representation_dispatch.v1"
+)
+MXFP4_E2M1_G32_RESOURCE_REPRESENTATION = "mxfp4_e2m1_g32"
+MXFP4_E2M1_TO_FP8_E4M3_RESIDENT_DERIVATION = "mxfp4_e2m1_to_fp8_e4m3"
+
+
+def fixed_mxfp4_resource_representation_dispatch() -> Json:
+    return {
+        "schema": KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA,
+        "source_representation": MXFP4_E2M1_G32_RESOURCE_REPRESENTATION,
+        "resident_derivation": None,
+        "selection": "fixed_source",
+    }
+
+
+def adaptive_mxfp4_resource_representation_dispatch() -> Json:
+    return {
+        "schema": KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA,
+        "source_representation": MXFP4_E2M1_G32_RESOURCE_REPRESENTATION,
+        "resident_derivation": (MXFP4_E2M1_TO_FP8_E4M3_RESIDENT_DERIVATION),
+        "selection": "resource_address_tag",
+    }
 
 
 @dataclass(frozen=True)

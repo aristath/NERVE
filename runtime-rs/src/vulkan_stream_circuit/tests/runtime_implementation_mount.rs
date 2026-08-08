@@ -138,6 +138,7 @@ fn runtime_overlay_disambiguates_equal_batch_geometry_by_structure() {
         workgroup_count_x: 64,
         batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
         batch_implementations: vec![cooperative, exact.clone()],
+        resource_representation_dispatch: None,
     };
     let mut overlay = exact.clone();
     overlay.stages[0].shader_path = "kernels/candidate.spv".to_string();
@@ -170,6 +171,7 @@ fn runtime_overlay_rejects_ambiguous_batch_implementation_identity() {
         workgroup_count_x: 64,
         batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
         batch_implementations: vec![first.clone(), second],
+        resource_representation_dispatch: None,
     };
     let mut overlay = first;
     overlay.stages[0].shader_path = "kernels/candidate.spv".to_string();

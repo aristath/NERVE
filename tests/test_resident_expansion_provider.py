@@ -73,6 +73,10 @@ from nerve.resident_representations import (
     MXFP4_TO_FP8_REQUIRED_FEATURES,
     mxfp4_to_fp8_resident_derivation,
 )
+from nerve.physical_representations import (
+    adaptive_mxfp4_resource_representation_dispatch,
+    fixed_mxfp4_resource_representation_dispatch,
+)
 from tests.test_representation_optimizer_contracts import hardware_profile_contract
 
 
@@ -202,6 +206,9 @@ def _source_package(package: Path) -> tuple[dict, dict]:
             {
                 "node_id": down_node["id"],
                 "shader_path": shader_paths["down_scalar"],
+                "resource_representation_dispatch": (
+                    fixed_mxfp4_resource_representation_dispatch()
+                ),
                 "batch_implementations": [
                     {"stages": [{"shader_path": shader_paths["down_batch"]}]}
                 ],
@@ -209,6 +216,9 @@ def _source_package(package: Path) -> tuple[dict, dict]:
             {
                 "node_id": gate_node["id"],
                 "shader_path": shader_paths["gate_scalar"],
+                "resource_representation_dispatch": (
+                    fixed_mxfp4_resource_representation_dispatch()
+                ),
                 "batch_implementations": [
                     {"stages": [{"shader_path": shader_paths["gate_batch"]}]}
                 ],
@@ -930,6 +940,11 @@ def test_toolchain_constructs_and_proves_only_the_declared_component_boundary(
         for item in lowering["regions"][0]["shader_replacements"]
         if item["execution_kind"] == "scalar"
     }
+    assert all(
+        kernel["resource_representation_dispatch"]
+        == adaptive_mxfp4_resource_representation_dispatch()
+        for kernel in overlay["execution"]["kernels"]
+    )
 
     proof_digest = staged_file_digest(root / PROOF_PATH)
     verifier = ExactResidentExpansionProofVerifier(

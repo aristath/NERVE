@@ -20,6 +20,7 @@ from nerve.physical_representations import (
     FP8_PREQUANTIZATION_CONTRACT,
     PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
     SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
+    fixed_mxfp4_resource_representation_dispatch,
 )
 from nerve.resource_residency_planning import (
     build_planned_resource_residency_contract,
@@ -1222,6 +1223,13 @@ def component_kernel_spec(
         ),
         "batch_implementations": [],
     }
+    if node["op"] in {
+        "independent_sparse_moe_gate_up",
+        "independent_sparse_moe_down",
+    }:
+        spec["resource_representation_dispatch"] = (
+            fixed_mxfp4_resource_representation_dispatch()
+        )
     if parallel_block_stages is not None:
         spec["batch_implementations"].append(
             {

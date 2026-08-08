@@ -308,11 +308,13 @@ fn validate_runtime_mxfp4_derivation_targets(
                     node.id,
                 ))
             })?;
-        if !source_kernel.shader_path.contains("_mxfp4_e2m1_")
-            || source_kernel.shader_path.contains("_resident_fp8_e4m3_")
+        if source_kernel
+            .resource_representation_dispatch
+            .as_ref()
+            .is_none_or(|contract| !contract.is_exact_mxfp4_source())
         {
             return runtime_resident_derivation_error(format!(
-                "runtime resident derivation node {:?} is not backed by the exact compact MXFP4 implementation",
+                "runtime resident derivation node {:?} is not backed by an explicit exact compact MXFP4 resource-representation contract",
                 node.id,
             ));
         }
@@ -326,34 +328,17 @@ fn validate_runtime_mxfp4_derivation_targets(
                     node.id,
                 ))
             })?;
-        if !target_kernel
-            .shader_path
-            .contains("_resident_fp8_e4m3_")
+        if target_kernel
+            .resource_representation_dispatch
+            .as_ref()
+            .is_none_or(|contract| {
+                !contract.selects_resident_derivation(request.derivation.kind)
+            })
         {
             return runtime_resident_derivation_error(format!(
-                "runtime resident derivation node {:?} does not select the matching resident FP8 kernel",
+                "runtime resident derivation node {:?} does not declare address-tag selection of the matching resident representation",
                 node.id,
             ));
-        }
-        for (source_batch, target_batch) in source_kernel
-            .batch_implementations
-            .iter()
-            .zip(&target_kernel.batch_implementations)
-        {
-            for (source_stage, target_stage) in
-                source_batch.stages.iter().zip(&target_batch.stages)
-            {
-                if source_stage.shader_path.contains("_mxfp4_e2m1_")
-                    && !target_stage
-                        .shader_path
-                        .contains("_resident_fp8_e4m3_")
-                {
-                    return runtime_resident_derivation_error(format!(
-                        "runtime resident derivation node {:?} does not select its matching resident FP8 batch kernel",
-                        node.id,
-                    ));
-                }
-            }
         }
     }
     Ok(())
@@ -706,6 +691,49 @@ mod runtime_resident_derivation_tests {
                 "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
             ],
         }
+    }
+
+    fn dispatch(
+        resident_derivation: Option<CompiledResourceResidentDerivationKind>,
+        selection: VulkanResidentKernelResourceRepresentationSelection,
+    ) -> VulkanResidentKernelResourceRepresentationDispatchSpec {
+        VulkanResidentKernelResourceRepresentationDispatchSpec {
+            schema: KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA.to_string(),
+            source_representation:
+                VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32,
+            resident_derivation,
+            selection,
+        }
+    }
+
+    #[test]
+    fn kernel_resource_representation_contract_distinguishes_fixed_and_adaptive_dispatch() {
+        let source = dispatch(
+            None,
+            VulkanResidentKernelResourceRepresentationSelection::FixedSource,
+        );
+        let adaptive = dispatch(
+            Some(CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3),
+            VulkanResidentKernelResourceRepresentationSelection::ResourceAddressTag,
+        );
+
+        assert!(source.is_exact_mxfp4_source());
+        assert!(!source.selects_resident_derivation(
+            CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+        ));
+        assert!(!adaptive.is_exact_mxfp4_source());
+        assert!(adaptive.selects_resident_derivation(
+            CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+        ));
+
+        let malformed = dispatch(
+            Some(CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3),
+            VulkanResidentKernelResourceRepresentationSelection::FixedSource,
+        );
+        assert!(!malformed.is_exact_mxfp4_source());
+        assert!(!malformed.selects_resident_derivation(
+            CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+        ));
     }
 
     #[test]

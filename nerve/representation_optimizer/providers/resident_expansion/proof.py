@@ -7,6 +7,10 @@ from pathlib import Path
 
 from nerve.compilation import Json, ModelCompileError
 from nerve.model_package_shader_templates import render_shader_source
+from nerve.physical_representations import (
+    adaptive_mxfp4_resource_representation_dispatch,
+    fixed_mxfp4_resource_representation_dispatch,
+)
 from nerve.quantized_transforms import (
     MXFP4_E2M1_FP8_E4M3_BITS,
     mxfp4_value,
@@ -293,6 +297,24 @@ def _verify_overlay(
         "implementation"
     ]
     restored_execution["implementation"] = source_execution["implementation"]
+    resident_node_ids = sorted(
+        {item["node_id"] for item in lowering["resident_derivations"]}
+    )
+    for node_id in resident_node_ids:
+        target_kernel = _unique(restored_execution["kernels"], "node_id", node_id)
+        source_kernel = _unique(source_execution["kernels"], "node_id", node_id)
+        if target_kernel.get("resource_representation_dispatch") != (
+            adaptive_mxfp4_resource_representation_dispatch()
+        ) or source_kernel.get("resource_representation_dispatch") != (
+            fixed_mxfp4_resource_representation_dispatch()
+        ):
+            raise ModelCompileError(
+                "resident expansion overlay has an inconsistent explicit "
+                "resource-representation dispatch boundary"
+            )
+        target_kernel["resource_representation_dispatch"] = deepcopy(
+            source_kernel["resource_representation_dispatch"]
+        )
     for replacement in lowering["shader_replacements"]:
         target_path = replacement["artifact_path"]
         source_path = replacement["source_path"]

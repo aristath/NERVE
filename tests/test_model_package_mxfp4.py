@@ -20,6 +20,7 @@ from nerve.model_package_shader_selection import (
 )
 from nerve.model_package_shader_templates import copy_shader_templates
 from nerve.model_package_common import ModelCompileError
+from nerve.model_package_manifest import component_kernel_spec
 from nerve.model_package_tensors import physical_input_prequantization_spec
 from nerve.model_transpiler_tensor_index import make_tensor_index
 
@@ -272,6 +273,20 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     )
     assert workgroup_count_x_for_node(circuit, gate, tensor_index) == 4
     assert workgroup_count_x_for_node(circuit, down, tensor_index) == 2
+    gate_kernel = component_kernel_spec(
+        execution_index=0,
+        node=gate,
+        circuit=circuit,
+        shader_file=gate_shader,
+        local_size_x=512,
+        workgroup_count_x=4,
+    )
+    assert gate_kernel["resource_representation_dispatch"] == {
+        "schema": "nerve.kernel_resource_representation_dispatch.v1",
+        "source_representation": "mxfp4_e2m1_g32",
+        "resident_derivation": None,
+        "selection": "fixed_source",
+    }
 
     tensors["expert_0.w1.weight"]["byte_count"] = hidden_size - 1
     with pytest.raises(ModelCompileError, match="incompatible MXFP4"):

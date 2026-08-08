@@ -1475,6 +1475,7 @@ fn component_batch_execution_contract_requires_matching_shader_mode() {
                 workgroup_count_x: 1,
                 batch_mode,
                 batch_implementations,
+                resource_representation_dispatch: None,
             }],
         }]
     };

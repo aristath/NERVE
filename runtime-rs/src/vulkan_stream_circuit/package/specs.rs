@@ -153,6 +153,57 @@ pub struct VulkanResidentComponentKernelSpec {
     pub workgroup_count_x: u32,
     pub batch_mode: VulkanResidentComponentKernelBatchMode,
     pub batch_implementations: Vec<VulkanResidentComponentBatchImplementationSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_representation_dispatch:
+        Option<VulkanResidentKernelResourceRepresentationDispatchSpec>,
+}
+
+pub const KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA: &str =
+    "nerve.kernel_resource_representation_dispatch.v1";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VulkanResidentKernelResourceRepresentationDispatchSpec {
+    pub schema: String,
+    pub source_representation: VulkanResidentKernelSourceResourceRepresentation,
+    pub resident_derivation: Option<CompiledResourceResidentDerivationKind>,
+    pub selection: VulkanResidentKernelResourceRepresentationSelection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanResidentKernelSourceResourceRepresentation {
+    Mxfp4E2m1G32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanResidentKernelResourceRepresentationSelection {
+    FixedSource,
+    ResourceAddressTag,
+}
+
+impl VulkanResidentKernelResourceRepresentationDispatchSpec {
+    pub(crate) fn is_exact_mxfp4_source(&self) -> bool {
+        self.schema == KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA
+            && self.source_representation
+                == VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32
+            && self.resident_derivation.is_none()
+            && self.selection
+                == VulkanResidentKernelResourceRepresentationSelection::FixedSource
+    }
+
+    pub(crate) fn selects_resident_derivation(
+        &self,
+        derivation: CompiledResourceResidentDerivationKind,
+    ) -> bool {
+        self.schema == KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA
+            && self.source_representation
+                == VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32
+            && self.resident_derivation == Some(derivation)
+            && self.selection
+                == VulkanResidentKernelResourceRepresentationSelection::ResourceAddressTag
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
