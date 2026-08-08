@@ -60,6 +60,22 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   compiler selection, and tests were removed. Shared-memory reuse is therefore
   not promotion evidence unless every reachable geometry and the full product
   path remain exact and faster.
+- Splitting indexed attention into an exact score transaction followed by a
+  value transaction was also rejected after two complete product gates. The
+  reduction-order-preserving score kernel was byte-exact and faster in isolation:
+  0.35104 versus 0.47208 ms at a 4K live context, 1.29800 versus 2.79764 ms at
+  128K, and 7.02364 versus 20.05572 ms at the compiled maximum. Nevertheless,
+  static maximum dispatch produced only 7.9582 mean decode tok/s, and a generic
+  context-capacity-bound dispatch reduced the authoritative zero-load truth run
+  further to 7.7540 decode and 7.9702 prefill tok/s. The latter had zero reads,
+  uploads, reloads, evictions, or residency blocking, retained coherent answers
+  and turn recall, and restored every GPU reservation. Both implementations were
+  removed. A full F32 score plane, an added dispatch and buffer transaction, and
+  duplicated score/value traversal cost more in the complete stream than the
+  locally faster score kernel saves. The next attention design must fuse score,
+  selection, and value consumption into one compiled transaction and improve the
+  whole attributed attention phase; do not materialize all scores between
+  independently scheduled kernels.
 - Three further exact local-kernel candidates were rejected after the refined
   trace. Paired packed-BF16 state reads were 1.1% slower, and parallel tile
   exponentials were 0.5% slower; both preserved every BF16 output bit. A
@@ -183,6 +199,11 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      occupancy, as reference flash-attention implementations do. Do not retry
      dimension folding either: local-size 256 preserved the native subgroup
      arithmetic but was 23.71% slower than local-size 512.
+     Do not split score production from value consumption through a materialized
+     F32 score plane: its score microkernel won by 25.6% at 4K and 53.6% at 128K,
+     yet both static and context-bounded complete gates regressed. A replacement
+     must eliminate that intermediate and be evaluated by combined attention
+     score/read device time before a product gate.
    - Native compact-MXFP4 vector alternatives are now locally exhausted: address
      caching, larger persistent tiles, once-per-route intermediate quantization,
      and packed INT8 dot products all lost or were immaterial. Do not retry those
