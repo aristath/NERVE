@@ -68,6 +68,17 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   mean decode tok/s versus the accepted 8.4228 baseline. It was removed from
   source and the compiled package was restored. Local shader wins are not
   promotion evidence when the complete routed stream does not improve.
+- A grouped-query-head indexed-attention schedule inspired by the row blocking
+  in llama.cpp's Vulkan flash-attention path was also rejected locally before a
+  product gate. It reused each latent KV read across independent query heads
+  while preserving every head's existing reduction, online-softmax order, and
+  every BF16 output bit at q64/kv1/d512/r128/k8192. Four heads per workgroup took
+  30.46644 ms versus 19.16268 ms for the scalar-head kernel; even two heads took
+  23.33104 ms versus 19.77996 ms. Serial 512-wide reductions and their register/
+  shared-state pressure cost more than the duplicate read traffic. The shader,
+  renderer, and exact fixture were removed. Future head-row blocking must split
+  dimensions across smaller subgroups or use matrix tiles; do not repeat several
+  full-width head reductions inside one workgroup.
 - Four compact-expert representation candidates were also rejected on the same
   discrete AMD GPU and real six-expert geometry. Resolving and caching dynamic
   addresses once per workgroup preserved output but made gate/up 54% slower
@@ -158,7 +169,10 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      serial score reduction, barriers, and full-score materialization where an
      exact fused or tiled schedule is faster. Preserve score accumulation order,
      online-softmax semantics, sink handling, compressed-index ordering, and
-     BF16 output bits.
+     BF16 output bits. Do not retry full-width multi-head workgroups: h2 and h4
+     were exact but 17.95% and 58.99% slower at the real geometry. A new blocked
+     design must map dimensions, heads, and KV tiles cooperatively enough to keep
+     occupancy, as reference flash-attention implementations do.
    - Native compact-MXFP4 vector alternatives are now locally exhausted: address
      caching, larger persistent tiles, once-per-route intermediate quantization,
      and packed INT8 dot products all lost or were immaterial. Do not retry those
