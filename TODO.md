@@ -88,6 +88,19 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   renderer selection, exact fixture, and compiled package were removed. Do not
   retry state-base caching without also replacing the serial full-width reduction
   and barrier schedule as one materially different fused transaction.
+- A fused 16-head by 16-token cooperative-matrix indexed-attention transaction
+  eliminated the scalar 512-wide score reduction and reused each latent state
+  tile across score and value multiplication. At q64/kv1/d512/r128/k8192 it
+  reduced the representative 128K device microcase from 3.07856 to 1.44916 ms,
+  but rounding online-softmax weights to BF16 changed the output (0.00048828
+  maximum and 0.00001689 RMS error). The real product path confirmed the
+  numerical change was not acceptable promotion evidence: a 1,615-token
+  zero-new-load warmup turn sustained only 6.424 decode tok/s versus the
+  accepted 8.4228 baseline. The gate was stopped immediately, all five exact
+  pre-run VRAM reservations were restored, and the shader, selection logic,
+  tests, and compiled package were removed. A future matrix-tiled attention
+  transaction must retain F32 online-softmax weights and exact BF16 outputs;
+  raw cooperative-matrix throughput does not compensate for an altered stream.
 - Three further exact local-kernel candidates were rejected after the refined
   trace. Paired packed-BF16 state reads were 1.1% slower, and parallel tile
   exponentials were 0.5% slower; both preserved every BF16 output bit. A
@@ -211,6 +224,10 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      occupancy, as reference flash-attention implementations do. Do not retry
      dimension folding either: local-size 256 preserved the native subgroup
      arithmetic but was 23.71% slower than local-size 512.
+     Do not quantize online-softmax weights to BF16 merely to feed a cooperative
+     value matrix: that fused kernel won its microcase by 52.9% but changed BF16
+     outputs and the real stream fell to 6.424 decode tok/s. Any matrix-tiled
+     replacement must preserve the F32 weight path and exact output contract.
      Do not split score production from value consumption through a materialized
      F32 score plane: its score microkernel won by 25.6% at 4K and 53.6% at 128K,
      yet both static and context-bounded complete gates regressed. A replacement
