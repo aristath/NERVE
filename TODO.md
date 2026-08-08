@@ -79,6 +79,14 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   renderer, and exact fixture were removed. Future head-row blocking must split
   dimensions across smaller subgroups or use matrix tiles; do not repeat several
   full-width head reductions inside one workgroup.
+- Folding the 512 dimensions onto a 256-thread workgroup was likewise
+  byte-exact but slower at the same real geometry. On the target's native
+  64-lane subgroups, each lane handled two dimensions while each original
+  subgroup reduction and the eight-partial serial sum retained their exact
+  order. It still took 24.44188 ms versus 19.75720 ms, a 23.71% regression.
+  The candidate and exact fixture were removed. Maximum dimension parallelism
+  is useful here; reducing resident waves does not pay for serial folded loads
+  and reductions.
 - Four compact-expert representation candidates were also rejected on the same
   discrete AMD GPU and real six-expert geometry. Resolving and caching dynamic
   addresses once per workgroup preserved output but made gate/up 54% slower
@@ -172,7 +180,9 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      BF16 output bits. Do not retry full-width multi-head workgroups: h2 and h4
      were exact but 17.95% and 58.99% slower at the real geometry. A new blocked
      design must map dimensions, heads, and KV tiles cooperatively enough to keep
-     occupancy, as reference flash-attention implementations do.
+     occupancy, as reference flash-attention implementations do. Do not retry
+     dimension folding either: local-size 256 preserved the native subgroup
+     arithmetic but was 23.71% slower than local-size 512.
    - Native compact-MXFP4 vector alternatives are now locally exhausted: address
      caching, larger persistent tiles, once-per-route intermediate quantization,
      and packed INT8 dot products all lost or were immaterial. Do not retry those
