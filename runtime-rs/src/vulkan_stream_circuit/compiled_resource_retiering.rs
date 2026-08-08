@@ -142,6 +142,12 @@ impl VulkanCompiledResourceDeviceStore {
             Vec<VulkanCompiledResourceRetieringCandidate>,
         >::new();
         for (group_id, tier) in &memory_plan.group_tiers {
+            if address_state
+                .promoted_representations
+                .contains_key(group_id)
+            {
+                continue;
+            }
             let publications = address_state
                 .publications
                 .get(group_id)

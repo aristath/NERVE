@@ -226,6 +226,11 @@ pub struct VulkanStableCompiledResourceUploadRequest<'a> {
     pub resource_slots: &'a [usize],
 }
 
+struct VulkanPreparedStableCompiledResourceUpload {
+    resident_group: DeviceResidentResourceGroup<VulkanResidentCompiledResource>,
+    address_resources: Vec<(usize, Arc<VulkanStableResourceAllocation>, u32)>,
+}
+
 impl VulkanStableCompiledResourceUpload {
     pub fn resident_group(
         &self,
@@ -296,6 +301,105 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
     alignment: usize,
     capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
 ) -> Result<Vec<VulkanStableCompiledResourceUpload>, VulkanError> {
+    let prepared = prepare_loaded_compiled_resource_groups_for_stable_address_space(
+        device,
+        transfer,
+        arena,
+        requests,
+        address_table.slot_count(),
+        alignment,
+        capacity_permit,
+    )?;
+    let expected_publication_count = prepared.iter().try_fold(
+        0usize,
+        |total, upload| {
+            total.checked_add(upload.address_resources.len()).ok_or_else(|| {
+                VulkanError("stable upload publication count overflowed".to_string())
+            })
+        },
+    )?;
+    let address_resources = prepared
+        .iter()
+        .flat_map(|upload| upload.address_resources.iter().cloned())
+        .collect::<Vec<_>>();
+    let publications =
+        address_table.publish_tagged_group(transfer, &address_resources)?;
+    if publications.len() != expected_publication_count {
+        if !publications.is_empty() {
+            address_table.clear_group(transfer, &publications)?;
+        }
+        return Err(VulkanError(
+            "stable upload address publication result is inconsistent".to_string(),
+        ));
+    }
+    let mut remaining_publications = publications.as_slice();
+    let uploads = prepared
+        .into_iter()
+        .map(|prepared| {
+            let (group_publications, following_publications) = remaining_publications
+                .split_at(prepared.address_resources.len());
+            remaining_publications = following_publications;
+            VulkanStableCompiledResourceUpload {
+                resident_group: prepared.resident_group,
+                publications: group_publications.to_vec(),
+            }
+        })
+        .collect::<Vec<_>>();
+    debug_assert!(remaining_publications.is_empty());
+    Ok(uploads)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn replace_loaded_compiled_resource_group_in_stable_address_space(
+    device: &VulkanComputeDevice,
+    transfer: &mut VulkanResidentTransferStream,
+    arena: &VulkanStableResourceArena,
+    address_table: &mut VulkanStableResourceAddressTable,
+    current_publications: &[VulkanStableResourceAddressPublication],
+    descriptor: &DeviceResourceGroupDescriptor,
+    loaded: &LoadedCompiledResourceGroup,
+    resource_slots: &[usize],
+    alignment: usize,
+    capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
+) -> Result<VulkanStableCompiledResourceUpload, VulkanError> {
+    let request = VulkanStableCompiledResourceUploadRequest {
+        descriptor,
+        loaded,
+        resource_slots,
+    };
+    let mut prepared = prepare_loaded_compiled_resource_groups_for_stable_address_space(
+        device,
+        transfer,
+        arena,
+        &[request],
+        address_table.slot_count(),
+        alignment,
+        capacity_permit,
+    )?;
+    let prepared = prepared
+        .pop()
+        .expect("one stable replacement request returns one prepared group");
+    let publications = address_table.replace_group(
+        transfer,
+        current_publications,
+        &prepared.address_resources,
+    )?;
+    Ok(VulkanStableCompiledResourceUpload {
+        resident_group: prepared.resident_group,
+        publications,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_loaded_compiled_resource_groups_for_stable_address_space(
+    device: &VulkanComputeDevice,
+    transfer: &mut VulkanResidentTransferStream,
+    arena: &VulkanStableResourceArena,
+    requests: &[VulkanStableCompiledResourceUploadRequest<'_>],
+    address_slot_count: usize,
+    alignment: usize,
+    capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
+) -> Result<Vec<VulkanPreparedStableCompiledResourceUpload>, VulkanError> {
     if requests.is_empty() {
         return Err(VulkanError(
             "stable resource upload batch must not be empty".to_string(),
@@ -331,10 +435,10 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
                     "stable resource upload batch repeats address-table slot {slot}"
                 )));
             }
-            if *slot >= address_table.slot_count() {
+            if *slot >= address_slot_count {
                 return Err(VulkanError(format!(
                     "stable resource upload slot {slot} exceeds address-table capacity {}",
-                    address_table.slot_count()
+                    address_slot_count
                 )));
             }
         }
@@ -446,8 +550,7 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
     let ticket = transfer.submit(&writes)?;
     transfer.wait(&ticket)?;
 
-    let mut resident_groups = Vec::with_capacity(requests.len());
-    let mut address_resources = Vec::with_capacity(batch_slots.len());
+    let mut prepared_uploads = Vec::with_capacity(requests.len());
     for ((request, allocations), slots) in requests
         .iter()
         .zip(prepared_groups)
@@ -488,7 +591,7 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
                 "stable uploaded compiled resource group cannot be published: {error}"
             ))
         })?;
-        address_resources.extend(
+        let address_resources =
             slots
                 .iter()
                 .copied()
@@ -504,54 +607,28 @@ pub fn upload_loaded_compiled_resource_groups_to_stable_address_space(
                         Arc::clone(allocation),
                         loaded_resource.representation.address_tag(),
                     )
-                }),
-        );
-        resident_groups.push(resident_group);
-    }
-    let expected_publication_count =
-        requests.iter().try_fold(0usize, |total, request| {
-            total
-                .checked_add(request.resource_slots.len())
-                .ok_or_else(|| {
-                    VulkanError(
-                        "stable upload publication count overflowed".to_string(),
-                    )
                 })
-        })?;
-    if expected_publication_count != address_resources.len() {
+                .collect();
+        prepared_uploads.push(VulkanPreparedStableCompiledResourceUpload {
+            resident_group,
+            address_resources,
+        });
+    }
+    let prepared_publication_count = prepared_uploads.iter().try_fold(
+        0usize,
+        |total, upload| {
+            total.checked_add(upload.address_resources.len()).ok_or_else(|| {
+                VulkanError("stable upload publication count overflowed".to_string())
+            })
+        },
+    )?;
+    if prepared_publication_count != batch_slots.len() {
         return Err(VulkanError(
             "stable upload address publication plan is inconsistent"
                 .to_string(),
         ));
     }
-    let publications =
-        address_table.publish_tagged_group(transfer, &address_resources)?;
-    if publications.len() != expected_publication_count {
-        if !publications.is_empty() {
-            address_table.clear_group(transfer, &publications)?;
-        }
-        return Err(VulkanError(
-            "stable upload address publication result is inconsistent"
-                .to_string(),
-        ));
-    }
-    let mut remaining_publications = publications.as_slice();
-    let uploads = resident_groups
-        .into_iter()
-        .zip(requests)
-        .map(|(resident_group, request)| {
-            let (group_publications, following_publications) =
-                remaining_publications
-                    .split_at(request.resource_slots.len());
-            remaining_publications = following_publications;
-            VulkanStableCompiledResourceUpload {
-                resident_group,
-                publications: group_publications.to_vec(),
-            }
-        })
-        .collect::<Vec<_>>();
-    debug_assert!(remaining_publications.is_empty());
-    Ok(uploads)
+    Ok(prepared_uploads)
 }
 
 fn device_resource_descriptor_from_loaded_group(

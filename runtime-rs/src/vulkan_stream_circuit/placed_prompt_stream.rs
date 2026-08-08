@@ -1479,7 +1479,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
     fn retier_compiled_resources_at_prompt_boundary(
         &self,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let stores = self.package.adaptive_retiering_stores();
+        let stores = self.package.adaptive_resource_stores();
         if stores.is_empty() {
             return Ok(());
         }
@@ -1501,6 +1501,14 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 .map_err(|error| {
                     selection_telemetry_error(format!(
                         "adaptive compiled-resource retiering failed for {:?}: {error}",
+                        store.device_id()
+                    ))
+                })?;
+            store
+                .optimize_representations_from_selection_telemetry(device, &telemetry)
+                .map_err(|error| {
+                    selection_telemetry_error(format!(
+                        "adaptive compiled-resource representation selection failed for {:?}: {error}",
                         store.device_id()
                     ))
                 })?;

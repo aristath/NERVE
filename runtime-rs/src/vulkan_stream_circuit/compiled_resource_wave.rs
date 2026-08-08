@@ -529,6 +529,7 @@ impl VulkanCompiledResourceDeviceStore {
                 .map_err(compiled_device_store_vulkan_error)?;
         }
         for group_id in &selected_group_ids {
+            address_state.promoted_representations.remove(group_id);
             address_state.publications.remove(group_id);
             let chunks = address_state
                 .group_chunks
@@ -591,9 +592,24 @@ impl VulkanCompiledResourceDeviceStore {
             return Ok(0);
         };
         let mut released_device_bytes = self
+            .reclaim_promoted_representation_capacity(requested_bytes)?;
+        if released_device_bytes >= requested_bytes {
+            self.instrumentation
+                .record_released_device_bytes(released_device_bytes);
+            return Ok(released_device_bytes);
+        }
+        released_device_bytes = released_device_bytes
+            .checked_add(
+                self
             .device_arena
-            .trim_inactive_backing(requested_bytes)
-            .map_err(compiled_device_store_vulkan_error)?;
+                    .trim_inactive_backing(requested_bytes - released_device_bytes)
+                    .map_err(compiled_device_store_vulkan_error)?,
+            )
+            .ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource released device capacity overflowed",
+                )
+            })?;
         if released_device_bytes >= requested_bytes {
             self.instrumentation
                 .record_released_device_bytes(released_device_bytes);
@@ -874,6 +890,17 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled resource eviction left {} payload bytes above the residency budget",
                 settled_requirement.2,
             )));
+        }
+        if settled_requirement.4 > 0 {
+            if let Some(representation_arena) = &self.representation_arena {
+                let released = representation_arena
+                    .trim_inactive_backing(settled_requirement.4)
+                    .map_err(compiled_device_store_vulkan_error)?;
+                if released > 0 {
+                    self.instrumentation.record_released_device_bytes(released);
+                    settled_requirement = residency_requirement()?;
+                }
+            }
         }
         if settled_requirement.4 > 0 {
             // A differently shaped wave may not fit any retained inactive
@@ -1159,6 +1186,7 @@ impl VulkanCompiledResourceDeviceStore {
             publications: resident_publications,
             group_chunks,
             chunk_groups,
+            ..
         } = &mut *state;
         let device_capacity_permit = match device_capacity_permit {
             Some(permit) => Some(permit),

@@ -426,6 +426,8 @@ struct VulkanCompiledResourceDeviceAddressState {
     publications: BTreeMap<String, Vec<VulkanStableResourceAddressPublication>>,
     group_chunks: BTreeMap<String, BTreeSet<VulkanCompiledResourceAllocationCohort>>,
     chunk_groups: BTreeMap<VulkanCompiledResourceAllocationCohort, BTreeSet<String>>,
+    promoted_representations:
+        BTreeMap<String, VulkanCompiledResourcePromotedRepresentation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,6 +463,7 @@ struct VulkanCompiledResourceLoadPlan {
 
 struct VulkanCompiledResourceSelectorCachePolicy {
     group_selector_ids: BTreeMap<String, String>,
+    group_selections: BTreeMap<String, (String, usize)>,
     group_payload_bytes: BTreeMap<String, usize>,
     selector_payload_budgets: BTreeMap<String, usize>,
 }
@@ -500,12 +503,14 @@ pub struct VulkanCompiledResourceDeviceStore {
     layout: Arc<VulkanCompiledResourceAddressLayout>,
     device_arena: VulkanStableResourceArena,
     host_visible_arena: Option<VulkanStableResourceArena>,
+    representation_arena: Option<VulkanStableResourceArena>,
     shared_host_cache: Option<Arc<VulkanCompiledResourceSharedHostCache>>,
     memory_plan: Option<std::sync::Mutex<VulkanCompiledResourceMemoryPlan>>,
     address_state: std::sync::Mutex<VulkanCompiledResourceDeviceAddressState>,
     execution_barrier: std::sync::RwLock<()>,
     residency_mutation: std::sync::Mutex<()>,
     backing_store: CompiledResourceBackingStore,
+    representation_backing_store: Option<CompiledResourceBackingStore>,
     manager: DeviceResourceResidencyManager<VulkanResidentCompiledResource>,
     upload_alignment: usize,
     maximum_dynamic_payload_bytes: usize,
@@ -516,8 +521,11 @@ pub struct VulkanCompiledResourceDeviceStore {
     transfer_staging_host_bytes: usize,
     maximum_load_wave_group_count: usize,
     group_selector_ids: BTreeMap<String, String>,
+    group_selections: BTreeMap<String, (String, usize)>,
     selector_payload_budgets: BTreeMap<String, usize>,
     retiering_last_selection_counts: std::sync::Mutex<BTreeMap<String, u64>>,
+    representation_history:
+        std::sync::Mutex<VulkanCompiledResourceRepresentationHistory>,
     coverage_index: Vec<VulkanCompiledResourceComponentCoverageIndex>,
     instrumentation: VulkanCompiledResourceStoreInstrumentation,
     lifecycle: std::sync::Mutex<VulkanCompiledResourceStoreLifecycle>,
@@ -660,16 +668,16 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled device-resource store selector ownership is invalid",
             ));
         }
-        let maximum_allocation_byte_capacity = maximum_dynamic_device_payload_bytes
+        let source_maximum_allocation_byte_capacity = maximum_dynamic_device_payload_bytes
             .checked_add(store_residency.maximum_dynamic_allocation_padding_bytes)
             .ok_or_else(|| {
                 VulkanCompiledResourceDeviceStoreError::new(
                     "compiled resource allocation capacity overflowed",
                 )
             })?;
-        if maximum_allocation_byte_capacity > available_dynamic_device_bytes {
+        if source_maximum_allocation_byte_capacity > available_dynamic_device_bytes {
             return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-                "compiled resources require up to {maximum_allocation_byte_capacity} physical allocation bytes for {maximum_dynamic_payload_bytes} payload bytes, but only {available_dynamic_device_bytes} device bytes are available"
+                "compiled resources require up to {source_maximum_allocation_byte_capacity} physical allocation bytes for {maximum_dynamic_payload_bytes} payload bytes, but only {available_dynamic_device_bytes} device bytes are available"
             )));
         }
         let staging_byte_capacity = store_residency.transfer_staging_slot_byte_capacity;
@@ -687,6 +695,14 @@ impl VulkanCompiledResourceDeviceStore {
             &contract_index,
             &layout,
             &allowed_selector_ids,
+            CompiledResourceRepresentation::Source,
+        )?;
+        let representation_group_layouts = compiled_resource_sparse_group_layouts(
+            &contract,
+            &contract_index,
+            &layout,
+            &allowed_selector_ids,
+            CompiledResourceRepresentation::ResidentDerivation,
         )?;
         let device_arena = VulkanStableResourceArena::new(
             device,
@@ -695,10 +711,23 @@ impl VulkanCompiledResourceDeviceStore {
             &sparse_group_layouts,
         )
         .map_err(compiled_device_store_vulkan_error)?;
-        let maximum_allocation_byte_capacity = device_arena
-            .maximum_backed_byte_capacity()
-            .map_err(compiled_device_store_vulkan_error)?
-            .min(available_dynamic_device_bytes);
+        let maximum_allocation_byte_capacity = available_dynamic_device_bytes;
+        let representation_arena = if representation_group_layouts.is_empty() {
+            None
+        } else {
+            Some(
+                VulkanStableResourceArena::new(
+                    device,
+                    VulkanStableResourceArenaConfig::new(
+                        available_dynamic_device_bytes,
+                        upload_alignment,
+                    )
+                    .map_err(compiled_device_store_vulkan_error)?,
+                    &representation_group_layouts,
+                )
+                .map_err(compiled_device_store_vulkan_error)?,
+            )
+        };
         let package_root = package_root.into();
         let selector_cache_policy = compiled_resource_selector_cache_policy(
             &contract,
@@ -795,6 +824,41 @@ impl VulkanCompiledResourceDeviceStore {
                 "failed to create compiled resource backing store: {error}"
             ))
         })?;
+        let representation_backing_store = if representation_arena.is_some() {
+            let maximum_resident_group_bytes = representation_group_layouts
+                .iter()
+                .map(compiled_resource_group_layout_payload_bytes)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .max()
+                .ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled representation arena has no group payload",
+                    )
+                })?;
+            Some(
+                CompiledResourceBackingStore::new(
+                    package_root.clone(),
+                    CompiledResourceBackingStoreLimits {
+                        worker_count: 1,
+                        queued_request_capacity: 1,
+                        maximum_ranges_per_group,
+                        maximum_logical_bytes_per_group: maximum_group_byte_count,
+                        maximum_retained_payload_bytes: maximum_resident_group_bytes
+                            .max(maximum_group_byte_count),
+                        maximum_coalesced_read_bytes: maximum_group_byte_count,
+                        maximum_coalescing_gap_bytes: 64 * 1024,
+                    },
+                )
+                .map_err(|error| {
+                    VulkanCompiledResourceDeviceStoreError::new(format!(
+                        "failed to create compiled representation backing store: {error}"
+                    ))
+                })?,
+            )
+        } else {
+            None
+        };
         let manager = DeviceResourceResidencyManager::new(
             device_id.clone(),
             maximum_dynamic_payload_bytes,
@@ -817,6 +881,7 @@ impl VulkanCompiledResourceDeviceStore {
             layout,
             device_arena,
             host_visible_arena,
+            representation_arena,
             shared_host_cache,
             memory_plan: memory_plan.map(std::sync::Mutex::new),
             address_state: std::sync::Mutex::new(VulkanCompiledResourceDeviceAddressState {
@@ -825,10 +890,12 @@ impl VulkanCompiledResourceDeviceStore {
                 publications: BTreeMap::new(),
                 group_chunks: BTreeMap::new(),
                 chunk_groups: BTreeMap::new(),
+                promoted_representations: BTreeMap::new(),
             }),
             execution_barrier: std::sync::RwLock::new(()),
             residency_mutation: std::sync::Mutex::new(()),
             backing_store,
+            representation_backing_store,
             manager,
             upload_alignment,
             maximum_dynamic_payload_bytes,
@@ -839,8 +906,12 @@ impl VulkanCompiledResourceDeviceStore {
             transfer_staging_host_bytes: store_residency.transfer_staging_device_bytes,
             maximum_load_wave_group_count,
             group_selector_ids: selector_cache_policy.group_selector_ids,
+            group_selections: selector_cache_policy.group_selections,
             selector_payload_budgets: selector_cache_policy.selector_payload_budgets,
             retiering_last_selection_counts: std::sync::Mutex::new(BTreeMap::new()),
+            representation_history: std::sync::Mutex::new(
+                VulkanCompiledResourceRepresentationHistory::default(),
+            ),
             coverage_index,
             instrumentation: VulkanCompiledResourceStoreInstrumentation::default(),
             lifecycle: std::sync::Mutex::new(VulkanCompiledResourceStoreLifecycle {
@@ -1217,10 +1288,25 @@ impl VulkanCompiledResourceDeviceStore {
             .device_arena
             .stats()
             .map_err(compiled_device_store_vulkan_error)?;
+        let representation_committed_bytes = self
+            .representation_arena
+            .as_ref()
+            .map(VulkanStableResourceArena::stats)
+            .transpose()
+            .map_err(compiled_device_store_vulkan_error)?
+            .map(|stats| stats.committed_byte_capacity)
+            .unwrap_or_default();
         self.instrumentation.mark_mount_complete(
             residency.dynamic_resident_bytes,
             residency.resident_group_count,
-            arena.committed_byte_capacity,
+            arena
+                .committed_byte_capacity
+                .checked_add(representation_committed_bytes)
+                .ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource initial committed device byte count overflowed",
+                    )
+                })?,
         );
         Ok(())
     }
@@ -1250,10 +1336,25 @@ impl VulkanCompiledResourceDeviceStore {
             .device_arena
             .stats()
             .map_err(compiled_device_store_vulkan_error)?;
+        let representation_arena = self
+            .representation_arena
+            .as_ref()
+            .map(VulkanStableResourceArena::stats)
+            .transpose()
+            .map_err(compiled_device_store_vulkan_error)?
+            .unwrap_or_default();
+        let current_committed_device_bytes = arena
+            .committed_byte_capacity
+            .checked_add(representation_arena.committed_byte_capacity)
+            .ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource current committed device byte count overflowed",
+                )
+            })?;
         self.instrumentation
             .high_water_committed_device_bytes
             .fetch_max(
-                u64::try_from(arena.committed_byte_capacity).unwrap_or(u64::MAX),
+                u64::try_from(current_committed_device_bytes).unwrap_or(u64::MAX),
                 Ordering::AcqRel,
             );
         let backing = self.backing_store.statistics();
@@ -1418,7 +1519,7 @@ impl VulkanCompiledResourceDeviceStore {
             physical_device_id: self.physical_device_id.clone(),
             logical_device_ids: self.logical_device_ids.clone(),
             initial_device_bytes: total_device_bytes(initial_committed_device_bytes, "initial")?,
-            current_device_bytes: total_device_bytes(arena.committed_byte_capacity, "current")?,
+            current_device_bytes: total_device_bytes(current_committed_device_bytes, "current")?,
             maximum_device_bytes: total_device_bytes(
                 self.maximum_allocation_byte_capacity,
                 "maximum",
@@ -1685,10 +1786,16 @@ impl VulkanCompiledResourceDeviceStore {
             state.group_chunks.clear();
             state.chunk_groups.clear();
         }
+        state.promoted_representations.clear();
         drop(state);
         self.device_arena
             .release_backing()
             .map_err(compiled_device_store_vulkan_error)?;
+        if let Some(arena) = &self.representation_arena {
+            arena
+                .release_backing()
+                .map_err(compiled_device_store_vulkan_error)?;
+        }
         if let Some(arena) = &self.host_visible_arena {
             let committed_bytes = arena
                 .stats()
@@ -1716,6 +1823,13 @@ impl VulkanCompiledResourceDeviceStore {
             .transpose()
             .map_err(compiled_device_store_vulkan_error)?
             .unwrap_or_default();
+        let representation_arena = self
+            .representation_arena
+            .as_ref()
+            .map(VulkanStableResourceArena::stats)
+            .transpose()
+            .map_err(compiled_device_store_vulkan_error)?
+            .unwrap_or_default();
         if !residency.directory.is_empty()
             || residency.statistics.dynamic_resident_bytes != 0
             || residency.statistics.reserved_loading_bytes != 0
@@ -1730,9 +1844,13 @@ impl VulkanCompiledResourceDeviceStore {
             || host_visible_arena.allocated_byte_count != 0
             || host_visible_arena.committed_byte_capacity != 0
             || host_visible_arena.chunk_count != 0
+            || representation_arena.active_allocation_count != 0
+            || representation_arena.allocated_byte_count != 0
+            || representation_arena.committed_byte_capacity != 0
+            || representation_arena.chunk_count != 0
         {
             return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-                "compiled resource store teardown did not quiesce cleanly: directory={}, dynamic_bytes={}, reserved_bytes={}, loading={}, resident={}, failed={}, device_arena_allocations={}, device_arena_bytes={}, device_arena_committed={}, device_arena_chunks={}, host_arena_allocations={}, host_arena_bytes={}, host_arena_committed={}, host_arena_chunks={}",
+                "compiled resource store teardown did not quiesce cleanly: directory={}, dynamic_bytes={}, reserved_bytes={}, loading={}, resident={}, failed={}, device_arena_allocations={}, device_arena_bytes={}, device_arena_committed={}, device_arena_chunks={}, host_arena_allocations={}, host_arena_bytes={}, host_arena_committed={}, host_arena_chunks={}, representation_arena_allocations={}, representation_arena_bytes={}, representation_arena_committed={}, representation_arena_chunks={}",
                 residency.directory.len(),
                 residency.statistics.dynamic_resident_bytes,
                 residency.statistics.reserved_loading_bytes,
@@ -1747,6 +1865,10 @@ impl VulkanCompiledResourceDeviceStore {
                 host_visible_arena.allocated_byte_count,
                 host_visible_arena.committed_byte_capacity,
                 host_visible_arena.chunk_count,
+                representation_arena.active_allocation_count,
+                representation_arena.allocated_byte_count,
+                representation_arena.committed_byte_capacity,
+                representation_arena.chunk_count,
             )));
         }
         if let Some(memory_plan) = &self.memory_plan {
@@ -2029,6 +2151,7 @@ fn compiled_resource_selector_cache_policy(
         .collect::<BTreeMap<_, _>>();
 
     let mut group_owners = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut group_selections = BTreeMap::<String, (String, usize)>::new();
     let mut group_payload_bytes = BTreeMap::<String, usize>::new();
     for selector in contract
         .selectors
@@ -2109,11 +2232,14 @@ fn compiled_resource_selector_cache_policy(
                     .collect::<Result<Vec<_>, _>>()?
             }
         };
-        for (group_id, byte_count) in groups {
+        for (resource_index, (group_id, byte_count)) in groups.into_iter().enumerate() {
             group_owners
                 .entry(group_id.clone())
                 .or_default()
                 .insert(selector.id.clone());
+            group_selections
+                .entry(group_id.clone())
+                .or_insert_with(|| (selector.id.clone(), resource_index));
             if let Some(previous) = group_payload_bytes.insert(group_id, byte_count)
                 && previous != byte_count
             {
@@ -2188,9 +2314,34 @@ fn compiled_resource_selector_cache_policy(
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     Ok(VulkanCompiledResourceSelectorCachePolicy {
         group_selector_ids,
+        group_selections,
         group_payload_bytes,
         selector_payload_budgets,
     })
+}
+
+fn compiled_resource_group_layout_payload_bytes(
+    layout: &VulkanStableResourceGroupLayout,
+) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+    let resource_byte_counts = match layout {
+        VulkanStableResourceGroupLayout::Explicit {
+            resource_byte_counts,
+            ..
+        } => resource_byte_counts.as_slice(),
+        VulkanStableResourceGroupLayout::Partitioned {
+            resource_byte_counts,
+            ..
+        } => resource_byte_counts.as_slice(),
+    };
+    resource_byte_counts
+        .iter()
+        .try_fold(0usize, |total, byte_count| {
+            total.checked_add(*byte_count).ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled representation group payload byte count overflowed",
+                )
+            })
+        })
 }
 
 fn compiled_resource_sparse_group_layouts(
@@ -2198,11 +2349,12 @@ fn compiled_resource_sparse_group_layouts(
     contract_index: &CompiledResourceContractIndex,
     layout: &VulkanCompiledResourceAddressLayout,
     allowed_selector_ids: &BTreeSet<String>,
+    representation: CompiledResourceRepresentation,
 ) -> Result<Vec<VulkanStableResourceGroupLayout>, VulkanCompiledResourceDeviceStoreError> {
     let resource_byte_count = |resource: &CompiledImmutableResource,
                                label: &str|
      -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
-        let byte_count = resource.source_byte_count().map_err(|error| {
+        let byte_count = resource.resident_byte_count_for(representation).map_err(|error| {
             VulkanCompiledResourceDeviceStoreError::new(format!(
                 "sparse {label} resource is invalid: {error}"
             ))
@@ -2249,6 +2401,17 @@ fn compiled_resource_sparse_group_layouts(
                                 "sparse atomic group has no address slots",
                             )
                         })?;
+                    if representation == CompiledResourceRepresentation::ResidentDerivation
+                        && !group.resource_ids.iter().any(|resource_id| {
+                            contract_index
+                                .resource(contract, resource_id)
+                                .is_some_and(|resource| {
+                                    resource.supports_representation(representation)
+                                })
+                        })
+                    {
+                        continue;
+                    }
                     let byte_counts = group
                         .resource_ids
                         .iter()
@@ -2294,11 +2457,21 @@ fn compiled_resource_sparse_group_layouts(
                         "sparse partition selector count differs from its address layout",
                     ));
                 }
+                if representation == CompiledResourceRepresentation::ResidentDerivation
+                    && !template
+                        .member_templates
+                        .iter()
+                        .any(|member| member.supports_representation(representation))
+                {
+                    continue;
+                }
                 let byte_counts = template
                     .member_templates
                     .iter()
                     .map(|member| {
-                        let byte_count = member.source_byte_count().map_err(|error| {
+                        let byte_count = member
+                            .resident_byte_count_for(representation)
+                            .map_err(|error| {
                             VulkanCompiledResourceDeviceStoreError::new(
                                 error.to_string(),
                             )
@@ -2327,7 +2500,10 @@ fn compiled_resource_sparse_group_layouts(
             }
         }
     }
-    if explicit_groups.is_empty() && partitioned_groups.is_empty() {
+    if representation == CompiledResourceRepresentation::Source
+        && explicit_groups.is_empty()
+        && partitioned_groups.is_empty()
+    {
         return Err(VulkanCompiledResourceDeviceStoreError::new(
             "compiled resource store has no sparse resource groups",
         ));

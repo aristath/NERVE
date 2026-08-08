@@ -1016,6 +1016,21 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert_eq!(inspection.scopes[0].addressable_unit_count, 2);
     let contract = Arc::new(contract);
     let layout = Arc::new(VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap());
+    let metadata_device_bytes_for = |selector_ids: &[&str]| {
+        let allowed_selector_ids = selector_ids
+            .iter()
+            .map(|selector_id| (*selector_id).to_string())
+            .collect::<BTreeSet<_>>();
+        plan_compiled_resource_store_residency(
+            &contract,
+            &layout,
+            &allowed_selector_ids,
+            1024,
+            compiled_resource_upload_alignment(&contract, &device).unwrap(),
+        )
+        .unwrap()
+        .metadata_device_bytes
+    };
     let capacity_error = match VulkanCompiledResourceDeviceStore::new(
         &device,
         ResourceResidencyPolicy::DemandRetained,
@@ -1032,7 +1047,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         1,
         128,
         64,
-        layout.address_table_byte_count().unwrap(),
+        metadata_device_bytes_for(&[&selector_id, &alias_selector_id]),
     ) {
         Ok(_) => panic!("physical allocation padding was not admitted"),
         Err(error) => error,
@@ -1040,7 +1055,8 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
     assert!(
         capacity_error
             .to_string()
-            .contains("physical allocation bytes")
+            .contains("physical allocation bytes"),
+        "unexpected capacity admission error: {capacity_error}",
     );
     let over_capacity_store = VulkanCompiledResourceDeviceStore::new(
         &device,
@@ -1058,7 +1074,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         1,
         128,
         64,
-        layout.address_table_byte_count().unwrap(),
+        metadata_device_bytes_for(&[&selector_id]),
     )
     .unwrap();
     over_capacity_store.mark_mount_complete().unwrap();
@@ -1115,7 +1131,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         1,
         128,
         64,
-        layout.address_table_byte_count().unwrap(),
+        metadata_device_bytes_for(&[&selector_id]),
     )
     .unwrap());
     paged_store
@@ -1225,7 +1241,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         1,
         128,
         64,
-        layout.address_table_byte_count().unwrap(),
+        metadata_device_bytes_for(&[&selector_id]),
         None,
     )
     .unwrap();
@@ -1282,7 +1298,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             1,
             128,
             64,
-            layout.address_table_byte_count().unwrap(),
+            metadata_device_bytes_for(&[&selector_id]),
             None,
         )
         .unwrap(),
@@ -1346,7 +1362,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             1,
             128,
             64,
-            layout.address_table_byte_count().unwrap(),
+            metadata_device_bytes_for(&[&selector_id]),
             None,
         )
         .unwrap(),
@@ -1427,7 +1443,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         1,
         128,
         64,
-        layout.address_table_byte_count().unwrap(),
+        metadata_device_bytes_for(&[&selector_id]),
         None,
     )
     .unwrap();
@@ -1755,7 +1771,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         1,
         128,
         64,
-        layout.address_table_byte_count().unwrap(),
+        metadata_device_bytes_for(&[&selector_id, &alias_selector_id]),
     )
     .unwrap();
     let buffers = store
@@ -1941,7 +1957,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             1,
             128,
             64,
-            layout.address_table_byte_count().unwrap(),
+            metadata_device_bytes_for(&[&selector_id, &alias_selector_id]),
         )
         .unwrap();
         cycle_store.mark_mount_complete().unwrap();
@@ -2260,5 +2276,272 @@ fn compiled_resource_reclamation_never_waits_on_active_execution() {
             .unwrap()
             .is_none(),
         "an allocator callback must decline reclamation instead of waiting on an active execution epoch"
+    );
+}
+
+#[test]
+fn adaptive_representation_cache_promotes_restores_and_tears_down_atomically() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let root = crate::test_support::TempDir::new("adaptive_representation_cache");
+    let packed_weights = [0x10u8, 0x32, 0x54, 0x76];
+    let scales = [0x38u8, 0x40, 0x44, 0x48];
+    let artifact = [packed_weights.as_slice(), scales.as_slice()].concat();
+    fs::write(root.path().join("weights.bin"), &artifact).unwrap();
+    let content_id = |byte: char| format!("sha256:{}", byte.to_string().repeat(64));
+    let digest = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let compatibility = CompiledResourceCompatibility {
+        device_api: "vulkan".to_string(),
+        storage_class: "storage_buffer".to_string(),
+        read_only: true,
+        required_features: vec!["buffer_device_address".to_string()],
+    };
+    let weight_id = content_id('1');
+    let scale_id = content_id('2');
+    let group_id = content_id('3');
+    let selector_id = content_id('4');
+    let contract = Arc::new(CompiledResourceResidencyContract {
+        schema: COMPILED_RESOURCE_RESIDENCY_SCHEMA.to_string(),
+        identity_algorithm: RESOURCE_IDENTITY_ALGORITHM.to_string(),
+        state_machine_schema: RESOURCE_RESIDENCY_STATE_MACHINE_SCHEMA.to_string(),
+        supported_policies: vec![ResourceResidencyPolicy::DemandPaged],
+        resources: vec![
+            CompiledImmutableResource {
+                id: weight_id.clone(),
+                lifetime: CompiledResourceLifetime::Dynamic,
+                ranges: vec![CompiledResourceByteRange {
+                    artifact_path: "weights.bin".to_string(),
+                    byte_offset: 0,
+                    byte_count: packed_weights.len(),
+                    alignment_bytes: 4,
+                    integrity: CompiledResourceRangeIntegrity {
+                        algorithm: "sha256".to_string(),
+                        digest: digest(&packed_weights),
+                    },
+                }],
+                dependencies: Vec::new(),
+                compatibility: CompiledResourceCompatibility {
+                    required_features: vec![
+                        "buffer_device_address".to_string(),
+                        "shader_float8".to_string(),
+                        "shader_int8".to_string(),
+                        "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
+                    ],
+                    ..compatibility.clone()
+                },
+                resident_derivation: Some(CompiledResourceResidentDerivation {
+                    schema: RESIDENT_DERIVATION_SCHEMA.to_string(),
+                    kind: CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+                    source_byte_count: packed_weights.len(),
+                    resident_byte_count: packed_weights.len() * 2,
+                    required_features: vec![
+                        "shader_float8".to_string(),
+                        "shader_int8".to_string(),
+                        "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
+                    ],
+                }),
+            },
+            CompiledImmutableResource {
+                id: scale_id.clone(),
+                lifetime: CompiledResourceLifetime::Dynamic,
+                ranges: vec![CompiledResourceByteRange {
+                    artifact_path: "weights.bin".to_string(),
+                    byte_offset: packed_weights.len(),
+                    byte_count: scales.len(),
+                    alignment_bytes: 4,
+                    integrity: CompiledResourceRangeIntegrity {
+                        algorithm: "sha256".to_string(),
+                        digest: digest(&scales),
+                    },
+                }],
+                dependencies: Vec::new(),
+                compatibility,
+                resident_derivation: None,
+            },
+        ],
+        atomic_groups: vec![CompiledAtomicResidencyGroup {
+            id: group_id.clone(),
+            lifetime: CompiledResourceLifetime::Dynamic,
+            resource_ids: vec![weight_id, scale_id],
+            dependencies: Vec::new(),
+        }],
+        partition_templates: Vec::new(),
+        bindings: Vec::new(),
+        selectors: vec![CompiledResourceSelector {
+            id: selector_id.clone(),
+            execution_scope: "target".to_string(),
+            component_id: "sparse_moe".to_string(),
+            node_id: "choose_expert".to_string(),
+            domain_id: "experts".to_string(),
+            resource_count: 1,
+            selection_signal: "selected_expert".to_string(),
+            encoding: CompiledResourceSelectionEncoding {
+                element_type: CompiledResourceSelectionElementType::U32,
+                selection_count_per_activation: 1,
+                index_shift: 0,
+                index_mask: 0xffff,
+            },
+            mapping: CompiledResourceSelectorMapping::GroupTable {
+                atomic_group_ids: vec![group_id.clone()],
+            },
+        }],
+        checkpoints: Vec::new(),
+    });
+    contract.inspection_report().unwrap();
+    let layout = Arc::new(VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap());
+    let mut store = VulkanCompiledResourceDeviceStore::new(
+        &device,
+        ResourceResidencyPolicy::DemandPaged,
+        "adaptive-representation-test",
+        device.physical_device_id(),
+        vec!["gpu0".to_string()],
+        root.path(),
+        Arc::clone(&contract),
+        Arc::clone(&layout),
+        BTreeSet::from([selector_id.clone()]),
+        artifact.len(),
+        64 * 1024,
+        artifact.len(),
+        2,
+        0,
+        64,
+        layout.address_table_byte_count().unwrap(),
+    )
+    .unwrap();
+    store
+        .load_selector_resource(
+            &device,
+            &selector_id,
+            0,
+            DeviceResourceResidencyOwnerId::new("adaptive-representation-owner").unwrap(),
+        )
+        .unwrap();
+    let telemetry = VulkanSelectionTelemetrySnapshot {
+        domains: vec![VulkanSelectionTelemetryDomainSnapshot {
+            execution_scope: "target".to_string(),
+            component_id: "sparse_moe".to_string(),
+            node_id: "choose_expert".to_string(),
+            domain_id: "experts".to_string(),
+            resource_count: 1,
+            selection_counts: vec![7],
+        }],
+    };
+
+    let unstable = store
+        .optimize_representations_from_selection_telemetry(&device, &telemetry)
+        .unwrap();
+    assert!(unstable.skipped_unstable_load_interval);
+    assert_eq!(unstable.promoted_group_count, 0);
+
+    let placement_budget = store.maximum_allocation_byte_capacity;
+    store.maximum_allocation_byte_capacity = store
+        .device_arena
+        .stats()
+        .unwrap()
+        .committed_byte_capacity;
+    let capacity_limited = store
+        .optimize_representations_from_selection_telemetry(&device, &telemetry)
+        .unwrap();
+    assert_eq!(capacity_limited.considered_group_count, 1);
+    assert_eq!(capacity_limited.promoted_group_count, 0);
+    assert!(capacity_limited.skipped_capacity_bytes > 0);
+    assert!(
+        store
+            .address_state
+            .lock()
+            .unwrap()
+            .promoted_representations
+            .is_empty(),
+        "an acceleration representation must never exceed the store placement budget",
+    );
+    store.maximum_allocation_byte_capacity = placement_budget;
+
+    let promoted = store
+        .optimize_representations_from_selection_telemetry(&device, &telemetry)
+        .unwrap();
+    assert_eq!(promoted.considered_group_count, 1);
+    assert_eq!(promoted.promoted_group_count, 1);
+    assert_eq!(promoted.promoted_source_bytes, artifact.len());
+    assert_eq!(promoted.promoted_resident_bytes, packed_weights.len() * 2 + scales.len());
+    let resource_slots = layout.selectors[0]
+        .mapping
+        .resource_slots(0)
+        .unwrap();
+    {
+        let state = store.address_state.lock().unwrap();
+        assert!(state.promoted_representations.contains_key(&group_id));
+        let weight_record = state.address_table.record(resource_slots[0]).unwrap();
+        assert_eq!(weight_record.byte_count, (packed_weights.len() * 2) as u64);
+        assert_eq!(weight_record.resident, 1);
+        assert_eq!(
+            weight_record.representation,
+            CompiledResourceRepresentation::ResidentDerivation.address_tag(),
+        );
+        assert_eq!(
+            state.address_table.record(resource_slots[1]).unwrap().representation,
+            CompiledResourceRepresentation::Source.address_tag(),
+            "group members without an exact alternative must keep their source form",
+        );
+    }
+    assert!(
+        store
+            .representation_arena
+            .as_ref()
+            .unwrap()
+            .stats()
+            .unwrap()
+            .allocated_byte_count
+            > artifact.len()
+    );
+
+    assert!(store.reclaim_inactive_device_memory(1).unwrap() > 0);
+    {
+        let state = store.address_state.lock().unwrap();
+        assert!(state.promoted_representations.is_empty());
+        for slot in resource_slots {
+            assert_eq!(
+                state.address_table.record(slot).unwrap().representation,
+                CompiledResourceRepresentation::Source.address_tag(),
+            );
+        }
+    }
+    assert_eq!(
+        store
+            .representation_arena
+            .as_ref()
+            .unwrap()
+            .stats()
+            .unwrap()
+            .committed_byte_capacity,
+        0,
+    );
+
+    let pressure_boundary = store
+        .optimize_representations_from_selection_telemetry(&device, &telemetry)
+        .unwrap();
+    assert!(pressure_boundary.skipped_unstable_load_interval);
+    assert_eq!(pressure_boundary.promoted_group_count, 0);
+    assert_eq!(
+        store
+            .optimize_representations_from_selection_telemetry(&device, &telemetry)
+            .unwrap()
+            .promoted_group_count,
+        1,
+        "a reclaimed representation may return only after a complete stable interval",
+    );
+    assert_eq!(store.unload().unwrap().group_count, 1);
+    assert!(store.address_state.lock().unwrap().promoted_representations.is_empty());
+    assert_eq!(
+        store
+            .representation_arena
+            .as_ref()
+            .unwrap()
+            .stats()
+            .unwrap(),
+        VulkanStableResourceArenaStats::default(),
     );
 }

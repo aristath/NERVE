@@ -86,6 +86,26 @@ impl CompiledImmutableResource {
             })
         })
     }
+
+    pub fn resident_byte_count_for(
+        &self,
+        representation: CompiledResourceRepresentation,
+    ) -> io::Result<usize> {
+        match (representation, &self.resident_derivation) {
+            (CompiledResourceRepresentation::ResidentDerivation, Some(derivation)) => {
+                Ok(derivation.resident_byte_count)
+            }
+            _ => self.source_byte_count(),
+        }
+    }
+
+    pub fn supports_representation(
+        &self,
+        representation: CompiledResourceRepresentation,
+    ) -> bool {
+        representation == CompiledResourceRepresentation::Source
+            || self.resident_derivation.is_some()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +264,26 @@ impl CompiledPartitionMemberTemplate {
                     )
                 })
             })
+    }
+
+    pub fn resident_byte_count_for(
+        &self,
+        representation: CompiledResourceRepresentation,
+    ) -> io::Result<usize> {
+        match (representation, &self.resident_derivation) {
+            (CompiledResourceRepresentation::ResidentDerivation, Some(derivation)) => {
+                Ok(derivation.resident_byte_count)
+            }
+            _ => self.source_byte_count(),
+        }
+    }
+
+    pub fn supports_representation(
+        &self,
+        representation: CompiledResourceRepresentation,
+    ) -> bool {
+        representation == CompiledResourceRepresentation::Source
+            || self.resident_derivation.is_some()
     }
 }
 
