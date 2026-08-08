@@ -603,6 +603,84 @@ fn stable_resource_groups_atomically_exchange_physical_backing() {
 }
 
 #[test]
+fn stable_resource_group_atomically_replaces_variable_size_representation() {
+    let Some(device_index) = stable_resource_test_device_index() else {
+        eprintln!("skipping stable resource replacement test: explicit Vulkan device unset");
+        return;
+    };
+    let device = VulkanComputeDevice::new_for_physical_device_index(device_index).unwrap();
+    let source_arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(64 * 1024, 256).unwrap(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: vec![0],
+            resource_byte_counts: vec![1024],
+        }],
+    )
+    .unwrap();
+    let derived_arena = VulkanStableResourceArena::new(
+        &device,
+        VulkanStableResourceArenaConfig::new(64 * 1024, 256).unwrap(),
+        &[VulkanStableResourceGroupLayout::Explicit {
+            resource_slots: vec![0],
+            resource_byte_counts: vec![2048],
+        }],
+    )
+    .unwrap();
+    let source = Arc::clone(
+        &source_arena
+            .allocate_groups(&device, &[(&[0], &[1024])], 256)
+            .unwrap()[0][0],
+    );
+    let derived = Arc::clone(
+        &derived_arena
+            .allocate_groups(&device, &[(&[0], &[2048])], 256)
+            .unwrap()[0][0],
+    );
+    let mut transfer = device
+        .create_resident_transfer_stream(2, 64 * 1024)
+        .unwrap();
+    let mut table = VulkanStableResourceAddressTable::new(&device, &mut transfer, 1).unwrap();
+    let source_publications = table
+        .publish_tagged_group(&mut transfer, &[(0, Arc::clone(&source), 0)])
+        .unwrap();
+
+    let derived_publications = table
+        .replace_group(
+            &mut transfer,
+            &source_publications,
+            &[(0, Arc::clone(&derived), 1)],
+        )
+        .unwrap();
+    assert_eq!(derived_publications[0].generation(), 2);
+    assert_eq!(derived_publications[0].representation(), 1);
+    assert_eq!(table.record(0).unwrap().byte_count, 2048);
+    assert_eq!(table.record(0).unwrap().representation, 1);
+    assert!(table.allocations_for_publications(&source_publications).is_err());
+
+    let restored_publications = table
+        .replace_group(
+            &mut transfer,
+            &derived_publications,
+            &[(0, Arc::clone(&source), 0)],
+        )
+        .unwrap();
+    assert_eq!(restored_publications[0].generation(), 3);
+    assert_eq!(restored_publications[0].representation(), 0);
+    assert_eq!(table.record(0).unwrap().byte_count, 1024);
+    assert_eq!(table.record(0).unwrap().representation, 0);
+    assert!(table.allocations_for_publications(&derived_publications).is_err());
+
+    table
+        .clear_group(&mut transfer, &restored_publications)
+        .unwrap();
+    drop(source);
+    drop(derived);
+    source_arena.release_backing().unwrap();
+    derived_arena.release_backing().unwrap();
+}
+
+#[test]
 fn dense_stable_resource_layout_packs_members_without_sparse_page_padding() {
     let (offsets, byte_capacity) = stable_group_member_layout(&[1024, 257, 2048], 256).unwrap();
     assert_eq!(offsets, vec![0, 1024, 1536]);

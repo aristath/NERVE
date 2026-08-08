@@ -1328,6 +1328,87 @@ impl VulkanStableResourceAddressTable {
         Ok((exchanged_left, exchanged_right))
     }
 
+    pub fn replace_group(
+        &mut self,
+        transfer: &mut VulkanResidentTransferStream,
+        current: &[VulkanStableResourceAddressPublication],
+        replacements: &[(usize, Arc<VulkanStableResourceAllocation>, u32)],
+    ) -> Result<Vec<VulkanStableResourceAddressPublication>, VulkanError> {
+        if current.is_empty() || current.len() != replacements.len() {
+            return Err(VulkanError(format!(
+                "stable resource replacement needs equally sized non-empty groups, got {} and {}",
+                current.len(),
+                replacements.len()
+            )));
+        }
+        let current_by_slot = current
+            .iter()
+            .map(|publication| (publication.slot, publication))
+            .collect::<BTreeMap<_, _>>();
+        if current_by_slot.len() != current.len() {
+            return Err(VulkanError(
+                "stable resource replacement repeats a current slot".to_string(),
+            ));
+        }
+        let mut replacement_slots = BTreeSet::new();
+        let mut updates = Vec::with_capacity(replacements.len());
+        let mut publications = Vec::with_capacity(replacements.len());
+        for (slot, allocation, representation) in replacements {
+            if !replacement_slots.insert(*slot) {
+                return Err(VulkanError(format!(
+                    "stable resource replacement repeats slot {slot}"
+                )));
+            }
+            let current_publication = current_by_slot.get(slot).ok_or_else(|| {
+                VulkanError(format!(
+                    "stable resource replacement slot {slot} is not in the current group"
+                ))
+            })?;
+            self.allocation_for_publication(current_publication)?;
+            if allocation.buffer.device.handle() != self.buffer.device.handle() {
+                return Err(VulkanError(format!(
+                    "stable resource replacement slot {slot} cannot publish an allocation from another logical device"
+                )));
+            }
+            let generation = current_publication
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "stable resource address table slot {slot} exhausted its generations"
+                    ))
+                })?;
+            let byte_count = u64::try_from(allocation.byte_count()).map_err(|_| {
+                VulkanError("stable resource byte count exceeds u64".to_string())
+            })?;
+            updates.push((
+                *slot,
+                VulkanStableResourceAddressRecord {
+                    device_address: allocation.device_address(),
+                    byte_count,
+                    generation,
+                    resident: 1,
+                    representation: *representation,
+                },
+                Some(Arc::clone(allocation)),
+            ));
+            publications.push(VulkanStableResourceAddressPublication {
+                slot: *slot,
+                generation,
+                allocation_id: allocation.allocation_id(),
+                device_address: allocation.device_address(),
+                representation: *representation,
+            });
+        }
+        if replacement_slots.len() != current_by_slot.len() {
+            return Err(VulkanError(
+                "stable resource replacement omits a current slot".to_string(),
+            ));
+        }
+        self.submit_updates(transfer, &updates)?;
+        Ok(publications)
+    }
+
     pub fn clear_group(
         &mut self,
         transfer: &mut VulkanResidentTransferStream,
