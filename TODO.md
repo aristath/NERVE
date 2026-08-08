@@ -68,9 +68,16 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   transforms, attention score, selection and read, positional encoding,
   hyper-connections, and pointwise activation. Cross-device device time is
   sampled by a bounded rotating probe at completed prompt boundaries; production
-  transfers remain timestamp-free and have zero host waits. A real staged
-  DeepSeek event sampled about 0.1 ms for one source/destination boundary pair,
-  so physical activation movement is not a material steady-state limiter.
+  transfers remain timestamp-free and have zero host waits. Automatic placement
+  now derives every cut payload and direction from the compiled graph, measures
+  the production-compatible physical route for each ordered device pair after
+  one discarded replay, and includes the exact payload-specific cost in the
+  contiguous-partition objective. Missing measurements fail placement instead
+  of becoming a zero-cost edge, and non-chain wiring remains an explicit graph
+  concern rather than being flattened. The real Qwen boundary is 4,096 bytes;
+  its staged route measured 23.16 microseconds from PCI 0a to 0d and 22.12
+  microseconds in the reverse direction, confirming that physical activation
+  movement is not a material steady-state limiter.
 - The refined instrumentation passed exact sequential tests plus complete
   thinking-enabled regression gates. Qwen3.6-35B-A3B measured 60.6544 decode and
   45.8668 prefill tok/s. A fresh Qwen3.5-9B package now discovers its producer's
@@ -285,6 +292,13 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   leak, or reservation loss occurred. Direct sequence replay is therefore being
   migrated to monotonically increasing timeline completion; reusable binary
   fence reset is not a valid persistent-stream completion protocol.
+- Payload-aware transfer pricing passed exact sequential graph, direction,
+  missing-measurement, and non-chain-wiring tests plus real thinking-enabled
+  gates. Qwen3.6-35B-A3B measured 69.7402 decode tok/s, Qwen3.5-9B measured
+  48.7356, and the unchanged explicit DeepSeek control measured 7.8666 decode
+  and 7.9348 prefill tok/s after three discarded complete conversations. All
+  truth sets had zero loads, misses, reloads, evictions, and residency blocking,
+  preserved behavior and recall, and restored every exact pre-run reservation.
 
 ## Work queue
 
@@ -451,10 +465,6 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
       count, advertised capability, or free bytes with execution cost. Retain the
       smallest device prefix only among placements that do not create avoidable
       paging or a materially slower serial bottleneck.
-    - Measure activation-transfer costs for each reachable device boundary and
-      include them in the same contiguous partition objective. The current solve
-      has live component/signature costs but still assigns zero cost to transport;
-      it is not complete until the selected order and cuts account for both.
     - Learn per-component retained working-set pressure from real selector hits,
       misses, evictions, and reloads. At a completed conversation/checkpoint,
       recompute contiguous boundaries and remount only when moving a boundary has

@@ -249,6 +249,16 @@ fn fixture_placement_costs(costs: &[(&str, &str, u64)]) -> VulkanRuntimePlacemen
     }
 }
 
+fn fixture_empty_placement_boundaries(
+    component_count: usize,
+) -> Vec<VulkanRuntimePlacementBoundary> {
+    (1..component_count)
+        .map(|_| VulkanRuntimePlacementBoundary {
+            transfers: Vec::new(),
+        })
+        .collect()
+}
+
 #[test]
 fn cost_aware_contiguous_placement_jointly_selects_device_order_and_boundary() {
     let components = ["a", "b", "c", "d"].map(|component_id| CapacityPackedPlacementComponent {
@@ -276,8 +286,15 @@ fn cost_aware_contiguous_placement_jointly_selects_device_order_and_boundary() {
         ("tail-fast", "d", 1),
     ]);
 
-    let placed =
-        cost_aware_contiguous_component_placement(&components, &candidates, &costs, None).unwrap();
+    let boundaries = fixture_empty_placement_boundaries(components.len());
+    let placed = cost_aware_contiguous_component_placement(
+        &components,
+        &candidates,
+        &costs,
+        &boundaries,
+        None,
+    )
+    .unwrap();
 
     assert_eq!(placed.ordered_device_ids, ["head-fast", "tail-fast"]);
     assert_eq!(placed.placement["a"], "head-fast");
@@ -285,6 +302,146 @@ fn cost_aware_contiguous_placement_jointly_selects_device_order_and_boundary() {
     assert_eq!(placed.placement["c"], "tail-fast");
     assert_eq!(placed.placement["d"], "tail-fast");
     assert_eq!(placed.predicted_execution_ns, 4);
+}
+
+#[test]
+fn runtime_placement_discovers_exact_graph_boundary_payloads() {
+    let runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
+    let boundaries = vulkan_runtime_placement_boundaries(&runtime_model).unwrap();
+    let byte_counts = vulkan_runtime_placement_transfer_byte_counts(&runtime_model).unwrap();
+
+    assert_eq!(boundaries.len(), 2);
+    assert!(boundaries.iter().all(|boundary| !boundary.transfers.is_empty()));
+    assert_eq!(
+        byte_counts,
+        boundaries
+            .iter()
+            .flat_map(|boundary| &boundary.transfers)
+            .map(|transfer| transfer.byte_count)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn automatic_cost_placement_rejects_a_non_chain_graph_without_flattening_its_wiring() {
+    let mut runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
+    let processor_ids = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| component.component_id.clone())
+        .collect::<Vec<_>>();
+    let mut nonlocal = runtime_model
+        .circuit_graph
+        .edges
+        .iter()
+        .find(|edge| {
+            edge.source.component_id == processor_ids[0]
+                && edge.destination.component_id == processor_ids[1]
+        })
+        .unwrap()
+        .clone();
+    nonlocal.id = "nonlocal-fixture-edge".to_string();
+    nonlocal.destination = runtime_model
+        .circuit_graph
+        .edges
+        .iter()
+        .find(|edge| edge.destination.component_id == processor_ids[2])
+        .unwrap()
+        .destination
+        .clone();
+    runtime_model.circuit_graph.edges.push(nonlocal);
+
+    let error = vulkan_runtime_placement_boundaries(&runtime_model).unwrap_err();
+
+    assert!(error.to_string().contains("nearest-neighbor"));
+    assert!(error.to_string().contains("use explicit wiring"));
+}
+
+#[test]
+fn cost_aware_placement_uses_payload_specific_directional_transfer_costs() {
+    let components = ["a", "b", "c"].map(|component_id| {
+        CapacityPackedPlacementComponent {
+            component_id: component_id.to_string(),
+            resident_weight_bytes: 1,
+        }
+    });
+    let candidates = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "a-device".to_string(),
+            safe_capacity_bytes: 2,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "b-device".to_string(),
+            safe_capacity_bytes: 2,
+        },
+    ];
+    let mut costs = fixture_placement_costs(&[
+        ("a-device", "a", 1),
+        ("a-device", "b", 1),
+        ("a-device", "c", 1),
+        ("b-device", "a", 1),
+        ("b-device", "b", 1),
+        ("b-device", "c", 1),
+    ]);
+    for (source, target, bytes, nanoseconds) in [
+        ("a-device", "b-device", 16, 1),
+        ("b-device", "a-device", 16, 100),
+        ("a-device", "b-device", 32, 100),
+        ("b-device", "a-device", 32, 50),
+    ] {
+        costs
+            .record_boundary_transfer_cost(source, target, bytes, nanoseconds)
+            .unwrap();
+    }
+    let boundaries = [
+        VulkanRuntimePlacementBoundary {
+            transfers: vec![VulkanRuntimePlacementBoundaryTransfer {
+                source_in_prefix: true,
+                byte_count: 16,
+            }],
+        },
+        VulkanRuntimePlacementBoundary {
+            transfers: vec![VulkanRuntimePlacementBoundaryTransfer {
+                source_in_prefix: false,
+                byte_count: 32,
+            }],
+        },
+    ];
+
+    let placed = cost_aware_contiguous_component_placement(
+        &components,
+        &candidates,
+        &costs,
+        &boundaries,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(placed.ordered_device_ids, ["a-device", "b-device"]);
+    assert_eq!(placed.placement["a"], "a-device");
+    assert_eq!(placed.placement["b"], "b-device");
+    assert_eq!(placed.placement["c"], "b-device");
+    assert_eq!(placed.predicted_execution_ns, 4);
+}
+
+#[test]
+fn cost_aware_placement_rejects_an_unmeasured_boundary_instead_of_assuming_zero() {
+    let costs = VulkanRuntimePlacementCostModel::default();
+    let boundary = VulkanRuntimePlacementBoundary {
+        transfers: vec![VulkanRuntimePlacementBoundaryTransfer {
+            source_in_prefix: true,
+            byte_count: 32,
+        }],
+    };
+
+    let error = runtime_placement_boundary_cost_ns(&boundary, "source", "target", &costs)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("no measured 32-byte boundary cost"));
 }
 
 #[test]
@@ -326,6 +483,7 @@ fn cost_aware_paged_placement_prevents_fast_cache_from_claiming_every_component(
         &components,
         &candidates,
         &costs,
+        &fixture_empty_placement_boundaries(components.len()),
         Some(&balance),
     )
     .unwrap();
@@ -381,6 +539,7 @@ fn cost_aware_paged_placement_cannot_strand_material_retained_capacity() {
         &components,
         &candidates,
         &costs,
+        &fixture_empty_placement_boundaries(components.len()),
         Some(&balance),
     )
     .unwrap();
@@ -513,6 +672,7 @@ fn cost_aware_paged_placement_reserves_auxiliary_graphs_on_the_endpoint() {
         &components,
         &candidates,
         &costs,
+        &fixture_empty_placement_boundaries(components.len()),
         Some(&balance),
     )
     .unwrap();

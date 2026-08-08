@@ -34,12 +34,14 @@ use nerve_runtime::{
     VulkanResidentTokenTextCodec, VulkanReusableKernelArtifactManifest,
     VulkanRuntimePlacementCalibrationSuite, VulkanRuntimePlacementCandidate,
     VulkanRuntimePlacementCostModel, VulkanSpeculativeCycleTrace, VulkanSpeculativeWindowStats,
-    calibrate_vulkan_runtime_placement_candidate, capacity_pack_and_select_vulkan_runtime_model,
+    calibrate_vulkan_runtime_placement_candidate,
+    calibrate_vulkan_runtime_placement_transfers, capacity_pack_and_select_vulkan_runtime_model,
     chat_stop_token_ids_from_manifest, chat_transcript_codec, discover_cpu_hardware_profile,
     execute_vulkan_resident_chat_transaction, reset_runtime_critical_path_counters,
     reset_vulkan_resident_execution_counters, runtime_critical_path_report,
     runtime_critical_path_span, runtime_devices_from_compute_devices,
     vulkan_resident_execution_counters, vulkan_runtime_device_capacity_admission_bytes,
+    vulkan_runtime_placement_transfer_byte_counts,
 };
 
 #[derive(Clone, Debug, PartialEq)]

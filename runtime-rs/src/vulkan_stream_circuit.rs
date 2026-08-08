@@ -72,10 +72,10 @@ use crate::vulkan_compute::{
     VulkanResidentKernelSequenceStep, VulkanResidentMappedBufferCopy,
     VulkanResidentQueueSubmissionBatch, VulkanResidentQueueSubmissionTemplate,
     VulkanResidentTransferStream, VulkanShaderFeature, VulkanSharedResidentBufferRoute,
-    VulkanStableResourceAddressPublication, VulkanStableResourceAddressTable,
-    VulkanStableResourceAllocation, VulkanStableResourceArena, VulkanStableResourceArenaConfig,
-    VulkanStableResourceGroupLayout, VulkanSubgroupOperation, VulkanTimelineSemaphore,
-    VulkanTimelineSemaphorePoint, VulkanTimelineSemaphoreReplayState,
+    VulkanSharedResidentBufferSet, VulkanStableResourceAddressPublication,
+    VulkanStableResourceAddressTable, VulkanStableResourceAllocation, VulkanStableResourceArena,
+    VulkanStableResourceArenaConfig, VulkanStableResourceGroupLayout, VulkanSubgroupOperation,
+    VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint, VulkanTimelineSemaphoreReplayState,
     record_vulkan_demand_sequence_device_duration, record_vulkan_execution_quantum_measurement,
     record_vulkan_resident_component_sequence_device_duration, semantic_label_field,
     vulkan_gpu_residency_gate_spirv_words, vulkan_spirv_requirements,
@@ -184,6 +184,7 @@ include!("vulkan_stream_circuit/residency_backpressure_scheduler.rs");
 include!("vulkan_stream_circuit/runtime_residency_plan.rs");
 include!("vulkan_stream_circuit/runtime_auto_placement.rs");
 include!("vulkan_stream_circuit/runtime_placement_calibration.rs");
+include!("vulkan_stream_circuit/runtime_transfer_calibration.rs");
 include!("vulkan_stream_circuit/resource_backing_store.rs");
 include!("vulkan_stream_circuit/device_resource_residency.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_upload.rs");

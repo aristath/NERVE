@@ -222,7 +222,7 @@ fn runtime_capacity_packed_model(
     let mut calibration_evidence = BTreeMap::<String, (String, String)>::new();
     let mut placement_costs = VulkanRuntimePlacementCostModel::default();
     let mut measured_candidates = Vec::with_capacity(eligible_devices.len());
-    let mut opened_devices = Vec::with_capacity(eligible_devices.len());
+    let mut opened_devices = BTreeMap::new();
     for (device_info, profile) in eligible_devices {
         if calibration_started.elapsed() >= VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION {
             return Err(io::Error::new(
@@ -321,7 +321,7 @@ fn runtime_capacity_packed_model(
                 safe_capacity_bytes,
             },
         ));
-        opened_devices.push(device);
+        opened_devices.insert(device_info.physical_device_id.clone(), device);
     }
     if calibration_started.elapsed() > VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION {
         return Err(io::Error::new(
@@ -338,6 +338,60 @@ fn runtime_capacity_packed_model(
         measured_candidates,
         primary_capability_class.as_deref(),
     );
+    let transfer_byte_counts = vulkan_runtime_placement_transfer_byte_counts(&runtime_model)?;
+    if candidates.len() > 1 && !transfer_byte_counts.is_empty() {
+        for source in &candidates {
+            for target in &candidates {
+                if source.device_id == target.device_id {
+                    continue;
+                }
+                if calibration_started.elapsed()
+                    >= VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "runtime package-specific placement calibration exceeded its one-minute bound",
+                    )
+                    .into());
+                }
+                let reports = calibrate_vulkan_runtime_placement_transfers(
+                    &source.device_id,
+                    opened_devices
+                        .get(&source.device_id)
+                        .expect("every placement candidate remains open"),
+                    &target.device_id,
+                    opened_devices
+                        .get(&target.device_id)
+                        .expect("every placement candidate remains open"),
+                    &transfer_byte_counts,
+                )?;
+                for report in reports {
+                    placement_costs.record_boundary_transfer_cost(
+                        &report.source_device_id,
+                        &report.target_device_id,
+                        report.byte_count,
+                        report.measured_ns,
+                    )?;
+                    eprintln!(
+                        "nerve runtime placement calibration: transfer={}=>{}, bytes={}, route={:?}, warmup_ns={}, measured_ns={}",
+                        report.source_device_id,
+                        report.target_device_id,
+                        report.byte_count,
+                        report.route,
+                        report.warmup_ns,
+                        report.measured_ns,
+                    );
+                }
+            }
+        }
+    }
+    if calibration_started.elapsed() > VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "runtime package-specific placement calibration exceeded its one-minute bound",
+        )
+        .into());
+    }
     let selected = capacity_pack_and_select_vulkan_runtime_model(
         manifest_dir,
         &runtime_model,

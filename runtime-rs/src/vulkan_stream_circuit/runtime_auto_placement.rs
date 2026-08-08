@@ -7,7 +7,18 @@ pub struct VulkanRuntimePlacementCandidate {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VulkanRuntimePlacementCostModel {
     component_execution: BTreeMap<(String, String), (String, u64)>,
-    boundary_transfer_ns: BTreeMap<(String, String), u64>,
+    boundary_transfer_ns: BTreeMap<(String, String, usize), u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanRuntimePlacementBoundaryTransfer {
+    source_in_prefix: bool,
+    byte_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanRuntimePlacementBoundary {
+    transfers: Vec<VulkanRuntimePlacementBoundaryTransfer>,
 }
 
 impl VulkanRuntimePlacementCostModel {
@@ -46,21 +57,36 @@ impl VulkanRuntimePlacementCostModel {
         &mut self,
         source_device_id: &str,
         target_device_id: &str,
+        byte_count: usize,
         measured_ns: u64,
     ) -> Result<(), VulkanRuntimeResidencyPlanError> {
         if source_device_id.is_empty()
             || target_device_id.is_empty()
             || source_device_id == target_device_id
+            || byte_count == 0
+            || measured_ns == 0
         {
             return Err(VulkanRuntimeResidencyPlanError(
-                "runtime placement boundary cost requires two distinct nonempty devices"
+                "runtime placement boundary cost requires two distinct nonempty devices, positive bytes, and positive measured time"
                     .to_string(),
             ));
         }
-        self.boundary_transfer_ns.insert(
-            (source_device_id.to_string(), target_device_id.to_string()),
-            measured_ns,
-        );
+        if self
+            .boundary_transfer_ns
+            .insert(
+                (
+                    source_device_id.to_string(),
+                    target_device_id.to_string(),
+                    byte_count,
+                ),
+                measured_ns,
+            )
+            .is_some()
+        {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "runtime placement contains a duplicate {byte_count}-byte boundary cost from {source_device_id:?} to {target_device_id:?}",
+            )));
+        }
         Ok(())
     }
 
@@ -87,6 +113,23 @@ impl VulkanRuntimePlacementCostModel {
                             "runtime placement cost for component {component_id:?} on device {:?} was measured for a different compiled execution signature",
                             candidate.device_id,
                         )));
+                    }
+                }
+            }
+        }
+        if candidates.len() > 1 {
+            let boundary_bytes = vulkan_runtime_placement_boundary_byte_counts(runtime_model)?;
+            for source in candidates {
+                for target in candidates {
+                    if source.device_id == target.device_id {
+                        continue;
+                    }
+                    for byte_count in &boundary_bytes {
+                        self.boundary_transfer_ns(
+                            &source.device_id,
+                            &target.device_id,
+                            *byte_count,
+                        )?;
                     }
                 }
             }
@@ -127,12 +170,178 @@ impl VulkanRuntimePlacementCostModel {
             })
     }
 
-    fn boundary_transfer_ns(&self, source_device_id: &str, target_device_id: &str) -> u64 {
+    fn boundary_transfer_ns(
+        &self,
+        source_device_id: &str,
+        target_device_id: &str,
+        byte_count: usize,
+    ) -> Result<u64, VulkanRuntimeResidencyPlanError> {
         self.boundary_transfer_ns
-            .get(&(source_device_id.to_string(), target_device_id.to_string()))
+            .get(&(
+                source_device_id.to_string(),
+                target_device_id.to_string(),
+                byte_count,
+            ))
             .copied()
-            .unwrap_or(0)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "runtime placement has no measured {byte_count}-byte boundary cost from {source_device_id:?} to {target_device_id:?}",
+                ))
+            })
     }
+}
+
+fn vulkan_runtime_placement_boundaries(
+    runtime_model: &VulkanResidentRuntimeModel,
+) -> Result<Vec<VulkanRuntimePlacementBoundary>, VulkanRuntimeResidencyPlanError> {
+    let signal_processors = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .collect::<Vec<_>>();
+    if signal_processors.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let component_index = signal_processors
+        .iter()
+        .enumerate()
+        .map(|(index, component)| (component.component_id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let bytes_per_element = runtime_model.package.activation_element_bytes.ok_or_else(|| {
+        VulkanRuntimeResidencyPlanError(
+            "multi-device runtime placement requires a compiled activation element width"
+                .to_string(),
+        )
+    })?;
+    if bytes_per_element == 0 {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "compiled activation element width must be positive".to_string(),
+        ));
+    }
+    let component_by_id = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .map(|component| (component.component_id.as_str(), component))
+        .collect::<BTreeMap<_, _>>();
+    let mut grouped = vec![BTreeSet::<(bool, String, String, usize)>::new(); signal_processors.len() - 1];
+    for edge in &runtime_model.circuit_graph.edges {
+        let (Some(&source_index), Some(&destination_index)) = (
+            component_index.get(edge.source.component_id.as_str()),
+            component_index.get(edge.destination.component_id.as_str()),
+        ) else {
+            continue;
+        };
+        if source_index.abs_diff(destination_index) != 1 {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "automatic cost-based placement requires a nearest-neighbor signal-processor chain, but edge {:?} connects component positions {source_index} and {destination_index}; use explicit wiring for non-chain graphs",
+                edge.id,
+            )));
+        }
+        let source = component_by_id[edge.source.component_id.as_str()];
+        let destination = component_by_id[edge.destination.component_id.as_str()];
+        let output = source
+            .circuit
+            .boundary
+            .outputs
+            .iter()
+            .find(|port| port.id == edge.source.port_id)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "runtime placement edge {:?} references missing output {}.{}",
+                    edge.id, edge.source.component_id, edge.source.port_id,
+                ))
+            })?;
+        let input = destination
+            .circuit
+            .boundary
+            .inputs
+            .iter()
+            .find(|port| port.id == edge.destination.port_id)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "runtime placement edge {:?} references missing input {}.{}",
+                    edge.id, edge.destination.component_id, edge.destination.port_id,
+                ))
+            })?;
+        let physical_shape = edge.connection.physical_shape(&output.shape, &input.shape);
+        let element_count = physical_shape.iter().try_fold(1usize, |total, dimension| {
+            total.checked_mul(*dimension).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "runtime placement edge {:?} activation shape overflows",
+                    edge.id,
+                ))
+            })
+        })?;
+        let byte_count = element_count.checked_mul(bytes_per_element).ok_or_else(|| {
+            VulkanRuntimeResidencyPlanError(format!(
+                "runtime placement edge {:?} activation byte count overflows",
+                edge.id,
+            ))
+        })?;
+        if byte_count == 0 {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "runtime placement edge {:?} has an empty activation payload",
+                edge.id,
+            )));
+        }
+        let cut = source_index.min(destination_index);
+        grouped[cut].insert((
+            source_index < destination_index,
+            edge.source.component_id.clone(),
+            edge.source.port_id.clone(),
+            byte_count,
+        ));
+    }
+    Ok(grouped
+        .into_iter()
+        .map(|transfers| VulkanRuntimePlacementBoundary {
+            transfers: transfers
+                .into_iter()
+                .map(
+                    |(source_in_prefix, _source_component_id, _source_port_id, byte_count)| {
+                        VulkanRuntimePlacementBoundaryTransfer {
+                            source_in_prefix,
+                            byte_count,
+                        }
+                    },
+                )
+                .collect(),
+        })
+        .collect())
+}
+
+fn vulkan_runtime_placement_boundary_byte_counts(
+    runtime_model: &VulkanResidentRuntimeModel,
+) -> Result<BTreeSet<usize>, VulkanRuntimeResidencyPlanError> {
+    Ok(vulkan_runtime_placement_boundaries(runtime_model)?
+        .into_iter()
+        .flat_map(|boundary| boundary.transfers)
+        .map(|transfer| transfer.byte_count)
+        .collect())
+}
+
+fn runtime_placement_boundary_cost_ns(
+    boundary: &VulkanRuntimePlacementBoundary,
+    prefix_device_id: &str,
+    suffix_device_id: &str,
+    costs: &VulkanRuntimePlacementCostModel,
+) -> Result<u64, VulkanRuntimeResidencyPlanError> {
+    boundary.transfers.iter().try_fold(0u64, |total, transfer| {
+        let (source, target) = if transfer.source_in_prefix {
+            (prefix_device_id, suffix_device_id)
+        } else {
+            (suffix_device_id, prefix_device_id)
+        };
+        total
+            .checked_add(costs.boundary_transfer_ns(source, target, transfer.byte_count)?)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "runtime placement boundary transfer time overflowed".to_string(),
+                )
+            })
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -508,10 +717,12 @@ fn capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
 ) -> Result<VulkanRuntimeAutoPlacement, VulkanRuntimeResidencyPlanError> {
     let (placement, ordered_candidates) = match placement_costs {
         Some(costs) => {
+            let boundaries = vulkan_runtime_placement_boundaries(runtime_model)?;
             let placed = cost_aware_contiguous_component_placement(
                 components,
                 candidates,
                 costs,
+                &boundaries,
                 Some(paged_balance),
             )?;
             let ordered = placed
@@ -558,6 +769,7 @@ fn cost_aware_contiguous_component_placement(
     components: &[CapacityPackedPlacementComponent],
     candidates: &[VulkanRuntimePlacementCandidate],
     costs: &VulkanRuntimePlacementCostModel,
+    boundaries: &[VulkanRuntimePlacementBoundary],
     paged_balance: Option<&VulkanRuntimePagedPlacementBalance>,
 ) -> Result<VulkanRuntimeCostAwarePlacement, VulkanRuntimeResidencyPlanError> {
     if components.is_empty()
@@ -599,6 +811,13 @@ fn cost_aware_contiguous_component_placement(
         return Err(VulkanRuntimeResidencyPlanError(
             "paged placement balance does not match the component chain".to_string(),
         ));
+    }
+    if boundaries.len() != components.len().saturating_sub(1) {
+        return Err(VulkanRuntimeResidencyPlanError(format!(
+            "runtime placement has {} component boundaries for {} components",
+            boundaries.len(),
+            components.len(),
+        )));
     }
     let mut effective_weights = paged_balance.map_or_else(
         || {
@@ -745,10 +964,12 @@ fn cost_aware_contiguous_component_placement(
                     let transfer_ns = if previous_device == no_device {
                         0
                     } else {
-                        costs.boundary_transfer_ns(
+                        runtime_placement_boundary_cost_ns(
+                            &boundaries[cursor - 1],
                             &candidates[previous_device].device_id,
                             &candidates[device_index].device_id,
-                        )
+                            costs,
+                        )?
                     };
                     let predicted_execution_ns = state
                         .predicted_execution_ns
@@ -1080,6 +1301,7 @@ fn capacity_pack_vulkan_runtime_model_on_devices(
     for _ in 0..maximum_refinements {
         let (placement, ordered_device_ids) = match placement_costs {
             Some(costs) => {
+                let boundaries = vulkan_runtime_placement_boundaries(runtime_model)?;
                 let effective_candidates = candidates
                     .iter()
                     .map(|candidate| VulkanRuntimePlacementCandidate {
@@ -1095,6 +1317,7 @@ fn capacity_pack_vulkan_runtime_model_on_devices(
                     components,
                     &effective_candidates,
                     costs,
+                    &boundaries,
                     None,
                 )?;
                 (placed.placement, placed.ordered_device_ids)
