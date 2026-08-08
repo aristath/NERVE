@@ -50,6 +50,16 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   attention schedules were rejected: subgroup-per-token changed product output,
   while an exact reduction-order-preserving tiled version was slower at both
   tiny and production geometry (1.79814 vs 1.57616 ms).
+- A third indexed-attention candidate cached each packed BF16 key/value word in
+  workgroup memory and reused it for score and value accumulation. At the exact
+  q64/kv1/d512/r128/k8192 geometry it was byte-exact on the local fixture and
+  reduced best device time from 19.96104 to 8.73592 ms, but the authoritative
+  complete gate rejected it. With the accepted contiguous five-GPU placement,
+  three complete warmups, and a zero-load measured conversation, decode fell
+  from 8.4228 to 8.3290 tok/s and generated behavior changed. The shader,
+  compiler selection, and tests were removed. Shared-memory reuse is therefore
+  not promotion evidence unless every reachable geometry and the full product
+  path remain exact and faster.
 - Three further exact local-kernel candidates were rejected after the refined
   trace. Paired packed-BF16 state reads were 1.1% slower, and parallel tile
   exponentials were 0.5% slower; both preserved every BF16 output bit. A
