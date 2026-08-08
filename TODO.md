@@ -16,20 +16,52 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
 
 ## Current evidence
 
-- The latest accepted zero-load DeepSeek truth conversation is 8.4228 decode
+- The accepted zero-load DeepSeek truth conversation remains 8.4228 decode
   tok/s and 8.3570 prefill tok/s. It followed three discarded complete
   conversations whose residency loads converged from 10,004 to 414 to 8; the
   measured fourth conversation had zero reads, uploads, reloads, evictions, or
   residency blocking. NVMe paging is therefore not the steady-state limiter.
-- Complete critical-path instrumentation is enabled in normal chat and covers
-  99.99% of host wall time. The refined 2,224-token DeepSeek truth turn incurred
-  only 4.788 seconds of residency blocking while attributing 70.598 seconds to
-  attention read, 49.812 seconds to hyper-connections, 45.682 seconds to expert
-  gate/up, 29.396 seconds to attention score, 26.420 seconds to dense projection,
-  25.478 seconds to expert down, 8.505 seconds to state memory, and 6.972 seconds
-  to grouped projection. The host is predominantly waiting for device work; the
-  earlier claim that compact math was simply masked by host orchestration is no
-  longer supported.
+- A fresh schema-v10 compilation with explicit fixed-source MXFP4 dispatch
+  contracts passed a complete four-conversation product gate, preserved behavior
+  and turn recall, and restored every GPU reservation, but its zero-load truth
+  conversation reached only 7.4952 decode and 7.8016 prefill tok/s. The same
+  10,004 -> 414 -> 8 -> 0 load convergence proves the 11.01% decode regression
+  is not paging. Device time regressed broadly rather than in one host phase:
+  the 2,224-token truth turn measured 74.625 seconds of attention read, 52.927
+  seconds of hyper-connections, 50.215 seconds of expert gate/up, 32.073 seconds
+  of attention score, 28.071 seconds of expert down, and 27.590 seconds of dense
+  projection. Keep 8.4228/8.3570 as the acceptance baseline until an equivalent
+  complete gate beats it.
+- Equal layer counts are not an execution-cost-equivalent placement on the live
+  workstation even across five nominally identical R9700s. The exact sequential
+  six-expert compact-MXFP4 microcase measured 0.586, 1.194, 0.415, 0.418, and
+  1.375 ms on PCI 03, 07, 0a, 0d, and 21 respectively. A width-six native
+  compact batch took 2.480 ms on 0d versus 5.040 ms on 21, while preexpanded FP8
+  was essentially tied at 1.392 versus 1.362 ms. Links were all PCIe 5.0 x16 and
+  reservations were restored exactly. Placement and representation therefore
+  need a live, implementation-specific cost signal; device name and capability
+  class are insufficient.
+- Complete host critical-path instrumentation covers 99.99% of wall time. The
+  prior fully timestamped 2,224-token DeepSeek truth turn incurred only 4.788
+  seconds of residency blocking while attributing 70.598 seconds to attention
+  read, 49.812 seconds to hyper-connections, 45.682 seconds to expert gate/up,
+  29.396 seconds to attention score, 26.420 seconds to dense projection, 25.478
+  seconds to expert down, 8.505 seconds to state memory, and 6.972 seconds to
+  grouped projection. That diagnosis established that the host predominantly
+  waits for device work; keeping expensive per-dispatch timestamps on every
+  token was no longer justified.
+- Normal chat now records detailed device phases for the first execution window
+  and then one bounded sample every 128 windows. Profiled and unprofiled command
+  sequences and submission templates have distinct identities, deferred paths
+  never emit timestamps that their completion path cannot consume, and reports
+  no longer mislabel a sampled duration as a full-stream per-token cost. On the
+  same fixed topology and current package, DeepSeek improved from 7.8596 to
+  8.0284 decode tok/s and from 7.8136 to 7.9794 prefill tok/s. The zero-load
+  truth conversation preserved behavior and recall and restored all five exact
+  reservations. Qwen3.6-35B-A3B improved from a matched 70.8880 to 71.4034
+  decode tok/s, while Qwen3.5-9B reached 48.8568; both had zero measured paging
+  and exact teardown. The remaining DeepSeek gap is device execution, not
+  always-on telemetry.
 - Semantic attribution separates genuine sparse-expert operations from grouped
   attention projections and distinguishes expert gate/up, down and reduction,
   dense/grouped projections, normalization, quantization, state memory, index
@@ -41,9 +73,13 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   so physical activation movement is not a material steady-state limiter.
 - The refined instrumentation passed exact sequential tests plus complete
   thinking-enabled regression gates. Qwen3.6-35B-A3B measured 60.6544 decode and
-  45.8668 prefill tok/s; Qwen3.5-9B measured 48.6830 decode and 139.3640 prefill
-  tok/s. Both produced correct turn recall and restored the exact pre-workload
-  VRAM reservations.
+  45.8668 prefill tok/s. A fresh Qwen3.5-9B package now discovers its producer's
+  unambiguous documented sampling policy when its machine-readable generation
+  file omits one; the package-owned warmed gate measured 48.8240 decode and
+  142.5696 prefill tok/s with correct turn recall, zero measured residency
+  activity, and exact pre-workload VRAM restoration. Conflicting documented
+  profiles are not guessed, explicit machine metadata always wins, and no model
+  name participates in discovery.
 - The current real six-expert MXFP4 microbenchmark measures 1.00392 ms for
   gate/up and 0.43088 ms for down. A host-visible-weight path is 3.912x slower.
   Gate/up is the first sparse-expert kernel target. Two alternative indexed
@@ -204,6 +240,39 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   exact teardown are implemented. Resident FP8 coexistence is also implemented
   and measured, but the complete matched trial rejected it because several real
   geometries regressed and its footprint was worse than native compact MXFP4.
+- Package-derived placement calibration now measures six real execution
+  signatures once, reuses prepared tensor/slice plans across all targets, and
+  finishes the five-device sweep in under one minute. A capacity-constrained
+  contiguous dynamic program jointly selects device order and boundaries from
+  those component costs. Demand-paged placement enforces both lower and upper
+  retained-byte quotas around the capacity-proportional share; the rejected
+  upper-only variant caused pathological paging, while the bounded variant
+  completed the cold DeepSeek conversation without evictions.
+- The first endpoint-aware, timeline-only DeepSeek product probe exposed and
+  corrected two completion-lifecycle defects rather than hiding them: retained
+  stream-edge copies now permit timeline-ordered simultaneous replay without an
+  internal host completion, and completed deferred resources retire an observed
+  monotonic value before reuse after a downstream epoch join. Exact sequential
+  Vulkan tests cover both cases. The runtime Vulkan execution module now contains
+  no binary-fence create/reset/wait path and no unbounded device-idle teardown;
+  every selected GPU returned to its exact pre-probe reservation.
+- With those fixes, four fresh thinking-enabled `hi` conversations completed in
+  one mounted DeepSeek process. Decode progressed from 2.47 cold, to 5.14, 7.01,
+  and 9.31 tok/s. The fourth sustained windows were 10.02, 9.69, 9.06, and 8.80
+  tok/s. The process retained 6,159 expert units / 82.34 GB of payload, but the
+  first ten-layer store reached 26.73/27.18 GB while other stores retained 7--13
+  GB of headroom, causing 12 evictions and 11 reloads. Static component cost and
+  addressable-byte balance therefore remain insufficient: observed per-component
+  sparse working-set pressure must participate in boundary selection at safe
+  stream/conversation epochs.
+- The first authoritative gate of that placement exposed a deterministic host
+  completion failure at the recall turn. Device timestamps proved all 484
+  recorded dispatches (59,904,077 work units and 22.63 GB of estimated traffic)
+  had reached both TOP_OF_PIPE and BOTTOM_OF_PIPE in about 5.29 ms, while the
+  reusable binary fence remained unsignaled. No ring timeout, reset, allocation
+  leak, or reservation loss occurred. Direct sequence replay is therefore being
+  migrated to monotonically increasing timeline completion; reusable binary
+  fence reset is not a valid persistent-stream completion protocol.
 
 ## Work queue
 
@@ -356,6 +425,37 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
     measured cross-class execution/transfer ranking so a graph may spill to a
     compatible discrete Intel GPU or CPU without recompilation when AMD capacity is
     exhausted.
+
+    - Rank physical instances inside the same capability class with a fast live
+      calibration of the package's actual implementation families. The probe must
+      use one fixed warmup and enough useful work to leave transient idle clocks,
+      finish in under one minute for the whole candidate set, preserve pre-existing
+      reservations, and report representation-specific costs rather than a single
+      synthetic FLOP score. Feed those costs into the representation/placement
+      fixed point so native MXFP4 work can avoid a device that is only competitive
+      for FP8, without changing graph order or introducing tensor parallelism.
+    - Optimize the contiguous partition for predicted serial stream latency subject
+      to exact per-device capacity and communication cost. Do not equate component
+      count, advertised capability, or free bytes with execution cost. Retain the
+      smallest device prefix only among placements that do not create avoidable
+      paging or a materially slower serial bottleneck.
+    - Demand-paged admission must distinguish "can execute with a bounded cache"
+      from "best available residency plan." Do not keep a huge model on one device
+      merely because fixed state plus one selector wave fits when additional
+      compatible VRAM can retain more of the observed working set. Conversely, do
+      not add a device whose transfer and execution cost cannot repay the retained
+      bytes it contributes.
+    - Measure activation-transfer costs for each reachable device boundary and
+      include them in the same contiguous partition objective. The current solve
+      has live component/signature costs but still assigns zero cost to transport;
+      it is not complete until the selected order and cuts account for both.
+    - Learn per-component retained working-set pressure from real selector hits,
+      misses, evictions, and reloads. At a completed conversation/checkpoint,
+      recompute contiguous boundaries and remount only when moving a boundary has
+      a measured net benefit after transfer/remount cost. Preserve component
+      order, endpoint auxiliary reservations, resident state, unrelated VRAM
+      reservations, and exact output. A hot store must not evict experts while a
+      compatible adjacent store has material unused retained capacity.
 
 12. Gate every runtime-performance milestone before commit. Run exact sequential
     tests, then full DeepSeek, Qwen3.6-35B-A3B, and Qwen3.5-9B conversations on
