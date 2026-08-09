@@ -514,7 +514,11 @@ pub struct VulkanCompiledResourceDeviceStore {
     manager: DeviceResourceResidencyManager<VulkanResidentCompiledResource>,
     upload_alignment: usize,
     maximum_dynamic_payload_bytes: usize,
+    maximum_dynamic_device_payload_bytes: usize,
+    maximum_dynamic_host_visible_payload_bytes: usize,
     maximum_allocation_byte_capacity: usize,
+    maximum_group_byte_count: usize,
+    maximum_ranges_per_group: usize,
     always_resident_parameter_bytes: usize,
     runtime_working_set_device_bytes: usize,
     metadata_device_bytes: usize,
@@ -522,6 +526,7 @@ pub struct VulkanCompiledResourceDeviceStore {
     maximum_load_wave_group_count: usize,
     group_selector_ids: BTreeMap<String, String>,
     group_selections: BTreeMap<String, (String, usize)>,
+    group_payload_bytes: BTreeMap<String, usize>,
     selector_payload_budgets: BTreeMap<String, usize>,
     retiering_last_selection_counts: std::sync::Mutex<BTreeMap<String, u64>>,
     representation_history:
@@ -899,7 +904,11 @@ impl VulkanCompiledResourceDeviceStore {
             manager,
             upload_alignment,
             maximum_dynamic_payload_bytes,
+            maximum_dynamic_device_payload_bytes,
+            maximum_dynamic_host_visible_payload_bytes,
             maximum_allocation_byte_capacity,
+            maximum_group_byte_count,
+            maximum_ranges_per_group,
             always_resident_parameter_bytes,
             runtime_working_set_device_bytes,
             metadata_device_bytes,
@@ -907,6 +916,7 @@ impl VulkanCompiledResourceDeviceStore {
             maximum_load_wave_group_count,
             group_selector_ids: selector_cache_policy.group_selector_ids,
             group_selections: selector_cache_policy.group_selections,
+            group_payload_bytes: selector_cache_policy.group_payload_bytes,
             selector_payload_budgets: selector_cache_policy.selector_payload_budgets,
             retiering_last_selection_counts: std::sync::Mutex::new(BTreeMap::new()),
             representation_history: std::sync::Mutex::new(
@@ -977,6 +987,59 @@ impl VulkanCompiledResourceDeviceStore {
 
     pub fn allowed_selector_ids(&self) -> &BTreeSet<String> {
         &self.allowed_selector_ids
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn is_compatible_with_mount(
+        &self,
+        residency_policy: ResourceResidencyPolicy,
+        device_id: &str,
+        physical_device_id: &str,
+        logical_device_ids: &[String],
+        package_root: &Path,
+        contract: &CompiledResourceResidencyContract,
+        layout: &VulkanCompiledResourceAddressLayout,
+        allowed_selector_ids: &BTreeSet<String>,
+        maximum_group_byte_count: usize,
+        maximum_ranges_per_group: usize,
+        always_resident_parameter_bytes: usize,
+        runtime_working_set_device_bytes: usize,
+        metadata_device_bytes: usize,
+    ) -> Result<bool, VulkanCompiledResourceDeviceStoreError> {
+        let lifecycle = self.lifecycle.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource store lifecycle was poisoned while validating remount reuse",
+            )
+        })?;
+        Ok(lifecycle.state == VulkanCompiledResourceStoreLifecycleState::Active
+            && self.residency_policy == residency_policy
+            && self.device_id == device_id
+            && self.physical_device_id == physical_device_id
+            && self.logical_device_ids == logical_device_ids
+            && self.package_root == package_root
+            && self.contract.as_ref() == contract
+            && self.layout.as_ref() == layout
+            && self.allowed_selector_ids == *allowed_selector_ids
+            && self.maximum_group_byte_count == maximum_group_byte_count
+            && self.maximum_ranges_per_group == maximum_ranges_per_group
+            && self.always_resident_parameter_bytes == always_resident_parameter_bytes
+            && self.runtime_working_set_device_bytes == runtime_working_set_device_bytes
+            && self.metadata_device_bytes == metadata_device_bytes)
+    }
+
+    fn retained_mount_capacities(&self) -> VulkanRetainedCompiledResourceStoreCapacities {
+        VulkanRetainedCompiledResourceStoreCapacities {
+            store_payload_bytes: self.maximum_dynamic_payload_bytes,
+            device_payload_bytes: self.maximum_dynamic_device_payload_bytes,
+            host_visible_payload_bytes: self.maximum_dynamic_host_visible_payload_bytes,
+            available_dynamic_device_bytes: self.maximum_allocation_byte_capacity,
+        }
+    }
+
+    fn shared_host_cache_for_remount(
+        &self,
+    ) -> Option<Arc<VulkanCompiledResourceSharedHostCache>> {
+        self.shared_host_cache.clone()
     }
 
     pub fn dynamic_buffers_for_components(

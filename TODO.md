@@ -299,6 +299,24 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   and 7.9348 prefill tok/s after three discarded complete conversations. All
   truth sets had zero loads, misses, reloads, evictions, and residency blocking,
   preserved behavior and recall, and restored every exact pre-run reservation.
+- Runtime placement can now learn exact per-component and per-resource hot-set
+  pressure from selector activity, distinguish selected/resident/addressable
+  bytes without double-counting aliased resources, and evaluate a contiguous
+  boundary change only at a completed conversation checkpoint. The objective
+  prices calibrated execution, exact graph-derived directional transfers, new
+  admission, and the complete hot set lost from every changed physical store.
+  Unchanged physical stores retain the same validated store object and residency
+  across remount; partial aliases and incompatible mounts are rejected rather
+  than silently reused. Exact sequential tests cover positive and negative net
+  benefit, partial aliasing, compatibility rejection, retained residency, final
+  teardown, and shared-package refusal. Thinking-enabled product gates remained
+  healthy: Qwen3.6-35B-A3B measured 69.6690 decode tok/s, Qwen3.5-9B measured
+  48.8408, and the explicit fixed-topology DeepSeek control measured 7.8162
+  decode and 7.8300 prefill tok/s after three discarded complete conversations.
+  The DeepSeek truth set recorded 1,149,648 resident hits and zero loads, misses,
+  evictions, reloads, or transfer stalls; behavior, turn recall, and exact NERVE
+  allocation release were preserved. Explicit placement never invokes the
+  adaptive remounter.
 
 ## Work queue
 
@@ -465,14 +483,6 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
       count, advertised capability, or free bytes with execution cost. Retain the
       smallest device prefix only among placements that do not create avoidable
       paging or a materially slower serial bottleneck.
-    - Learn per-component retained working-set pressure from real selector hits,
-      misses, evictions, and reloads. At a completed conversation/checkpoint,
-      recompute contiguous boundaries and remount only when moving a boundary has
-      a measured net benefit after transfer/remount cost. Preserve component
-      order, endpoint auxiliary reservations, resident state, unrelated VRAM
-      reservations, and exact output. A hot store must not evict experts while a
-      compatible adjacent store has material unused retained capacity.
-
 12. Gate every runtime-performance milestone before commit. Run exact sequential
     tests, then full DeepSeek, Qwen3.6-35B-A3B, and Qwen3.5-9B conversations on
     equivalent allowlisted discrete AMD placement. DeepSeek truth starts only after

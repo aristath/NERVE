@@ -76,7 +76,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .with_skip_special_tokens(args.skip_special_tokens);
     if args.chat {
         let capacity = choose_chat_runtime_context_size(package_manifest, args.context_size)?;
-        let runtime_model = runtime_capacity_packed_model(
+        let prepared = runtime_capacity_packed_model(
             &args,
             &manifest_dir,
             runtime_model,
@@ -86,7 +86,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             &args,
             &manifest_dir,
             &tokenizer_dir,
-            runtime_model,
+            prepared.runtime_model,
+            prepared.auto_placement,
             capacity,
             &codec,
             args.prompt.as_deref(),
@@ -108,7 +109,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         })?;
     let capacity =
         choose_runtime_context_size(package_manifest, args.context_size, prompt_ids.len())?;
-    let runtime_model = runtime_capacity_packed_model(
+    let prepared = runtime_capacity_packed_model(
         &args,
         &manifest_dir,
         runtime_model,
@@ -126,5 +127,5 @@ fn run() -> Result<(), Box<dyn Error>> {
         codec: &codec,
     };
 
-    run_placed_prompt(&context, runtime_model)
+    run_placed_prompt(&context, prepared.runtime_model)
 }

@@ -688,6 +688,142 @@ fn cost_aware_paged_placement_reserves_auxiliary_graphs_on_the_endpoint() {
 }
 
 #[test]
+fn observed_working_set_rebalance_moves_only_a_profitable_contiguous_boundary() {
+    let runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
+    let component_ids = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| component.component_id.clone())
+        .collect::<Vec<_>>();
+    let current = vulkan_runtime_model_with_component_placement(
+        &runtime_model,
+        "first",
+        &BTreeMap::from([
+            (component_ids[0].clone(), "first".to_string()),
+            (component_ids[1].clone(), "first".to_string()),
+            (component_ids[2].clone(), "third".to_string()),
+        ]),
+    )
+    .unwrap();
+    let candidates = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "first".to_string(),
+            safe_capacity_bytes: 32 * 1024 * 1024 * 1024,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "second".to_string(),
+            safe_capacity_bytes: 32 * 1024 * 1024 * 1024,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "third".to_string(),
+            safe_capacity_bytes: 32 * 1024 * 1024 * 1024,
+        },
+    ];
+    let targets = vulkan_runtime_placement_calibration_targets(&current).unwrap();
+    let mut costs = VulkanRuntimePlacementCostModel::default();
+    for candidate in &candidates {
+        for target in &targets {
+            costs
+                .record_calibration(&candidate.device_id, target, 10)
+                .unwrap();
+        }
+    }
+    for byte_count in vulkan_runtime_placement_transfer_byte_counts(&current).unwrap() {
+        for source in ["first", "second", "third"] {
+            for destination in ["first", "second", "third"] {
+                if source != destination {
+                    costs
+                        .record_boundary_transfer_cost(source, destination, byte_count, 1)
+                        .unwrap();
+                }
+            }
+        }
+    }
+    let pressure_component = |component_id: &str, selected_payload_bytes: usize| {
+        VulkanRuntimeComponentWorkingSetPressure {
+            execution_scope: "target".to_string(),
+            component_id: component_id.to_string(),
+            selected_unit_count: usize::from(selected_payload_bytes > 0),
+            selected_payload_bytes,
+            selection_count: selected_payload_bytes as u64,
+            ..Default::default()
+        }
+    };
+    let cumulative = VulkanRuntimeWorkingSetPressureSnapshot {
+        stores: vec![
+            VulkanRuntimeDeviceWorkingSetPressure {
+                store_id: "first-store".to_string(),
+                physical_device_id: "first".to_string(),
+                logical_device_ids: vec!["first".to_string()],
+                components: vec![
+                    pressure_component(&component_ids[0], 1),
+                    pressure_component(&component_ids[1], 100),
+                ],
+                ..Default::default()
+            },
+            VulkanRuntimeDeviceWorkingSetPressure {
+                store_id: "third-store".to_string(),
+                physical_device_id: "third".to_string(),
+                logical_device_ids: vec!["third".to_string()],
+                components: vec![pressure_component(&component_ids[2], 1)],
+                ..Default::default()
+            },
+        ],
+    };
+    let mut interval = cumulative.clone();
+    interval.stores[0].eviction_count = 1;
+    interval.stores[0].reload_count = 1;
+    interval.stores[0].blocking_time_ns = 1_000_000;
+
+    let rebalanced = rebalance_demand_paged_vulkan_runtime_model_from_working_set(
+        tiny_model_dir(),
+        &current,
+        &candidates,
+        &costs,
+        &cumulative,
+        &interval,
+        100,
+        8,
+        0,
+    )
+    .unwrap()
+    .expect("observed churn should repay one boundary move");
+
+    assert_eq!(rebalanced.moved_component_ids, [component_ids[1].clone()]);
+    assert_eq!(
+        rebalanced
+            .placement
+            .runtime_model
+            .runtime_graph
+            .instances
+            .iter()
+            .find(|instance| instance.instance_id == component_ids[0])
+            .unwrap()
+            .device_id,
+        "first",
+    );
+    assert_eq!(
+        rebalanced
+            .placement
+            .runtime_model
+            .runtime_graph
+            .instances
+            .iter()
+            .filter(|instance| component_ids.contains(&instance.instance_id))
+            .map(|instance| instance.device_id.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"],
+    );
+    assert_eq!(
+        rebalanced.retained_logical_device_ids,
+        ["third".to_string()].into_iter().collect(),
+    );
+    assert!(rebalanced.estimated_net_benefit_ns > 0);
+}
+
+#[test]
 fn placement_cost_model_rejects_a_changed_compiled_execution_signature() {
     let mut runtime_model = fixture_model_runtime_model();
     let targets = vulkan_runtime_placement_calibration_targets(&runtime_model).unwrap();

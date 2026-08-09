@@ -96,14 +96,28 @@ fn rank_runtime_auto_placement_candidates_across_capability_classes(
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeAutoPlacementContext {
+    candidates: Vec<VulkanRuntimePlacementCandidate>,
+    costs: VulkanRuntimePlacementCostModel,
+}
+
+struct RuntimeCapacityPackedModel {
+    runtime_model: VulkanResidentRuntimeModel,
+    auto_placement: Option<RuntimeAutoPlacementContext>,
+}
+
 fn runtime_capacity_packed_model(
     args: &Args,
     manifest_dir: &Path,
     runtime_model: VulkanResidentRuntimeModel,
     context_capacity_activations: usize,
-) -> Result<VulkanResidentRuntimeModel, Box<dyn Error>> {
+) -> Result<RuntimeCapacityPackedModel, Box<dyn Error>> {
     if runtime_uses_explicit_placement(args) {
-        return Ok(runtime_model);
+        return Ok(RuntimeCapacityPackedModel {
+            runtime_model,
+            auto_placement: None,
+        });
     }
     let speculative_draft_tokens = effective_speculative_draft_tokens(args, &runtime_model)?;
     let catalog = runtime_vulkan_device_catalog(args)?;
@@ -445,8 +459,30 @@ fn runtime_capacity_packed_model(
         selected.selected_device_ids,
         admitted_bytes,
     );
+    let selected_candidates = selected
+        .selected_device_ids
+        .iter()
+        .map(|device_id| {
+            candidates
+                .iter()
+                .find(|candidate| &candidate.device_id == device_id)
+                .cloned()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("selected placement device {device_id:?} is absent from its calibrated candidates"),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     drop(opened_devices);
-    Ok(selected.runtime_model)
+    Ok(RuntimeCapacityPackedModel {
+        runtime_model: selected.runtime_model,
+        auto_placement: Some(RuntimeAutoPlacementContext {
+            candidates: selected_candidates,
+            costs: placement_costs,
+        }),
+    })
 }
 
 struct RuntimeBoundVulkanDevices {

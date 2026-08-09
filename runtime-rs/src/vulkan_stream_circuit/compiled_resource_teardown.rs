@@ -17,12 +17,101 @@ pub struct VulkanCompiledResourceTeardownReport {
     pub package_id: String,
     pub execution_scope: String,
     pub physical_device_count: usize,
+    pub retained_device_count: usize,
     pub released_unit_count: usize,
     pub released_payload_bytes: usize,
     pub cancelled_load_count: usize,
     pub acknowledged_device_count: usize,
     pub complete: bool,
     pub devices: Vec<VulkanCompiledResourceDeviceTeardownReport>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct VulkanRetainedCompiledResourceStoreCapacities {
+    store_payload_bytes: usize,
+    device_payload_bytes: usize,
+    host_visible_payload_bytes: usize,
+    available_dynamic_device_bytes: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct VulkanRetainedCompiledResourceStores {
+    stores_by_logical_device: BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
+}
+
+impl std::fmt::Debug for VulkanRetainedCompiledResourceStores {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanRetainedCompiledResourceStores")
+            .field("logical_device_ids", &self.stores_by_logical_device.keys())
+            .field("physical_store_count", &self.physical_store_count())
+            .finish()
+    }
+}
+
+impl VulkanRetainedCompiledResourceStores {
+    pub fn physical_store_count(&self) -> usize {
+        self.stores_by_logical_device
+            .values()
+            .map(|store| store.device_id())
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    fn store_for_logical_devices(
+        &self,
+        logical_device_ids: &[String],
+    ) -> Result<Option<Arc<VulkanCompiledResourceDeviceStore>>, String> {
+        let candidates = logical_device_ids
+            .iter()
+            .filter_map(|device_id| self.stores_by_logical_device.get(device_id))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        if candidates.len() != logical_device_ids.len()
+            || candidates
+                .iter()
+                .any(|candidate| !Arc::ptr_eq(candidates[0], candidate))
+        {
+            return Err(format!(
+                "retained compiled-resource aliases for logical devices {logical_device_ids:?} are incomplete or disagree",
+            ));
+        }
+        Ok(Some(Arc::clone(candidates[0])))
+    }
+
+    fn shared_host_cache(
+        &self,
+    ) -> Result<Option<Arc<VulkanCompiledResourceSharedHostCache>>, String> {
+        let mut cache = None;
+        let mut seen = BTreeSet::new();
+        for store in self.stores_by_logical_device.values() {
+            if !seen.insert(store.device_id()) {
+                continue;
+            }
+            let Some(candidate) = store.shared_host_cache_for_remount() else {
+                continue;
+            };
+            if cache
+                .as_ref()
+                .is_some_and(|current| !Arc::ptr_eq(current, &candidate))
+            {
+                return Err(
+                    "retained compiled-resource stores disagree on their shared host cache"
+                        .to_string(),
+                );
+            }
+            cache = Some(candidate);
+        }
+        Ok(cache)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VulkanSessionRemountRelease {
+    pub teardown: VulkanCompiledResourceTeardownReport,
+    pub retained_stores: VulkanRetainedCompiledResourceStores,
 }
 
 impl VulkanCompiledResourceTeardownReport {
@@ -69,16 +158,68 @@ impl VulkanResidentInProcessPlacedModelPackage {
     fn teardown_compiled_resources(
         &self,
     ) -> VulkanCompiledResourceTeardownReport {
+        self.teardown_compiled_resources_except(&BTreeSet::new())
+    }
+
+    fn compiled_resource_stores_for_session_remount(
+        &self,
+        retained_logical_device_ids: &BTreeSet<String>,
+    ) -> (BTreeSet<String>, VulkanRetainedCompiledResourceStores) {
+        let retained_placements = self
+            .compiled_resource_physical_placements
+            .iter()
+            .filter(|placement| {
+                placement
+                    .logical_device_ids
+                    .iter()
+                    .all(|device_id| retained_logical_device_ids.contains(device_id))
+            })
+            .collect::<Vec<_>>();
+        let retained_store_ids = retained_placements
+            .iter()
+            .map(|placement| placement.store_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut stores_by_logical_device = BTreeMap::new();
+        for placement in retained_placements {
+            let Some(first_device_id) = placement.logical_device_ids.first() else {
+                continue;
+            };
+            let Some(store) = self.compiled_resource_device_stores.get(first_device_id) else {
+                continue;
+            };
+            for logical_device_id in &placement.logical_device_ids {
+                stores_by_logical_device.insert(logical_device_id.clone(), Arc::clone(store));
+            }
+        }
+        (
+            retained_store_ids,
+            VulkanRetainedCompiledResourceStores {
+                stores_by_logical_device,
+            },
+        )
+    }
+
+    fn teardown_compiled_resources_except(
+        &self,
+        retained_store_ids: &BTreeSet<String>,
+    ) -> VulkanCompiledResourceTeardownReport {
         let mut report = VulkanCompiledResourceTeardownReport {
             package_id: self.package_id.clone(),
             execution_scope: self.execution_scope.clone(),
-            physical_device_count:
-                self.compiled_resource_physical_placements.len(),
+            physical_device_count: self
+                .compiled_resource_physical_placements
+                .iter()
+                .filter(|placement| !retained_store_ids.contains(&placement.store_id))
+                .count(),
+            retained_device_count: retained_store_ids.len(),
             complete: true,
             ..Default::default()
         };
         let mut placements =
-            self.compiled_resource_physical_placements.iter().collect::<Vec<_>>();
+            self.compiled_resource_physical_placements
+                .iter()
+                .filter(|placement| !retained_store_ids.contains(&placement.store_id))
+                .collect::<Vec<_>>();
         placements.sort_by(|left, right| {
             left.physical_device_id
                 .cmp(&right.physical_device_id)

@@ -1,8 +1,54 @@
+#[allow(clippy::too_many_arguments)]
+fn mount_placed_chat_stream(
+    args: &Args,
+    manifest_dir: &Path,
+    devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+    parameter_pool: &VulkanResidentBufferPool,
+    mut runtime_model: VulkanResidentRuntimeModel,
+    capacity: usize,
+    speculative_draft_tokens: usize,
+    retained_stores: Option<&VulkanRetainedCompiledResourceStores>,
+) -> Result<VulkanResidentInProcessPlacedPromptStream, Box<dyn Error>> {
+    runtime_model.package.sampler.spec = sampler_runtime_config(args)
+        .apply_to(&runtime_model.package.sampler.spec)?;
+    let package = Arc::new(match retained_stores {
+        Some(retained_stores) => {
+            VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_parameter_pool_and_retained_stores(
+                devices,
+                manifest_dir,
+                runtime_model,
+                Some(capacity),
+                speculative_draft_tokens,
+                args.resource_residency_policy,
+                parameter_pool,
+                retained_stores,
+            )?
+        }
+        None => VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_parameter_pool(
+            devices,
+            manifest_dir,
+            runtime_model,
+            Some(capacity),
+            speculative_draft_tokens,
+            args.resource_residency_policy,
+            parameter_pool,
+        )?,
+    });
+    Ok(VulkanResidentInProcessPlacedPromptStream::new(
+        package,
+        devices.clone(),
+        args.random_seed,
+    )?
+    .with_speculative_draft_tokens(speculative_draft_tokens)?
+    .with_speculative_confidence_threshold(args.speculative_confidence_threshold)?)
+}
+
 fn run_placed_chat(
     args: &Args,
     manifest_dir: &Path,
     tokenizer_dir: &Path,
     runtime_model: VulkanResidentRuntimeModel,
+    auto_placement: Option<RuntimeAutoPlacementContext>,
     capacity: usize,
     codec: &VulkanResidentHfTokenizerTextCodec,
     initial_prompt: Option<&str>,
@@ -54,19 +100,31 @@ fn run_placed_chat(
             },
         )?
     };
-    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices_with_sampler_config_and_residency_policy(
-        bound_devices.devices.clone(),
+    let parameter_pool = VulkanResidentBufferPool::default();
+    let stream = mount_placed_chat_stream(
+        args,
         manifest_dir,
-        runtime_model,
-        Some(capacity),
-        args.random_seed,
+        &bound_devices.devices,
+        &parameter_pool,
+        runtime_model.clone(),
+        capacity,
         speculative_draft_tokens,
-        sampler_runtime_config(args),
-        args.resource_residency_policy,
-    )?
-    .with_speculative_confidence_threshold(args.speculative_confidence_threshold)?;
+        None,
+    )?;
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
     let stream_snapshot = engine.add_stream("main", stream)?;
+    let initial_selection = engine
+        .stream("main")
+        .ok_or_else(|| io::Error::other("placed chat engine lost its mounted main stream"))?
+        .selection_telemetry_snapshot()?;
+    let mut working_set_baseline = engine
+        .stream("main")
+        .expect("mounted main stream remains present")
+        .package()
+        .working_set_pressure_snapshot(&initial_selection)?;
+    let mut mounted_runtime_model = runtime_model;
+    let auto_placement = auto_placement;
+    let mut conversation_activation_count = 0u64;
     let mounted_device_bindings = bound_devices
         .physical_device_ids
         .iter()
@@ -260,14 +318,22 @@ fn run_placed_chat(
                 &transaction.generation_run.engine_run,
                 &transaction.canonical_commit_run.engine_run,
             ];
-            let prefill_activation_count = engine_runs
+            let prefill_activation_count: usize = engine_runs
                 .iter()
                 .map(|run| run.prefill_activation_count)
                 .sum();
-            let decode_activation_count = engine_runs
+            let decode_activation_count: usize = engine_runs
                 .iter()
                 .map(|run| run.decode_activation_count)
                 .sum();
+            conversation_activation_count = conversation_activation_count
+                .checked_add(
+                    u64::try_from(
+                        prefill_activation_count.saturating_add(decode_activation_count),
+                    )
+                    .unwrap_or(u64::MAX),
+                )
+                .ok_or_else(|| io::Error::other("conversation activation count overflowed"))?;
             let timing = runtime_prompt_timing_report(
                 0,
                 transaction.elapsed_ns,
@@ -411,8 +477,85 @@ fn run_placed_chat(
             match outcome {
                 RuntimeChatReplOutcome::Exit => return Ok(()),
                 RuntimeChatReplOutcome::NewConversation => {
-                    let zeroed = engine
-                        .reset_stream_for_new_session("main", args.random_seed)?;
+                    let current_selection = engine
+                        .stream("main")
+                        .ok_or_else(|| {
+                            io::Error::other("placed chat engine lost its main stream at session boundary")
+                        })?
+                        .selection_telemetry_snapshot()?;
+                    let current_pressure = engine
+                        .stream("main")
+                        .expect("session-boundary main stream remains present")
+                        .package()
+                        .working_set_pressure_snapshot(&current_selection)?;
+                    let interval_pressure = current_pressure.delta_since(&working_set_baseline)?;
+                    let rebalance = auto_placement
+                        .as_ref()
+                        .map(|placement| {
+                            rebalance_demand_paged_vulkan_runtime_model_from_working_set(
+                                manifest_dir,
+                                &mounted_runtime_model,
+                                &placement.candidates,
+                                &placement.costs,
+                                &current_pressure,
+                                &interval_pressure,
+                                conversation_activation_count,
+                                capacity,
+                                speculative_draft_tokens,
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
+                    let zeroed = if let Some(rebalance) = rebalance {
+                        eprintln!(
+                            "nerve runtime working-set rebalance: moved_components={:?}, predicted_ns_per_activation={}=>{}, observed_blocking_ns={}, estimated_remount_ns={}, estimated_net_benefit_ns={}",
+                            rebalance.moved_component_ids,
+                            rebalance.current_predicted_ns_per_activation,
+                            rebalance.proposed_predicted_ns_per_activation,
+                            rebalance.observed_blocking_ns,
+                            rebalance.estimated_remount_ns,
+                            rebalance.estimated_net_benefit_ns,
+                        );
+                        let new_runtime_model = rebalance.placement.runtime_model;
+                        let release = engine.release_stream_for_session_remount(
+                            "main",
+                            &rebalance.retained_logical_device_ids,
+                        )?;
+                        let stream = mount_placed_chat_stream(
+                            args,
+                            manifest_dir,
+                            &bound_devices.devices,
+                            &parameter_pool,
+                            new_runtime_model.clone(),
+                            capacity,
+                            speculative_draft_tokens,
+                            Some(&release.retained_stores),
+                        )?;
+                        engine.add_stream("main", stream)?;
+                        parameter_pool.evict_unreferenced();
+                        mounted_runtime_model = new_runtime_model;
+                        let selection = engine
+                            .stream("main")
+                            .expect("remounted main stream is present")
+                            .selection_telemetry_snapshot()?;
+                        working_set_baseline = engine
+                            .stream("main")
+                            .expect("remounted main stream is present")
+                            .package()
+                            .working_set_pressure_snapshot(&selection)?;
+                        println!(
+                            "session_remount: released_units={} released_payload_bytes={}",
+                            release.teardown.released_unit_count,
+                            release.teardown.released_payload_bytes,
+                        );
+                        0
+                    } else {
+                        let zeroed = engine
+                            .reset_stream_for_new_session("main", args.random_seed)?;
+                        working_set_baseline = current_pressure;
+                        zeroed
+                    };
+                    conversation_activation_count = 0;
                     chat_session = RuntimeChatSession::from_tokenizer_dir(
                         tokenizer_dir,
                         &args.chat_template_variables,

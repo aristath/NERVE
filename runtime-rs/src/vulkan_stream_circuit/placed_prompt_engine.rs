@@ -265,6 +265,64 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         Ok(placed_prompt_engine_stream_snapshot(stream_id, &stream))
     }
 
+    pub fn release_stream_for_session_remount(
+        &mut self,
+        stream_id: &str,
+        retained_logical_device_ids: &BTreeSet<String>,
+    ) -> Result<
+        VulkanSessionRemountRelease,
+        VulkanResidentInProcessPlacedPromptEngineError,
+    > {
+        if self.active_transaction_depths.contains_key(stream_id) {
+            return Err(placed_scheduler_divergence(
+                "cannot remount a stream with an active transaction",
+            )
+            .into());
+        }
+        let stream = self.streams.get(stream_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedPromptEngineError::UnknownStream {
+                stream_id: stream_id.to_string(),
+            }
+        })?;
+        if !stream.is_idle() || stream.pending_scheduler_activation.is_some() {
+            return Err(placed_scheduler_divergence(
+                "cannot remount a placed prompt stream while work is pending",
+            )
+            .into());
+        }
+        let package = Arc::clone(&stream.package);
+        let sharing_streams = self
+            .streams
+            .values()
+            .filter(|candidate| Arc::ptr_eq(&candidate.package, &package))
+            .count();
+        if sharing_streams != 1 {
+            return Err(placed_scheduler_divergence(format!(
+                "cannot remount one stream while its package is shared by {sharing_streams} streams",
+            ))
+            .into());
+        }
+        let (retained_store_ids, retained_stores) = package
+            .compiled_resource_stores_for_session_remount(retained_logical_device_ids);
+        let teardown = package.teardown_compiled_resources_except(&retained_store_ids);
+        if !teardown.complete {
+            return Err(VulkanResidentInProcessPlacedPromptEngineError::Stream(
+                placed_scheduler_divergence(format!(
+                    "session-boundary remount failed to release compiled resources on {} of {} physical devices",
+                    teardown
+                        .physical_device_count
+                        .saturating_sub(teardown.acknowledged_device_count),
+                    teardown.physical_device_count,
+                )),
+            ));
+        }
+        self.remove_stream(stream_id)?;
+        Ok(VulkanSessionRemountRelease {
+            teardown,
+            retained_stores,
+        })
+    }
+
     pub fn enqueue_input_event(
         &mut self,
         stream_id: &str,

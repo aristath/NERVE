@@ -932,6 +932,111 @@ fn fixture_model_runtime_model() -> VulkanResidentRuntimeModel {
         .unwrap()
 }
 
+fn fixture_model_runtime_model_with_one_dynamic_group() -> VulkanResidentRuntimeModel {
+    let mut runtime_model = fixture_model_runtime_model();
+    let contract = &mut runtime_model.package.resource_residency;
+    let binding = contract
+        .bindings
+        .iter()
+        .find(|binding| binding.parameter_id == "ffn_down")
+        .unwrap();
+    let CompiledResourceBindingMapping::AtomicGroup {
+        atomic_group_id: original_group_id,
+        resource_id: original_resource_id,
+    } = &binding.mapping
+    else {
+        panic!("fixture ffn_down binding is not concrete");
+    };
+    let original_group_id = original_group_id.clone();
+    let original_resource_id = original_resource_id.clone();
+    let resource = contract
+        .resources
+        .iter_mut()
+        .find(|resource| resource.id == original_resource_id)
+        .unwrap();
+    resource.lifetime = CompiledResourceLifetime::Dynamic;
+    resource.id = package::compiled_resource_identity(resource).unwrap();
+    let dynamic_resource_id = resource.id.clone();
+    let original_group = contract
+        .atomic_groups
+        .iter_mut()
+        .find(|group| group.id == original_group_id)
+        .unwrap();
+    original_group
+        .resource_ids
+        .retain(|resource_id| resource_id != &original_resource_id);
+    original_group.id = package::compiled_atomic_group_identity(original_group).unwrap();
+    let remaining_group_id = original_group.id.clone();
+    let mut dynamic_group = CompiledAtomicResidencyGroup {
+        id: String::new(),
+        lifetime: CompiledResourceLifetime::Dynamic,
+        resource_ids: vec![dynamic_resource_id.clone()],
+        dependencies: Vec::new(),
+    };
+    dynamic_group.id = package::compiled_atomic_group_identity(&dynamic_group).unwrap();
+    let dynamic_group_id = dynamic_group.id.clone();
+    contract.atomic_groups.push(dynamic_group);
+    contract.atomic_groups.sort_by(|left, right| left.id.cmp(&right.id));
+    contract.resources.sort_by(|left, right| left.id.cmp(&right.id));
+    for binding in &mut contract.bindings {
+        let CompiledResourceBindingMapping::AtomicGroup {
+            atomic_group_id,
+            resource_id,
+        } = &mut binding.mapping
+        else {
+            continue;
+        };
+        if *atomic_group_id != original_group_id {
+            continue;
+        }
+        if *resource_id == original_resource_id {
+            binding.mapping = CompiledResourceBindingMapping::SelectedAtomicGroup {
+                atomic_group_id: dynamic_group_id.clone(),
+                resource_id: dynamic_resource_id.clone(),
+                selection_signal: "ffn_hidden".to_string(),
+                selector_index: 0,
+                parameter_slot: 0,
+            };
+        } else {
+            *atomic_group_id = remaining_group_id.clone();
+        }
+    }
+    let mut selector = CompiledResourceSelector {
+        id: String::new(),
+        execution_scope: "target".to_string(),
+        component_id: "layer_00".to_string(),
+        node_id: "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply"
+            .to_string(),
+        domain_id: "fixture_dynamic_group".to_string(),
+        resource_count: 1,
+        selection_signal: "ffn_hidden".to_string(),
+        encoding: CompiledResourceSelectionEncoding {
+            element_type: CompiledResourceSelectionElementType::U32,
+            selection_count_per_activation: 1,
+            index_shift: 0,
+            index_mask: 0,
+        },
+        mapping: CompiledResourceSelectorMapping::GroupTable {
+            atomic_group_ids: vec![dynamic_group_id],
+        },
+    };
+    selector.id = package::compiled_selector_identity(&selector).unwrap();
+    let mut checkpoint = CompiledResidencyCheckpoint {
+        id: String::new(),
+        execution_scope: "target".to_string(),
+        component_id: "layer_00".to_string(),
+        after_node_id:
+            "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply"
+                .to_string(),
+        resume_node_id: "ffn_down_projection__ffn_residual".to_string(),
+        selector_ids: vec![selector.id.clone()],
+    };
+    checkpoint.id = package::compiled_checkpoint_identity(&checkpoint).unwrap();
+    contract.selectors = vec![selector];
+    contract.checkpoints = vec![checkpoint];
+    runtime_model
+}
+
 fn fixture_model_runtime_model_with_dynamic_partition(
     partition_count: usize,
     member_bytes: usize,

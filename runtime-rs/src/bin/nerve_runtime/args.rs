@@ -3,6 +3,7 @@ use std::error::Error;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use nerve_runtime::{
@@ -25,19 +26,23 @@ use nerve_runtime::{
     RuntimeTopologyReport, VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION,
     VulkanCompiledResourceResidencyReport, VulkanComputeDevice, VulkanComputeDeviceCatalog,
     VulkanComputeDeviceInfo, VulkanPlacedEdgeTransferRoute, VulkanPlacedEdgeTransportStats,
-    VulkanPlacedPromptEngineShutdownReport, VulkanResidentChatTransactionPhase,
-    VulkanResidentExecutionCounters, VulkanResidentFeedbackExecutionStats,
-    VulkanResidentHfTokenizerTextCodec, VulkanResidentInProcessPlacedPromptEngine,
+    VulkanPlacedPromptEngineShutdownReport, VulkanResidentBufferPool,
+    VulkanResidentChatTransactionPhase, VulkanResidentExecutionCounters,
+    VulkanResidentFeedbackExecutionStats, VulkanResidentHfTokenizerTextCodec,
+    VulkanResidentInProcessPlacedModelPackage, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptStream, VulkanResidentModelPackageDeviceSlice,
     VulkanResidentModelPackageManifest, VulkanResidentPlacedPrefixStateCacheStats,
     VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
-    VulkanResidentTokenTextCodec, VulkanReusableKernelArtifactManifest,
+    VulkanResidentTokenTextCodec, VulkanRetainedCompiledResourceStores,
+    VulkanReusableKernelArtifactManifest,
     VulkanRuntimePlacementCalibrationSuite, VulkanRuntimePlacementCandidate,
     VulkanRuntimePlacementCostModel, VulkanSpeculativeCycleTrace, VulkanSpeculativeWindowStats,
     calibrate_vulkan_runtime_placement_candidate,
     calibrate_vulkan_runtime_placement_transfers, capacity_pack_and_select_vulkan_runtime_model,
     chat_stop_token_ids_from_manifest, chat_transcript_codec, discover_cpu_hardware_profile,
-    execute_vulkan_resident_chat_transaction, reset_runtime_critical_path_counters,
+    execute_vulkan_resident_chat_transaction,
+    rebalance_demand_paged_vulkan_runtime_model_from_working_set,
+    reset_runtime_critical_path_counters,
     reset_vulkan_resident_execution_counters, runtime_critical_path_report,
     runtime_critical_path_span, runtime_devices_from_compute_devices,
     vulkan_resident_execution_counters, vulkan_runtime_device_capacity_admission_bytes,

@@ -266,6 +266,244 @@ fn placed_package_pool_reuses_immutable_parameters_across_graph_variants() {
 }
 
 #[test]
+fn placed_prompt_engine_releases_one_idle_package_for_a_session_remount() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_UUID").is_some() => {
+            panic!("explicit Vulkan device for session remount was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping session remount test: {error}");
+            return;
+        }
+    };
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let pool = VulkanResidentBufferPool::default();
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let mount = |runtime_model| {
+        let package = Arc::new(
+            VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_parameter_pool(
+                &devices,
+                manifest_dir,
+                runtime_model,
+                Some(64),
+                0,
+                ResourceResidencyPolicy::Eager,
+                &pool,
+            )
+            .unwrap(),
+        );
+        VulkanResidentInProcessPlacedPromptStream::new(package, devices.clone(), 0).unwrap()
+    };
+    let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+    engine.add_stream("main", mount(runtime_model.clone())).unwrap();
+    let initial_pool_stats = pool.stats();
+
+    let release = engine
+        .release_stream_for_session_remount("main", &BTreeSet::new())
+        .unwrap();
+
+    assert!(release.teardown.complete);
+    assert_eq!(release.retained_stores.physical_store_count(), 0);
+    assert_eq!(engine.snapshot().stream_count, 0);
+    engine.add_stream("main", mount(runtime_model)).unwrap();
+    assert!(pool.stats().hit_count > initial_pool_stats.hit_count);
+    engine
+        .submit_input_event_until_idle(
+            "main",
+            VulkanResidentTokenInputEvent::new("after_remount", vec![1], 1),
+        )
+        .unwrap();
+    let shutdown = engine.shutdown();
+    assert!(shutdown.complete, "{:?}", shutdown.errors);
+}
+
+#[test]
+fn placed_model_package_remount_reuses_an_exact_retained_compiled_resource_store() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_UUID").is_some() => {
+            panic!("explicit Vulkan device for retained-store remount was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping retained-store remount test: {error}");
+            return;
+        }
+    };
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let pool = VulkanResidentBufferPool::default();
+    let runtime_model = vulkan_runtime_model_with_component_placement(
+        &fixture_model_runtime_model_with_one_dynamic_group(),
+        "gpu0",
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let package = Arc::new(
+        VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_parameter_pool(
+            &devices,
+            manifest_dir,
+            runtime_model.clone(),
+            Some(64),
+            0,
+            ResourceResidencyPolicy::Eager,
+            &pool,
+        )
+        .unwrap(),
+    );
+    let original_store = package
+        .compiled_resource_device_store("gpu0")
+        .expect("tiny package should have a compiled-resource store")
+        as *const VulkanCompiledResourceDeviceStore;
+    let (retained_store_ids, retained_stores) = package
+        .compiled_resource_stores_for_session_remount(
+            &["gpu0".to_string()].into_iter().collect(),
+        );
+    let release = package.teardown_compiled_resources_except(&retained_store_ids);
+    assert!(release.complete);
+    assert_eq!(release.physical_device_count, 0);
+    assert_eq!(release.retained_device_count, 1);
+    assert_eq!(retained_stores.physical_store_count(), 1);
+    drop(package);
+    let remounted_package = Arc::new(
+        VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_parameter_pool_and_retained_stores(
+            &devices,
+            manifest_dir,
+            runtime_model,
+            Some(64),
+            0,
+            ResourceResidencyPolicy::Eager,
+            &pool,
+            &retained_stores,
+        )
+        .unwrap(),
+    );
+    assert!(std::ptr::eq(
+        original_store,
+        remounted_package
+            .compiled_resource_device_store("gpu0")
+            .unwrap(),
+    ));
+    let store = remounted_package
+        .compiled_resource_device_store("gpu0")
+        .unwrap();
+    store
+        .load_all_allowed(
+            devices["gpu0"].as_ref(),
+            DeviceResourceResidencyOwnerId::new("retained-remount-proof").unwrap(),
+        )
+        .unwrap();
+    assert!(store.residency_report().unwrap().resident_unit_count > 0);
+    let teardown = remounted_package.teardown_compiled_resources();
+    assert!(teardown.complete, "{teardown:?}");
+}
+
+#[test]
+fn placed_model_package_remount_rejects_an_incompatible_retained_store() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_UUID").is_some() => {
+            panic!("explicit Vulkan device for incompatible remount was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping incompatible retained-store test: {error}");
+            return;
+        }
+    };
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let pool = VulkanResidentBufferPool::default();
+    let runtime_model = vulkan_runtime_model_with_component_placement(
+        &fixture_model_runtime_model_with_one_dynamic_group(),
+        "gpu0",
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let package = VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_parameter_pool(
+        &devices,
+        manifest_dir,
+        runtime_model.clone(),
+        Some(64),
+        0,
+        ResourceResidencyPolicy::Eager,
+        &pool,
+    )
+    .unwrap();
+    let (retained_store_ids, retained_stores) = package
+        .compiled_resource_stores_for_session_remount(
+            &["gpu0".to_string()].into_iter().collect(),
+        );
+    let release = package.teardown_compiled_resources_except(&retained_store_ids);
+    assert!(release.complete);
+    drop(package);
+
+    let error = match VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_parameter_pool_and_retained_stores(
+        &devices,
+        manifest_dir,
+        runtime_model,
+        Some(32),
+        0,
+        ResourceResidencyPolicy::Eager,
+        &pool,
+        &retained_stores,
+    ) {
+        Ok(_) => panic!("incompatible retained store was accepted"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("incompatible with the requested remount"),
+        "unexpected retained-store error: {error}",
+    );
+}
+
+#[test]
+fn placed_prompt_engine_rejects_remounting_one_stream_from_a_shared_package() {
+    let device = match selected_test_vulkan_device() {
+        Ok(device) => device,
+        Err(error) if std::env::var_os("NERVE_TEST_VULKAN_DEVICE_UUID").is_some() => {
+            panic!("explicit Vulkan device for shared remount rejection was unavailable: {error}")
+        }
+        Err(error) => {
+            eprintln!("skipping shared remount rejection test: {error}");
+            return;
+        }
+    };
+    let runtime_model = tiny_fixture_model_runtime_model_with_placement(
+        StreamCircuitPlacementSpec::new("gpu0"),
+    );
+    let manifest_path = tiny_fixture_model_package_manifest_path();
+    let manifest_dir = manifest_path.parent().unwrap();
+    let devices = BTreeMap::from([("gpu0".to_string(), Rc::new(device))]);
+    let stream = VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
+        devices,
+        manifest_dir,
+        runtime_model,
+        Some(64),
+        0,
+        0,
+    )
+    .unwrap();
+    let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+    engine.add_stream("main", stream).unwrap();
+    engine.fork_stream("main", "fork", 1).unwrap();
+
+    let error = engine
+        .release_stream_for_session_remount("main", &BTreeSet::new())
+        .unwrap_err();
+
+    assert!(error.to_string().contains("package is shared by 2 streams"));
+    let shutdown = engine.shutdown();
+    assert!(shutdown.complete, "{:?}", shutdown.errors);
+}
+
+#[test]
 fn placed_prompt_engine_transaction_restores_the_resident_stream_in_place() {
     let device = match selected_test_vulkan_device() {
         Ok(device) => device,
