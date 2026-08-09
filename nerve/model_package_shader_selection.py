@@ -1704,7 +1704,7 @@ def shader_file_for_node(
                 raise ModelCompileError(
                     f"indexed sparse-attention node {node['id']!r} has an invalid compressed-index contract"
                 )
-        score_pipeline_supported = (
+        score_pipeline_contract_supported = (
             head_width == 512
             and key_value_heads == 1
             and compression_ratio > 0
@@ -1717,15 +1717,27 @@ def shader_file_for_node(
                 and head_width % int(device.get("subgroup_size", 0)) == 0
                 and {"basic", "arithmetic"}
                 <= set(device.get("subgroup_operations", []))
-                and int(device.get("max_compute_work_group_invocations", 0))
-                >= head_width + 64
-                and int(device.get("max_compute_work_group_size_x", 0))
-                >= head_width + 64
                 for device in compiler_target["devices"]
             )
         )
+        score_pipeline_supported = score_pipeline_contract_supported and all(
+            int(device.get("max_compute_work_group_invocations", 0))
+            >= head_width + 64
+            and int(device.get("max_compute_work_group_size_x", 0))
+            >= head_width + 64
+            for device in compiler_target["devices"]
+        )
+        tile_overlap_supported = score_pipeline_contract_supported and all(
+            int(device.get("max_compute_work_group_invocations", 0))
+            >= head_width * 2
+            and int(device.get("max_compute_work_group_size_x", 0))
+            >= head_width * 2
+            for device in compiler_target["devices"]
+        )
         prefix = (
-            "indexed_sparse_attention_main_score_pipeline"
+            "indexed_sparse_attention_main_tile_overlap"
+            if tile_overlap_supported
+            else "indexed_sparse_attention_main_score_pipeline"
             if score_pipeline_supported
             else "indexed_sparse_attention_main"
         )
@@ -2331,6 +2343,8 @@ def local_size_x_for_node(node: Json) -> int:
 
 
 def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
+    if shader_file.startswith("indexed_sparse_attention_main_tile_overlap_"):
+        return int(node["attrs"]["head_width"]) * 2
     if shader_file.startswith("indexed_sparse_attention_main_score_pipeline_"):
         return int(node["attrs"]["head_width"]) + 64
     if shader_file.startswith(

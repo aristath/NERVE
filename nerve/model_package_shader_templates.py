@@ -910,7 +910,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         return rendered
 
     indexed_sparse_attention_main = re.fullmatch(
-        r"indexed_sparse_attention_main(_score_pipeline)?"
+        r"indexed_sparse_attention_main(_score_pipeline|_tile_overlap)?"
         r"(_temporal(?:_parallel)?)?_bf16_"
         r"q(\d+)_kv(\d+)_d(\d+)_w(\d+)_"
         r"r(\d+)_k(\d+)_scale([0-9eE+.-]+)\.comp",
@@ -918,7 +918,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     )
     if indexed_sparse_attention_main is not None:
         (
-            score_pipeline,
+            schedule,
             temporal,
             query_heads,
             kv_heads,
@@ -958,7 +958,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             or window <= 0
             or (compression_ratio == 0) != (max_compressed_indices == 0)
             or (
-                score_pipeline is not None
+                schedule is not None
                 and (
                     kv_heads != 1
                     or head_width != 512
@@ -969,20 +969,35 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             raise ModelCompileError(
                 f"invalid main indexed sparse-attention shader shape {shader_file!r}"
             )
+        if schedule == "_tile_overlap" and temporal not in {
+            None,
+            "_temporal_parallel",
+        }:
+            raise ModelCompileError(
+                f"tile-overlapped attention requires lane-parallel temporal execution in {shader_file!r}"
+            )
         rendered = render_shader_template(
             source_dir,
             (
-                "indexed_sparse_attention_main_score_pipeline_temporal_bf16.comp.template"
-                if score_pipeline is not None and temporal is not None
+                "indexed_sparse_attention_main_tile_overlap_temporal_parallel_bf16.comp.template"
+                if schedule == "_tile_overlap" and temporal == "_temporal_parallel"
+                else "indexed_sparse_attention_main_tile_overlap_bf16.comp.template"
+                if schedule == "_tile_overlap"
+                else "indexed_sparse_attention_main_score_pipeline_temporal_bf16.comp.template"
+                if schedule == "_score_pipeline" and temporal is not None
                 else "indexed_sparse_attention_main_score_pipeline_bf16.comp.template"
-                if score_pipeline is not None
+                if schedule == "_score_pipeline"
                 else "indexed_sparse_attention_main_temporal_bf16.comp.template"
                 if temporal is not None
                 else "indexed_sparse_attention_main_bf16.comp.template"
             ),
             {
                 "LOCAL_SIZE": str(
-                    head_width + 64 if score_pipeline is not None else head_width
+                    head_width * 2
+                    if schedule == "_tile_overlap"
+                    else head_width + 64
+                    if schedule == "_score_pipeline"
+                    else head_width
                 ),
                 "QUERY_HEADS": str(query_heads),
                 "KV_HEADS": str(kv_heads),
@@ -997,7 +1012,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "CONTROL_BINDING": "8" if has_compressed else "5",
             },
         )
-        if temporal == "_temporal_parallel":
+        if temporal == "_temporal_parallel" and schedule != "_tile_overlap":
             return parallelize_temporal_batch_lanes(shader_file, rendered)
         return rendered
 

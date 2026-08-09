@@ -16,13 +16,17 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
 
 ## Current evidence
 
-- The accepted zero-load DeepSeek truth conversation is now 8.5828 decode tok/s
-  and 8.6922 prefill tok/s. It followed three discarded complete conversations
+- The accepted zero-load DeepSeek truth conversation is now 8.5924 decode tok/s
+  and 8.6604 prefill tok/s. It followed three discarded complete conversations
   whose residency loads converged from 9,994 to 373 to zero; the measured fourth
   conversation had zero reads, uploads, reloads, evictions, or residency
-  blocking. Every response byte matched the prior package, including turn
-  recall, and every GPU returned to its exact pre-run reservation. NVMe paging
-  is therefore not the steady-state limiter.
+  blocking. All 24 responses matched the prior package byte-for-byte across
+  all four conversations, including turn recall, and every GPU returned to its
+  exact pre-run reservation. The exact tile-overlap attention transaction
+  reduced the real 2,224-token sampled attention-read phase from 26.785 to
+  19.150 ms per window and attention-score from 12.783 to 11.840 ms per window.
+  Decode improved 0.11%; the 0.37% prefill difference is below run variance.
+  NVMe paging is therefore not the steady-state limiter.
 - A fresh schema-v10 compilation with explicit fixed-source MXFP4 dispatch
   contracts passed a complete four-conversation product gate, preserved behavior
   and turn recall, and restored every GPU reservation, but its zero-load truth
@@ -417,12 +421,21 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    semantics.
 
    - Indexed sparse-attention read is the largest measured device phase. The
-     accepted score pipeline now overlaps exact score finalization with the next
-     token reduction and removes one barrier per score token for every compressed
-     attention component. Re-attribute the warmed product path before choosing
-     the next attention target. Continue eliminating redundant state-address
-     translation, duplicate key/value reads, remaining barriers, and avoidable
-     memory passes only where an exact fused or tiled schedule is faster.
+     accepted 1,024-thread tile-overlap transaction assigns independent score
+     and value workers to one fused workgroup, overlaps score tile N with value
+     tile N-1, and preserves the existing F32 online-softmax and BF16 output.
+     It is byte-exact and reduced the real r4/k512 microcase from 1.66632 to
+     0.61208 ms and r128/k8192 from 17.93188 to 6.57308 ms. Compiler selection
+     is capability-driven: 1,024-thread targets use tile overlap, 576-thread
+     targets retain the exact score pipeline, and smaller targets retain the
+     portable baseline. Its complete DeepSeek gate reached a new 8.5924 decode
+     high-water mark and reduced the product attention-read phase by 28.5%.
+     Qwen3.6-35B-A3B remained byte-identical at 72.4232 decode tok/s, and
+     Qwen3.5-9B remained byte-identical at 48.6914; both restored their exact
+     reservations. Re-attribute the warmed path before choosing the next kernel
+     target. Continue eliminating redundant state-address translation,
+     duplicate key/value reads, remaining barriers, and avoidable memory passes
+     only where an exact fused or tiled schedule is faster.
      Preserve score accumulation order,
      online-softmax semantics, sink handling, compressed-index ordering, and
      BF16 output bits. Do not retry full-width multi-head workgroups: h2 and h4

@@ -32,10 +32,7 @@ mod indexed_attention_score_pipeline_tests {
         .replace("{{ATTENTION_SCALE}}", "0.04419417382415922")
     }
 
-    fn rendered_baseline_shader(
-        compression_ratio: usize,
-        max_compressed_indices: usize,
-    ) -> String {
+    fn rendered_baseline_shader(compression_ratio: usize, max_compressed_indices: usize) -> String {
         std::fs::read_to_string(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("shaders")
@@ -57,6 +54,28 @@ mod indexed_attention_score_pipeline_tests {
         .replace("{{OUTPUT_BINDING}}", "4")
         .replace("{{SINK_BINDING}}", "5")
         .replace("{{CONTROL_BINDING}}", "8")
+    }
+
+    fn rendered_tile_overlap_shader(
+        compression_ratio: usize,
+        max_compressed_indices: usize,
+    ) -> String {
+        std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("shaders")
+                .join("indexed_sparse_attention_main_tile_overlap_bf16.comp.template"),
+        )
+        .expect("tile-overlapped indexed-attention shader template must exist")
+        .replace("{{LOCAL_SIZE}}", "1024")
+        .replace("{{QUERY_HEADS}}", "64")
+        .replace("{{HEAD_WIDTH}}", "512")
+        .replace("{{LOCAL_WINDOW}}", "128")
+        .replace("{{COMPRESSION_RATIO}}", &compression_ratio.to_string())
+        .replace(
+            "{{MAX_COMPRESSED_INDICES}}",
+            &max_compressed_indices.to_string(),
+        )
+        .replace("{{ATTENTION_SCALE}}", "0.04419417382415922")
     }
 
     fn compile_source(label: &str, source: String) -> Vec<u32> {
@@ -139,6 +158,15 @@ mod indexed_attention_score_pipeline_tests {
     }
 
     #[test]
+    fn tile_overlapped_indexed_attention_compiles_for_product_geometry() {
+        let words = compile_source(
+            "indexed-attention-tile-overlap",
+            rendered_tile_overlap_shader(128, 8192),
+        );
+        assert!(!words.is_empty());
+    }
+
+    #[test]
     fn score_pipelined_indexed_attention_is_exact_and_faster_at_product_geometry() {
         let started = Instant::now();
         let device = selected_test_vulkan_device().unwrap();
@@ -171,12 +199,16 @@ mod indexed_attention_score_pipeline_tests {
         let compressed_indices = device
             .create_resident_buffer(indices.len() * size_of::<u32>())
             .unwrap();
-        compressed_indices.write_bytes(&u32_bytes(&indices)).unwrap();
+        compressed_indices
+            .write_bytes(&u32_bytes(&indices))
+            .unwrap();
         let output_bytes = QUERY_HEADS * HEAD_WIDTH * size_of::<u16>();
         let baseline_output = device.create_resident_buffer(output_bytes).unwrap();
         baseline_output.write_bytes(&vec![0; output_bytes]).unwrap();
         let pipelined_output = device.create_resident_buffer(output_bytes).unwrap();
-        pipelined_output.write_bytes(&vec![0; output_bytes]).unwrap();
+        pipelined_output
+            .write_bytes(&vec![0; output_bytes])
+            .unwrap();
         let sinks = device
             .create_resident_buffer(QUERY_HEADS * size_of::<f32>())
             .unwrap();
@@ -192,7 +224,11 @@ mod indexed_attention_score_pipeline_tests {
                         binding(0, &query, VulkanResidentKernelBufferAccess::Read),
                         binding(1, &local_state, VulkanResidentKernelBufferAccess::Read),
                         binding(2, &compressed_state, VulkanResidentKernelBufferAccess::Read),
-                        binding(3, &compressed_indices, VulkanResidentKernelBufferAccess::Read),
+                        binding(
+                            3,
+                            &compressed_indices,
+                            VulkanResidentKernelBufferAccess::Read,
+                        ),
                         binding(4, output, VulkanResidentKernelBufferAccess::Write),
                         binding(5, &sinks, VulkanResidentKernelBufferAccess::Read),
                         binding(8, &control, VulkanResidentKernelBufferAccess::Read),
@@ -235,10 +271,7 @@ mod indexed_attention_score_pipeline_tests {
             );
             let pipelined_words = compile_source(
                 "indexed-attention-score-pipeline",
-                rendered_product_geometry_shader(
-                    compression_ratio,
-                    max_compressed_indices,
-                ),
+                rendered_product_geometry_shader(compression_ratio, max_compressed_indices),
             );
             let baseline_dispatch = dispatch(&baseline_words, &baseline_output, 512);
             let pipelined_dispatch = dispatch(&pipelined_words, &pipelined_output, 576);
@@ -279,6 +312,154 @@ mod indexed_attention_score_pipeline_tests {
         assert!(
             started.elapsed() < Duration::from_secs(60),
             "score-pipelined attention microbenchmark exceeded one minute",
+        );
+    }
+
+    #[test]
+    fn tile_overlapped_attention_is_exact_and_faster_than_score_pipeline() {
+        let started = Instant::now();
+        let device = selected_test_vulkan_device().unwrap();
+        assert_eq!(device.subgroup_size, 64);
+
+        let query_values = (0..QUERY_HEADS * HEAD_WIDTH)
+            .map(|index| bf16_bits(((index * 17 % 97) as f32 - 48.0) / 64.0))
+            .collect::<Vec<_>>();
+        let local_values = (0..LOCAL_WINDOW * HEAD_WIDTH)
+            .map(|index| bf16_bits(((index * 13 % 61) as f32 - 30.0) / 128.0))
+            .collect::<Vec<_>>();
+        let compressed_values = (0..MAX_COMPRESSED_INDICES * HEAD_WIDTH)
+            .map(|index| bf16_bits(((index * 29 % 127) as f32 - 63.0) / 256.0))
+            .collect::<Vec<_>>();
+        let indices = (0..MAX_COMPRESSED_INDICES)
+            .map(|index| u32::try_from(LOCAL_WINDOW + index).unwrap())
+            .collect::<Vec<_>>();
+        let query = device
+            .create_resident_buffer(query_values.len() * size_of::<u16>())
+            .unwrap();
+        query.write_bytes(&u16_bytes(&query_values)).unwrap();
+        let local_bytes = fixed_state_view_bytes(&local_values);
+        let local_state = device.create_resident_buffer(local_bytes.len()).unwrap();
+        local_state.write_bytes(&local_bytes).unwrap();
+        let compressed_bytes = fixed_state_view_bytes(&compressed_values);
+        let compressed_state = device
+            .create_resident_buffer(compressed_bytes.len())
+            .unwrap();
+        compressed_state.write_bytes(&compressed_bytes).unwrap();
+        let compressed_indices = device
+            .create_resident_buffer(indices.len() * size_of::<u32>())
+            .unwrap();
+        compressed_indices
+            .write_bytes(&u32_bytes(&indices))
+            .unwrap();
+        let output_bytes = QUERY_HEADS * HEAD_WIDTH * size_of::<u16>();
+        let accepted_output = device.create_resident_buffer(output_bytes).unwrap();
+        accepted_output.write_bytes(&vec![0; output_bytes]).unwrap();
+        let overlap_output = device.create_resident_buffer(output_bytes).unwrap();
+        overlap_output.write_bytes(&vec![0; output_bytes]).unwrap();
+        let sinks = device
+            .create_resident_buffer(QUERY_HEADS * size_of::<f32>())
+            .unwrap();
+        sinks
+            .write_bytes(&u32_bytes(&vec![(-0.5_f32).to_bits(); QUERY_HEADS]))
+            .unwrap();
+        let control = device.create_resident_buffer(9 * size_of::<u32>()).unwrap();
+        let dispatch = |words: &[u32], output: &VulkanResidentBuffer, local_size: u32| {
+            device
+                .create_resident_kernel_dispatch(
+                    words,
+                    &[
+                        binding(0, &query, VulkanResidentKernelBufferAccess::Read),
+                        binding(1, &local_state, VulkanResidentKernelBufferAccess::Read),
+                        binding(2, &compressed_state, VulkanResidentKernelBufferAccess::Read),
+                        binding(
+                            3,
+                            &compressed_indices,
+                            VulkanResidentKernelBufferAccess::Read,
+                        ),
+                        binding(4, output, VulkanResidentKernelBufferAccess::Write),
+                        binding(5, &sinks, VulkanResidentKernelBufferAccess::Read),
+                        binding(8, &control, VulkanResidentKernelBufferAccess::Read),
+                    ],
+                    QUERY_HEADS as u32,
+                    local_size,
+                    0,
+                )
+                .unwrap()
+        };
+        let timeout = Duration::from_secs(30);
+        let measure = |sequence: &VulkanResidentKernelSequence| {
+            (0..2)
+                .map(|_| {
+                    device
+                        .run_timestamped_recorded_resident_kernel_sequence_for(sequence, timeout)
+                        .unwrap()
+                })
+                .min()
+                .unwrap()
+        };
+
+        for (compression_ratio, max_compressed_indices) in [(4usize, 512usize), (128, 8192)] {
+            let stream_tick = compression_ratio * max_compressed_indices - 1;
+            control
+                .write_bytes(&u32_bytes(&[
+                    0,
+                    u32::try_from(stream_tick).unwrap(),
+                    0,
+                    0,
+                    LOCAL_WINDOW as u32,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]))
+                .unwrap();
+            let accepted_words = compile_source(
+                "indexed-attention-score-pipeline",
+                rendered_product_geometry_shader(compression_ratio, max_compressed_indices),
+            );
+            let overlap_words = compile_source(
+                "indexed-attention-tile-overlap",
+                rendered_tile_overlap_shader(compression_ratio, max_compressed_indices),
+            );
+            let accepted_dispatch = dispatch(&accepted_words, &accepted_output, 576);
+            let overlap_dispatch = dispatch(&overlap_words, &overlap_output, 1024);
+
+            device
+                .run_resident_kernel_dispatch(&accepted_dispatch, &[])
+                .unwrap();
+            device
+                .run_resident_kernel_dispatch(&overlap_dispatch, &[])
+                .unwrap();
+            assert_eq!(
+                overlap_output.read_bytes(output_bytes).unwrap(),
+                accepted_output.read_bytes(output_bytes).unwrap(),
+                "tile overlap must preserve every BF16 output bit for r{compression_ratio}/k{max_compressed_indices}",
+            );
+
+            let accepted_sequence = timestamped(&device, &accepted_dispatch);
+            let overlap_sequence = timestamped(&device, &overlap_dispatch);
+            for sequence in [&accepted_sequence, &overlap_sequence] {
+                device
+                    .run_timestamped_recorded_resident_kernel_sequence_for(sequence, timeout)
+                    .unwrap();
+            }
+            let accepted_ns = measure(&accepted_sequence);
+            let overlap_ns = measure(&overlap_sequence);
+            eprintln!(
+                "indexed_attention_tile_overlap q={QUERY_HEADS} d={HEAD_WIDTH} r={compression_ratio} k={max_compressed_indices} accepted_ms={:.6} overlap_ms={:.6} ratio={:.6} elapsed_ms={:.3}",
+                accepted_ns as f64 / 1_000_000.0,
+                overlap_ns as f64 / 1_000_000.0,
+                overlap_ns as f64 / accepted_ns as f64,
+                started.elapsed().as_secs_f64() * 1_000.0,
+            );
+            assert!(
+                overlap_ns < accepted_ns,
+                "tile-overlapped attention must beat the accepted score pipeline for r{compression_ratio}/k{max_compressed_indices}",
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "tile-overlapped attention microbenchmark exceeded one minute",
         );
     }
 }

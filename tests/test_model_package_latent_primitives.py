@@ -1062,7 +1062,7 @@ def test_compiles_causal_indexed_attention_with_compressed_memory(
     assert (tmp_path / shader_file.replace(".comp", ".spv")).is_file()
 
 
-def test_selects_score_pipelined_attention_only_for_its_discovered_contract(
+def test_selects_fastest_exact_attention_schedule_for_discovered_capabilities(
     tmp_path: Path,
 ) -> None:
     circuit, tensor_index = _fixture()
@@ -1129,20 +1129,35 @@ def test_selects_score_pipelined_attention_only_for_its_discovered_contract(
         compiler_target=target,
     )
     assert selected == (
-        "indexed_sparse_attention_main_score_pipeline_bf16_"
+        "indexed_sparse_attention_main_tile_overlap_bf16_"
         "q64_kv1_d512_w128_r4_k512_scale0.0441941738__sc7.comp"
     )
-    assert local_size_x_for_shader_file(selected, node) == 576
+    assert local_size_x_for_shader_file(selected, node) == 1024
 
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     copy_shader_templates(shader_source_dir, tmp_path, {selected})
     source = (tmp_path / selected).read_text()
-    assert "layout(local_size_x = 576" in source
+    assert "layout(local_size_x = 1024" in source
     assert "uint score_subgroup_count = HEAD_WIDTH / gl_SubgroupSize;" in source
     assert "score_partials[2u * MAX_SCORE_SUBGROUP_COUNT]" in source
+    assert "bool value_worker = invocation >= HEAD_WIDTH;" in source
+    assert "previous_tile_accumulator" in source
     compile_shader_artifacts(tmp_path)
 
-    baseline = selected.replace("_score_pipeline", "")
+    score_pipeline = selected.replace("_tile_overlap", "_score_pipeline")
+    medium_target = deepcopy(target)
+    medium_target["devices"][0]["max_compute_work_group_invocations"] = 768
+    medium_target["devices"][0]["max_compute_work_group_size_x"] = 768
+    assert shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        dimensions,
+        compiler_target=medium_target,
+    ) == score_pipeline
+    assert local_size_x_for_shader_file(score_pipeline, node) == 576
+
+    baseline = selected.replace("_tile_overlap", "")
     unsupported_targets = []
     for field, value in (
         ("subgroup_compute_supported", False),
@@ -1173,6 +1188,13 @@ def test_selects_score_pipelined_attention_only_for_its_discovered_contract(
 
     wrong_geometry = deepcopy(node)
     wrong_geometry["attrs"]["head_width"] = 256
+    assert "_tile_overlap" not in shader_file_for_node(
+        circuit,
+        wrong_geometry,
+        tensor_index,
+        dimensions,
+        compiler_target=target,
+    )
     assert "_score_pipeline" not in shader_file_for_node(
         circuit,
         wrong_geometry,
@@ -1183,6 +1205,13 @@ def test_selects_score_pipelined_attention_only_for_its_discovered_contract(
 
     local_only = deepcopy(node)
     local_only["inputs"] = local_only["inputs"][:2]
+    assert "_tile_overlap" not in shader_file_for_node(
+        circuit,
+        local_only,
+        tensor_index,
+        dimensions,
+        compiler_target=target,
+    )
     assert "_score_pipeline" not in shader_file_for_node(
         circuit,
         local_only,
