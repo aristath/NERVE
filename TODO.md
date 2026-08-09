@@ -362,6 +362,23 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   transaction as a universal compiler building block, but keep 8.4228 decode tok/s
   as the DeepSeek acceptance high-water mark until an equivalent complete gate
   exceeds it.
+- Fusing indexed sparse attention with its sole inverse-RoPE consumer was
+  rejected by the complete product gate despite an exact local win. The generic
+  graph transaction contracted all 43 eligible pairs, removed one dispatch and
+  one 64-by-512 BF16 intermediate write/read per sparse-attention component, and
+  preserved every measured response byte. At the real q64/kv1/d512/r128/k8192
+  geometry it was byte-exact and reduced the two-operation microcase from
+  19.80100 to 19.18656 ms, a 3.10% improvement. After three complete discarded
+  conversations, however, the zero-load truth set reached only 8.1876 decode and
+  8.3302 prefill tok/s: decode improved just 0.41% over the matched current
+  package's 8.1540 while prefill regressed 0.58%, and decode remained 2.79% below
+  the accepted 8.4228 high-water mark. All five measured responses were
+  byte-identical, the truth set recorded only resident hits, and teardown restored
+  every exact pre-run GPU reservation. The transaction, tests, and compiled
+  package were removed. Do not fuse inverse RoPE onto the existing serial
+  full-width attention schedule as an isolated dispatch-elimination exercise;
+  positional post-processing must be part of a materially different attention
+  topology that improves the complete product path.
 
 ## Work queue
 
@@ -391,6 +408,10 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      yet both static and context-bounded complete gates regressed. A replacement
      must eliminate that intermediate and be evaluated by combined attention
      score/read device time before a product gate.
+     Do not append inverse RoPE to the existing full-width serial attention
+     workgroup merely to remove its BF16 intermediate: that exact transaction
+     won the real microcase by 3.10% but improved matched decode by only 0.41%,
+     regressed prefill, and remained below the accepted product high-water mark.
    - Native compact-MXFP4 vector alternatives are now locally exhausted: address
      caching, larger persistent tiles, once-per-route intermediate quantization,
      and packed INT8 dot products all lost or were immaterial. Do not retry those
