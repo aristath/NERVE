@@ -423,6 +423,18 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   independent regression gates versus 72.0300, while Qwen3.5-9B reached 48.7832
   versus 48.7338; all responses matched, measured residency deltas were zero,
   and teardown restored exact reservations.
+- Moving the demand-window state and sampler baseline copies from synchronous
+  host calls into the first device submission was rejected after a complete
+  product gate. All 24 responses were byte-identical to the accepted package,
+  load deltas converged from 9,991 to 370 to zero, the measured fourth
+  conversation had zero reads, uploads, reloads, evictions, or residency
+  blocking, and all five GPU reservations were restored exactly. Nevertheless,
+  mean decode fell from 8.5924 to 8.4578 tok/s (1.57%) and prefill fell from
+  8.6604 to 8.6426 tok/s. Queueing the same full-state copies removes a host-side
+  wait but leaves their memory traffic on the critical device queue. The
+  experiment was removed completely. Do not retry asynchronous bulk snapshots;
+  the resident transaction must avoid creating the baseline copy in the first
+  place.
 
 ## Work queue
 
@@ -436,6 +448,13 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    - Only a real miss may publish an immutable fault record and stop at the exact
      causal checkpoint. Resume only the uncommitted suffix after the host updates
      the address table and acknowledges the fault.
+   - Replace per-window state and sampler baseline copies with GPU-resident
+     transactional state. Writes must target shadow/versioned pages, an all-hit
+     gate must commit the new page-table/frontier generation on device, and a
+     miss must discard the uncommitted suffix by generation or pointer change.
+     Neither outcome may bulk-copy the previous state. Fixed recurrent state and
+     the sampler's compact mutable state require the same commit protocol as
+     dynamically paged attention state; a host-maintained shadow is not enough.
    - Cover all-hit windows, disjoint misses, eviction, version changes, repeated
      faults, cancellation, rollback, and teardown. All-hit and miss/resume must
      produce identical committed tokens, routed experts, sampler state, and state
