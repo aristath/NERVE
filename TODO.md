@@ -453,6 +453,15 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   8.7912 to 8.4948 tok/s. The experiment was removed completely. Preserve the
   one compact predicate check until a normal completion/commit record can prove
   all-hit status without scanning every queue.
+- Reusing the sampler's resident `executed_tick_count` as that all-hit proof and
+  carrying the same completion snapshot into commit was also rejected by the
+  complete gate. All 24 responses, generated-token digests, resident-state
+  digests, 9,997 -> 382 -> 0 load convergence, zero-load truth behavior,
+  teardown, and exact GPU reservations matched, but truth decode regressed from
+  8.6600 to 8.3478 tok/s and prefill from 8.7912 to 8.3982 tok/s. Reading the
+  larger shared completion record on every attempt costs more than the compact
+  predicate it replaces. The experiment was removed completely; keep completion
+  records terminal and do not turn them into another hot-path polling surface.
 
 ## Work queue
 
