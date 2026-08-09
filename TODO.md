@@ -426,8 +426,38 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
 
 ## Work queue
 
-1. Compile a persistent per-device stream transaction that preserves measured
-   asynchronous device overlap.
+1. Make a resident sparse-expert hit completely device-owned. This is a hard
+   prerequisite of the persistent stream transaction: a bounded transaction
+   cannot be persistent while its normal all-hit path leaves the device.
+
+   - Keep selector-to-resource addresses plus validity/version metadata resident.
+     An all-hit gate must continue directly into expert execution without a host
+     fence, notification read, or execution-epoch round trip.
+   - Only a real miss may publish an immutable fault record and stop at the exact
+     causal checkpoint. Resume only the uncommitted suffix after the host updates
+     the address table and acknowledges the fault.
+   - Cover all-hit windows, disjoint misses, eviction, version changes, repeated
+     faults, cancellation, rollback, and teardown. All-hit and miss/resume must
+     produce identical committed tokens, routed experts, sampler state, and state
+     digests from the same checkpoint.
+
+2. Make cross-device transfers part of the compiled transaction. This is the
+   second hard prerequisite of the persistent stream transaction; device-local
+   execution cannot be composed while every graph edge remains a host-scheduled
+   operation.
+
+   - Preserve arbitrary ordered visits, including `gpu0 -> gpu1 -> gpu0`, with
+     persistent activation rings and timeline dependencies. A 32-KiB edge must not
+     cause a host wait.
+   - Select direct peer or staged transfer from measured capabilities and costs.
+     Keep contiguous layer/component placement by default and never use tensor
+     parallelism on this workstation.
+   - First optimize single-stream latency. Pipeline independent streams across
+   otherwise idle segments only after that path is correct and measured.
+
+3. Compile a persistent per-device stream transaction that preserves measured
+   asynchronous device overlap after the device-owned residency and transfer
+   primitives above are complete.
 
    - Turn each ordered physical-device component segment into a stable bounded
      hardware execution topology. Preserve independent compute and transfer
@@ -466,30 +496,6 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      bounded asynchronous topology. Preserve the accepted path until that topology
      wins the complete product gate; neither rejected decoder transaction may
      remain as a fallback, hidden mode, or future target shape.
-
-2. Make a resident sparse-expert hit completely device-owned.
-
-   - Keep selector-to-resource addresses plus validity/version metadata resident.
-     An all-hit gate must continue directly into expert execution without a host
-     fence, notification read, or execution-epoch round trip.
-   - Only a real miss may publish an immutable fault record and stop at the exact
-     causal checkpoint. Resume only the uncommitted suffix after the host updates
-     the address table and acknowledges the fault.
-   - Cover all-hit windows, disjoint misses, eviction, version changes, repeated
-     faults, cancellation, rollback, and teardown. All-hit and miss/resume must
-     produce identical committed tokens, routed experts, sampler state, and state
-     digests from the same checkpoint.
-
-3. Make cross-device transfers part of the compiled transaction.
-
-   - Preserve arbitrary ordered visits, including `gpu0 -> gpu1 -> gpu0`, with
-     persistent activation rings and timeline dependencies. A 32-KiB edge must not
-     cause a host wait.
-   - Select direct peer or staged transfer from measured capabilities and costs.
-     Keep contiguous layer/component placement by default and never use tensor
-     parallelism on this workstation.
-   - First optimize single-stream latency. Pipeline independent streams across
-     otherwise idle segments only after that path is correct and measured.
 
 4. Make temporal prefill a real multi-token device transaction. Execute prompt
    blocks through the same resident gates, ordered segments, transfers, attention
