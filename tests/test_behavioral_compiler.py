@@ -163,6 +163,96 @@ def test_exact_candidate_gate_proves_complete_fusion_coverage() -> None:
     assert evidence["rewrites"][0]["proof_contract"] == "silu_multiply_exact_bf16.v1"
 
 
+def test_exact_candidate_proves_mixed_query_kv_norm_rope_transaction() -> None:
+    source = {
+        "schema": "nerve.layer_circuit.v1",
+        "source": {"component_id": "layer_00"},
+        "boundary": {
+            "inputs": [{"id": "query"}, {"id": "kv"}],
+            "outputs": [
+                {"id": "query_positioned", "source": "query_positioned"},
+                {"id": "kv_positioned", "source": "kv_positioned"},
+            ],
+        },
+        "state_ports": [],
+        "parameters": {"refs": {"kv_weight": {"tensor": "kv.weight"}}},
+        "behavioral_error_contract": {"kind": "exact"},
+        "nodes": [
+            {
+                "id": "query_norm",
+                "op": "rms_norm_per_head_unscaled",
+                "inputs": ["query"],
+                "outputs": ["query_normed"],
+                "attrs": {"eps": 1e-6, "head_count": 64, "head_width": 512},
+            },
+            {
+                "id": "query_rope",
+                "op": "rotary_position_embedding",
+                "inputs": ["query_normed"],
+                "outputs": ["query_positioned"],
+                "attrs": {"head_count": 64, "head_width": 512, "rotary_width": 64},
+            },
+            {
+                "id": "kv_norm",
+                "op": "rms_norm",
+                "inputs": ["kv"],
+                "outputs": ["kv_normed"],
+                "params": ["kv_weight"],
+                "attrs": {"eps": 1e-6, "weight_offset": 0.0},
+            },
+            {
+                "id": "kv_rope",
+                "op": "rotary_position_embedding",
+                "inputs": ["kv_normed"],
+                "outputs": ["kv_positioned"],
+                "attrs": {"head_count": 1, "head_width": 512, "rotary_width": 64},
+            },
+        ],
+    }
+    candidate = deepcopy(source)
+    candidate["nodes"] = [
+        {
+            "id": "query_norm__query_rope__kv_norm__kv_rope",
+            "op": "parallel_mixed_head_norm_rope_2way",
+            "inputs": ["query", "kv"],
+            "outputs": ["query_positioned", "kv_positioned"],
+            "params": ["kv_weight"],
+            "attrs": {
+                "compiled_from": [
+                    "query_norm",
+                    "query_rope",
+                    "kv_norm",
+                    "kv_rope",
+                ],
+                "branches": [
+                    {
+                        "norm_op": "rms_norm_per_head_unscaled",
+                        "norm": deepcopy(source["nodes"][0]["attrs"]),
+                        "rope": deepcopy(source["nodes"][1]["attrs"]),
+                    },
+                    {
+                        "norm_op": "rms_norm",
+                        "norm": deepcopy(source["nodes"][2]["attrs"]),
+                        "rope": deepcopy(source["nodes"][3]["attrs"]),
+                    },
+                ],
+                "branch_parameter_counts": [0, 1],
+                "intermediate_rounding": "BF16",
+                "output_element_bytes": [2, 2],
+            },
+        }
+    ]
+
+    evidence = prove_exact_circuit_candidate(
+        component_id="layer_00", source=source, candidate=candidate
+    )
+
+    assert evidence["status"] == "passed"
+    assert evidence["rewrites"][0]["proof_contract"] == (
+        "parallel_mixed_head_norm_rope_exact_bf16.v1"
+    )
+
+
 def test_exact_candidate_gate_proves_fused_linear_scalar_gate() -> None:
     source = {
         "schema": "nerve.stream_circuit.v1",

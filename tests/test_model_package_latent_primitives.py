@@ -5,9 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from nerve.circuit_optimizer import optimize_circuit_for_vulkan
 from nerve.model_package import (
     ModelCompileError,
     ROW_MAJOR_LAYOUT,
+    can_fuse_parallel_mixed_head_norm_rope,
     compile_shader_artifacts,
     copy_shader_templates,
     local_size_x_for_shader_file,
@@ -99,6 +101,171 @@ def _fixture() -> tuple[dict[str, object], dict[str, object]]:
         }
     }
     return circuit, tensor_index
+
+
+def _mixed_norm_rope_fixture():
+    rope = {
+        "position_source": "stream_tick",
+        "position_offset": 0,
+        "theta": 160_000.0,
+        "rope_type": "yarn",
+        "scaling": {
+            "type": "yarn",
+            "factor": 16.0,
+            "correction_low": 15.0,
+            "correction_high": 25.0,
+            "attention_factor": 1.0,
+        },
+        "interleaved": True,
+        "rotary_width": 64,
+        "rotary_scope": "tail",
+        "head_width": 512,
+    }
+    query_norm = {
+        "id": "query_norm",
+        "op": "rms_norm_per_head_unscaled",
+        "inputs": ["query"],
+        "outputs": ["query_normed"],
+        "attrs": {"eps": 1e-6, "head_count": 64, "head_width": 512},
+    }
+    query_rope = {
+        "id": "query_rope",
+        "op": "rotary_position_embedding",
+        "inputs": ["query_normed"],
+        "outputs": ["query_positioned"],
+        "attrs": {**rope, "head_count": 64},
+    }
+    kv_norm = {
+        "id": "kv_norm",
+        "op": "rms_norm",
+        "inputs": ["kv"],
+        "outputs": ["kv_normed"],
+        "params": ["kv_norm_weight"],
+        "attrs": {"eps": 1e-6, "weight_offset": 0.0},
+    }
+    kv_rope = {
+        "id": "kv_rope",
+        "op": "rotary_position_embedding",
+        "inputs": ["kv_normed"],
+        "outputs": ["kv_positioned"],
+        "attrs": {
+            **rope,
+            "head_count": 1,
+            "activation_quantization": {
+                "format": "fp8_e4m3",
+                "scale_format": "e8m0_power_of_two",
+                "block_columns": 64,
+                "scope": "non_rotary_dimensions",
+                "mode": "quantize_dequantize",
+            },
+        },
+    }
+    circuit = {
+        "parameters": {"refs": {"kv_norm_weight": {"tensor": "kv.norm"}}}
+    }
+    tensor_index = {
+        "tensors": {
+            "kv.norm": {
+                "dtype": "BF16",
+                "shape": [512],
+                "layout": ROW_MAJOR_LAYOUT,
+            }
+        }
+    }
+    target = {
+        "devices": [
+            {
+                "shader_features": ["shader_float8", "shader_int8"],
+                "subgroup_operations": ["arithmetic"],
+                "subgroup_compute_supported": True,
+                "max_compute_work_group_invocations": 1024,
+                "max_compute_work_group_size_x": 1024,
+            }
+        ]
+    }
+    return circuit, (query_norm, query_rope), (kv_norm, kv_rope), tensor_index, target
+
+
+def test_mixed_norm_rope_fusion_requires_exact_graph_and_device_contract() -> None:
+    circuit, query, key_value, tensor_index, target = _mixed_norm_rope_fixture()
+
+    assert can_fuse_parallel_mixed_head_norm_rope(
+        circuit,
+        query,
+        key_value,
+        tensor_index,
+        compiler_target=target,
+    )
+
+    unsupported = deepcopy(target)
+    unsupported["devices"][0]["shader_features"].remove("shader_float8")
+    assert not can_fuse_parallel_mixed_head_norm_rope(
+        circuit,
+        query,
+        key_value,
+        tensor_index,
+        compiler_target=unsupported,
+    )
+
+    mismatched = deepcopy(key_value)
+    mismatched[1]["attrs"]["theta"] = 10_000.0
+    assert not can_fuse_parallel_mixed_head_norm_rope(
+        circuit,
+        query,
+        mismatched,
+        tensor_index,
+        compiler_target=target,
+    )
+
+
+def test_mixed_norm_rope_transaction_renders_scalar_and_temporal_spirv(
+    tmp_path: Path,
+) -> None:
+    circuit, query, key_value, tensor_index, target = _mixed_norm_rope_fixture()
+    circuit["nodes"] = [query[0], query[1], key_value[0], key_value[1]]
+    optimized = optimize_circuit_for_vulkan(
+        circuit,
+        can_fuse_parallel_mixed_head_norm_rope=lambda found_query, found_kv: (
+            can_fuse_parallel_mixed_head_norm_rope(
+                circuit,
+                found_query,
+                found_kv,
+                tensor_index,
+                compiler_target=target,
+            )
+        ),
+    )
+    node = optimized["nodes"][0]
+
+    scalar = shader_file_for_node(
+        optimized,
+        node,
+        tensor_index,
+        {"hidden_size": 4096},
+    )
+    assert scalar == (
+        "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_spow2_b64_"
+        "bf16_h64_1_d512_r64_qeps1e-06_keps1e-06_koffset0_theta160000_"
+        "yarn_f16_lo15_hi25_a1_interleaved_tail__sc5.comp"
+    )
+    assert workgroup_count_x_for_node(optimized, node, tensor_index) == 65
+    temporal = causal_scan_batch_shader_file(scalar)
+    assert temporal == scalar.replace("_bf16_", "_temporal_bf16_").replace(
+        "__sc5.comp", ".comp"
+    )
+    assert causal_scan_workgroup_count_x(scalar) == 65
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {scalar, temporal})
+    scalar_source = (tmp_path / scalar).read_text()
+    temporal_source = (tmp_path / temporal).read_text()
+    assert "binding = 5) readonly buffer StreamControl" in scalar_source
+    assert "binding = 5) readonly buffer BatchControl" in temporal_source
+    assert "if (branch == 1u)" in scalar_source
+    assert "quantize_dequantize_e4m3" in scalar_source
+    assert "{{" not in scalar_source
+    assert "{{" not in temporal_source
+    compile_shader_artifacts(tmp_path)
 
 
 def test_compiles_latent_attention_primitives(tmp_path: Path) -> None:

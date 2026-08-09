@@ -42,6 +42,9 @@ EXACT_REWRITE_CONTRACTS = {
     "multiply_rolling_depthwise": "rolling_depthwise_exact_bf16.v1",
     "multiply_rolling_depthwise_gate": "rolling_depthwise_gate_exact_bf16.v1",
     "parallel_head_norm_rope_2way": "parallel_head_norm_rope_exact_bf16.v1",
+    "parallel_mixed_head_norm_rope_2way": (
+        "parallel_mixed_head_norm_rope_exact_bf16.v1"
+    ),
     "parallel_linear_2way": "parallel_linear_exact_bf16.v1",
     "parallel_linear_3way": "parallel_linear_exact_bf16.v1",
     "mixed_parallel_linear_4way": "parallel_linear_4way_exact.v1",
@@ -115,6 +118,14 @@ EXACT_REWRITE_SOURCE_OPS = {
             "rms_norm_per_head",
             "rotary_position_embedding",
             "rms_norm_per_head",
+            "rotary_position_embedding",
+        )
+    },
+    "parallel_mixed_head_norm_rope_2way": {
+        (
+            "rms_norm_per_head_unscaled",
+            "rotary_position_embedding",
+            "rms_norm",
             "rotary_position_embedding",
         )
     },
@@ -1182,6 +1193,27 @@ def _validate_exact_rewrite_semantics(
                     "norm": deepcopy(region[2].get("attrs", {})),
                     "rope": deepcopy(region[3].get("attrs", {})),
                 },
+            ],
+            "intermediate_rounding": "BF16",
+        }
+    elif op == "parallel_mixed_head_norm_rope_2way":
+        expected_attrs = {
+            "compiled_from": source_ids,
+            "branches": [
+                {
+                    "norm_op": region[0]["op"],
+                    "norm": deepcopy(region[0].get("attrs", {})),
+                    "rope": deepcopy(region[1].get("attrs", {})),
+                },
+                {
+                    "norm_op": region[2]["op"],
+                    "norm": deepcopy(region[2].get("attrs", {})),
+                    "rope": deepcopy(region[3].get("attrs", {})),
+                },
+            ],
+            "branch_parameter_counts": [
+                len(region[0].get("params", [])),
+                len(region[2].get("params", [])),
             ],
             "intermediate_rounding": "BF16",
         }

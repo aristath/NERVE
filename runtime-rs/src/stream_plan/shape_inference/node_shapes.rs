@@ -168,10 +168,12 @@ fn infer_node_output_shapes(
             Ok(vec![value_shape])
         }
         "parallel_head_norm_rope_2way"
+        | "parallel_mixed_head_norm_rope_2way"
         | "parallel_head_norm_rope_2way_codebook_u8"
         | "parallel_head_norm_rope_2way_embedded_parameters" => {
             let expected_parameters = match node.op.as_str() {
                 "parallel_head_norm_rope_2way" => 2,
+                "parallel_mixed_head_norm_rope_2way" => 1,
                 "parallel_head_norm_rope_2way_codebook_u8" => 3,
                 "parallel_head_norm_rope_2way_embedded_parameters" => 0,
                 _ => unreachable!("matched head-normalization operation"),

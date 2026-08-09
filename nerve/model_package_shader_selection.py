@@ -1354,6 +1354,98 @@ def shader_file_for_node(
             f"x{node['attrs']['head_width']}"
             f"_eps{shader_float_token(float(node['attrs']['eps']))}.comp"
         )
+    if op == "parallel_mixed_head_norm_rope_2way":
+        branches = node.get("attrs", {}).get("branches", [])
+        if (
+            len(branches) != 2
+            or len(node.get("inputs", [])) != 2
+            or len(node.get("outputs", [])) != 2
+            or len(node.get("params", [])) != 1
+            or node.get("attrs", {}).get("branch_parameter_counts") != [0, 1]
+            or node.get("attrs", {}).get("intermediate_rounding") != "BF16"
+            or branches[0].get("norm_op") != "rms_norm_per_head_unscaled"
+            or branches[1].get("norm_op") != "rms_norm"
+        ):
+            raise ModelCompileError(
+                f"mixed parallel head-norm/rope node {node['id']!r} has invalid branch metadata"
+            )
+        query_norm = branches[0].get("norm", {})
+        query_rope = branches[0].get("rope", {})
+        key_value_norm = branches[1].get("norm", {})
+        key_value_rope = branches[1].get("rope", {})
+        quantization = key_value_rope.get("activation_quantization", {})
+        try:
+            query_heads = int(query_norm["head_count"])
+            key_value_heads = int(key_value_rope["head_count"])
+            head_width = int(query_norm["head_width"])
+            rotary_width = int(query_rope["rotary_width"])
+            query_eps = float(query_norm["eps"])
+            key_value_eps = float(key_value_norm["eps"])
+            key_value_offset = float(key_value_norm.get("weight_offset", 0.0))
+            block_columns = int(quantization["block_columns"])
+            scale_format = str(quantization["scale_format"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ModelCompileError(
+                f"mixed parallel head-norm/rope node {node['id']!r} has incomplete geometry"
+            ) from error
+        rope_fields = (
+            "position_source",
+            "position_offset",
+            "theta",
+            "rope_type",
+            "scaling",
+            "interleaved",
+            "rotary_width",
+            "rotary_scope",
+            "head_width",
+        )
+        parameter_id = node["params"][0]
+        if (
+            query_heads <= 0
+            or key_value_heads != 1
+            or head_width <= 0
+            or head_width % 2
+            or int(query_rope.get("head_count", 0)) != query_heads
+            or int(query_rope.get("head_width", 0)) != head_width
+            or int(key_value_rope.get("head_width", 0)) != head_width
+            or rotary_width <= 0
+            or rotary_width % 2
+            or rotary_width >= head_width
+            or any(query_rope.get(field) != key_value_rope.get(field) for field in rope_fields)
+            or query_rope.get("position_source") != "stream_tick"
+            or query_rope.get("rotary_scope") != "tail"
+            or query_rope.get("activation_quantization") is not None
+            or quantization.get("format") != "fp8_e4m3"
+            or scale_format not in {"f32_exact", "e8m0_power_of_two"}
+            or quantization.get("scope") != "non_rotary_dimensions"
+            or quantization.get("mode") != "quantize_dequantize"
+            or block_columns <= 0
+            or (head_width - rotary_width) % block_columns
+            or parameter_shape_for_id(circuit, parameter_id, tensor_index) != [head_width]
+            or parameter_dtype_for_id(circuit, parameter_id, tensor_index) != "BF16"
+            or parameter_layout_for_id(circuit, parameter_id, tensor_index)
+            != ROW_MAJOR_LAYOUT
+        ):
+            raise ModelCompileError(
+                f"mixed parallel head-norm/rope node {node['id']!r} has incompatible geometry"
+            )
+        rope_attrs = {
+            "theta": float(query_rope["theta"]),
+            "rope_type": str(query_rope.get("rope_type", "default")),
+            "interleaved": bool(query_rope["interleaved"]),
+            "scaling": query_rope.get("scaling"),
+        }
+        scale_token = "spow2" if scale_format == "e8m0_power_of_two" else "sexact"
+        binding = stream_control_binding_for_node(circuit, node)
+        return (
+            "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_"
+            f"{scale_token}_b{block_columns}_bf16_h{query_heads}_{key_value_heads}"
+            f"_d{head_width}_r{rotary_width}"
+            f"_qeps{shader_float_token(query_eps)}"
+            f"_keps{shader_float_token(key_value_eps)}"
+            f"_koffset{shader_float_token(key_value_offset)}"
+            f"_{rope_shader_suffix(rope_attrs)}_tail__sc{binding}.comp"
+        )
     if op == "parallel_head_norm_rope_2way":
         branches = node.get("attrs", {}).get("branches", [])
         if (
@@ -1914,9 +2006,13 @@ def workgroup_count_x_for_node(
     if node["op"] == "linear_split_recurrent_depthwise_gate":
         hidden_size = int(state_port(circuit, node["state_reads"][0])["shape"][1])
         return hidden_size // 2
-    if node["op"] == "parallel_head_norm_rope_2way":
+    if node["op"] in {
+        "parallel_head_norm_rope_2way",
+        "parallel_mixed_head_norm_rope_2way",
+    }:
         return sum(
-            int(branch["norm"]["head_count"]) for branch in node["attrs"]["branches"]
+            int(branch["norm"].get("head_count", branch["rope"]["head_count"]))
+            for branch in node["attrs"]["branches"]
         )
     if node["op"] == "mixed_parallel_linear_4way":
         output_sizes = [

@@ -601,6 +601,176 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
 
         self.assertEqual(circuit, optimized)
 
+    def test_fuses_mixed_query_and_kv_norm_rope_after_both_projections(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "query_projection",
+                    "op": "linear",
+                    "inputs": ["hidden"],
+                    "outputs": ["query_heads"],
+                    "params": ["query_weight"],
+                },
+                {
+                    "id": "query_norm",
+                    "op": "rms_norm_per_head_unscaled",
+                    "inputs": ["query_heads"],
+                    "outputs": ["query_normed"],
+                    "attrs": {"head_count": 64, "head_width": 512},
+                },
+                {
+                    "id": "query_rope",
+                    "op": "rotary_position_embedding",
+                    "inputs": ["query_normed"],
+                    "outputs": ["query_positioned"],
+                    "attrs": {"head_count": 64, "head_width": 512},
+                },
+                {
+                    "id": "kv_projection",
+                    "op": "linear",
+                    "inputs": ["hidden"],
+                    "outputs": ["kv_latent"],
+                    "params": ["kv_weight"],
+                },
+                {
+                    "id": "kv_norm",
+                    "op": "rms_norm",
+                    "inputs": ["kv_latent"],
+                    "outputs": ["kv_normed"],
+                    "params": ["kv_norm_weight"],
+                    "attrs": {"eps": 1e-6},
+                },
+                {
+                    "id": "kv_rope",
+                    "op": "rotary_position_embedding",
+                    "inputs": ["kv_normed"],
+                    "outputs": ["kv_positioned"],
+                    "attrs": {"head_count": 1, "head_width": 512},
+                },
+                {
+                    "id": "attention",
+                    "op": "indexed_sparse_attention",
+                    "inputs": ["query_positioned", "kv_positioned"],
+                    "outputs": ["attention_out"],
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_parallel_mixed_head_norm_rope=lambda query, kv: (
+                query[0]["op"] == "rms_norm_per_head_unscaled"
+                and kv[0]["op"] == "rms_norm"
+            ),
+        )
+
+        self.assertEqual(
+            [
+                "query_projection",
+                "kv_projection",
+                "query_norm__query_rope__kv_norm__kv_rope",
+                "attention",
+            ],
+            [node["id"] for node in optimized["nodes"]],
+        )
+        fused = optimized["nodes"][2]
+        self.assertEqual("parallel_mixed_head_norm_rope_2way", fused["op"])
+        self.assertEqual(["query_heads", "kv_latent"], fused["inputs"])
+        self.assertEqual(["query_positioned", "kv_positioned"], fused["outputs"])
+        self.assertEqual(["kv_norm_weight"], fused["params"])
+        self.assertEqual([0, 1], fused["attrs"]["branch_parameter_counts"])
+        self.assertEqual("BF16", fused["attrs"]["intermediate_rounding"])
+
+    def test_does_not_fuse_mixed_norm_rope_when_intermediate_is_shared(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "query_norm",
+                    "op": "rms_norm_per_head_unscaled",
+                    "inputs": ["query"],
+                    "outputs": ["query_normed"],
+                },
+                {
+                    "id": "query_extra",
+                    "op": "silu",
+                    "inputs": ["query_normed"],
+                    "outputs": ["extra"],
+                },
+                {
+                    "id": "query_rope",
+                    "op": "rotary_position_embedding",
+                    "inputs": ["query_normed"],
+                    "outputs": ["query_positioned"],
+                },
+                {
+                    "id": "kv_norm",
+                    "op": "rms_norm",
+                    "inputs": ["kv"],
+                    "outputs": ["kv_normed"],
+                    "params": ["kv_weight"],
+                },
+                {
+                    "id": "kv_rope",
+                    "op": "rotary_position_embedding",
+                    "inputs": ["kv_normed"],
+                    "outputs": ["kv_positioned"],
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_parallel_mixed_head_norm_rope=lambda _query, _kv: True,
+        )
+
+        self.assertEqual(circuit, optimized)
+
+    def test_does_not_move_mixed_norm_rope_output_after_an_early_consumer(
+        self,
+    ) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "query_norm",
+                    "op": "rms_norm_per_head_unscaled",
+                    "inputs": ["query"],
+                    "outputs": ["query_normed"],
+                },
+                {
+                    "id": "query_rope",
+                    "op": "rotary_position_embedding",
+                    "inputs": ["query_normed"],
+                    "outputs": ["query_positioned"],
+                },
+                {
+                    "id": "query_consumer",
+                    "op": "silu",
+                    "inputs": ["query_positioned"],
+                    "outputs": ["query_used"],
+                },
+                {
+                    "id": "kv_norm",
+                    "op": "rms_norm",
+                    "inputs": ["kv"],
+                    "outputs": ["kv_normed"],
+                    "params": ["kv_weight"],
+                },
+                {
+                    "id": "kv_rope",
+                    "op": "rotary_position_embedding",
+                    "inputs": ["kv_normed"],
+                    "outputs": ["kv_positioned"],
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_parallel_mixed_head_norm_rope=lambda _query, _kv: True,
+        )
+
+        self.assertEqual(circuit, optimized)
+
     def test_fuses_two_or_three_independent_linears_with_one_input(self) -> None:
         nodes = [
             {

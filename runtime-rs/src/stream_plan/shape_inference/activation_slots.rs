@@ -101,6 +101,45 @@ mod tests {
     }
 
     #[test]
+    fn mixed_head_norm_rope_transaction_preserves_both_branch_shapes() {
+        let signal = |id: &str, shape: Vec<usize>| PlannedSignal {
+            id: id.to_string(),
+            producer: SignalProducer::BoundaryInput,
+            consumers: Vec::new(),
+            shape: Some(shape),
+            element_bytes: Some(2),
+            storage: SignalStorage::Boundary,
+            is_boundary_output: false,
+        };
+        let signals = BTreeMap::from([
+            (
+                "query_heads".to_string(),
+                signal("query_heads", vec![64 * 512]),
+            ),
+            ("kv_latent".to_string(), signal("kv_latent", vec![512])),
+        ]);
+        let node = CircuitNode {
+            id: "mixed_norm_rope".to_string(),
+            op: "parallel_mixed_head_norm_rope_2way".to_string(),
+            inputs: vec!["query_heads".to_string(), "kv_latent".to_string()],
+            outputs: vec![
+                "query_positioned".to_string(),
+                "kv_positioned".to_string(),
+            ],
+            params: vec!["kv_norm_weight".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({}),
+        };
+
+        assert_eq!(
+            infer_node_output_shapes("layer", &node, &signals, &BTreeMap::new(), None)
+                .unwrap(),
+            vec![Some(vec![64 * 512]), Some(vec![512])]
+        );
+    }
+
+    #[test]
     fn package_tensor_index_rejects_sources_outside_the_package() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

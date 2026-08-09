@@ -1396,6 +1396,109 @@ def can_fuse_bf16_parallel_head_norm_rope(
     )
 
 
+def can_fuse_parallel_mixed_head_norm_rope(
+    circuit: Json,
+    query_branch: tuple[Json, Json],
+    key_value_branch: tuple[Json, Json],
+    tensor_index: Json,
+    *,
+    compiler_target: Json,
+) -> bool:
+    query_norm, query_rope = query_branch
+    key_value_norm, key_value_rope = key_value_branch
+    query_norm_attrs = query_norm.get("attrs", {})
+    query_rope_attrs = query_rope.get("attrs", {})
+    key_value_norm_attrs = key_value_norm.get("attrs", {})
+    key_value_rope_attrs = key_value_rope.get("attrs", {})
+    quantization = key_value_rope_attrs.get("activation_quantization")
+    devices = compiler_target.get("devices", [])
+    try:
+        query_heads = int(query_rope_attrs["head_count"])
+        key_value_heads = int(key_value_rope_attrs["head_count"])
+        query_head_width = int(query_rope_attrs["head_width"])
+        key_value_head_width = int(key_value_rope_attrs["head_width"])
+        rotary_width = int(query_rope_attrs["rotary_width"])
+        query_eps = float(query_norm_attrs["eps"])
+        key_value_eps = float(key_value_norm_attrs["eps"])
+        weight_offset = float(key_value_norm_attrs.get("weight_offset", 0.0))
+        block_columns = int(quantization["block_columns"])
+        norm_parameter = key_value_norm["params"][0]
+        norm_shape = parameter_shape_for_id(circuit, norm_parameter, tensor_index)
+        norm_dtype = parameter_dtype_for_id(circuit, norm_parameter, tensor_index)
+        norm_layout = parameter_layout_for_id(circuit, norm_parameter, tensor_index)
+    except (IndexError, KeyError, TypeError, ValueError):
+        return False
+    common_rope_fields = (
+        "position_source",
+        "position_offset",
+        "theta",
+        "rope_type",
+        "scaling",
+        "interleaved",
+        "rotary_width",
+        "rotary_scope",
+    )
+    return (
+        query_norm.get("op") == "rms_norm_per_head_unscaled"
+        and not query_norm.get("params")
+        and len(query_norm.get("inputs", [])) == 1
+        and len(query_norm.get("outputs", [])) == 1
+        and query_rope.get("inputs") == query_norm.get("outputs")
+        and query_rope.get("outputs")
+        and key_value_norm.get("op") == "rms_norm"
+        and len(key_value_norm.get("params", [])) == 1
+        and len(key_value_norm.get("inputs", [])) == 1
+        and len(key_value_norm.get("outputs", [])) == 1
+        and key_value_rope.get("inputs") == key_value_norm.get("outputs")
+        and len(key_value_rope.get("outputs", [])) == 1
+        and query_heads > 0
+        and key_value_heads == 1
+        and query_head_width == key_value_head_width
+        and query_head_width > 0
+        and query_head_width % 2 == 0
+        and int(query_norm_attrs.get("head_count", 0)) == query_heads
+        and int(query_norm_attrs.get("head_width", 0)) == query_head_width
+        and rotary_width > 0
+        and rotary_width % 2 == 0
+        and rotary_width <= query_head_width
+        and all(
+            query_rope_attrs.get(field) == key_value_rope_attrs.get(field)
+            for field in common_rope_fields
+        )
+        and query_rope_attrs.get("position_source") == "stream_tick"
+        and str(query_rope_attrs.get("rope_type", "default")) != "proportional"
+        and query_rope_attrs.get("rotary_scope", "prefix") == "tail"
+        and query_rope_attrs.get("activation_quantization") is None
+        and isinstance(quantization, dict)
+        and quantization.get("format") == "fp8_e4m3"
+        and quantization.get("scale_format")
+        in {"f32_exact", "e8m0_power_of_two"}
+        and quantization.get("scope") == "non_rotary_dimensions"
+        and quantization.get("mode") == "quantize_dequantize"
+        and block_columns > 0
+        and (query_head_width - rotary_width) > 0
+        and (query_head_width - rotary_width) % block_columns == 0
+        and math.isfinite(query_eps)
+        and query_eps > 0.0
+        and math.isfinite(key_value_eps)
+        and key_value_eps > 0.0
+        and math.isfinite(weight_offset)
+        and list(map(int, norm_shape)) == [key_value_head_width]
+        and norm_dtype == "BF16"
+        and norm_layout == ROW_MAJOR_LAYOUT
+        and bool(devices)
+        and all(
+            {"shader_float8", "shader_int8"}
+            <= set(device.get("shader_features", []))
+            and "arithmetic" in set(device.get("subgroup_operations", []))
+            and bool(device.get("subgroup_compute_supported"))
+            and int(device.get("max_compute_work_group_invocations", 0)) >= 64
+            and int(device.get("max_compute_work_group_size_x", 0)) >= 64
+            for device in devices
+        )
+    )
+
+
 def can_fuse_bf16_multiply_rolling_depthwise(
     circuit: Json,
     multiply: Json,

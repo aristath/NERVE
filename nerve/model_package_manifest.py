@@ -564,6 +564,15 @@ def build_vulkan_resident_package_manifest(
             can_fuse_parallel_head_norm_rope=lambda branches, circuit=circuit: (
                 can_fuse_bf16_parallel_head_norm_rope(circuit, branches, tensor_index)
             ),
+            can_fuse_parallel_mixed_head_norm_rope=lambda query, key_value, circuit=circuit: (
+                can_fuse_parallel_mixed_head_norm_rope(
+                    circuit,
+                    query,
+                    key_value,
+                    tensor_index,
+                    compiler_target=compiler_target,
+                )
+            ),
             can_fuse_multiply_rolling_depthwise=lambda multiply, rolling, depthwise, circuit=circuit: (
                 can_fuse_bf16_multiply_rolling_depthwise(
                     circuit, multiply, rolling, depthwise, tensor_index

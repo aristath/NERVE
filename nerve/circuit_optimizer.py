@@ -25,6 +25,9 @@ def optimize_circuit_for_vulkan(
     can_fuse_parallel_head_norm_rope: (
         Callable[[list[tuple[Json, Json]]], bool] | None
     ) = None,
+    can_fuse_parallel_mixed_head_norm_rope: (
+        Callable[[tuple[Json, Json], tuple[Json, Json]], bool] | None
+    ) = None,
     can_fuse_multiply_rolling_depthwise: (
         Callable[[Json, Json, Json], bool] | None
     ) = None,
@@ -53,6 +56,9 @@ def optimize_circuit_for_vulkan(
     nodes = _fuse_hyper_connection_post_pre_regions(nodes)
     nodes = _fuse_parallel_head_norm_rope_regions(
         nodes, can_fuse_parallel_head_norm_rope
+    )
+    nodes = _fuse_parallel_mixed_head_norm_rope_regions(
+        nodes, can_fuse_parallel_mixed_head_norm_rope
     )
     consumer_counts = Counter(
         signal
@@ -1337,6 +1343,128 @@ def _fuse_parallel_head_norm_rope_regions(
             }
         )
 
+    return compiled
+
+
+def _fuse_parallel_mixed_head_norm_rope_regions(
+    nodes: list[Json],
+    can_fuse: Callable[[tuple[Json, Json], tuple[Json, Json]], bool] | None,
+) -> list[Json]:
+    """Fuse independent unscaled-query and weighted-KV norm/RoPE branches.
+
+    The two branches need not be adjacent: their projections commonly appear
+    between the query and KV normalization nodes. The fused transaction is
+    emitted only after both branch inputs have been produced and only when all
+    discarded intermediates have exactly one consumer.
+    """
+    if can_fuse is None:
+        return nodes
+
+    consumers: dict[str, list[tuple[int, Json]]] = defaultdict(list)
+    for index, node in enumerate(nodes):
+        for signal in node.get("inputs", []):
+            consumers[signal].append((index, node))
+
+    branches: list[tuple[int, int, Json, Json]] = []
+    for norm_index, norm in enumerate(nodes):
+        norm_outputs = norm.get("outputs", [])
+        if (
+            norm.get("op") not in {"rms_norm", "rms_norm_per_head_unscaled"}
+            or len(norm.get("inputs", [])) != 1
+            or len(norm_outputs) != 1
+            or norm.get("state_reads")
+            or norm.get("state_writes")
+        ):
+            continue
+        output_consumers = consumers.get(norm_outputs[0], [])
+        if len(output_consumers) != 1:
+            continue
+        rope_index, rope = output_consumers[0]
+        if (
+            rope_index <= norm_index
+            or rope.get("op") != "rotary_position_embedding"
+            or rope.get("inputs") != norm_outputs
+            or len(rope.get("outputs", [])) != 1
+            or rope.get("params")
+            or rope.get("state_reads")
+            or rope.get("state_writes")
+        ):
+            continue
+        branches.append((norm_index, rope_index, norm, rope))
+
+    consumed: set[int] = set()
+    insertions: dict[int, Json] = {}
+    for query in branches:
+        if query[0] in consumed or query[2].get("op") != "rms_norm_per_head_unscaled":
+            continue
+        for key_value in branches:
+            if (
+                key_value[0] in consumed
+                or key_value[2].get("op") != "rms_norm"
+                or set(query[:2]) & set(key_value[:2])
+                or not can_fuse((query[2], query[3]), (key_value[2], key_value[3]))
+            ):
+                continue
+            insertion_index = max(query[1], key_value[1])
+            branch_outputs = (
+                query[3]["outputs"][0],
+                key_value[3]["outputs"][0],
+            )
+            if any(
+                consumer_index <= insertion_index
+                for output in branch_outputs
+                for consumer_index, _consumer in consumers.get(output, [])
+            ):
+                continue
+            attrs = {
+                "compiled_from": [
+                    *_source_node_ids(query[2]),
+                    *_source_node_ids(query[3]),
+                    *_source_node_ids(key_value[2]),
+                    *_source_node_ids(key_value[3]),
+                ],
+                "branches": [
+                    {
+                        "norm_op": query[2]["op"],
+                        "norm": deepcopy(query[2].get("attrs", {})),
+                        "rope": deepcopy(query[3].get("attrs", {})),
+                    },
+                    {
+                        "norm_op": key_value[2]["op"],
+                        "norm": deepcopy(key_value[2].get("attrs", {})),
+                        "rope": deepcopy(key_value[3].get("attrs", {})),
+                    },
+                ],
+                "branch_parameter_counts": [
+                    len(query[2].get("params", [])),
+                    len(key_value[2].get("params", [])),
+                ],
+                "intermediate_rounding": "BF16",
+                "output_element_bytes": [2, 2],
+            }
+            insertions[insertion_index] = {
+                "id": "__".join(
+                    node["id"]
+                    for node in (query[2], query[3], key_value[2], key_value[3])
+                ),
+                "op": "parallel_mixed_head_norm_rope_2way",
+                "inputs": [query[2]["inputs"][0], key_value[2]["inputs"][0]],
+                "outputs": [query[3]["outputs"][0], key_value[3]["outputs"][0]],
+                "params": [
+                    *deepcopy(query[2].get("params", [])),
+                    *deepcopy(key_value[2].get("params", [])),
+                ],
+                "attrs": attrs,
+            }
+            consumed.update({query[0], query[1], key_value[0], key_value[1]})
+            break
+
+    compiled: list[Json] = []
+    for index, node in enumerate(nodes):
+        if index in insertions:
+            compiled.append(insertions[index])
+        if index not in consumed:
+            compiled.append(deepcopy(node))
     return compiled
 
 

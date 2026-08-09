@@ -377,6 +377,11 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
         ) or reads_static_state_snapshot
         source_stream_control = re.search(r"__sc(\d+)\.comp$", shader_file)
         temporal_binding = (
+            5
+            if causal_scan_shader.startswith(
+                "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_temporal_"
+            )
+            else
             6
             if causal_scan_shader.startswith("parallel_head_norm_rope_2way_temporal_")
             else 2
@@ -831,6 +836,19 @@ def causal_scan_batch_shader_file(shader_file: str) -> str | None:
     ):
         return shader_file.replace("gated_delta_step_", "gated_delta_scan_", 1)
     if re.fullmatch(
+        r"parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_(?:spow2|sexact)_b\d+_"
+        r"bf16_h\d+_\d+_d\d+_r\d+_qeps[0-9eE+.-]+_keps[0-9eE+.-]+"
+        r"_koffset[0-9eE+.-]+_theta[0-9eE+.-]+"
+        r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
+        r"_(?:half|interleaved)_tail__sc\d+\.comp",
+        shader_file,
+    ):
+        return re.sub(
+            r"__sc\d+\.comp$",
+            ".comp",
+            shader_file.replace("_bf16_", "_temporal_bf16_", 1),
+        )
+    if re.fullmatch(
         r"parallel_head_norm_rope_2way_bf16_h\d+_\d+_d\d+_r\d+"
         r"_eps[0-9eE+.-]+_offset[0-9eE+.-]+_theta[0-9eE+.-]+"
         r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
@@ -946,6 +964,18 @@ def causal_scan_workgroup_count_x(shader_file: str) -> int:
     )
     if gated_delta is not None:
         return int(gated_delta.group(1))
+    mixed_head_norm_rope = re.fullmatch(
+        r"parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_(?:spow2|sexact)_b\d+_"
+        r"bf16_h(\d+)_(\d+)_d\d+_r\d+_qeps[0-9eE+.-]+_keps[0-9eE+.-]+"
+        r"_koffset[0-9eE+.-]+_theta[0-9eE+.-]+"
+        r"(?:_yarn_f[0-9eE+.-]+_lo[0-9eE+.-]+_hi[0-9eE+.-]+_a[0-9eE+.-]+)?"
+        r"_(?:half|interleaved)_tail__sc\d+\.comp",
+        shader_file,
+    )
+    if mixed_head_norm_rope is not None:
+        return int(mixed_head_norm_rope.group(1)) + int(
+            mixed_head_norm_rope.group(2)
+        )
     head_norm_rope = re.fullmatch(
         r"parallel_head_norm_rope_2way_bf16_h(\d+)_(\d+)_d\d+_r\d+"
         r"_eps[0-9eE+.-]+_offset[0-9eE+.-]+_theta[0-9eE+.-]+"

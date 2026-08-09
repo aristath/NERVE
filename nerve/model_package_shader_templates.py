@@ -3519,6 +3519,96 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             ),
         ),
         (
+            r"parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_(spow2|sexact)_b(\d+)_"
+            r"temporal_bf16_h(\d+)_(\d+)_d(\d+)_r(\d+)_qeps([0-9eE+.-]+)"
+            r"_keps([0-9eE+.-]+)_koffset([0-9eE+.-]+)_theta([0-9eE+.-]+)"
+            r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
+            r"_a([0-9eE+.-]+)_(half|interleaved)_tail\.comp",
+            "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_temporal_bf16.comp.template",
+            (
+                "SCALE_FORMAT",
+                "QUANT_BLOCK_COLUMNS",
+                "QUERY_HEADS",
+                "KEY_VALUE_HEADS",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "QUERY_NORM_EPS",
+                "KEY_VALUE_NORM_EPS",
+                "KEY_VALUE_WEIGHT_OFFSET",
+                "ROPE_THETA",
+                "ROPE_FACTOR",
+                "ROPE_CORRECTION_LOW",
+                "ROPE_CORRECTION_HIGH",
+                "ROPE_ATTENTION_FACTOR",
+                "ROPE_LAYOUT",
+            ),
+        ),
+        (
+            r"parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_(spow2|sexact)_b(\d+)_"
+            r"temporal_bf16_h(\d+)_(\d+)_d(\d+)_r(\d+)_qeps([0-9eE+.-]+)"
+            r"_keps([0-9eE+.-]+)_koffset([0-9eE+.-]+)_theta([0-9eE+.-]+)"
+            r"_(half|interleaved)_tail\.comp",
+            "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_temporal_bf16.comp.template",
+            (
+                "SCALE_FORMAT",
+                "QUANT_BLOCK_COLUMNS",
+                "QUERY_HEADS",
+                "KEY_VALUE_HEADS",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "QUERY_NORM_EPS",
+                "KEY_VALUE_NORM_EPS",
+                "KEY_VALUE_WEIGHT_OFFSET",
+                "ROPE_THETA",
+                "ROPE_LAYOUT",
+            ),
+        ),
+        (
+            r"parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_(spow2|sexact)_b(\d+)_"
+            r"bf16_h(\d+)_(\d+)_d(\d+)_r(\d+)_qeps([0-9eE+.-]+)"
+            r"_keps([0-9eE+.-]+)_koffset([0-9eE+.-]+)_theta([0-9eE+.-]+)"
+            r"_yarn_f([0-9eE+.-]+)_lo([0-9eE+.-]+)_hi([0-9eE+.-]+)"
+            r"_a([0-9eE+.-]+)_(half|interleaved)_tail\.comp",
+            "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_bf16.comp.template",
+            (
+                "SCALE_FORMAT",
+                "QUANT_BLOCK_COLUMNS",
+                "QUERY_HEADS",
+                "KEY_VALUE_HEADS",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "QUERY_NORM_EPS",
+                "KEY_VALUE_NORM_EPS",
+                "KEY_VALUE_WEIGHT_OFFSET",
+                "ROPE_THETA",
+                "ROPE_FACTOR",
+                "ROPE_CORRECTION_LOW",
+                "ROPE_CORRECTION_HIGH",
+                "ROPE_ATTENTION_FACTOR",
+                "ROPE_LAYOUT",
+            ),
+        ),
+        (
+            r"parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_(spow2|sexact)_b(\d+)_"
+            r"bf16_h(\d+)_(\d+)_d(\d+)_r(\d+)_qeps([0-9eE+.-]+)"
+            r"_keps([0-9eE+.-]+)_koffset([0-9eE+.-]+)_theta([0-9eE+.-]+)"
+            r"_(half|interleaved)_tail\.comp",
+            "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_bf16.comp.template",
+            (
+                "SCALE_FORMAT",
+                "QUANT_BLOCK_COLUMNS",
+                "QUERY_HEADS",
+                "KEY_VALUE_HEADS",
+                "HEAD_WIDTH",
+                "ROTARY_WIDTH",
+                "QUERY_NORM_EPS",
+                "KEY_VALUE_NORM_EPS",
+                "KEY_VALUE_WEIGHT_OFFSET",
+                "ROPE_THETA",
+                "ROPE_LAYOUT",
+            ),
+        ),
+        (
             r"parallel_head_norm_rope_2way_bf16_h(\d+)_(\d+)_d(\d+)_r(\d+)"
             r"_eps([0-9eE+.-]+)_offset([0-9eE+.-]+)_theta([0-9eE+.-]+)"
             r"_(half|interleaved|proportional)\.comp",
@@ -3885,6 +3975,8 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                         in {
                             "rotary_qdq_fp8_e4m3_bf16.comp.template",
                             "rotary_qdq_fp8_e4m3_temporal_bf16.comp.template",
+                            "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_bf16.comp.template",
+                            "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_temporal_bf16.comp.template",
                         }
                         else "block_max"
                     ),
@@ -3946,6 +4038,8 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "rotary_qdq_fp8_e4m3_bf16.comp.template",
                 "rotary_qdq_fp8_e4m3_temporal_bf16.comp.template",
                 "rotary_temporal_bf16.comp.template",
+                "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_bf16.comp.template",
+                "parallel_mixed_head_norm_rope_2way_qdq_fp8_e4m3_temporal_bf16.comp.template",
             }:
                 replacements["POSITION_OFFSET"] = (
                     replacements.get("POSITION_OFFSET") or "0"
