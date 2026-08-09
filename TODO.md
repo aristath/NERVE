@@ -343,6 +343,26 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   tests, and compiled package were removed; do not move a local conversion into
   a global representation pass unless multiple consumers amortize that pass.
 
+- A graph- and capability-discovered mixed normalization/RoPE transaction now
+  combines the independent unscaled query-head branch and weighted, exact-FP8-QDQ
+  key/value branch without materializing their BF16 intermediates. The compiler
+  contracts 43 four-node regions into 43 transactions and reduces the DeepSeek
+  stream from 1,474 to 1,345 dispatches per pass without a model-name or layer-index
+  branch. Discovery refuses shared intermediates, mismatched numerical contracts,
+  unsupported targets, and any graph whose earlier consumer would be moved behind
+  the transaction. After three complete discarded conversations, the measured
+  fourth conversation reached 8.1540 decode and 8.3784 prefill tok/s versus the
+  matched current package's 7.9570/7.8618. All five response digests were identical,
+  recall was correct, and the truth conversation recorded 1,149,648 resident hits
+  with zero loads, misses, evictions, reloads, transfers, or residency blocking.
+  Qwen3.6-35B-A3B passed at 72.0300 decode and 148.8120 prefill tok/s versus
+  71.4898/140.1718, while Qwen3.5-9B remained within run variance at 48.7338 decode
+  and 141.0704 prefill tok/s versus 48.7954/141.5648; every response digest matched.
+  All selected GPUs restored their exact pre-run reservations. Retain the
+  transaction as a universal compiler building block, but keep 8.4228 decode tok/s
+  as the DeepSeek acceptance high-water mark until an equivalent complete gate
+  exceeds it.
+
 ## Work queue
 
 1. Optimize the hottest refined DeepSeek device kernels without changing model
