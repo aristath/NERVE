@@ -101,18 +101,6 @@ fn demand_feedback_requires_one_unambiguous_miss_checkpoint() {
 }
 
 #[test]
-fn demand_feedback_never_commits_an_attempt_that_resolved_a_residency_checkpoint() {
-    assert_eq!(
-        demand_feedback_attempt_completion(false),
-        VulkanDemandFeedbackAttemptCompletion::Commit
-    );
-    assert_eq!(
-        demand_feedback_attempt_completion(true),
-        VulkanDemandFeedbackAttemptCompletion::RestoreBaselineAndReplay
-    );
-}
-
-#[test]
 fn demand_feedback_pipeline_predicate_skips_only_fully_resident_queue_scans() {
     assert!(!demand_feedback_pipeline_has_pending_miss([
         ("gpu0", 1),
@@ -398,7 +386,7 @@ fn demand_feedback_resume_rejects_an_independent_parallel_branch() {
 }
 
 #[test]
-fn demand_feedback_continuation_never_replays_completed_lanes() {
+fn demand_feedback_commits_the_causal_prefix_and_resumes_only_the_uncommitted_suffix() {
     assert_eq!(
         demand_feedback_continuation_lanes(8, 3)
             .unwrap()
@@ -413,6 +401,23 @@ fn demand_feedback_continuation_never_replays_completed_lanes() {
     );
     assert!(demand_feedback_continuation_lanes(8, 8).is_err());
     assert!(demand_feedback_continuation_lanes(0, 0).is_err());
+}
+
+#[test]
+fn disjoint_demand_faults_execute_every_feedback_lane_exactly_once() {
+    // Lanes 0..3 completed before the first fault. Its continuation completed
+    // lanes 3..5 before a second, disjoint fault. The final continuation must
+    // begin at lane 5: replaying either earlier range would duplicate sampler
+    // and recurrent-state mutations that are already causally committed.
+    let executed = (0..3)
+        .chain(3..5)
+        .chain(demand_feedback_continuation_lanes(8, 5).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(executed, (0..8).collect::<Vec<_>>());
+    assert_eq!(
+        executed.iter().copied().collect::<BTreeSet<_>>().len(),
+        executed.len()
+    );
 }
 
 #[test]

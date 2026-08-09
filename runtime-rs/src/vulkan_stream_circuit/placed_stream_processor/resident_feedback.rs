@@ -327,12 +327,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 template_catalog,
             );
         };
-        demand
-            .capture_window_baseline(&self.device_slices)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        self.sampler
-            .capture_token_state()
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
         let attempt = (|| {
             demand
                 .reset_pipeline_predicate()
@@ -357,7 +351,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             let mut resolved_resource_count = 0usize;
             let mut aggregate_transport_stats = VulkanPlacedEdgeTransportStats::default();
             let mut prepared_execution_guards = None;
-            let mut requires_commit_replay = false;
             loop {
                 let execution_guards = match prepared_execution_guards.take() {
                     Some(guards) => guards,
@@ -398,33 +391,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     VulkanResidentPlacedTokenTickTail::Sample.sequence_variant(),
                 )?
                 else {
-                    if demand_feedback_attempt_completion(requires_commit_replay)
-                        == VulkanDemandFeedbackAttemptCompletion::RestoreBaselineAndReplay
-                    {
-                        // A faulting feedback traversal is a residency-discovery
-                        // transaction, never a committed token execution. Its
-                        // causal continuations load every demanded resource
-                        // without replaying the already-completed graph prefix,
-                        // then one clean traversal commits from the captured
-                        // model and sampler baseline.
-                        self.rollback_demand_feedback_attempt(
-                            demand,
-                            input_token_id,
-                            start_stream_tick,
-                        )?;
-                        demand.reset_pipeline_predicate().map_err(
-                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
-                        )?;
-                        mounted = self.mount_demand_resident_feedback_attempt(
-                            devices,
-                            start_stream_tick,
-                            tick_count,
-                            stop_token_ids,
-                        )?;
-                        prepared_execution_guards = None;
-                        requires_commit_replay = false;
-                        continue;
-                    }
+                    // Every miss gate stops before the first unavailable
+                    // resource is consumed, while the mounted activation,
+                    // state, sampler, and timeline buffers retain the exact
+                    // completed causal prefix. A continuation therefore
+                    // completes the same transaction; replaying from a copied
+                    // baseline would execute valid work twice and would put a
+                    // full-state copy on every all-hit token.
                     mounted.pending.transport_stats = aggregate_transport_stats;
                     mounted.pending.demand_resolved_checkpoints =
                         resolved_checkpoints.keys().copied().collect();
@@ -451,7 +424,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         )),
                     ));
                 }
-                requires_commit_replay = true;
                 let resume = self.demand_feedback_tick_resume(checkpoint)?;
                 demand
                     .reset_pipeline_predicate()
@@ -471,15 +443,10 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         match attempt {
             Ok(pending) => Ok(pending),
             Err(error) => {
-                if let Err(rollback_error) = self.rollback_demand_feedback_attempt(
-                    demand,
-                    input_token_id,
-                    start_stream_tick,
-                )
-                {
+                if let Err(abort_error) = self.abort_demand_feedback_attempt() {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                         VulkanError(format!(
-                            "demand feedback failed: {error}; transaction rollback also failed: {rollback_error}"
+                            "demand feedback failed: {error}; transaction abort also failed: {abort_error}"
                         )),
                     ));
                 }
@@ -652,9 +619,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 continue;
             }
             // Imported device-local views share storage, not host-write
-            // visibility. Demand rollback is a host control boundary, so each
-            // physical device view must be explicitly restored before its
-            // queue can begin the retry. Shared-host aliases are one mapped
+            // visibility. Initial feedback control is a host boundary, so each
+            // physical device view must be explicitly initialized before its
+            // queue begins the window. Shared-host aliases are one mapped
             // allocation and need only one write.
             buffer
                 .write_bytes(&bytes)
@@ -664,17 +631,14 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         Ok(())
     }
 
-    fn rollback_demand_feedback_attempt(
+    fn abort_demand_feedback_attempt(
         &self,
-        demand: &VulkanResidentDemandFeedbackState,
-        input_token_id: u32,
-        start_stream_tick: u64,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         self.resident_feedback_loop
             .as_ref()
             .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                    "demand feedback rollback has no mounted feedback loop".to_string(),
+                    "demand feedback abort has no mounted feedback loop".to_string(),
                 ))
             })?
             .control
@@ -687,18 +651,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         {
             feedback_synchronization.discard_aborted_turns();
         }
-        demand
-            .restore_window_baseline(&self.device_slices)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        self.sampler
-            .restore_token_state()
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
-        // A miss may be discovered after earlier lanes in the same speculative
-        // feedback window have already sampled tokens. Those lanes advance the
-        // device-owned stream tick as well as the token. Rolling back only the
-        // token would make the scalar retry execute at a future position and
-        // permanently corrupt every position-dependent state buffer.
-        self.prepare_resident_feedback_initial_control(input_token_id, start_stream_tick)
+        Ok(())
     }
 
     fn submit_resident_feedback_attempt(

@@ -1,6 +1,5 @@
 struct VulkanResidentDemandFeedbackState {
     predicates_by_device: BTreeMap<String, Arc<VulkanResidentBuffer>>,
-    state_transactions: Vec<VulkanResidentStateTransactionBank>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -25,22 +24,6 @@ struct VulkanPlacedDemandFeedbackTickResume {
 struct VulkanDemandFeedbackResumePlan {
     schedule_start_turn_index: usize,
     next_stage_indices: Vec<usize>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VulkanDemandFeedbackAttemptCompletion {
-    Commit,
-    RestoreBaselineAndReplay,
-}
-
-fn demand_feedback_attempt_completion(
-    resolved_checkpoint_since_baseline: bool,
-) -> VulkanDemandFeedbackAttemptCompletion {
-    if resolved_checkpoint_since_baseline {
-        VulkanDemandFeedbackAttemptCompletion::RestoreBaselineAndReplay
-    } else {
-        VulkanDemandFeedbackAttemptCompletion::Commit
-    }
 }
 
 fn demand_feedback_pipeline_has_pending_miss<'a>(
@@ -497,15 +480,10 @@ fn write_shared_device_predicate_views<'a>(
 }
 
 impl VulkanResidentDemandFeedbackState {
-    fn new<'a, F, E>(
+    fn new(
         predicates_by_device: BTreeMap<String, Arc<VulkanResidentBuffer>>,
         device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
-        device_for: &F,
-    ) -> Result<Self, VulkanError>
-    where
-        F: Fn(&str) -> Result<&'a VulkanComputeDevice, E>,
-        E: Display,
-    {
+    ) -> Result<Self, VulkanError> {
         if predicates_by_device.len() != device_slices.len()
             || device_slices
                 .iter()
@@ -515,22 +493,6 @@ impl VulkanResidentDemandFeedbackState {
                 "demand feedback predicates do not cover every placed device".to_string(),
             ));
         }
-        let state_transactions = device_slices
-            .iter()
-            .map(|slice| {
-                let device = device_for(&slice.device_id).map_err(|error| {
-                    VulkanError(format!(
-                        "demand feedback transaction device {:?} resolution failed: {error}",
-                        slice.device_id
-                    ))
-                })?;
-                VulkanResidentStateTransactionBank::new_transactional(
-                    device,
-                    &slice.mounted.buffers,
-                    1,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let checkpoint_count_per_tick = device_slices
             .iter()
             .flat_map(|slice| &slice.resident_execution_plan.dispatch_segments)
@@ -547,7 +509,6 @@ impl VulkanResidentDemandFeedbackState {
         }
         Ok(Self {
             predicates_by_device,
-            state_transactions,
         })
     }
 
@@ -595,45 +556,6 @@ impl VulkanResidentDemandFeedbackState {
                     .flat_map(VulkanDemandResidencySegment::resource_domain_counts)
             }),
         )
-    }
-
-    fn capture_window_baseline(
-        &self,
-        device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
-    ) -> Result<(), VulkanError> {
-        self.for_each_transaction(device_slices, |transaction, slice| {
-            transaction.capture_baseline(&slice.mounted.buffers)
-        })
-    }
-
-    fn restore_window_baseline(
-        &self,
-        device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
-    ) -> Result<(), VulkanError> {
-        self.for_each_transaction(device_slices, |transaction, slice| {
-            transaction.restore_baseline(&slice.mounted.buffers)
-        })
-    }
-
-    fn for_each_transaction(
-        &self,
-        device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
-        mut run: impl FnMut(
-            &VulkanResidentStateTransactionBank,
-            &VulkanResidentInProcessPlacedStreamProcessorDevice,
-        ) -> Result<(), VulkanError>,
-    ) -> Result<(), VulkanError> {
-        if self.state_transactions.len() != device_slices.len() {
-            return Err(VulkanError(format!(
-                "demand feedback has {} state transactions for {} device slices",
-                self.state_transactions.len(),
-                device_slices.len()
-            )));
-        }
-        for (transaction, slice) in self.state_transactions.iter().zip(device_slices) {
-            run(transaction, slice)?;
-        }
-        Ok(())
     }
 
     fn begin_execution<'a>(

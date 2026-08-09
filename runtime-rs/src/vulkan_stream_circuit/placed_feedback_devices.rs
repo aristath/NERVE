@@ -832,7 +832,6 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
             (true, Some(predicates)) => Some(VulkanResidentDemandFeedbackState::new(
                 predicates,
                 device_slices,
-                device_for,
             )?),
             (true, None) => {
                 return Err(VulkanError(

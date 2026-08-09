@@ -16,13 +16,21 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
 
 ## Current evidence
 
-- The accepted zero-load DeepSeek truth conversation is now 8.5924 decode tok/s
-  and 8.6604 prefill tok/s. It followed three discarded complete conversations
-  whose residency loads converged from 9,994 to 373 to zero; the measured fourth
+- The accepted zero-load DeepSeek truth conversation is now 8.6600 decode tok/s
+  and 8.7912 prefill tok/s. It followed three discarded complete conversations
+  whose residency loads converged from 9,997 to 382 to zero; the measured fourth
   conversation had zero reads, uploads, reloads, evictions, or residency
-  blocking. All 24 responses matched the prior package byte-for-byte across
-  all four conversations, including turn recall, and every GPU returned to its
-  exact pre-run reservation. The exact tile-overlap attention transaction
+  blocking. The demand-resident stream now commits the valid causal prefix at a
+  fault and resumes only the uncommitted suffix; it no longer creates model and
+  sampler baselines or restores and clean-replays the whole token. All 24
+  responses, generated-token digests, and resident-state digests matched the
+  prior package exactly. The cold path executed 1,548 fewer expert selections;
+  all three warmed conversations retained the exact 1,149,648 selections. Mean
+  decode improved 0.79% and prefill improved 1.51%, and every GPU returned to
+  its exact pre-run reservation. Qwen3.6-35B-A3B passed at 72.6436 versus
+  72.4232 decode tok/s and Qwen3.5-9B passed at 48.7490 versus 48.6914, with
+  byte-exact responses, zero measured paging, and exact teardown. The exact
+  tile-overlap attention transaction
   reduced the real 2,224-token sampled attention-read phase from 26.785 to
   19.150 ms per window and attention-score from 12.783 to 11.840 ms per window.
   Decode improved 0.11%; the 0.37% prefill difference is below run variance.
@@ -448,17 +456,20 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    - Only a real miss may publish an immutable fault record and stop at the exact
      causal checkpoint. Resume only the uncommitted suffix after the host updates
      the address table and acknowledges the fault.
-   - Replace per-window state and sampler baseline copies with GPU-resident
-     transactional state. Writes must target shadow/versioned pages, an all-hit
-     gate must commit the new page-table/frontier generation on device, and a
-     miss must discard the uncommitted suffix by generation or pointer change.
-     Neither outcome may bulk-copy the previous state. Fixed recurrent state and
-     the sampler's compact mutable state require the same commit protocol as
-     dynamically paged attention state; a host-maintained shadow is not enough.
-   - Cover all-hit windows, disjoint misses, eviction, version changes, repeated
-     faults, cancellation, rollback, and teardown. All-hit and miss/resume must
-     produce identical committed tokens, routed experts, sampler state, and state
-     digests from the same checkpoint.
+   - The causal gate now stops before an unavailable resource is consumed and
+     resumes only the uncommitted graph suffix and feedback lanes. This removed
+     per-window model/sampler snapshots and the final clean replay: state before
+     the gate is already valid committed progress, while no state after the gate
+     has executed. Do not reintroduce shadow/versioned full-state pages for
+     ordinary residency faults. True cancellation or device failure belongs to
+     the supervised transaction boundary in item 7, where the failed stream is
+     quarantined rather than silently reused from partially advanced state.
+   - Complete durable coverage for the remaining device-owned path: all-hit
+     windows without host predicate reads or execution-epoch round trips,
+     disjoint misses, eviction, address-version changes, repeated faults,
+     cancellation, poisoned-worker isolation, and teardown. All-hit and
+     miss/resume must produce identical committed tokens, routed experts,
+     sampler state, and state digests from the same checkpoint.
 
 2. Make cross-device transfers part of the compiled transaction. This is the
    second hard prerequisite of the persistent stream transaction; device-local
