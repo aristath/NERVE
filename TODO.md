@@ -387,6 +387,12 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      replayed correctly but remained slower than scalar execution and the
      complete gate fell to 8.1736 tok/s. Change the executed device topology,
      not merely how the losing topology is recorded.
+     A terminal-wait-only one-tick demand path was also rejected and removed in
+     full. It preserved coherent output and exact teardown, but a repeated turn
+     reached only 4.403 decode tok/s with 826 incremental loads; even subtracting
+     all measured residency blocking leaves an estimated upper bound near 5.6
+     tok/s. It still regrouped the scalar graph into the rejected per-device
+     batch topology. Do not revive it as a mode or fallback.
    - The mounted input and output graph phases and packed host readback are now
      reusable transaction segments. Compose their dispatches, ingress/egress
      copies, demand gates, processor dispatches, and terminal readback into the
