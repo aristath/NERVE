@@ -473,6 +473,18 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   the current execution-epoch admission boundary until the device-owned
   residency transaction removes the epoch round trip itself; deleting its
   device-budget observation in isolation is not a product-path optimization.
+- Serializing every bounded per-device submission group against consumer-queue
+  address publication, then removing the demand-feedback execution epochs, was
+  rejected by the authoritative gate. The queue-identity contract, causal-
+  continuation tests, and disjoint-fault tests passed; all conversations stayed
+  coherent, load deltas converged through 9,996 -> 383 -> 0, the truth set had
+  zero loads, and teardown restored all five GPU reservations exactly. Truth
+  decode nevertheless fell from 8.6600 to 8.4594 tok/s (2.32%) and prefill from
+  8.7912 to 8.6088 tok/s. Host queue exclusion makes allocation retirement
+  correct but does not make residency device-owned, and its per-window locking
+  is another orchestration cost. The implementation was removed completely.
+  Do not substitute a queue mutex for the resident generation/timeline protocol
+  required by item 1.
 - Making a permanently selected scalar/resident adaptive-feedback winner stop
   maintaining its attached DSpark state was also rejected by the authoritative
   gate. The candidate was behaviorally exact, retained the accepted
