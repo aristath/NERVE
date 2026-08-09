@@ -379,6 +379,17 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   full-width attention schedule as an isolated dispatch-elimination exercise;
   positional post-processing must be part of a materially different attention
   topology that improves the complete product path.
+- A genuinely blocked indexed-attention schedule was rejected locally before
+  package compilation. One native 64-lane subgroup owned each query head, eight
+  heads shared a 512-thread workgroup, and every state vector was loaded once
+  into shared memory for all eight heads. Each lane retained eight strided
+  dimensions, and eight subgroup reductions reproduced the accepted 512-wide
+  score accumulation order exactly. The real q64/kv1/d512/r128/k8192 fixture
+  preserved every BF16 output bit, but took 22.80848 ms versus 19.12952 ms for
+  the accepted scalar-head kernel, a 19.23% regression. Exact arithmetic across
+  eight reductions plus strided accumulators creates more register/shared-memory
+  pressure than the amortized KV reads save. The shader and conformance test
+  were removed immediately; no model package or product gate was run.
 
 ## Work queue
 
@@ -399,6 +410,11 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      occupancy, as reference flash-attention implementations do. Do not retry
      dimension folding either: local-size 256 preserved the native subgroup
      arithmetic but was 23.71% slower than local-size 512.
+     A subgroup-per-head blocked schedule is exhausted too: eight heads sharing
+     each 512-thread workgroup preserved every BF16 bit and reduced state reads,
+     but its eight exact reductions and strided accumulators were 19.23% slower
+     at product geometry. A future blocked design needs a different arithmetic
+     primitive, not another rearrangement of the same scalar subgroup sums.
      Do not quantize online-softmax weights to BF16 merely to feed a cooperative
      value matrix: that fused kernel won its microcase by 52.9% but changed BF16
      outputs and the real stream fell to 6.424 decode tok/s. Any matrix-tiled
