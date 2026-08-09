@@ -462,6 +462,17 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   larger shared completion record on every attempt costs more than the compact
   predicate it replaces. The experiment was removed completely; keep completion
   records terminal and do not turn them into another hot-path polling surface.
+- Treating execution epochs as allocation-free lifetime pins and moving physical
+  heap-headroom observation exclusively to residency mutations was rejected by
+  the complete gate. The narrow causal-continuation, disjoint-fault, and active-
+  execution reclamation tests passed, and the product run retained the accepted
+  9,997 -> 382 -> 0 load convergence with a zero-load truth conversation and
+  exact teardown. It nevertheless reduced truth decode from 8.6600 to 8.1942
+  tok/s and prefill from 8.7912 to 8.4184 tok/s. All five GPU reservations were
+  restored byte-for-byte and the experiment was removed completely. Preserve
+  the current execution-epoch admission boundary until the device-owned
+  residency transaction removes the epoch round trip itself; deleting its
+  device-budget observation in isolation is not a product-path optimization.
 
 ## Work queue
 
