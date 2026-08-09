@@ -1,5 +1,5 @@
 from model_package_layout_common import *
-from nerve.model_package_validation import valid_indirect_dispatch_pipeline
+from nerve.model_package_validation import valid_batch_stage, valid_indirect_dispatch_pipeline
 from nerve.model_package_shader_compiler import compile_shader_artifacts
 from nerve.model_package_shader_templates import parallelize_temporal_batch_lanes
 
@@ -422,6 +422,58 @@ def test_compiler_orders_frame_parallel_before_portable_batch_implementation() -
         implementation["parallel_block_compatible"] is True
         for implementation in portable
     )
+
+
+def test_fused_hyper_norm_decode_keeps_exact_two_stage_batch_execution() -> None:
+    cases = (
+        (
+            "hyper_connection_pre_rms_norm",
+            "hyper_connection_pre_rms_norm_quantize_fp8_e4m3_spow2_b128_"
+            "m4_h4096_i20_neps1e-06_heps1e-06_reps1e-06_roffset0.comp",
+            [0, 1, 2, 3, 6, 7, 8],
+            [1, 4, 5, 9],
+        ),
+        (
+            "hyper_connection_post_pre_rms_norm",
+            "hyper_connection_post_pre_rms_norm_quantize_fp8_e4m3_spow2_b128_"
+            "m4_h4096_i20_neps1e-06_heps1e-06_reps1e-06_roffset0.comp",
+            [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12],
+            [5, 8, 9, 13],
+        ),
+    )
+    for operation, shader_file, hyper_sources, rms_sources in cases:
+        spec = component_kernel_spec(
+            execution_index=0,
+            node={"id": "fused", "op": operation},
+            circuit={},
+            shader_file=shader_file,
+            local_size_x=1024,
+            workgroup_count_x=1,
+        )
+
+        assert spec["execution_domain"] == "decode"
+        assert spec["batch_mode"] == "weight_shared"
+        assert [
+            implementation["lane_tile_width"]
+            for implementation in spec["batch_implementations"]
+        ] == [2, 4, 8, 16]
+        for implementation in spec["batch_implementations"]:
+            assert implementation["execution_domain"] == "decode_and_prefill"
+            assert len(implementation["stages"]) == 2
+            hyper_stage, rms_stage = implementation["stages"]
+            assert valid_batch_stage(hyper_stage)
+            assert valid_batch_stage(rms_stage)
+            assert hyper_stage["workgroup_count_x"] == implementation["lane_tile_width"]
+            assert rms_stage["workgroup_count_x"] == 1
+            assert [
+                mapping["source_binding"]
+                for mapping in hyper_stage["descriptor_bindings"]
+            ] == hyper_sources
+            assert [
+                mapping["source_binding"]
+                for mapping in rms_stage["descriptor_bindings"]
+            ] == rms_sources
+            assert "rms_norm_quantize_in_place_batch" in rms_stage["shader_path"]
 
 
 def test_compiler_marks_all_visible_indexed_attention_as_parallel_block_only() -> None:
@@ -855,6 +907,8 @@ def test_compiler_renders_deepseek_stateless_causal_batch_kernels(
         "rms_norm_per_head_unscaled_batch8_bf16_64x512_eps1e-06__pbc31.comp",
         "grouped_linear_batch8_fp8_e4m3_se8m0_b128x128_g8_32768x8192__pbc31.comp",
         "bounded_silu_multiply_batch8_bf16_2048_limit10__pbc31.comp",
+        "rms_norm_quantize_in_place_batch8_fp8_e4m3_spow2_b128_h4096_"
+        "eps1e-06_offset0__pbc31.comp",
         "inverse_rotary_temporal_bf16_64x512_r64_theta160000_"
         "yarn_f16_lo15_hi25_a1_interleaved_tail_po1__pbc2.comp",
     }
@@ -882,6 +936,17 @@ def test_compiler_renders_deepseek_stateless_causal_batch_kernels(
         for name, source in sources.items()
         if name.startswith("grouped_linear_batch")
     )
+    in_place_rms = next(
+        source
+        for name, source in sources.items()
+        if name.startswith("rms_norm_quantize_in_place_batch")
+    )
+    assert "binding = 0) buffer OutputFrames" in in_place_rms
+    assert "binding = 1) buffer QuantizedFrames" in in_place_rms
+    assert "binding = 2) buffer Scales" in in_place_rms
+    assert "binding = 3) readonly buffer Weight" in in_place_rms
+    assert "output_frames.words[" in in_place_rms
+    assert "memoryBarrierBuffer();" in in_place_rms
     compile_shader_artifacts(tmp_path)
     assert len(list(tmp_path.glob("*.spv"))) == len(shader_files)
 

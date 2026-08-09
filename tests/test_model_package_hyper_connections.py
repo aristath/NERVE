@@ -204,6 +204,137 @@ def test_compiles_fused_hyper_connection_kernels(tmp_path: Path) -> None:
     assert len(list(tmp_path.glob("*.spv"))) == 3
 
 
+def test_compiles_hyper_connection_norm_fp8_transaction(tmp_path: Path) -> None:
+    circuit, tensor_index = _circuit()
+    circuit["parameters"]["refs"]["operator_norm"] = {"tensor": "operator.norm"}
+    tensor_index["tensors"]["attention.function"]["shape"] = [24, 16384]
+    tensor_index["tensors"]["operator.norm"] = {
+        "dtype": "BF16",
+        "shape": [4096],
+        "layout": ROW_MAJOR_LAYOUT,
+    }
+    node = {
+        "id": "attention_hyper__operator_norm",
+        "op": "hyper_connection_pre_rms_norm",
+        "inputs": ["input_frame"],
+        "outputs": [
+            "operator_norm_out",
+            "attention_post",
+            "attention_combination",
+            "operator_norm_fp8",
+            "operator_norm_scale",
+        ],
+        "params": [
+            "attention_function_weight",
+            "attention_scale",
+            "attention_base",
+            "operator_norm",
+        ],
+        "attrs": {
+            "compiled_from": [
+                "attention_function",
+                "attention_sinkhorn",
+                "attention_reduce",
+                "operator_norm",
+            ],
+            "multiplicity": 4,
+            "normalization_epsilon": 1e-6,
+            "sinkhorn_iterations": 20,
+            "epsilon": 1e-6,
+            "intermediate_rounding": "BF16",
+            "rms_norm_eps": 1e-6,
+            "rms_norm_weight_offset": 0.0,
+            "rms_norm_intermediate_rounding": "BF16",
+            "output_element_bytes": [2, 4, 4, 1, 4],
+            "physical_output_representations": [
+                {
+                    "contract": "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1",
+                    "logical_signal": "operator_norm_out",
+                    "outputs": ["operator_norm_fp8", "operator_norm_scale"],
+                    "consumer_node_ids": ["query", "key_value"],
+                    "element_count": 4096,
+                    "block_columns": 128,
+                }
+            ],
+        },
+    }
+    shader_file = shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        {"hidden_size": 4096},
+    )
+    assert shader_file == (
+        "hyper_connection_pre_rms_norm_quantize_fp8_e4m3_spow2_b128_"
+        "m4_h4096_i20_neps1e-06_heps1e-06_reps1e-06_roffset0.comp"
+    )
+    post_node = {
+        **node,
+        "id": "attention_post_hyper__feed_forward_norm",
+        "op": "hyper_connection_post_pre_rms_norm",
+        "inputs": [
+            "attention_out",
+            "input_frame",
+            "prior_post",
+            "prior_combination",
+        ],
+        "outputs": [
+            "attention_residual",
+            "feed_forward_norm_out",
+            "feed_forward_post",
+            "feed_forward_combination",
+            "feed_forward_norm_fp8",
+            "feed_forward_norm_scale",
+        ],
+        "attrs": {
+            **node["attrs"],
+            "output_element_bytes": [2, 2, 4, 4, 1, 4],
+            "physical_output_representations": [
+                {
+                    **node["attrs"]["physical_output_representations"][0],
+                    "logical_signal": "feed_forward_norm_out",
+                    "outputs": [
+                        "feed_forward_norm_fp8",
+                        "feed_forward_norm_scale",
+                    ],
+                }
+            ],
+        },
+    }
+    post_shader_file = shader_file_for_node(
+        circuit,
+        post_node,
+        tensor_index,
+        {"hidden_size": 4096},
+    )
+    assert post_shader_file == (
+        "hyper_connection_post_pre_rms_norm_quantize_fp8_e4m3_spow2_b128_"
+        "m4_h4096_i20_neps1e-06_heps1e-06_reps1e-06_roffset0.comp"
+    )
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(
+        shader_source_dir,
+        tmp_path,
+        {shader_file, post_shader_file},
+    )
+    source = (tmp_path / shader_file).read_text()
+    assert "layout(set = 0, binding = 4) buffer QuantizedFrame" in source
+    assert "layout(set = 0, binding = 5) buffer RmsScale" in source
+    assert "layout(set = 0, binding = 9) readonly buffer NormWeight" in source
+    assert "rms_square_sum = subgroupAdd(rms_square_sum);" in source
+    assert "reduced_output.words[output_word] = output_lo;" in source
+    assert "{{" not in source
+    post_source = (tmp_path / post_shader_file).read_text()
+    assert "layout(set = 0, binding = 8) buffer QuantizedFrame" in post_source
+    assert "layout(set = 0, binding = 9) buffer RmsScale" in post_source
+    assert "layout(set = 0, binding = 13) readonly buffer NormWeight" in post_source
+    assert "preserved_streams.words" in post_source
+    assert "{{" not in post_source
+    compile_shader_artifacts(tmp_path)
+    assert (tmp_path / Path(shader_file).with_suffix(".spv")).is_file()
+    assert (tmp_path / Path(post_shader_file).with_suffix(".spv")).is_file()
+
+
 def test_hyper_connection_pre_parallelizes_rows_without_changing_reduction_order(
     tmp_path: Path,
 ) -> None:

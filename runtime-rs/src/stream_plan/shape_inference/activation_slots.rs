@@ -208,10 +208,7 @@ mod tests {
             is_boundary_output: false,
         };
         let signals = BTreeMap::from([
-            (
-                "normalized".to_string(),
-                signal("normalized", vec![2048]),
-            ),
+            ("normalized".to_string(), signal("normalized", vec![2048])),
             (
                 "shared_value".to_string(),
                 signal("shared_value", vec![1024]),
@@ -219,14 +216,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,).unwrap(),
             vec![Some(vec![1024])]
         );
     }
@@ -295,14 +285,8 @@ mod tests {
         };
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &node, &BTreeMap::new(), &BTreeMap::new(), None,)
+                .unwrap(),
             vec![Some(vec![8192])]
         );
     }
@@ -320,14 +304,9 @@ mod tests {
             attrs: serde_json::json!({"groups": 8, "rank_per_group": 0}),
         };
 
-        let error = infer_node_output_shapes(
-            "layer_00",
-            &node,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            None,
-        )
-        .unwrap_err();
+        let error =
+            infer_node_output_shapes("layer_00", &node, &BTreeMap::new(), &BTreeMap::new(), None)
+                .unwrap_err();
 
         assert!(error.0.contains("invalid grouped-linear output geometry"));
     }
@@ -399,8 +378,7 @@ mod tests {
 
         for (node, expected) in cases {
             assert_eq!(
-                infer_node_output_shapes("layer", &node, &signals, &params, None)
-                    .unwrap(),
+                infer_node_output_shapes("layer", &node, &signals, &params, None).unwrap(),
                 vec![Some(expected)]
             );
         }
@@ -433,10 +411,7 @@ mod tests {
             is_boundary_output: false,
         };
         let signals = BTreeMap::from([
-            (
-                "normalized".to_string(),
-                signal("normalized", vec![4096]),
-            ),
+            ("normalized".to_string(), signal("normalized", vec![4096])),
             (
                 "shared_value".to_string(),
                 signal("shared_value", vec![2048]),
@@ -452,14 +427,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,).unwrap(),
             vec![Some(vec![2048])]
         );
     }
@@ -491,14 +459,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,).unwrap(),
             vec![Some(vec![2048])]
         );
     }
@@ -523,7 +484,11 @@ mod tests {
                 "post_mix".to_string(),
                 "combination_mix".to_string(),
             ],
-            params: vec!["function".to_string(), "scale".to_string(), "base".to_string()],
+            params: vec![
+                "function".to_string(),
+                "scale".to_string(),
+                "base".to_string(),
+            ],
             state_reads: Vec::new(),
             state_writes: Vec::new(),
             attrs: serde_json::json!({"multiplicity": 4}),
@@ -533,15 +498,40 @@ mod tests {
             signal("input_frame", vec![4, 4096]),
         )]);
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &pre,
-                &pre_signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &pre, &pre_signals, &BTreeMap::new(), None,)
+                .unwrap(),
             vec![Some(vec![4096]), Some(vec![4]), Some(vec![4, 4])]
+        );
+
+        let mut fused_pre = pre.clone();
+        fused_pre.op = "hyper_connection_pre_rms_norm".to_string();
+        fused_pre.outputs = vec![
+            "operator_input".to_string(),
+            "post_mix".to_string(),
+            "combination_mix".to_string(),
+            "operator_input_fp8".to_string(),
+            "operator_input_scale".to_string(),
+        ];
+        fused_pre.attrs = serde_json::json!({
+            "multiplicity": 4,
+            "physical_output_representations": [{
+                "contract": "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1",
+                "logical_signal": "operator_input",
+                "outputs": ["operator_input_fp8", "operator_input_scale"],
+                "element_count": 4096,
+                "block_columns": 128
+            }]
+        });
+        assert_eq!(
+            infer_node_output_shapes("layer_00", &fused_pre, &pre_signals, &BTreeMap::new(), None,)
+                .unwrap(),
+            vec![
+                Some(vec![4096]),
+                Some(vec![4]),
+                Some(vec![4, 4]),
+                Some(vec![4096]),
+                Some(vec![32]),
+            ]
         );
 
         let post_pre = crate::stream_circuit::CircuitNode {
@@ -559,7 +549,11 @@ mod tests {
                 "ffn_post_mix".to_string(),
                 "ffn_combination_mix".to_string(),
             ],
-            params: vec!["function".to_string(), "scale".to_string(), "base".to_string()],
+            params: vec![
+                "function".to_string(),
+                "scale".to_string(),
+                "base".to_string(),
+            ],
             state_reads: Vec::new(),
             state_writes: Vec::new(),
             attrs: serde_json::json!({"multiplicity": 4}),
@@ -580,9 +574,35 @@ mod tests {
             ),
         ]);
         assert_eq!(
+            infer_node_output_shapes("layer_00", &post_pre, &post_signals, &BTreeMap::new(), None,)
+                .unwrap(),
+            vec![
+                Some(vec![4, 4096]),
+                Some(vec![4096]),
+                Some(vec![4]),
+                Some(vec![4, 4]),
+            ]
+        );
+
+        let mut fused_post_pre = post_pre.clone();
+        fused_post_pre.op = "hyper_connection_post_pre_rms_norm".to_string();
+        fused_post_pre
+            .outputs
+            .extend(["ffn_input_fp8".to_string(), "ffn_input_scale".to_string()]);
+        fused_post_pre.attrs = serde_json::json!({
+            "multiplicity": 4,
+            "physical_output_representations": [{
+                "contract": "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1",
+                "logical_signal": "ffn_input",
+                "outputs": ["ffn_input_fp8", "ffn_input_scale"],
+                "element_count": 4096,
+                "block_columns": 128
+            }]
+        });
+        assert_eq!(
             infer_node_output_shapes(
                 "layer_00",
-                &post_pre,
+                &fused_post_pre,
                 &post_signals,
                 &BTreeMap::new(),
                 None,
@@ -593,6 +613,8 @@ mod tests {
                 Some(vec![4096]),
                 Some(vec![4]),
                 Some(vec![4, 4]),
+                Some(vec![4096]),
+                Some(vec![32]),
             ]
         );
 
@@ -601,15 +623,14 @@ mod tests {
             "input_frame".to_string(),
             signal("input_frame", vec![4, 2048]),
         );
-        let error = infer_node_output_shapes(
-            "layer_00",
-            &post_pre,
-            &invalid,
-            &BTreeMap::new(),
-            None,
-        )
-        .unwrap_err();
-        assert!(error.0.contains("incompatible hyper-connection post geometry"));
+        let error =
+            infer_node_output_shapes("layer_00", &post_pre, &invalid, &BTreeMap::new(), None)
+                .unwrap_err();
+        assert!(
+            error
+                .0
+                .contains("incompatible hyper-connection post geometry")
+        );
     }
 
     #[test]
@@ -633,10 +654,8 @@ mod tests {
             state_writes: Vec::new(),
             attrs: serde_json::json!({"multiplicity": 4, "hidden_size": 4096}),
         };
-        let repeated_signals = BTreeMap::from([(
-            "input_frame".to_string(),
-            signal("input_frame", vec![4096]),
-        )]);
+        let repeated_signals =
+            BTreeMap::from([("input_frame".to_string(), signal("input_frame", vec![4096]))]);
         assert_eq!(
             infer_node_output_shapes(
                 "draft_input",
@@ -658,14 +677,8 @@ mod tests {
             signal("lane_frames", vec![4, 4096]),
         )]);
         assert_eq!(
-            infer_node_output_shapes(
-                "draft_input",
-                &node,
-                &lane_signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("draft_input", &node, &lane_signals, &BTreeMap::new(), None,)
+                .unwrap(),
             vec![Some(vec![4096])]
         );
 
@@ -752,14 +765,7 @@ mod tests {
         )]);
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,).unwrap(),
             vec![Some(vec![5120]), Some(vec![160])]
         );
     }
@@ -798,19 +804,8 @@ mod tests {
         )]);
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
-            vec![
-                Some(vec![5120]),
-                Some(vec![160]),
-                Some(vec![160]),
-            ]
+            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,).unwrap(),
+            vec![Some(vec![5120]), Some(vec![160]), Some(vec![160]),]
         );
     }
 
@@ -899,8 +894,7 @@ mod tests {
         )]);
 
         assert_eq!(
-            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,)
-                .unwrap(),
+            infer_node_output_shapes("layer_00", &node, &signals, &BTreeMap::new(), None,).unwrap(),
             vec![Some(vec![4096]), Some(vec![4096]), Some(vec![32]),]
         );
     }
@@ -1066,14 +1060,8 @@ mod tests {
         };
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &node, &BTreeMap::new(), &BTreeMap::new(), None,)
+                .unwrap(),
             vec![
                 Some(vec![4_112]),
                 Some(vec![4_096]),
@@ -1166,14 +1154,8 @@ mod tests {
             }),
         };
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &attention,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &attention, &signals, &BTreeMap::new(), None,)
+                .unwrap(),
             vec![Some(vec![32768])]
         );
 
@@ -1261,25 +1243,13 @@ mod tests {
         )]);
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_03",
-                &helper,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_03", &helper, &signals, &BTreeMap::new(), None,)
+                .unwrap(),
             vec![Some(vec![8, 16, 258])]
         );
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_03",
-                &reduction,
-                &signals,
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_03", &reduction, &signals, &BTreeMap::new(), None,)
+                .unwrap(),
             vec![Some(vec![4096])]
         );
     }
@@ -1603,10 +1573,7 @@ mod tests {
                     tensor("F8_E4M3", vec![8192, 2048]),
                 ),
                 ("qkv.scale".to_string(), tensor("BF16", vec![64, 16])),
-                (
-                    "z.weight".to_string(),
-                    tensor("F8_E4M3", vec![4096, 2048]),
-                ),
+                ("z.weight".to_string(), tensor("F8_E4M3", vec![4096, 2048])),
                 ("z.scale".to_string(), tensor("BF16", vec![32, 16])),
                 ("b.weight".to_string(), tensor("BF16", vec![32, 2048])),
                 ("a.weight".to_string(), tensor("BF16", vec![32, 2048])),
@@ -1736,14 +1703,8 @@ mod tests {
         };
 
         assert_eq!(
-            infer_node_output_shapes(
-                "layer_00",
-                &node,
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                None,
-            )
-            .unwrap(),
+            infer_node_output_shapes("layer_00", &node, &BTreeMap::new(), &BTreeMap::new(), None,)
+                .unwrap(),
             vec![Some(vec![512])]
         );
     }

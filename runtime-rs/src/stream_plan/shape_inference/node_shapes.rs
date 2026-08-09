@@ -18,20 +18,22 @@ fn infer_node_output_shapes(
         "hyper_connection_pre" => {
             infer_hyper_connection_pre_output_shapes(component_id, node, signals)
         }
-        "hyper_connection_post_pre" => infer_hyper_connection_post_pre_output_shapes(
-            component_id,
-            node,
-            signals,
-        ),
+        "hyper_connection_pre_rms_norm" => {
+            infer_hyper_connection_pre_rms_norm_output_shapes(component_id, node, signals)
+        }
+        "hyper_connection_post_pre" => {
+            infer_hyper_connection_post_pre_output_shapes(component_id, node, signals)
+        }
+        "hyper_connection_post_pre_rms_norm" => {
+            infer_hyper_connection_post_pre_rms_norm_output_shapes(component_id, node, signals)
+        }
         "hyper_connection_post" => {
             infer_hyper_connection_post_output_shapes(component_id, node, signals)
         }
         "repeat_stream_lanes" => {
             infer_stream_lane_transform_shape(component_id, node, signals, false)
         }
-        "mean_stream_lanes" => {
-            infer_stream_lane_transform_shape(component_id, node, signals, true)
-        }
+        "mean_stream_lanes" => infer_stream_lane_transform_shape(component_id, node, signals, true),
         "markov_argmax_partials" => {
             let candidates = attr_usize(node, "vocabulary_size")
                 .zip(attr_usize(node, "vocabulary_tile_width"))
@@ -47,9 +49,7 @@ fn infer_node_output_shapes(
             let shape = attr_usize(node, "block_width").map(|width| vec![width]);
             Ok(repeat_shape(shape, outputs))
         }
-        "quantize_fp8_e4m3"
-        | "quantize_fp8_e4m3_e8m0"
-        | "quantize_int8_symmetric" => {
+        "quantize_fp8_e4m3" | "quantize_fp8_e4m3_e8m0" | "quantize_int8_symmetric" => {
             let element_count = attr_usize(node, "element_count");
             let block_columns = attr_usize(node, "block_columns");
             if node.inputs.len() != 1
@@ -151,9 +151,7 @@ fn infer_node_output_shapes(
             }
             let mut value_shape = None;
             for input in node.inputs.iter().skip(1) {
-                let shape = signals
-                    .get(input)
-                    .and_then(|signal| signal.shape.clone());
+                let shape = signals.get(input).and_then(|signal| signal.shape.clone());
                 if let Some(shape) = shape {
                     if let Some(existing) = &value_shape {
                         if existing != &shape {
@@ -193,15 +191,12 @@ fn infer_node_output_shapes(
                 .map(|input| signals.get(input).and_then(|signal| signal.shape.clone()))
                 .collect())
         }
-        "parallel_linear_2way"
-        | "parallel_linear_3way"
-        | "mixed_parallel_linear_4way" => {
+        "parallel_linear_2way" | "parallel_linear_3way" | "mixed_parallel_linear_4way" => {
             infer_parallel_linear_output_shapes(component_id, node, signals, params, tensor_index)
         }
         "grouped_linear" => {
             let groups = attr_usize(node, "groups").filter(|value| *value > 0);
-            let rank_per_group =
-                attr_usize(node, "rank_per_group").filter(|value| *value > 0);
+            let rank_per_group = attr_usize(node, "rank_per_group").filter(|value| *value > 0);
             let output_width = groups
                 .zip(rank_per_group)
                 .and_then(|(groups, rank)| groups.checked_mul(rank))
@@ -333,8 +328,8 @@ fn infer_node_output_shapes(
             Ok(repeat_shape(output_shape, outputs))
         }
         "learned_index_scores" => {
-            let output_shape = attr_usize(node, "max_compressed_positions")
-                .map(|positions| vec![positions]);
+            let output_shape =
+                attr_usize(node, "max_compressed_positions").map(|positions| vec![positions]);
             Ok(repeat_shape(output_shape, outputs))
         }
         "radix_topk_index" => {
@@ -463,34 +458,22 @@ fn apply_physical_output_representation_shapes(
                 | "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
                 | "bf16_blockwise_symmetric_int8_f32_scale.v1",
             ) => 2,
-            Some(
-                "bf16_blockwise_symmetric_int8_pairpacked_f32_scale_i32_sum.v1",
-            ) => 3,
-            Some(
-                "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_u32_route_map.v1",
-            ) => 3,
+            Some("bf16_blockwise_symmetric_int8_pairpacked_f32_scale_i32_sum.v1") => 3,
+            Some("bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_u32_route_map.v1") => 3,
             _ => 0,
         };
         let sparse_moe_representation = contract
-            == Some(
-                "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_u32_route_map.v1",
-            );
+            == Some("bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_u32_route_map.v1");
         if outputs.len() != expected_outputs
             || expected_outputs == 0
             || element_count == 0
             || block_columns == 0
             || element_count % block_columns != 0
-            || (
-                sparse_moe_representation
-                    && (
-                        experts_per_token.is_none()
-                            || experts_per_token == Some(0)
-                            || element_count % experts_per_token.unwrap() != 0
-                            || (element_count / experts_per_token.unwrap())
-                                % block_columns
-                                != 0
-                    )
-            )
+            || (sparse_moe_representation
+                && (experts_per_token.is_none()
+                    || experts_per_token == Some(0)
+                    || element_count % experts_per_token.unwrap() != 0
+                    || (element_count / experts_per_token.unwrap()) % block_columns != 0))
         {
             return Err(CircuitPlanError(format!(
                 "{component_id} node {} has invalid blockwise physical output geometry",
@@ -509,14 +492,12 @@ fn apply_physical_output_representation_shapes(
             })?;
         let logical_element_count = if sparse_moe_representation {
             element_count
-                .checked_add(experts_per_token.unwrap().checked_mul(2).ok_or_else(
-                    || {
-                        CircuitPlanError(format!(
-                            "{component_id} node {} sparse MoE route map size overflowed",
-                            node.id
-                        ))
-                    },
-                )?)
+                .checked_add(experts_per_token.unwrap().checked_mul(2).ok_or_else(|| {
+                    CircuitPlanError(format!(
+                        "{component_id} node {} sparse MoE route map size overflowed",
+                        node.id
+                    ))
+                })?)
                 .ok_or_else(|| {
                     CircuitPlanError(format!(
                         "{component_id} node {} sparse MoE logical shape overflowed",
@@ -544,11 +525,7 @@ fn apply_physical_output_representation_shapes(
                 vec![experts_per_token.unwrap()],
             ]
         } else if expected_outputs == 3 {
-            vec![
-                vec![element_count],
-                vec![block_count],
-                vec![block_count],
-            ]
+            vec![vec![element_count], vec![block_count], vec![block_count]]
         } else {
             vec![vec![element_count], vec![block_count]]
         };
@@ -677,6 +654,29 @@ fn infer_hyper_connection_pre_output_shapes(
     ])
 }
 
+fn infer_hyper_connection_pre_rms_norm_output_shapes(
+    component_id: &str,
+    node: &CircuitNode,
+    signals: &BTreeMap<String, PlannedSignal>,
+) -> Result<Vec<Option<Vec<usize>>>, CircuitPlanError> {
+    if node.outputs.len() != 5 {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} has an invalid fused hyper-connection/RMS interface",
+            node.id
+        )));
+    }
+    let mut logical = infer_hyper_connection_pre_output_shapes(
+        component_id,
+        &CircuitNode {
+            outputs: node.outputs[..3].to_vec(),
+            ..node.clone()
+        },
+        signals,
+    )?;
+    logical.extend([None, None]);
+    Ok(logical)
+}
+
 fn infer_stream_lane_transform_shape(
     component_id: &str,
     node: &CircuitNode,
@@ -748,6 +748,29 @@ fn infer_hyper_connection_post_pre_output_shapes(
     ])
 }
 
+fn infer_hyper_connection_post_pre_rms_norm_output_shapes(
+    component_id: &str,
+    node: &CircuitNode,
+    signals: &BTreeMap<String, PlannedSignal>,
+) -> Result<Vec<Option<Vec<usize>>>, CircuitPlanError> {
+    if node.outputs.len() != 6 {
+        return Err(CircuitPlanError(format!(
+            "{component_id} node {} has an invalid fused hyper-connection/RMS interface",
+            node.id
+        )));
+    }
+    let (hidden_width, hyper_shape, multiplicity) =
+        validate_hyper_connection_post_inputs(component_id, node, signals)?;
+    Ok(vec![
+        hyper_shape,
+        hidden_width.map(|width| vec![width]),
+        Some(vec![multiplicity]),
+        Some(vec![multiplicity, multiplicity]),
+        None,
+        None,
+    ])
+}
+
 fn infer_hyper_connection_post_output_shapes(
     component_id: &str,
     node: &CircuitNode,
@@ -786,11 +809,7 @@ fn validate_hyper_connection_post_inputs(
     let shapes = node
         .inputs
         .iter()
-        .map(|input| {
-            signals
-                .get(input)
-                .and_then(|signal| signal.shape.clone())
-        })
+        .map(|input| signals.get(input).and_then(|signal| signal.shape.clone()))
         .collect::<Vec<_>>();
     let operator_width = shapes[0]
         .as_ref()
@@ -827,8 +846,7 @@ fn validate_hyper_connection_post_inputs(
         .as_ref()
         .is_none_or(|shape| shape == &[multiplicity]);
     let combination_shape_is_valid = shapes[3].as_ref().is_none_or(|shape| {
-        shape == &[multiplicity, multiplicity]
-            || shape == &[combination_width]
+        shape == &[multiplicity, multiplicity] || shape == &[combination_width]
     });
     if operator_width
         .zip(hidden_from_hyper)
@@ -1138,9 +1156,9 @@ fn product(shape: &[usize]) -> Option<usize> {
 
 fn node_output_storage(node: &CircuitNode) -> SignalStorage {
     match node.op.as_str() {
-        "append_state_update"
-        | "conditional_append_state_update"
-        | "rolling_state_update" => SignalStorage::StateView,
+        "append_state_update" | "conditional_append_state_update" | "rolling_state_update" => {
+            SignalStorage::StateView
+        }
         _ => SignalStorage::Activation,
     }
 }

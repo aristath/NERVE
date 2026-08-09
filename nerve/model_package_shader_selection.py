@@ -42,6 +42,77 @@ def shader_file_for_node(
     }:
         return latent_compression_shader_file(circuit, node, tensor_index)
 
+    if op in {
+        "hyper_connection_pre_rms_norm",
+        "hyper_connection_post_pre_rms_norm",
+    }:
+        attrs = node.get("attrs", {})
+        base_op = op.removesuffix("_rms_norm")
+        representations = attrs.get("physical_output_representations")
+        hyper = deepcopy(node)
+        hyper["op"] = base_op
+        hyper["params"] = node.get("params", [])[:3]
+        if base_op == "hyper_connection_pre":
+            hyper["inputs"] = node.get("inputs", [])
+            hyper["outputs"] = ["__reduced", *node.get("outputs", [])[1:3]]
+            hyper["attrs"]["output_element_bytes"] = [2, 4, 4]
+        else:
+            hyper["inputs"] = node.get("inputs", [])
+            hyper["outputs"] = [
+                node.get("outputs", [None])[0],
+                "__reduced",
+                *node.get("outputs", [])[2:4],
+            ]
+            hyper["attrs"]["output_element_bytes"] = [2, 2, 4, 4]
+        (
+            multiplicity,
+            sinkhorn_iterations,
+            normalization_epsilon,
+            sinkhorn_epsilon,
+        ) = hyper_connection_geometry_for_node(
+            circuit,
+            hyper,
+            tensor_index,
+            hidden_size=hidden_size,
+        )
+        norm_parameter = node.get("params", [None])[-1]
+        rms_eps = float(attrs.get("rms_norm_eps", 0.0))
+        rms_weight_offset = float(attrs.get("rms_norm_weight_offset", 0.0))
+        expected_output_count = 5 if base_op == "hyper_connection_pre" else 6
+        if (
+            len(node.get("params", [])) != 4
+            or len(node.get("outputs", [])) != expected_output_count
+            or not isinstance(representations, list)
+            or len(representations) != 1
+            or representations[0].get("contract")
+            != FP8_E8M0_PREQUANTIZATION_CONTRACT
+            or int(representations[0].get("element_count", 0)) != hidden_size
+            or int(representations[0].get("block_columns", 0)) != 128
+            or representations[0].get("logical_signal")
+            != node["outputs"][1 if base_op.endswith("post_pre") else 0]
+            or representations[0].get("outputs")
+            != node["outputs"][-2:]
+            or parameter_shape_for_id(circuit, norm_parameter, tensor_index)
+            != [hidden_size]
+            or parameter_dtype_for_id(circuit, norm_parameter, tensor_index) != "BF16"
+            or parameter_layout_for_id(circuit, norm_parameter, tensor_index)
+            != ROW_MAJOR_LAYOUT
+            or not math.isfinite(rms_eps)
+            or rms_eps <= 0.0
+            or not math.isfinite(rms_weight_offset)
+            or attrs.get("rms_norm_intermediate_rounding") != "BF16"
+        ):
+            raise ModelCompileError(
+                f"fused hyper/RMS node {node['id']!r} has an invalid contract"
+            )
+        return (
+            f"{base_op}_rms_norm_quantize_fp8_e4m3_spow2_b128_"
+            f"m{multiplicity}_h{hidden_size}_i{sinkhorn_iterations}_"
+            f"neps{shader_float_token(normalization_epsilon)}_"
+            f"heps{shader_float_token(sinkhorn_epsilon)}_"
+            f"reps{shader_float_token(rms_eps)}_"
+            f"roffset{shader_float_token(rms_weight_offset)}.comp"
+        )
     if op in {"hyper_connection_pre", "hyper_connection_post_pre"}:
         (
             multiplicity,
@@ -1794,6 +1865,8 @@ def workgroup_count_x_for_node(
     if node["op"] in {
         "hyper_connection_pre",
         "hyper_connection_post_pre",
+        "hyper_connection_pre_rms_norm",
+        "hyper_connection_post_pre_rms_norm",
     }:
         return 1
     if node["op"] == "hyper_connection_post":

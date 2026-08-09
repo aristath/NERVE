@@ -23,7 +23,13 @@ EXACT_REWRITE_CONTRACTS = {
     "append_scaled_dot_product_attention": "append_attention_exact_bf16.v1",
     "contiguous_linear_swiglu": "contiguous_linear_swiglu_exact_bf16.v1",
     "hyper_connection_pre": "hyper_connection_pre_exact_bf16.v1",
+    "hyper_connection_pre_rms_norm": (
+        "hyper_connection_pre_rms_norm_exact_bf16.v1"
+    ),
     "hyper_connection_post_pre": "hyper_connection_post_pre_exact_bf16.v1",
+    "hyper_connection_post_pre_rms_norm": (
+        "hyper_connection_post_pre_rms_norm_exact_bf16.v1"
+    ),
     "linear_residual": "linear_residual_exact_bf16.v1",
     "linear_sigmoid_scalar_multiply": (
         "linear_sigmoid_scalar_multiply_exact_bf16.v1"
@@ -50,12 +56,29 @@ EXACT_REWRITE_SOURCE_OPS = {
     "hyper_connection_pre": {
         ("normalized_linear", "hyper_connection_sinkhorn", "hyper_connection_reduce")
     },
+    "hyper_connection_pre_rms_norm": {
+        (
+            "normalized_linear",
+            "hyper_connection_sinkhorn",
+            "hyper_connection_reduce",
+            "rms_norm",
+        )
+    },
     "hyper_connection_post_pre": {
         (
             "hyper_connection_post",
             "normalized_linear",
             "hyper_connection_sinkhorn",
             "hyper_connection_reduce",
+        )
+    },
+    "hyper_connection_post_pre_rms_norm": {
+        (
+            "hyper_connection_post",
+            "normalized_linear",
+            "hyper_connection_sinkhorn",
+            "hyper_connection_reduce",
+            "rms_norm",
         )
     },
     "linear_residual": {("linear", "residual_add")},
@@ -521,7 +544,7 @@ def _validate_physical_representation_providers(
             ]
             or attrs.get("output_element_bytes")
             != [
-                *([2] * len(logical_outputs)),
+                *_expected_logical_output_element_bytes(provider, logical_outputs),
                 *expected_representation_bytes,
             ]
         ):
@@ -624,7 +647,7 @@ def _expected_node_output_element_bytes(node: Json) -> list[int] | None:
         "physical_output_representations"
     )
     if representations is None:
-        return [2] * len(outputs)
+        return _expected_logical_output_element_bytes(node, outputs)
     if not isinstance(representations, list) or not representations:
         return None
     physical_outputs: list[str] = []
@@ -648,7 +671,23 @@ def _expected_node_output_element_bytes(node: Json) -> list[int] | None:
     ]
     if outputs != [*logical_outputs, *physical_outputs]:
         return None
-    return [*([2] * len(logical_outputs)), *physical_bytes]
+    return [
+        *_expected_logical_output_element_bytes(node, logical_outputs),
+        *physical_bytes,
+    ]
+
+
+def _expected_logical_output_element_bytes(
+    node: Json,
+    logical_outputs: list[str],
+) -> list[int]:
+    fixed_widths = {
+        "hyper_connection_pre_rms_norm": [2, 4, 4],
+        "hyper_connection_post_pre_rms_norm": [2, 2, 4, 4],
+    }.get(str(node.get("op", "")))
+    if fixed_widths is not None and len(fixed_widths) == len(logical_outputs):
+        return fixed_widths
+    return [2] * len(logical_outputs)
 
 
 def _valid_physical_representation_metadata(
@@ -954,10 +993,19 @@ def _validate_exact_rewrite_semantics(
             "weight_partition": "contiguous_gate_up",
             "intermediate_rounding": "BF16",
         }
-    elif op in {"hyper_connection_pre", "hyper_connection_post_pre"}:
-        offset = 1 if op == "hyper_connection_post_pre" else 0
+    elif op in {
+        "hyper_connection_pre",
+        "hyper_connection_pre_rms_norm",
+        "hyper_connection_post_pre",
+        "hyper_connection_post_pre_rms_norm",
+    }:
+        has_post = op.startswith("hyper_connection_post_pre")
+        has_norm = op.endswith("_rms_norm")
+        offset = 1 if has_post else 0
         post = region[0] if offset else None
-        function, sinkhorn, reduce = region[offset:]
+        hyper_end = len(region) - int(has_norm)
+        function, sinkhorn, reduce = region[offset:hyper_end]
+        norm = region[-1] if has_norm else None
         function_attrs = _logical_candidate_node(function).get("attrs", {})
         sinkhorn_attrs = _logical_candidate_node(sinkhorn).get("attrs", {})
         reduce_attrs = _logical_candidate_node(reduce).get("attrs", {})
@@ -1006,6 +1054,23 @@ def _validate_exact_rewrite_semantics(
         }
         if post is not None:
             expected_attrs["post_rounding"] = "BF16"
+        if norm is not None:
+            norm_attrs = _logical_candidate_node(norm).get("attrs", {})
+            if (
+                set(norm_attrs) != {"eps", "weight_offset"}
+                or not isinstance(norm_attrs.get("eps"), (int, float))
+                or isinstance(norm_attrs.get("eps"), bool)
+                or float(norm_attrs["eps"]) <= 0.0
+                or not isinstance(norm_attrs.get("weight_offset"), (int, float))
+                or isinstance(norm_attrs.get("weight_offset"), bool)
+            ):
+                raise ModelCompileError(
+                    f"candidate circuit {component_id!r} rewrite "
+                    f"{candidate_node['id']!r} cannot prove RMS normalization attributes"
+                )
+            expected_attrs["rms_norm_eps"] = norm_attrs["eps"]
+            expected_attrs["rms_norm_weight_offset"] = norm_attrs["weight_offset"]
+            expected_attrs["rms_norm_intermediate_rounding"] = "BF16"
     elif op == "linear_residual":
         _require_empty_attrs(component_id, op, region)
         expected_attrs = {
@@ -1239,6 +1304,16 @@ def _validate_rewrite_interface(
             region[0]["outputs"][0],
             region[-1]["outputs"][0],
             *region[-2]["outputs"][1:],
+        ]
+        outputs = [signal for signal in preferred if signal in outputs]
+    elif candidate_node["op"] == "hyper_connection_pre_rms_norm":
+        preferred = [*region[-1]["outputs"], *region[-3]["outputs"][1:]]
+        outputs = [signal for signal in preferred if signal in outputs]
+    elif candidate_node["op"] == "hyper_connection_post_pre_rms_norm":
+        preferred = [
+            region[0]["outputs"][0],
+            *region[-1]["outputs"],
+            *region[-3]["outputs"][1:],
         ]
         outputs = [signal for signal in preferred if signal in outputs]
     params = [param for node in region for param in node.get("params", [])]

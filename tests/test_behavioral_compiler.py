@@ -749,6 +749,124 @@ def test_hyper_connection_fusion_has_a_strict_exactness_proof() -> None:
         )
 
 
+def test_hyper_connection_norm_transaction_has_a_strict_exactness_proof() -> None:
+    source, _candidate = hyper_connection_source_and_candidate()
+    source["boundary"]["outputs"] = [
+        {"id": "normalized", "source": "normalized"},
+        {"id": "post", "source": "post"},
+        {"id": "combination", "source": "combination"},
+    ]
+    source["parameters"]["refs"]["norm_weight"] = {"tensor": "norm.weight"}
+    source["nodes"].append(
+        {
+            "id": "norm",
+            "op": "rms_norm",
+            "inputs": ["operator_input"],
+            "outputs": ["normalized"],
+            "params": ["norm_weight"],
+            "attrs": {"eps": 1e-6, "weight_offset": 0.0},
+        }
+    )
+    candidate = deepcopy(source)
+    candidate["nodes"] = [
+        {
+            "id": "function__sinkhorn__reduce__norm",
+            "op": "hyper_connection_pre_rms_norm",
+            "inputs": ["input_frame"],
+            "outputs": ["normalized", "post", "combination"],
+            "params": ["function", "scale", "base", "norm_weight"],
+            "attrs": {
+                "compiled_from": ["function", "sinkhorn", "reduce", "norm"],
+                "epsilon": 1e-6,
+                "intermediate_rounding": "BF16",
+                "multiplicity": 4,
+                "normalization_epsilon": 1e-6,
+                "sinkhorn_iterations": 20,
+                "rms_norm_eps": 1e-6,
+                "rms_norm_weight_offset": 0.0,
+                "rms_norm_intermediate_rounding": "BF16",
+            },
+        }
+    ]
+
+    proof = prove_exact_circuit_candidate(
+        component_id="layer_00", source=source, candidate=candidate
+    )
+    assert proof["candidate_kind"] == "exact_reference"
+    assert proof["rewrites"][0]["proof_contract"] == (
+        "hyper_connection_pre_rms_norm_exact_bf16.v1"
+    )
+
+    source_with_representation = deepcopy(source)
+    source_with_representation["nodes"].append(
+        {
+            "id": "projection",
+            "op": "linear",
+            "inputs": ["normalized"],
+            "outputs": ["projected"],
+            "params": ["projection_weight", "projection_scale"],
+        }
+    )
+    source_with_representation["boundary"]["outputs"].append(
+        {"id": "projected", "source": "projected"}
+    )
+    represented_candidate = deepcopy(candidate)
+    represented_candidate["boundary"] = deepcopy(
+        source_with_representation["boundary"]
+    )
+    represented_candidate["nodes"][0]["outputs"].extend(
+        ["normalized_fp8", "normalized_scale"]
+    )
+    represented_candidate["nodes"][0]["attrs"].update(
+        {
+            "output_element_bytes": [2, 4, 4, 1, 4],
+            "physical_output_representations": [
+                {
+                    "contract": (
+                        "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
+                    ),
+                    "logical_signal": "normalized",
+                    "outputs": ["normalized_fp8", "normalized_scale"],
+                    "consumer_node_ids": ["projection"],
+                    "element_count": 4096,
+                    "block_columns": 128,
+                }
+            ],
+        }
+    )
+    represented_candidate["nodes"].append(
+        {
+            "id": "projection",
+            "op": "linear",
+            "inputs": ["normalized_fp8", "normalized_scale"],
+            "outputs": ["projected"],
+            "params": ["projection_weight", "projection_scale"],
+            "attrs": {
+                "output_element_bytes": [2],
+                "physical_input_contract": (
+                    "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
+                ),
+                "physical_input_provider_id": (
+                    "function__sinkhorn__reduce__norm"
+                ),
+                "physical_logical_inputs": ["normalized"],
+            },
+        }
+    )
+    represented_proof = prove_exact_circuit_candidate(
+        component_id="layer_00",
+        source=source_with_representation,
+        candidate=represented_candidate,
+    )
+    assert represented_proof["physical_representation_count"] == 1
+
+    candidate["nodes"][0]["attrs"]["rms_norm_intermediate_rounding"] = "F32"
+    with pytest.raises(ModelCompileError, match="changes exact rewrite attributes"):
+        prove_exact_circuit_candidate(
+            component_id="layer_00", source=source, candidate=candidate
+        )
+
+
 def test_approximate_candidate_requires_both_closed_loop_evidence_modes() -> None:
     source = source_circuit()
     candidate = deepcopy(source)

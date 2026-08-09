@@ -62,6 +62,99 @@ def persistent_batch_control_stage(
     return stage
 
 
+def hyper_connection_rms_norm_batch_implementations(
+    shader_file: str,
+) -> list[Json] | None:
+    match = re.fullmatch(
+        r"(hyper_connection_pre|hyper_connection_post_pre)_rms_norm_quantize_"
+        r"fp8_e4m3_spow2_b(\d+)_m(\d+)_h(\d+)_i(\d+)_"
+        r"neps([^_]+)_heps([^_]+)_reps([^_]+)_roffset([^_]+)\.comp",
+        shader_file,
+    )
+    if match is None:
+        return None
+    (
+        operation,
+        block_columns,
+        multiplicity,
+        hidden_size,
+        sinkhorn_iterations,
+        normalization_epsilon,
+        sinkhorn_epsilon,
+        rms_epsilon,
+        rms_weight_offset,
+    ) = match.groups()
+    post_pre = operation == "hyper_connection_post_pre"
+    hyper_scalar = (
+        f"{operation}_m{multiplicity}_h{hidden_size}_i{sinkhorn_iterations}_"
+        f"neps{normalization_epsilon}_heps{sinkhorn_epsilon}.comp"
+    )
+    # The component descriptor namespace is inputs, then outputs, then parameters.
+    # These maps preserve the unfused hyper kernel's interface while its reduced
+    # BF16 output becomes the in-place scratch/final output for the RMS stage.
+    hyper_source_bindings = (
+        [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12]
+        if post_pre
+        else [0, 1, 2, 3, 6, 7, 8]
+    )
+    rms_source_bindings = (
+        [5, 8, 9, 13]
+        if post_pre
+        else [1, 4, 5, 9]
+    )
+    implementations = []
+    for tile_width in EXACT_BATCH_LANE_TILE_WIDTHS:
+        hyper_batch = weight_shared_batch_shader_file(
+            hyper_scalar,
+            tile_width=tile_width,
+        )
+        if hyper_batch is None:
+            raise ModelCompileError(
+                f"fused hyper/RMS shader {shader_file!r} lost hyper batch support"
+            )
+        rms_batch = (
+            f"rms_norm_quantize_in_place_batch{tile_width}_fp8_e4m3_spow2_"
+            f"b{block_columns}_h{hidden_size}_eps{rms_epsilon}_"
+            f"offset{rms_weight_offset}.comp"
+        )
+        implementations.append(
+            {
+                "execution_domain": "decode_and_prefill",
+                "lane_tile_width": tile_width,
+                "selection_priority": 0,
+                "independent_candidate_compatible": True,
+                "causal_sequence_compatible": True,
+                "parallel_block_compatible": True,
+                "device_requirements": {
+                    "vulkan_device_extensions": [],
+                    "vulkan_features": [],
+                    "subgroup_operations": [],
+                },
+                "stages": [
+                    persistent_batch_control_stage(
+                        hyper_batch,
+                        1024,
+                        tile_width,
+                        descriptor_bindings=[
+                            {"binding": binding, "source_binding": source}
+                            for binding, source in enumerate(hyper_source_bindings)
+                        ],
+                    ),
+                    persistent_batch_control_stage(
+                        rms_batch,
+                        1024,
+                        1,
+                        descriptor_bindings=[
+                            {"binding": binding, "source_binding": source}
+                            for binding, source in enumerate(rms_source_bindings)
+                        ],
+                    ),
+                ],
+            }
+        )
+    return implementations
+
+
 def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     if re.fullmatch(
         r"independent_sparse_moe_(?:gate_up|down)(?:_prequant)?_mxfp4_e2m1"

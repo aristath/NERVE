@@ -1762,6 +1762,128 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
             fused["attrs"]["compiled_from"],
         )
 
+    def test_fuses_hyper_reduction_norm_and_physical_output_as_one_transaction(
+        self,
+    ) -> None:
+        circuit = {
+            "boundary": {
+                "outputs": [{"id": "output", "source": "output"}],
+            },
+            "nodes": [
+                {
+                    "id": "hyper",
+                    "op": "hyper_connection_pre",
+                    "inputs": ["streams"],
+                    "outputs": ["reduced", "post", "combination"],
+                    "params": ["function", "scale", "base"],
+                    "attrs": {
+                        "compiled_from": ["function", "sinkhorn", "reduce"],
+                        "multiplicity": 4,
+                        "normalization_epsilon": 1e-6,
+                        "sinkhorn_iterations": 20,
+                        "epsilon": 1e-6,
+                        "intermediate_rounding": "BF16",
+                        "output_element_bytes": [2, 4, 4],
+                    },
+                },
+                {
+                    "id": "norm",
+                    "op": "rms_norm",
+                    "inputs": ["reduced"],
+                    "outputs": ["normalized", "normalized_fp8", "normalized_scale"],
+                    "params": ["norm_weight"],
+                    "attrs": {
+                        "eps": 1e-6,
+                        "weight_offset": 0.0,
+                        "output_element_bytes": [2, 1, 4],
+                        "physical_output_representations": [
+                            {
+                                "contract": (
+                                    "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
+                                ),
+                                "logical_signal": "normalized",
+                                "outputs": ["normalized_fp8", "normalized_scale"],
+                                "consumer_node_ids": ["projection"],
+                                "element_count": 4096,
+                                "block_columns": 128,
+                            }
+                        ],
+                    },
+                },
+                {
+                    "id": "projection",
+                    "op": "linear",
+                    "inputs": ["normalized_fp8", "normalized_scale"],
+                    "outputs": ["output"],
+                    "params": ["weight", "weight_scale"],
+                    "attrs": {
+                        "physical_input_contract": (
+                            "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
+                        ),
+                        "physical_input_provider_id": "norm",
+                        "physical_logical_inputs": ["normalized"],
+                    },
+                },
+            ],
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_hyper_connection_rms_norm=lambda _hyper, _norm: True,
+        )
+
+        self.assertEqual(2, len(optimized["nodes"]))
+        fused = optimized["nodes"][0]
+        self.assertEqual("hyper_connection_pre_rms_norm", fused["op"])
+        self.assertEqual(["streams"], fused["inputs"])
+        self.assertEqual(
+            ["normalized", "post", "combination", "normalized_fp8", "normalized_scale"],
+            fused["outputs"],
+        )
+        self.assertEqual(
+            ["function", "scale", "base", "norm_weight"], fused["params"]
+        )
+        self.assertEqual(
+            ["function", "sinkhorn", "reduce", "norm"],
+            fused["attrs"]["compiled_from"],
+        )
+        self.assertEqual([2, 4, 4, 1, 4], fused["attrs"]["output_element_bytes"])
+        self.assertEqual(
+            "hyper__norm",
+            optimized["nodes"][1]["attrs"]["physical_input_provider_id"],
+        )
+
+    def test_does_not_fuse_hyper_norm_when_reduced_frame_escapes(self) -> None:
+        circuit = {
+            "boundary": {"outputs": [{"id": "reduced", "source": "reduced"}]},
+            "nodes": [
+                {
+                    "id": "hyper",
+                    "op": "hyper_connection_pre",
+                    "inputs": ["streams"],
+                    "outputs": ["reduced", "post", "combination"],
+                    "params": ["function", "scale", "base"],
+                },
+                {
+                    "id": "norm",
+                    "op": "rms_norm",
+                    "inputs": ["reduced"],
+                    "outputs": ["normalized"],
+                    "params": ["norm_weight"],
+                },
+            ],
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_hyper_connection_rms_norm=lambda _hyper, _norm: True,
+        )
+
+        self.assertEqual(
+            ["hyper_connection_pre", "rms_norm"],
+            [node["op"] for node in optimized["nodes"]],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

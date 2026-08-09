@@ -121,6 +121,219 @@ def parallelize_temporal_batch_lanes(shader_file: str, rendered: str) -> str:
     return parallelized
 
 
+def render_hyper_connection_rms_norm_shader(
+    source_dir: Path,
+    shader_file: str,
+) -> str | None:
+    match = re.fullmatch(
+        r"(hyper_connection_pre|hyper_connection_post_pre)_rms_norm_quantize_"
+        r"fp8_e4m3_spow2_b(\d+)_m(\d+)_h(\d+)_i(\d+)_"
+        r"neps([^_]+)_heps([^_]+)_reps([^_]+)_roffset([^_]+)\.comp",
+        shader_file,
+    )
+    if match is None:
+        return None
+    (
+        operation,
+        block_columns_text,
+        multiplicity_text,
+        hidden_size_text,
+        sinkhorn_iterations_text,
+        normalization_epsilon_text,
+        sinkhorn_epsilon_text,
+        rms_epsilon_text,
+        rms_weight_offset_text,
+    ) = match.groups()
+    block_columns = int(block_columns_text)
+    multiplicity = int(multiplicity_text)
+    hidden_size = int(hidden_size_text)
+    sinkhorn_iterations = int(sinkhorn_iterations_text)
+    rms_epsilon = float(rms_epsilon_text)
+    rms_weight_offset = float(rms_weight_offset_text)
+    if (
+        block_columns != 128
+        or multiplicity != 4
+        or hidden_size != 4096
+        or sinkhorn_iterations <= 0
+        or rms_epsilon <= 0.0
+        or not math.isfinite(rms_epsilon)
+        or not math.isfinite(rms_weight_offset)
+    ):
+        raise ModelCompileError(
+            f"invalid fused hyper/RMS shader shape {shader_file!r}"
+        )
+    base_file = (
+        f"{operation}_m{multiplicity}_h{hidden_size}_i{sinkhorn_iterations}_"
+        f"neps{normalization_epsilon_text}_heps{sinkhorn_epsilon_text}.comp"
+    )
+    rendered = render_shader_source(source_dir, base_file)
+    if operation == "hyper_connection_pre":
+        binding_rewrites = {
+            "PostOutput": (2, 2),
+            "CombinationOutput": (3, 3),
+            "FunctionWeight": (4, 6),
+            "HyperScale": (5, 7),
+            "HyperBase": (6, 8),
+        }
+        quantized_binding = 4
+        rms_scale_binding = 5
+        norm_weight_binding = 9
+    else:
+        binding_rewrites = {
+            "PostOutput": (6, 6),
+            "CombinationOutput": (7, 7),
+            "FunctionWeight": (8, 10),
+            "HyperScale": (9, 11),
+            "HyperBase": (10, 12),
+        }
+        quantized_binding = 8
+        rms_scale_binding = 9
+        norm_weight_binding = 13
+    for block_name, (source_binding, target_binding) in binding_rewrites.items():
+        pattern = (
+            rf"layout\(set = 0, binding = {source_binding}\) "
+            rf"(?P<access>readonly )?buffer {block_name}"
+        )
+        rendered, replacement_count = re.subn(
+            pattern,
+            lambda found, target_binding=target_binding, block_name=block_name: (
+                f"layout(set = 0, binding = {target_binding}) "
+                f"{found.group('access') or ''}buffer {block_name}"
+            ),
+            rendered,
+        )
+        if replacement_count != 1:
+            raise ModelCompileError(
+                f"fused hyper/RMS shader {shader_file!r} could not relocate "
+                f"{block_name} binding"
+            )
+    extensions = """#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_float_e4m3 : require
+"""
+    rendered = rendered.replace("#version 460\n", f"#version 460\n\n{extensions}", 1)
+    declarations = f"""
+layout(set = 0, binding = {quantized_binding}) buffer QuantizedFrame {{
+    uint words[];
+}} quantized_frame;
+layout(set = 0, binding = {rms_scale_binding}) buffer RmsScale {{
+    float values[];
+}} rms_scale;
+layout(set = 0, binding = {norm_weight_binding}) readonly buffer NormWeight {{
+    uint words[];
+}} norm_weight;
+"""
+    marker = "const uint MULTIPLICITY = "
+    marker_index = rendered.find(marker)
+    if marker_index < 0:
+        raise ModelCompileError(
+            f"fused hyper/RMS shader {shader_file!r} has no geometry declaration"
+        )
+    rendered = rendered[:marker_index] + declarations + "\n" + rendered[marker_index:]
+    rms_constants = f"""const uint RMS_BLOCK_COLUMNS = {block_columns}u;
+const uint RMS_BLOCK_COUNT = HIDDEN_SIZE / RMS_BLOCK_COLUMNS;
+const uint RMS_FP8_WORDS_PER_BLOCK = RMS_BLOCK_COLUMNS / 4u;
+const float RMS_NORM_EPS = {shader_float_glsl(rms_epsilon)};
+const float RMS_WEIGHT_OFFSET = {shader_float_glsl(rms_weight_offset)};
+"""
+    geometry_marker = "const uint MIX_COUNT = "
+    rendered = rendered.replace(
+        geometry_marker,
+        rms_constants + geometry_marker,
+        1,
+    )
+    helpers = """
+float read_rms_weight(uint index) {
+    uint packed = norm_weight.words[index >> 1u];
+    return bf16_to_f32(packed >> ((index & 1u) * 16u));
+}
+
+uint pack_fp8(fe4m3vec4 value) {
+    u8vec4 bits = floate4m3BitsToUintEXT(value);
+    return uint(bits.x)
+        | (uint(bits.y) << 8u)
+        | (uint(bits.z) << 16u)
+        | (uint(bits.w) << 24u);
+}
+"""
+    main_marker = "void main() {"
+    rendered = rendered.replace(main_marker, helpers + "\n" + main_marker, 1)
+    rms_tail = """
+    barrier();
+
+    float rms_square_sum = 0.0;
+    for (uint index = lane; index < HIDDEN_SIZE; index += gl_WorkGroupSize.x) {
+        float value = read_bf16(
+            reduced_output.words[index >> 1u], index & 1u
+        );
+        rms_square_sum = fma(value, value, rms_square_sum);
+    }
+    rms_square_sum = subgroupAdd(rms_square_sum);
+    if (gl_SubgroupInvocationID == 0u) {
+        reduction[gl_SubgroupID] = rms_square_sum;
+    }
+    barrier();
+
+    float rms_total = 0.0;
+    for (uint subgroup = 0u; subgroup < gl_NumSubgroups; ++subgroup) {
+        rms_total += reduction[subgroup];
+    }
+    float rms_inverse = inversesqrt(
+        rms_total / float(HIDDEN_SIZE) + RMS_NORM_EPS
+    );
+    for (
+        uint block = gl_SubgroupID;
+        block < RMS_BLOCK_COUNT;
+        block += gl_NumSubgroups
+    ) {
+        vec4 rounded = vec4(0.0);
+        uint output_lo = 0u;
+        uint output_hi = 0u;
+        if (gl_SubgroupInvocationID < RMS_FP8_WORDS_PER_BLOCK) {
+            uint column = block * RMS_BLOCK_COLUMNS
+                + gl_SubgroupInvocationID * 4u;
+            uint rounded_bits[4];
+            for (uint element = 0u; element < 4u; ++element) {
+                uint index = column + element;
+                float normalized = read_bf16(
+                    reduced_output.words[index >> 1u], index & 1u
+                ) * rms_inverse * (read_rms_weight(index) + RMS_WEIGHT_OFFSET);
+                rounded_bits[element] = f32_to_bf16(normalized);
+                rounded[element] = bf16_to_f32(rounded_bits[element]);
+            }
+            output_lo = rounded_bits[0] | (rounded_bits[1] << 16u);
+            output_hi = rounded_bits[2] | (rounded_bits[3] << 16u);
+        }
+        float lane_max = max(
+            max(abs(rounded.x), abs(rounded.y)),
+            max(abs(rounded.z), abs(rounded.w))
+        );
+        float block_max = subgroupMax(lane_max);
+        float block_scale = exp2(ceil(log2(max(block_max, 1e-4) / 448.0)));
+        if (gl_SubgroupInvocationID == 0u) {
+            rms_scale.values[block] = block_scale;
+        }
+        if (gl_SubgroupInvocationID < RMS_FP8_WORDS_PER_BLOCK) {
+            uint word = block * RMS_FP8_WORDS_PER_BLOCK
+                + gl_SubgroupInvocationID;
+            uint output_word = word * 2u;
+            reduced_output.words[output_word] = output_lo;
+            reduced_output.words[output_word + 1u] = output_hi;
+            quantized_frame.words[word] = pack_fp8(
+                fe4m3vec4(rounded / block_scale)
+            );
+        }
+    }
+"""
+    closing = rendered.rfind("\n}")
+    if closing < 0:
+        raise ModelCompileError(
+            f"fused hyper/RMS shader {shader_file!r} has no main-function terminator"
+        )
+    return rendered[:closing] + rms_tail + rendered[closing:]
+
+
 def render_shader_source(source_dir: Path, shader_file: str) -> str:
     source = source_dir / shader_file
     if source.exists():
@@ -129,6 +342,53 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     latent_compression = render_latent_compression_shader(source_dir, shader_file)
     if latent_compression is not None:
         return latent_compression
+
+    hyper_rms_norm = render_hyper_connection_rms_norm_shader(
+        source_dir,
+        shader_file,
+    )
+    if hyper_rms_norm is not None:
+        return hyper_rms_norm
+
+    in_place_rms_batch = re.fullmatch(
+        r"rms_norm_quantize_in_place_batch(\d+)_fp8_e4m3(?:_(spow2))?_"
+        r"b(\d+)_h(\d+)_eps([0-9eE+.-]+)_offset([0-9eE+.-]+)\.comp",
+        shader_file,
+    )
+    if in_place_rms_batch is not None:
+        (
+            batch_tile_width,
+            scale_format,
+            block_columns,
+            hidden_size,
+            norm_epsilon,
+            weight_offset,
+        ) = in_place_rms_batch.groups()
+        return render_shader_template(
+            source_dir,
+            "rms_norm_quantize_batch_fp8_e4m3.comp.template",
+            {
+                "FRAME_BUFFERS": (
+                    "layout(set = 0, binding = 0) buffer OutputFrames {\n"
+                    "    uint words[];\n"
+                    "} output_frames;"
+                ),
+                "INPUT_FRAME_BUFFER": "output_frames",
+                "QUANTIZED_BINDING": "1",
+                "SCALE_BINDING": "2",
+                "WEIGHT_BINDING": "3",
+                "PRE_WRITE_BARRIER": "memoryBarrierBuffer();\n    barrier();",
+                "BATCH_TILE_WIDTH": batch_tile_width,
+                "DYNAMIC_SCALE": _fp8_dynamic_scale_expression(
+                    "block_max",
+                    power_of_two=scale_format == "spow2",
+                ),
+                "BLOCK_COLUMNS": block_columns,
+                "HIDDEN_SIZE": hidden_size,
+                "NORM_EPS": norm_epsilon,
+                "WEIGHT_OFFSET": weight_offset,
+            },
+        )
 
     hyper_pre_batch = re.fullmatch(
         r"(hyper_connection_pre|hyper_connection_post_pre)_batch(\d+)_"
@@ -3630,6 +3890,20 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                     ),
                     power_of_two=replacements.pop("SCALE_FORMAT") == "spow2",
                 )
+            if template == "rms_norm_quantize_batch_fp8_e4m3.comp.template":
+                replacements["FRAME_BUFFERS"] = (
+                    "layout(set = 0, binding = 0) readonly buffer InputFrames {\n"
+                    "    uint words[];\n"
+                    "} input_frames;\n"
+                    "layout(set = 0, binding = 1) buffer OutputFrames {\n"
+                    "    uint words[];\n"
+                    "} output_frames;"
+                )
+                replacements["INPUT_FRAME_BUFFER"] = "input_frames"
+                replacements["QUANTIZED_BINDING"] = "2"
+                replacements["SCALE_BINDING"] = "3"
+                replacements["WEIGHT_BINDING"] = "4"
+                replacements["PRE_WRITE_BARRIER"] = "barrier();"
             if template in (
                 "causal_conv1d_silu_bf16.comp.template",
                 "causal_conv1d_silu_temporal_bf16.comp.template",

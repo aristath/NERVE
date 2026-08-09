@@ -7,19 +7,14 @@
 
 layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer InputFrames {
-    uint words[];
-} input_frames;
-layout(set = 0, binding = 1) buffer OutputFrames {
-    uint words[];
-} output_frames;
-layout(set = 0, binding = 2) buffer QuantizedFrames {
+{{FRAME_BUFFERS}}
+layout(set = 0, binding = {{QUANTIZED_BINDING}}) buffer QuantizedFrames {
     uint words[];
 } quantized_frames;
-layout(set = 0, binding = 3) buffer Scales {
+layout(set = 0, binding = {{SCALE_BINDING}}) buffer Scales {
     float values[];
 } scales;
-layout(set = 0, binding = 4) readonly buffer Weight {
+layout(set = 0, binding = {{WEIGHT_BINDING}}) readonly buffer Weight {
     uint words[];
 } weight;
 
@@ -51,7 +46,9 @@ uint f32_to_bf16(float value) {
 
 float read_input(uint batch_index, uint index) {
     uint packed =
-        input_frames.words[batch_index * FRAME_WORDS + (index >> 1u)];
+        {{INPUT_FRAME_BUFFER}}.words[
+            batch_index * FRAME_WORDS + (index >> 1u)
+        ];
     return bf16_to_f32(
         ((index & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16u)
     );
@@ -101,7 +98,7 @@ void main() {
                 sum_squares[batch_lane];
         }
     }
-    barrier();
+    {{PRE_WRITE_BARRIER}}
 
     float inv_rms[BATCH_TILE_WIDTH];
     for (uint batch_lane = 0u; batch_lane < BATCH_TILE_WIDTH; batch_lane++) {

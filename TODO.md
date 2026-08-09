@@ -317,6 +317,19 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   evictions, reloads, or transfer stalls; behavior, turn recall, and exact NERVE
   allocation release were preserved. Explicit placement never invokes the
   adaptive remounter.
+- The compiler now recognizes a graph- and capability-proven
+  hyper-connection/RMS/FP8 transaction and emits one exact scalar decode shader
+  for it. A fresh DeepSeek package contracts 43 pre and 43 post/pre regions,
+  reducing the compiled stream from 1,560 to 1,474 dispatches per pass without a
+  model-name branch. All six measured-turn token digests are identical to the
+  unfused package. After three complete warmup conversations the zero-load truth
+  set measured 7.9570 decode and 7.8618 prefill tok/s, versus the matched current
+  fixed-topology control's 7.8596 and 7.8136. Qwen3.6-35B-A3B measured 71.4898
+  decode tok/s and Qwen3.5-9B measured 48.7954 with no paging or behavioral
+  regression. Every pre-run GPU reservation was restored exactly. This is a
+  valid compiled-transaction building block, but it does not beat the 8.4228
+  accepted DeepSeek baseline and therefore does not complete the device-kernel
+  or persistent-stream work.
 
 ## Work queue
 

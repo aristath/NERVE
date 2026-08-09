@@ -103,6 +103,63 @@ def can_emit_physical_representation_from_producer(
     )
 
 
+def can_fuse_hyper_connection_rms_norm(
+    circuit: Json,
+    hyper: Json,
+    norm: Json,
+    tensor_index: Json,
+    *,
+    hidden_size: int,
+    compiler_target: Json,
+) -> bool:
+    hyper_op = hyper.get("op")
+    reduced_output_index = 0 if hyper_op == "hyper_connection_pre" else 1
+    hyper_outputs = hyper.get("outputs", [])
+    norm_attrs = norm.get("attrs", {})
+    representations = norm_attrs.get("physical_output_representations")
+    try:
+        norm_parameter = norm["params"][0]
+        norm_shape = parameter_shape_for_id(circuit, norm_parameter, tensor_index)
+        norm_dtype = parameter_dtype_for_id(circuit, norm_parameter, tensor_index)
+        multiplicity = int(hyper.get("attrs", {}).get("multiplicity", 0))
+    except (IndexError, KeyError, TypeError, ValueError):
+        return False
+    return (
+        hyper_op in {"hyper_connection_pre", "hyper_connection_post_pre"}
+        and len(hyper_outputs) == (3 if hyper_op == "hyper_connection_pre" else 4)
+        and reduced_output_index < len(hyper_outputs)
+        and norm.get("op") == "rms_norm"
+        and norm.get("inputs") == [hyper_outputs[reduced_output_index]]
+        and len(norm.get("outputs", [])) == 3
+        and len(norm.get("params", [])) == 1
+        and not norm.get("state_reads")
+        and not norm.get("state_writes")
+        and norm_shape == [hidden_size]
+        and norm_dtype == "BF16"
+        and hidden_size == 4096
+        and multiplicity == 4
+        and isinstance(representations, list)
+        and len(representations) == 1
+        and isinstance(representations[0], dict)
+        and representations[0].get("contract") == FP8_E8M0_PREQUANTIZATION_CONTRACT
+        and representations[0].get("logical_signal") == norm["outputs"][0]
+        and representations[0].get("outputs") == norm["outputs"][1:]
+        and int(representations[0].get("element_count", 0)) == hidden_size
+        and int(representations[0].get("block_columns", 0)) == 128
+        and bool(compiler_target.get("devices"))
+        and all(
+            {"shader_float8", "shader_int8"}
+            <= set(device.get("shader_features", []))
+            and int(device.get("max_compute_work_group_invocations", 0)) >= 1024
+            and int(device.get("max_compute_work_group_size_x", 0)) >= 1024
+            and "arithmetic" in set(device.get("subgroup_operations", []))
+            and int(device.get("subgroup_size", 0)) == 64
+            and bool(device.get("subgroup_compute_supported"))
+            for device in compiler_target["devices"]
+        )
+    )
+
+
 def build_vulkan_resident_package_manifest(
     *,
     model_graph: Json,
@@ -548,6 +605,16 @@ def build_vulkan_resident_package_manifest(
                     projection,
                     multiply,
                     tensor_index,
+                )
+            ),
+            can_fuse_hyper_connection_rms_norm=lambda hyper, norm, circuit=circuit: (
+                can_fuse_hyper_connection_rms_norm(
+                    circuit,
+                    hyper,
+                    norm,
+                    tensor_index,
+                    hidden_size=hidden_size,
+                    compiler_target=compiler_target,
                 )
             ),
             prequantization_spec=lambda node, circuit=circuit: (
@@ -1118,6 +1185,26 @@ def component_kernel_spec(
 ) -> Json:
     source_node_ids = normalized_source_node_ids(node)
     stream_control_binding = stream_control_binding_from_artifact_path(shader_file)
+    hyper_rms_batch_implementations = hyper_connection_rms_norm_batch_implementations(
+        shader_file
+    )
+    if hyper_rms_batch_implementations is not None:
+        return {
+            "execution_index": execution_index,
+            "node_id": node["id"],
+            "op": node["op"],
+            "source_node_ids": source_node_ids,
+            "semantic_module_ids": semantic_module_ids_for_source_nodes(
+                circuit, source_node_ids
+            ),
+            "execution_domain": "decode",
+            "stream_control_binding": stream_control_binding,
+            "shader_path": f"shaders/{shader_file}",
+            "local_size_x": local_size_x,
+            "workgroup_count_x": workgroup_count_x,
+            "batch_mode": "weight_shared",
+            "batch_implementations": hyper_rms_batch_implementations,
+        }
     if node["op"] == "mixed_parallel_linear_4way":
         return {
             "execution_index": execution_index,

@@ -40,6 +40,9 @@ def optimize_circuit_for_vulkan(
     can_fuse_linear_sigmoid_scalar_multiply: (
         Callable[[Json, Json], bool] | None
     ) = None,
+    can_fuse_hyper_connection_rms_norm: (
+        Callable[[Json, Json], bool] | None
+    ) = None,
     prequantization_spec: Callable[[Json], Json | None] | None = None,
     can_emit_representation: Callable[[Json, Json], bool] | None = None,
     attention_partition_count: int | None = None,
@@ -146,11 +149,155 @@ def optimize_circuit_for_vulkan(
         prequantization_spec,
         can_emit_representation,
     )
-    optimized["nodes"] = _fuse_mixed_precision_parallel_linears(
+    transaction_nodes = _fuse_hyper_connection_rms_norm_regions(
         lowered_nodes,
+        can_fuse_hyper_connection_rms_norm,
+        {
+            output.get("source", output["id"])
+            for output in optimized.get("boundary", {}).get("outputs", [])
+        },
+    )
+    optimized["nodes"] = _fuse_mixed_precision_parallel_linears(
+        transaction_nodes,
         can_fuse_mixed_precision_parallel_linears,
     )
     return optimized
+
+
+def _fuse_hyper_connection_rms_norm_regions(
+    nodes: list[Json],
+    can_fuse: Callable[[Json, Json], bool] | None,
+    boundary_outputs: set[str],
+) -> list[Json]:
+    if can_fuse is None:
+        return nodes
+    consumer_counts = Counter(
+        signal for node in nodes for signal in node.get("inputs", [])
+    )
+    fused_nodes: list[Json] = []
+    provider_rewrites: dict[str, str] = {}
+    index = 0
+    while index < len(nodes):
+        hyper = nodes[index]
+        norm = nodes[index + 1] if index + 1 < len(nodes) else None
+        hyper_op = hyper.get("op")
+        reduced_output_index = 0 if hyper_op == "hyper_connection_pre" else 1
+        hyper_outputs = hyper.get("outputs", [])
+        reduced_output = (
+            hyper_outputs[reduced_output_index]
+            if reduced_output_index < len(hyper_outputs)
+            else None
+        )
+        if (
+            norm is None
+            or hyper_op
+            not in {"hyper_connection_pre", "hyper_connection_post_pre"}
+            or reduced_output is None
+            or norm.get("op") != "rms_norm"
+            or norm.get("inputs") != [reduced_output]
+            or len(norm.get("outputs", [])) < 1
+            or len(norm.get("params", [])) != 1
+            or norm.get("state_reads")
+            or norm.get("state_writes")
+            or consumer_counts[reduced_output] != 1
+            or reduced_output in boundary_outputs
+            or not can_fuse(hyper, norm)
+        ):
+            fused_nodes.append(deepcopy(hyper))
+            index += 1
+            continue
+
+        hyper_attrs = deepcopy(hyper.get("attrs", {}))
+        norm_attrs = deepcopy(norm.get("attrs", {}))
+        hyper_source_ids = _source_node_ids(hyper)
+        norm_source_ids = _source_node_ids(norm)
+        hyper_element_bytes = list(
+            hyper_attrs.get("output_element_bytes", [2] * len(hyper_outputs))
+        )
+        norm_element_bytes = list(
+            norm_attrs.get(
+                "output_element_bytes", [2] * len(norm.get("outputs", []))
+            )
+        )
+        representation_outputs = {
+            output
+            for representation in norm_attrs.get(
+                "physical_output_representations", []
+            )
+            if isinstance(representation, dict)
+            for output in representation.get("outputs", [])
+        }
+        norm_output_bytes = dict(
+            zip(norm.get("outputs", []), norm_element_bytes, strict=True)
+        )
+        logical_norm_outputs = [
+            output
+            for output in norm.get("outputs", [])
+            if output not in representation_outputs
+        ]
+        physical_norm_outputs = [
+            output
+            for output in norm.get("outputs", [])
+            if output in representation_outputs
+        ]
+        if hyper_op == "hyper_connection_pre":
+            outputs = [
+                *deepcopy(logical_norm_outputs),
+                *deepcopy(hyper_outputs[1:]),
+                *deepcopy(physical_norm_outputs),
+            ]
+            output_element_bytes = [
+                *(norm_output_bytes[output] for output in logical_norm_outputs),
+                *hyper_element_bytes[1:],
+                *(norm_output_bytes[output] for output in physical_norm_outputs),
+            ]
+        else:
+            outputs = [
+                hyper_outputs[0],
+                *deepcopy(logical_norm_outputs),
+                *deepcopy(hyper_outputs[2:]),
+                *deepcopy(physical_norm_outputs),
+            ]
+            output_element_bytes = [
+                hyper_element_bytes[0],
+                *(norm_output_bytes[output] for output in logical_norm_outputs),
+                *hyper_element_bytes[2:],
+                *(norm_output_bytes[output] for output in physical_norm_outputs),
+            ]
+        attrs = {
+            **hyper_attrs,
+            "compiled_from": [*hyper_source_ids, *norm_source_ids],
+            "rms_norm_eps": norm_attrs.get("eps"),
+            "rms_norm_weight_offset": norm_attrs.get("weight_offset", 0.0),
+            "rms_norm_intermediate_rounding": "BF16",
+            "output_element_bytes": output_element_bytes,
+        }
+        if "physical_output_representations" in norm_attrs:
+            attrs["physical_output_representations"] = deepcopy(
+                norm_attrs["physical_output_representations"]
+            )
+        fused_id = f"{hyper['id']}__{norm['id']}"
+        provider_rewrites[str(norm["id"])] = fused_id
+        fused_nodes.append(
+            {
+                "id": fused_id,
+                "op": f"{hyper_op}_rms_norm",
+                "inputs": deepcopy(hyper.get("inputs", [])),
+                "outputs": outputs,
+                "params": [
+                    *deepcopy(hyper.get("params", [])),
+                    *deepcopy(norm["params"]),
+                ],
+                "attrs": attrs,
+            }
+        )
+        index += 2
+    for node in fused_nodes:
+        attrs = node.get("attrs", {})
+        provider_id = attrs.get("physical_input_provider_id")
+        if provider_id in provider_rewrites:
+            attrs["physical_input_provider_id"] = provider_rewrites[provider_id]
+    return fused_nodes
 
 
 def _fuse_hyper_connection_pre_regions(nodes: list[Json]) -> list[Json]:
