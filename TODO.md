@@ -486,6 +486,21 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   not the limiting wall-clock path. Do not add dormant-decoder state or remount
   policy solely to reduce host counters; DSpark must instead become a winning,
   device-owned proposal/verification transaction under item 5.
+- A known-input causal-verification wavefront was rejected after exact state
+  tests and the authoritative product gate. It queued the target's speculative
+  lanes as one causal device-major transaction, kept full-state and sampler
+  checkpoints off the all-hit path, and fell back to exact scalar continuation
+  only when a real demand fault invalidated the cross-device wavefront. Full
+  state, partial-prefix commit, and fault-fallback tests passed. The complete
+  run converged through 10,087 -> 304 -> 196 -> 0 loads; its measured
+  conversation had zero reads, uploads, reloads, evictions, or blocking, and
+  every response was byte-identical to the accepted gate. Truth decode was
+  nevertheless 8.6288 versus 8.6600 tok/s and prefill was 8.7452 versus
+  8.7912 tok/s. Every GPU returned to its exact reservation and the shader,
+  transaction state, fallback plumbing, tests, and obsolete-path displacement
+  were removed completely. Preserving causal correctness across lanes is not
+  sufficient: the next verification topology must overlap useful proposal or
+  target work rather than serially queueing the same scalar token dependency.
 
 ## Work queue
 
