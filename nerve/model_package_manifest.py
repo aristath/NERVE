@@ -669,6 +669,7 @@ def build_vulkan_resident_package_manifest(
         compiled_circuits=compiled_circuits,
         tensor_index=tensor_index,
         dimensions=dimensions,
+        compiler_target=compiler_target,
         cooperative_float8_e4m3_shapes=cooperative_float8_e4m3_shapes,
     )
     speculative_decoders = speculative_decoder_specs(
@@ -677,6 +678,7 @@ def build_vulkan_resident_package_manifest(
         compiled_circuits=compiled_circuits,
         tensor_index=tensor_index,
         dimensions=dimensions,
+        compiler_target=compiler_target,
         projection_shader_file=projection_shader_file,
         norm_shader_file=norm_shader_file,
         projection_workgroup_count_x=projection_workgroup_count_x,
@@ -957,6 +959,7 @@ def component_execution_specs(
     compiled_circuits: dict[str, Json],
     tensor_index: Json,
     dimensions: Json,
+    compiler_target: Json,
     cooperative_float8_e4m3_shapes: tuple[tuple[int, int, int], ...] = (),
 ) -> list[Json]:
     executions: list[Json] = []
@@ -972,6 +975,7 @@ def component_execution_specs(
                 node,
                 tensor_index,
                 dimensions,
+                compiler_target=compiler_target,
             )
             kernels.append(
                 component_kernel_spec(
@@ -1008,6 +1012,7 @@ def speculative_decoder_specs(
     compiled_circuits: dict[str, Json],
     tensor_index: Json,
     dimensions: Json,
+    compiler_target: Json,
     projection_shader_file: str,
     norm_shader_file: str,
     projection_workgroup_count_x: int,
@@ -1042,6 +1047,7 @@ def speculative_decoder_specs(
                 circuit=compiled_circuits[ref["id"]],
                 tensor_index=tensor_index,
                 dimensions=dimensions,
+                compiler_target=compiler_target,
                 cooperative_float8_e4m3_shapes=(cooperative_float8_e4m3_shapes),
             )
             for ref in executable_refs
@@ -1153,11 +1159,18 @@ def component_execution_spec(
     circuit: Json,
     tensor_index: Json,
     dimensions: Json,
+    compiler_target: Json,
     cooperative_float8_e4m3_shapes: tuple[tuple[int, int, int], ...] = (),
 ) -> Json:
     kernels = []
     for index, node in enumerate(circuit["nodes"]):
-        shader_file = shader_file_for_node(circuit, node, tensor_index, dimensions)
+        shader_file = shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            dimensions,
+            compiler_target=compiler_target,
+        )
         kernels.append(
             component_kernel_spec(
                 execution_index=index,

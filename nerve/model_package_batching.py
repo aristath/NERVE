@@ -364,7 +364,10 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
             )
         )
         reads_static_state_snapshot = causal_scan_shader.startswith(
-            "indexed_sparse_attention_main_temporal_"
+            (
+                "indexed_sparse_attention_main_temporal_",
+                "indexed_sparse_attention_main_score_pipeline_temporal_",
+            )
         )
         temporal_state_snapshot_control = (
             captures_static_state
@@ -414,7 +417,10 @@ def causal_scan_batch_stages(shader_file: str, local_size_x: int) -> list[Json] 
                     1 if reads_static_state_snapshot else None
                 ),
                 dispatch_y_from_batch_width=causal_scan_shader.startswith(
-                    "indexed_sparse_attention_main_temporal_parallel_"
+                    (
+                        "indexed_sparse_attention_main_temporal_parallel_",
+                        "indexed_sparse_attention_main_score_pipeline_temporal_parallel_",
+                    )
                 ),
             )
             if temporal_binding is not None
@@ -934,6 +940,11 @@ def causal_scan_batch_shader_file(shader_file: str) -> str | None:
             "chronological_compressed_index_temporal_",
         ),
         (
+            r"indexed_sparse_attention_main_score_pipeline_bf16_q\d+_kv1_.+__sc\d+\.comp",
+            "indexed_sparse_attention_main_score_pipeline_",
+            "indexed_sparse_attention_main_score_pipeline_temporal_parallel_",
+        ),
+        (
             r"indexed_sparse_attention_main_bf16_q\d+_kv1_.+__sc\d+\.comp",
             "indexed_sparse_attention_main_",
             "indexed_sparse_attention_main_temporal_parallel_",
@@ -1021,7 +1032,8 @@ def causal_scan_workgroup_count_x(shader_file: str) -> int:
         maximum, chunk = map(int, index_scores.groups())
         return (maximum + chunk - 1) // chunk
     indexed_attention = re.fullmatch(
-        r"indexed_sparse_attention_main_bf16_q(\d+)_kv1_d\d+_.+__sc\d+\.comp",
+        r"indexed_sparse_attention_main(?:_score_pipeline)?_bf16_"
+        r"q(\d+)_kv1_d\d+_.+__sc\d+\.comp",
         shader_file,
     )
     if indexed_attention is not None:

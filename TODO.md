@@ -16,11 +16,13 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
 
 ## Current evidence
 
-- The accepted zero-load DeepSeek truth conversation remains 8.4228 decode
-  tok/s and 8.3570 prefill tok/s. It followed three discarded complete
-  conversations whose residency loads converged from 10,004 to 414 to 8; the
-  measured fourth conversation had zero reads, uploads, reloads, evictions, or
-  residency blocking. NVMe paging is therefore not the steady-state limiter.
+- The accepted zero-load DeepSeek truth conversation is now 8.5828 decode tok/s
+  and 8.6922 prefill tok/s. It followed three discarded complete conversations
+  whose residency loads converged from 9,994 to 373 to zero; the measured fourth
+  conversation had zero reads, uploads, reloads, evictions, or residency
+  blocking. Every response byte matched the prior package, including turn
+  recall, and every GPU returned to its exact pre-run reservation. NVMe paging
+  is therefore not the steady-state limiter.
 - A fresh schema-v10 compilation with explicit fixed-source MXFP4 dispatch
   contracts passed a complete four-conversation product gate, preserved behavior
   and turn recall, and restored every GPU reservation, but its zero-load truth
@@ -30,7 +32,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   the 2,224-token truth turn measured 74.625 seconds of attention read, 52.927
   seconds of hyper-connections, 50.215 seconds of expert gate/up, 32.073 seconds
   of attention score, 28.071 seconds of expert down, and 27.590 seconds of dense
-  projection. Keep 8.4228/8.3570 as the acceptance baseline until an equivalent
+  projection. Keep 8.5828/8.6922 as the acceptance baseline until an equivalent
   complete gate beats it.
 - Equal layer counts are not an execution-cost-equivalent placement on the live
   workstation even across five nominally identical R9700s. The exact sequential
@@ -358,10 +360,9 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   Qwen3.6-35B-A3B passed at 72.0300 decode and 148.8120 prefill tok/s versus
   71.4898/140.1718, while Qwen3.5-9B remained within run variance at 48.7338 decode
   and 141.0704 prefill tok/s versus 48.7954/141.5648; every response digest matched.
-  All selected GPUs restored their exact pre-run reservations. Retain the
-  transaction as a universal compiler building block, but keep 8.4228 decode tok/s
-  as the DeepSeek acceptance high-water mark until an equivalent complete gate
-  exceeds it.
+  All selected GPUs restored their exact pre-run reservations. The transaction
+  remains a universal compiler building block; its product high-water mark is
+  now superseded by the accepted score pipeline described below.
 - Fusing indexed sparse attention with its sole inverse-RoPE consumer was
   rejected by the complete product gate despite an exact local win. The generic
   graph transaction contracted all 43 eligible pairs, removed one dispatch and
@@ -390,6 +391,25 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   eight reductions plus strided accumulators creates more register/shared-memory
   pressure than the amortized KV reads save. The shader and conformance test
   were removed immediately; no model package or product gate was run.
+- The exact fused indexed-attention score pipeline is the new accepted
+  transaction. The existing 512 score workers retain the original eight
+  subgroup reductions while a ninth controller region finalizes token N as the
+  workers reduce token N+1 through a double-buffered score plane. This removes
+  one full-workgroup barrier per score token without materializing scores outside
+  the attention transaction or changing softmax/value arithmetic. The shader
+  derives its reduction count from `gl_SubgroupSize`; compiler selection depends
+  only on graph geometry, subgroup operations, and a 576-invocation workgroup,
+  never a model or layer name. It is byte-exact and faster at both reachable
+  compressed geometries: r4/k512 improved by 15.42% and r128/k8192 by 11.15% in
+  the final device microgate. The compiler selected it for all 41 compressed
+  attention components and retained the established kernel for the two
+  local-only components. After three full discarded conversations, the
+  zero-load truth set reached 8.5828 decode and 8.6922 prefill tok/s, respectively
+  1.90% and 4.01% above the prior accepted high-water marks, with every response
+  byte preserved. Qwen3.6-35B-A3B reached 72.2308 and 71.7204 decode tok/s in two
+  independent regression gates versus 72.0300, while Qwen3.5-9B reached 48.7832
+  versus 48.7338; all responses matched, measured residency deltas were zero,
+  and teardown restored exact reservations.
 
 ## Work queue
 
@@ -397,12 +417,13 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    semantics.
 
    - Indexed sparse-attention read is the largest measured device phase. The
-     exact local scheduling/load candidates tried so far are exhausted or slower;
-     pursue a materially different compiled attention transaction rather than
-     another barrier-for-barrier shader rewrite. Eliminate redundant
-     state-address translation, duplicate key/value reads,
-     serial score reduction, barriers, and full-score materialization where an
-     exact fused or tiled schedule is faster. Preserve score accumulation order,
+     accepted score pipeline now overlaps exact score finalization with the next
+     token reduction and removes one barrier per score token for every compressed
+     attention component. Re-attribute the warmed product path before choosing
+     the next attention target. Continue eliminating redundant state-address
+     translation, duplicate key/value reads, remaining barriers, and avoidable
+     memory passes only where an exact fused or tiled schedule is faster.
+     Preserve score accumulation order,
      online-softmax semantics, sink handling, compressed-index ordering, and
      BF16 output bits. Do not retry full-width multi-head workgroups: h2 and h4
      were exact but 17.95% and 58.99% slower at the real geometry. A new blocked

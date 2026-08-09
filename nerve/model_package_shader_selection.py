@@ -26,6 +26,8 @@ def shader_file_for_node(
     node: Json,
     tensor_index: Json,
     dimensions: Json,
+    *,
+    compiler_target: Json | None = None,
 ) -> str:
     hidden_size = int(dimensions["hidden_size"])
     op = node["op"]
@@ -1702,8 +1704,33 @@ def shader_file_for_node(
                 raise ModelCompileError(
                     f"indexed sparse-attention node {node['id']!r} has an invalid compressed-index contract"
                 )
+        score_pipeline_supported = (
+            head_width == 512
+            and key_value_heads == 1
+            and compression_ratio > 0
+            and max_compressed_indices > 0
+            and isinstance(compiler_target, dict)
+            and bool(compiler_target.get("devices"))
+            and all(
+                bool(device.get("subgroup_compute_supported"))
+                and int(device.get("subgroup_size", 0)) >= 4
+                and head_width % int(device.get("subgroup_size", 0)) == 0
+                and {"basic", "arithmetic"}
+                <= set(device.get("subgroup_operations", []))
+                and int(device.get("max_compute_work_group_invocations", 0))
+                >= head_width + 64
+                and int(device.get("max_compute_work_group_size_x", 0))
+                >= head_width + 64
+                for device in compiler_target["devices"]
+            )
+        )
+        prefix = (
+            "indexed_sparse_attention_main_score_pipeline"
+            if score_pipeline_supported
+            else "indexed_sparse_attention_main"
+        )
         return (
-            f"indexed_sparse_attention_main_bf16_{common}"
+            f"{prefix}_bf16_{common}"
             f"r{compression_ratio}_k{max_compressed_indices}_"
             f"scale{shader_float_token(scale)}__sc{binding}.comp"
         )
@@ -2304,6 +2331,8 @@ def local_size_x_for_node(node: Json) -> int:
 
 
 def local_size_x_for_shader_file(shader_file: str, node: Json) -> int:
+    if shader_file.startswith("indexed_sparse_attention_main_score_pipeline_"):
+        return int(node["attrs"]["head_width"]) + 64
     if shader_file.startswith(
         ("hyper_connection_pre_", "hyper_connection_post_pre_")
     ):

@@ -648,6 +648,15 @@ def test_compiler_selects_stateful_causal_scan_kernels() -> None:
         "scale0.0441941738__sc8.comp"
     )
     assert causal_scan_batch_shader_file(unsupported_multi_kv_attention) is None
+    pipelined_attention = (
+        "indexed_sparse_attention_main_score_pipeline_bf16_"
+        "q64_kv1_d512_w128_r4_k512_scale0.0441941738__sc8.comp"
+    )
+    assert causal_scan_batch_shader_file(pipelined_attention) == (
+        "indexed_sparse_attention_main_score_pipeline_temporal_parallel_bf16_"
+        "q64_kv1_d512_w128_r4_k512_scale0.0441941738.comp"
+    )
+    assert causal_scan_workgroup_count_x(pipelined_attention) == 64
 
     attention_local_size = attention_workgroup_shape(256)[0]
     assert causal_scan_batch_stages(
@@ -974,6 +983,8 @@ def test_compiler_renders_deepseek_stateful_causal_scan_kernels(
         "chronological_compressed_index_temporal_u32_m8192_r128_o128__pbc3.comp",
         "indexed_sparse_attention_main_temporal_parallel_bf16_q64_kv1_d512_w128_"
         "r4_k512_scale0.0441941738__pbc8.comp",
+        "indexed_sparse_attention_main_score_pipeline_temporal_parallel_bf16_"
+        "q64_kv1_d512_w128_r4_k512_scale0.0441941738__pbc8.comp",
     }
 
     copy_shader_templates(shader_source_dir, tmp_path, shader_files)
@@ -1011,6 +1022,14 @@ def test_compiler_renders_deepseek_stateful_causal_scan_kernels(
     assert "uint batch_position = gl_WorkGroupID.y;" in attention
     assert "if (batch_position >= batch_control.batch_width)" in attention
     assert "for (uint batch_position" not in attention
+    pipelined_attention = sources[
+        "indexed_sparse_attention_main_score_pipeline_temporal_parallel_bf16_"
+        "q64_kv1_d512_w128_r4_k512_scale0.0441941738__pbc8.comp"
+    ]
+    assert "binding = 30) readonly buffer LocalStateSnapshots" in pipelined_attention
+    assert "uint batch_position = gl_WorkGroupID.y;" in pipelined_attention
+    assert "uint score_subgroup_count = HEAD_WIDTH / gl_SubgroupSize;" in pipelined_attention
+    assert "for (uint batch_position" not in pipelined_attention
     compile_shader_artifacts(tmp_path)
     assert len(list(tmp_path.glob("*.spv"))) == len(shader_files)
 

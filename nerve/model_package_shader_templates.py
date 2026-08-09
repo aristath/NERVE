@@ -910,13 +910,15 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         return rendered
 
     indexed_sparse_attention_main = re.fullmatch(
-        r"indexed_sparse_attention_main(_temporal(?:_parallel)?)?_bf16_"
+        r"indexed_sparse_attention_main(_score_pipeline)?"
+        r"(_temporal(?:_parallel)?)?_bf16_"
         r"q(\d+)_kv(\d+)_d(\d+)_w(\d+)_"
         r"r(\d+)_k(\d+)_scale([0-9eE+.-]+)\.comp",
         shader_file,
     )
     if indexed_sparse_attention_main is not None:
         (
+            score_pipeline,
             temporal,
             query_heads,
             kv_heads,
@@ -955,6 +957,14 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             or head_width > 1024
             or window <= 0
             or (compression_ratio == 0) != (max_compressed_indices == 0)
+            or (
+                score_pipeline is not None
+                and (
+                    kv_heads != 1
+                    or head_width != 512
+                    or not has_compressed
+                )
+            )
         ):
             raise ModelCompileError(
                 f"invalid main indexed sparse-attention shader shape {shader_file!r}"
@@ -962,12 +972,18 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         rendered = render_shader_template(
             source_dir,
             (
-                "indexed_sparse_attention_main_temporal_bf16.comp.template"
+                "indexed_sparse_attention_main_score_pipeline_temporal_bf16.comp.template"
+                if score_pipeline is not None and temporal is not None
+                else "indexed_sparse_attention_main_score_pipeline_bf16.comp.template"
+                if score_pipeline is not None
+                else "indexed_sparse_attention_main_temporal_bf16.comp.template"
                 if temporal is not None
                 else "indexed_sparse_attention_main_bf16.comp.template"
             ),
             {
-                "LOCAL_SIZE": str(head_width),
+                "LOCAL_SIZE": str(
+                    head_width + 64 if score_pipeline is not None else head_width
+                ),
                 "QUERY_HEADS": str(query_heads),
                 "KV_HEADS": str(kv_heads),
                 "HEAD_WIDTH": str(head_width),

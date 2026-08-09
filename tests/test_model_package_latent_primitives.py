@@ -1060,3 +1060,133 @@ def test_compiles_causal_indexed_attention_with_compressed_memory(
     assert "tile_token * SUBGROUP_COUNT" not in source
     compile_shader_artifacts(tmp_path)
     assert (tmp_path / shader_file.replace(".comp", ".spv")).is_file()
+
+
+def test_selects_score_pipelined_attention_only_for_its_discovered_contract(
+    tmp_path: Path,
+) -> None:
+    circuit, tensor_index = _fixture()
+    circuit["state_ports"][0]["shape_per_token"] = [512]
+    circuit["parameters"]["refs"]["attention_sinks"] = {
+        "tensor": "attention.sinks"
+    }
+    tensor_index["tensors"]["attention.sinks"] = {
+        "dtype": "F32",
+        "shape": [64],
+        "layout": ROW_MAJOR_LAYOUT,
+    }
+    circuit["nodes"].append(
+        {
+            "id": "index",
+            "op": "chronological_compressed_index",
+            "inputs": ["compressed_kv_values"],
+            "outputs": ["compressed_indices"],
+            "attrs": {"ratio": 4, "causal": True},
+        }
+    )
+    node = {
+        "id": "attend",
+        "op": "indexed_sparse_attention",
+        "inputs": [
+            "query",
+            "local_kv_values",
+            "compressed_kv_values",
+            "compressed_indices",
+        ],
+        "outputs": ["attention_heads"],
+        "params": ["attention_sinks"],
+        "attrs": {
+            "causal": True,
+            "scale": 512**-0.5,
+            "window_size": 128,
+            "query_heads": 64,
+            "key_value_heads": 1,
+            "head_width": 512,
+        },
+    }
+    circuit["nodes"].append(node)
+    dimensions = {
+        "hidden_size": 4096,
+        "max_position_embeddings": 2048,
+    }
+    target = {
+        "devices": [
+            {
+                "subgroup_size": 64,
+                "subgroup_compute_supported": True,
+                "subgroup_operations": ["basic", "arithmetic"],
+                "max_compute_work_group_invocations": 1024,
+                "max_compute_work_group_size_x": 1024,
+            }
+        ]
+    }
+
+    selected = shader_file_for_node(
+        circuit,
+        node,
+        tensor_index,
+        dimensions,
+        compiler_target=target,
+    )
+    assert selected == (
+        "indexed_sparse_attention_main_score_pipeline_bf16_"
+        "q64_kv1_d512_w128_r4_k512_scale0.0441941738__sc7.comp"
+    )
+    assert local_size_x_for_shader_file(selected, node) == 576
+
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(shader_source_dir, tmp_path, {selected})
+    source = (tmp_path / selected).read_text()
+    assert "layout(local_size_x = 576" in source
+    assert "uint score_subgroup_count = HEAD_WIDTH / gl_SubgroupSize;" in source
+    assert "score_partials[2u * MAX_SCORE_SUBGROUP_COUNT]" in source
+    compile_shader_artifacts(tmp_path)
+
+    baseline = selected.replace("_score_pipeline", "")
+    unsupported_targets = []
+    for field, value in (
+        ("subgroup_compute_supported", False),
+        ("max_compute_work_group_invocations", 512),
+        ("max_compute_work_group_size_x", 512),
+    ):
+        unsupported = deepcopy(target)
+        unsupported["devices"][0][field] = value
+        unsupported_targets.append(unsupported)
+    no_arithmetic = deepcopy(target)
+    no_arithmetic["devices"][0]["subgroup_operations"] = ["basic"]
+    unsupported_targets.append(no_arithmetic)
+    incompatible_subgroup = deepcopy(target)
+    incompatible_subgroup["devices"][0]["subgroup_size"] = 1024
+    unsupported_targets.append(incompatible_subgroup)
+    mixed_target = deepcopy(target)
+    mixed_target["devices"].append(deepcopy(no_arithmetic["devices"][0]))
+    unsupported_targets.append(mixed_target)
+
+    for unsupported in unsupported_targets:
+        assert shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            dimensions,
+            compiler_target=unsupported,
+        ) == baseline
+
+    wrong_geometry = deepcopy(node)
+    wrong_geometry["attrs"]["head_width"] = 256
+    assert "_score_pipeline" not in shader_file_for_node(
+        circuit,
+        wrong_geometry,
+        tensor_index,
+        dimensions,
+        compiler_target=target,
+    )
+
+    local_only = deepcopy(node)
+    local_only["inputs"] = local_only["inputs"][:2]
+    assert "_score_pipeline" not in shader_file_for_node(
+        circuit,
+        local_only,
+        tensor_index,
+        dimensions,
+        compiler_target=target,
+    )

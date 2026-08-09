@@ -40,6 +40,8 @@ include!("vulkan_compute/mxfp4_tests.rs");
 include!("vulkan_compute/cooperative_fp8_crossover_tests.rs");
 #[cfg(test)]
 include!("vulkan_compute/hyper_connection_tests.rs");
+#[cfg(test)]
+include!("vulkan_compute/indexed_attention_score_pipeline_tests.rs");
 include!("vulkan_compute/radix_topk_tests.rs");
 #[cfg(test)]
 include!("vulkan_compute/spirv_interface_tests.rs");
