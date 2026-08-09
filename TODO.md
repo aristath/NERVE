@@ -473,6 +473,19 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   the current execution-epoch admission boundary until the device-owned
   residency transaction removes the epoch round trip itself; deleting its
   device-budget observation in isolation is not a product-path optimization.
+- Making a permanently selected scalar/resident adaptive-feedback winner stop
+  maintaining its attached DSpark state was also rejected by the authoritative
+  gate. The candidate was behaviorally exact, retained the accepted
+  9,997 -> 382 -> 0 load convergence, and made the measured all-hit path remove
+  every `speculative_draft` host call. It cut sequence submissions from 15,786
+  to 13,155, copy submissions from 31,729 to 21,211, and copy waits from 10,706
+  to 190. Despite those large orchestration reductions, truth decode regressed
+  from 8.6600 to 8.4492 tok/s and prefill from 8.7912 to 8.2090 tok/s. All five
+  GPU reservations were restored exactly and the lifecycle machinery was removed
+  completely. Those decoder-maintenance commands were asynchronously overlapped,
+  not the limiting wall-clock path. Do not add dormant-decoder state or remount
+  policy solely to reduce host counters; DSpark must instead become a winning,
+  device-owned proposal/verification transaction under item 5.
 
 ## Work queue
 
