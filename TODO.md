@@ -27,6 +27,15 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   19.150 ms per window and attention-score from 12.783 to 11.840 ms per window.
   Decode improved 0.11%; the 0.37% prefill difference is below run variance.
   NVMe paging is therefore not the steady-state limiter.
+- Re-attribution after the accepted attention transaction closes the standalone
+  hot-kernel pass. On the 2,224-token truth turn, hyper-connections now consume
+  20.138 ms per sampled window, attention read 19.150 ms, expert gate/up 17.904
+  ms, state commit 15.123 ms, attention score 11.840 ms, expert down 10.081 ms,
+  and dense projection 9.805 ms. Exact local scalar hyper/expert alternatives
+  are exhausted; their remaining material opportunities require cross-component
+  resident transactions or proposal-lane matrix amortization. Those concerns
+  are carried by the persistent-transaction, device-owned-residency, and DSpark
+  items below rather than another isolated-kernel rearrangement.
 - A fresh schema-v10 compilation with explicit fixed-source MXFP4 dispatch
   contracts passed a complete four-conversation product gate, preserved behavior
   and turn recall, and restored every GPU reservation, but its zero-load truth
@@ -417,65 +426,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
 
 ## Work queue
 
-1. Optimize the hottest refined DeepSeek device kernels without changing model
-   semantics.
-
-   - Indexed sparse-attention read is the largest measured device phase. The
-     accepted 1,024-thread tile-overlap transaction assigns independent score
-     and value workers to one fused workgroup, overlaps score tile N with value
-     tile N-1, and preserves the existing F32 online-softmax and BF16 output.
-     It is byte-exact and reduced the real r4/k512 microcase from 1.66632 to
-     0.61208 ms and r128/k8192 from 17.93188 to 6.57308 ms. Compiler selection
-     is capability-driven: 1,024-thread targets use tile overlap, 576-thread
-     targets retain the exact score pipeline, and smaller targets retain the
-     portable baseline. Its complete DeepSeek gate reached a new 8.5924 decode
-     high-water mark and reduced the product attention-read phase by 28.5%.
-     Qwen3.6-35B-A3B remained byte-identical at 72.4232 decode tok/s, and
-     Qwen3.5-9B remained byte-identical at 48.6914; both restored their exact
-     reservations. Re-attribute the warmed path before choosing the next kernel
-     target. Continue eliminating redundant state-address translation,
-     duplicate key/value reads, remaining barriers, and avoidable memory passes
-     only where an exact fused or tiled schedule is faster.
-     Preserve score accumulation order,
-     online-softmax semantics, sink handling, compressed-index ordering, and
-     BF16 output bits. Do not retry full-width multi-head workgroups: h2 and h4
-     were exact but 17.95% and 58.99% slower at the real geometry. A new blocked
-     design must map dimensions, heads, and KV tiles cooperatively enough to keep
-     occupancy, as reference flash-attention implementations do. Do not retry
-     dimension folding either: local-size 256 preserved the native subgroup
-     arithmetic but was 23.71% slower than local-size 512.
-     A subgroup-per-head blocked schedule is exhausted too: eight heads sharing
-     each 512-thread workgroup preserved every BF16 bit and reduced state reads,
-     but its eight exact reductions and strided accumulators were 19.23% slower
-     at product geometry. A future blocked design needs a different arithmetic
-     primitive, not another rearrangement of the same scalar subgroup sums.
-     Do not quantize online-softmax weights to BF16 merely to feed a cooperative
-     value matrix: that fused kernel won its microcase by 52.9% but changed BF16
-     outputs and the real stream fell to 6.424 decode tok/s. Any matrix-tiled
-     replacement must preserve the F32 weight path and exact output contract.
-     Do not split score production from value consumption through a materialized
-     F32 score plane: its score microkernel won by 25.6% at 4K and 53.6% at 128K,
-     yet both static and context-bounded complete gates regressed. A replacement
-     must eliminate that intermediate and be evaluated by combined attention
-     score/read device time before a product gate.
-     Do not append inverse RoPE to the existing full-width serial attention
-     workgroup merely to remove its BF16 intermediate: that exact transaction
-     won the real microcase by 3.10% but improved matched decode by only 0.41%,
-     regressed prefill, and remained below the accepted product high-water mark.
-   - Native compact-MXFP4 vector alternatives are now locally exhausted: address
-     caching, larger persistent tiles, once-per-route intermediate quantization,
-     and packed INT8 dot products all lost or were immaterial. Do not retry those
-     shapes. A future expert candidate must be a materially different compiled
-     transaction, such as direct compact decode into a hardware matrix tile that
-     amortizes its otherwise wasted columns across real attached proposal lanes,
-     keeps SwiGLU on chip, preserves verified behavior, and does not permanently
-     expand every sparse expert.
-   - Every candidate microbenchmark must answer the binary faster/not-faster
-     question in under one minute with only enough repetitions to avoid a cold
-     anomaly. Reject a candidate immediately when it is slower or changes the
-     deterministic product path.
-
-2. Compile a persistent per-device stream transaction that preserves measured
+1. Compile a persistent per-device stream transaction that preserves measured
    asynchronous device overlap.
 
    - Turn each ordered physical-device component segment into a stable bounded
@@ -516,7 +467,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      wins the complete product gate; neither rejected decoder transaction may
      remain as a fallback, hidden mode, or future target shape.
 
-3. Make a resident sparse-expert hit completely device-owned.
+2. Make a resident sparse-expert hit completely device-owned.
 
    - Keep selector-to-resource addresses plus validity/version metadata resident.
      An all-hit gate must continue directly into expert execution without a host
@@ -529,7 +480,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      produce identical committed tokens, routed experts, sampler state, and state
      digests from the same checkpoint.
 
-4. Make cross-device transfers part of the compiled transaction.
+3. Make cross-device transfers part of the compiled transaction.
 
    - Preserve arbitrary ordered visits, including `gpu0 -> gpu1 -> gpu0`, with
      persistent activation rings and timeline dependencies. A 32-KiB edge must not
@@ -540,14 +491,14 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    - First optimize single-stream latency. Pipeline independent streams across
      otherwise idle segments only after that path is correct and measured.
 
-5. Make temporal prefill a real multi-token device transaction. Execute prompt
+4. Make temporal prefill a real multi-token device transaction. Execute prompt
    blocks through the same resident gates, ordered segments, transfers, attention
    updates, and terminal completion without a host loop per token. Choose block
    width from context geometry, transient-state capacity, residency headroom, and
    measured hardware behavior. Verify every causal state against scalar prefill
    and report time-to-first-token separately from decode.
 
-6. Rebuild attached DSpark execution on the persistent transaction. The compiler
+5. Rebuild attached DSpark execution on the persistent transaction. The compiler
    already discovers the package-owned `parallel_backbone_markov` decoder and its
    trained five-token minimum and legal seven-token execution width without model
    names. Fuse proposal, target verification, confidence-prefix comparison,
@@ -558,19 +509,19 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    acceptance and 2.853/0.967 useful tok/s width-five/width-seven results are a
    rejected baseline, not a mode to force.
 
-7. Optimize deterministic attention scoring and selection after the attention-read
+6. Optimize deterministic attention scoring and selection after the attention-read
    path. Evaluate fused score/select, deterministic radix-prefix, blockwise or
    hierarchical selection, and avoiding full-score materialization. Preserve
    exact tie ordering and score-descending output. Measure progressively larger
    real contexts rather than hiding growth behind a short benchmark.
 
-8. Preserve bounded failure handling without putting it on the hot path. Isolate
+7. Preserve bounded failure handling without putting it on the hot path. Isolate
    Vulkan execution behind supervised per-device workers carrying complete stream
    transactions, not component calls. Retain bounded watchdog progress, quarantine
    only the poisoned worker, preserve the first failure and last causal checkpoint,
    and keep all other workers and the UI responsive without per-token IPC.
 
-9. Complete capability-driven per-component representation selection. Preserve
+8. Complete capability-driven per-component representation selection. Preserve
     the native source representation whenever it wins on the assigned target.
     Add dense or exactly valid structured INT4, FP8, INT8, and FP16 candidates only
     through device-local measurement and behavioral-equivalence evidence. Promotion
@@ -578,13 +529,13 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
     traffic, representation boundaries, and live headroom; capability advertises a
     candidate but never selects it by itself.
 
-10. Extend the generic product gate with a representative tool-call round trip,
+9. Extend the generic product gate with a representative tool-call round trip,
     malformed-output rollback, and long-stream continuity. Use package-owned chat
     behavior and sampling defaults, official thinking behavior, agentic context,
     complete-conversation warmup, coherent final answers, turn recall, and exact
     teardown without model-name branches.
 
-11. Complete heterogeneous cost-based placement. Keep the existing smallest
+10. Complete heterogeneous cost-based placement. Keep the existing smallest
     capacity-safe contiguous device prefix, partial-reservation handling, integrated
     GPU exclusion, explicit-wiring preservation, and representation/placement
     fixed-point solve. Add compiler-emitted compatible BF16/INT8 alternatives and
@@ -605,7 +556,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
       count, advertised capability, or free bytes with execution cost. Retain the
       smallest device prefix only among placements that do not create avoidable
       paging or a materially slower serial bottleneck.
-12. Gate every runtime-performance milestone before commit. Run exact sequential
+11. Gate every runtime-performance milestone before commit. Run exact sequential
     tests, then full DeepSeek, Qwen3.6-35B-A3B, and Qwen3.5-9B conversations on
     equivalent allowlisted discrete AMD placement. DeepSeek truth starts only after
     a complete zero-load conversation. Reject microbenchmark-only wins, behavioral
@@ -614,7 +565,7 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
     toward 50, and stop only when the attributed path has no material avoidable host
     round trip, GPU bubble, conversion, or unfused memory pass.
 
-13. Perform a final adversarial review against `CONCEPT.md`. Compiled artifacts
+12. Perform a final adversarial review against `CONCEPT.md`. Compiled artifacts
     must remain self-contained and model-specific; compiler discovery, runtime
     operators, graph wiring, placement, representation, residency, and stream
     transactions must remain reusable by unseen models. Finish with an empty TODO,
