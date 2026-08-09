@@ -771,14 +771,16 @@ impl VulkanComputeDeviceCatalog {
                     )
                 };
 
+            let (compute_queue_submission, transfer_queue_submission) =
+                VulkanQueueSubmissionGate::paired(queue, transfer_queue);
             Ok(VulkanComputeDevice {
                 context: Arc::clone(&self.context),
                 physical_device,
                 device,
                 queue_family_index,
-                queue,
-                transfer_queue,
                 transfer_queue_is_distinct,
+                compute_queue_submission,
+                transfer_queue_submission,
                 activity_lease: RefCell::new(activity_lease),
                 device_health,
                 buffer_device_address_supported,

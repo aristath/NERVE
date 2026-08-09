@@ -3,8 +3,8 @@ pub struct VulkanResidentTransferStream {
     device_health: VulkanDeviceHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
-    queue: vk::Queue,
-    consumer_queue: vk::Queue,
+    queue_submission: VulkanQueueSubmissionGate,
+    consumer_queue_submission: VulkanQueueSubmissionGate,
     queue_is_distinct_from_consumer: bool,
     command_pool: vk::CommandPool,
     slots: Vec<VulkanResidentTransferSlot>,
@@ -137,8 +137,8 @@ impl VulkanComputeDevice {
                 device_health: self.device_health.clone(),
                 device_fault: self.device_fault.clone(),
                 device_address_registry: Arc::clone(&self.device_address_registry),
-                queue: self.transfer_queue,
-                consumer_queue: self.queue,
+                queue_submission: self.transfer_queue_submission.clone(),
+                consumer_queue_submission: self.compute_queue_submission.clone(),
                 queue_is_distinct_from_consumer:
                     self.transfer_queue_is_distinct,
                 command_pool,
@@ -275,9 +275,9 @@ impl VulkanResidentTransferStream {
                 .semaphore(self.timeline.semaphore)
                 .value(timeline_value)
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-            self.device
-                .queue_submit2(
-                    self.queue,
+            self.queue_submission
+                .submit2(
+                    &self.device,
                     &[vk::SubmitInfo2::default()
                         .command_buffer_infos(&command_infos)
                         .signal_semaphore_infos(&signal_infos)],
@@ -454,8 +454,8 @@ impl VulkanResidentTransferStream {
                 .semaphore(self.consumer_completion.semaphore())
                 .value(completion_value)
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-            if let Err(error) = self.device.queue_submit2(
-                self.consumer_queue,
+            if let Err(error) = self.consumer_queue_submission.submit2(
+                &self.device,
                 &[vk::SubmitInfo2::default()
                     .command_buffer_infos(&command_infos)
                     .signal_semaphore_infos(&signal_infos)],
@@ -607,8 +607,8 @@ impl VulkanResidentTransferStream {
                 .semaphore(self.consumer_completion.semaphore())
                 .value(completion_value)
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-            let submit_result = self.device.queue_submit2(
-                self.consumer_queue,
+            let submit_result = self.consumer_queue_submission.submit2(
+                &self.device,
                 &[vk::SubmitInfo2::default()
                     .wait_semaphore_infos(&wait_infos)
                     .signal_semaphore_infos(&signal_infos)],

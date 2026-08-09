@@ -936,7 +936,7 @@ impl VulkanComputeDevice {
             )
         };
         Ok(VulkanResidentMemoryAccess {
-            queue: self.queue,
+            queue_submission: self.compute_queue_submission.clone(),
             queue_family_index: self.queue_family_index,
             device_health: self.device_health.clone(),
             property_flags,
@@ -1424,7 +1424,7 @@ impl VulkanComputeDevice {
                 memory,
                 byte_capacity,
                 VulkanResidentMemoryAccess {
-                    queue: self.queue,
+                    queue_submission: self.compute_queue_submission.clone(),
                     queue_family_index: self.queue_family_index,
                     device_health: self.device_health.clone(),
                     property_flags,
@@ -1648,7 +1648,7 @@ impl VulkanComputeDevice {
                 device_health: self.device_health.clone(),
                 device_fault: self.device_fault.clone(),
                 device_address_registry: Arc::clone(&self.device_address_registry),
-                queue: self.queue,
+                queue_submission: self.compute_queue_submission.clone(),
                 command_pool,
                 command_buffer,
                 source: source.buffer,
@@ -1745,8 +1745,8 @@ impl VulkanComputeDevice {
                 .command_buffer_infos(&command_buffers)
                 .signal_semaphore_infos(&completion_signal)];
             if let Err(error) =
-                self.device
-                    .queue_submit2(self.queue, &submit_info, vk::Fence::null())
+                self.compute_queue_submission
+                    .submit2(&self.device, &submit_info, vk::Fence::null())
             {
                 binding.completion.cancel(completion_value);
                 return Err(vulkan_error_with_device_quarantine(
@@ -1848,7 +1848,7 @@ impl VulkanComputeDevice {
                 device_health: self.device_health.clone(),
                 device_fault: self.device_fault.clone(),
                 device_address_registry: Arc::clone(&self.device_address_registry),
-                queue: self.queue,
+                queue_submission: self.compute_queue_submission.clone(),
                 command_pool,
                 command_buffer,
                 completion,

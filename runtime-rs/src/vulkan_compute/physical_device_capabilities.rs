@@ -10,21 +10,25 @@ impl VulkanComputeDevice {
     /// the corresponding resources one device at a time.  Process-exit field
     /// drop order is not an accelerator residency protocol.
     pub fn quiesce(&self) -> Result<(), VulkanError> {
-        quiesce_vulkan_queue_with_progress_watchdog(
-            &self.device,
-            self.queue,
-            &self.device_health,
-            "compute queue quiescence",
-            |error| self.vulkan_operation_error("failed to quiesce compute queue", error),
-        )?;
-        if self.transfer_queue_is_distinct {
+        self.compute_queue_submission.with_exclusive(|queue| {
             quiesce_vulkan_queue_with_progress_watchdog(
                 &self.device,
-                self.transfer_queue,
+                queue,
                 &self.device_health,
-                "transfer queue quiescence",
-                |error| self.vulkan_operation_error("failed to quiesce transfer queue", error),
-            )?;
+                "compute queue quiescence",
+                |error| self.vulkan_operation_error("failed to quiesce compute queue", error),
+            )
+        })?;
+        if self.transfer_queue_is_distinct {
+            self.transfer_queue_submission.with_exclusive(|queue| {
+                quiesce_vulkan_queue_with_progress_watchdog(
+                    &self.device,
+                    queue,
+                    &self.device_health,
+                    "transfer queue quiescence",
+                    |error| self.vulkan_operation_error("failed to quiesce transfer queue", error),
+                )
+            })?;
         }
         Ok(())
     }
@@ -1072,7 +1076,7 @@ unsafe fn write_device_local_bytes(
         unsafe {
             copy_buffer_immediately(
                 device,
-                access.queue,
+                &access.queue_submission,
                 access.queue_family_index,
                 &access.device_health,
                 staging_buffer,
@@ -1115,7 +1119,7 @@ unsafe fn read_device_local_bytes(
     let result = (|| unsafe {
         copy_buffer_immediately(
             device,
-            access.queue,
+            &access.queue_submission,
             access.queue_family_index,
             &access.device_health,
             source,
@@ -1182,7 +1186,7 @@ unsafe fn create_temporary_staging_buffer(
 
 unsafe fn copy_buffer_immediately(
     device: &ash::Device,
-    queue: vk::Queue,
+    queue_submission: &VulkanQueueSubmissionGate,
     queue_family_index: u32,
     device_health: &VulkanDeviceHealth,
     source: vk::Buffer,
@@ -1224,14 +1228,16 @@ unsafe fn copy_buffer_immediately(
         unsafe { device.end_command_buffer(command_buffer) }.map_err(|error| {
             VulkanError(format!("failed to end staging command buffer: {error:?}"))
         })?;
-        submit_vulkan_command_buffers_and_wait_with_progress_watchdog(
-            device,
-            queue,
-            &[command_buffer],
-            device_health,
-            "immediate staging copy",
-            |error| VulkanError(format!("failed waiting for staging copy: {error:?}")),
-        )
+        queue_submission.with_exclusive(|queue| {
+            submit_vulkan_command_buffers_and_wait_with_progress_watchdog(
+                device,
+                queue,
+                &[command_buffer],
+                device_health,
+                "immediate staging copy",
+                |error| VulkanError(format!("failed waiting for staging copy: {error:?}")),
+            )
+        })
     })();
     if !device_health.is_quarantined() {
         unsafe { device.destroy_command_pool(command_pool, None) };

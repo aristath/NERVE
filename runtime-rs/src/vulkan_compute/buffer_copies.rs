@@ -3,7 +3,7 @@ pub struct VulkanResidentBufferCopy {
     device_health: VulkanDeviceHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
-    queue: vk::Queue,
+    queue_submission: VulkanQueueSubmissionGate,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     source: vk::Buffer,
@@ -19,7 +19,7 @@ pub struct VulkanResidentBufferCopyBatch {
     device_health: VulkanDeviceHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
-    queue: vk::Queue,
+    queue_submission: VulkanQueueSubmissionGate,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     completion: Rc<VulkanMonotonicQueueCompletion>,
@@ -300,8 +300,8 @@ impl VulkanResidentBufferCopy {
                 .command_buffer_infos(&command_buffers)
                 .signal_semaphore_infos(&completion_signal)];
             if let Err(error) =
-                self.device
-                    .queue_submit2(self.queue, &submit_info, vk::Fence::null())
+                self.queue_submission
+                    .submit2(&self.device, &submit_info, vk::Fence::null())
             {
                 self.completion.cancel(completion_value);
                 let mapped = vulkan_operation_error_with_device_fault(
@@ -402,8 +402,8 @@ impl VulkanResidentBufferCopyBatch {
                 .command_buffer_infos(&command_buffers)
                 .signal_semaphore_infos(&completion_signal)];
             if let Err(error) =
-                self.device
-                    .queue_submit2(self.queue, &submit_info, vk::Fence::null())
+                self.queue_submission
+                    .submit2(&self.device, &submit_info, vk::Fence::null())
             {
                 self.completion.cancel(completion_value);
                 let mapped = vulkan_operation_error_with_device_fault(

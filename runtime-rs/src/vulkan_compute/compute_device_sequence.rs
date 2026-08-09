@@ -291,8 +291,8 @@ impl VulkanComputeDevice {
             let submit_info = [vk::SubmitInfo2::default()
                 .wait_semaphore_infos(&wait_infos)
                 .signal_semaphore_infos(&signal_infos)];
-            self.device
-                .queue_submit2(self.queue, &submit_info, vk::Fence::null())
+            self.compute_queue_submission
+                .submit2(&self.device, &submit_info, vk::Fence::null())
                 .map_err(|error| {
                     vulkan_error_with_device_quarantine(
                         &self.device_health,
@@ -387,8 +387,8 @@ impl VulkanComputeDevice {
                 .wait_semaphore_infos(&wait_infos)
                 .command_buffer_infos(&command_buffers)
                 .signal_semaphore_infos(&signal_infos)];
-            self.device
-                .queue_submit2(self.queue, &submit_info, vk::Fence::null())
+            self.compute_queue_submission
+                .submit2(&self.device, &submit_info, vk::Fence::null())
                 .map_err(|error| {
                     vulkan_error_with_device_quarantine(
                         &self.device_health,
@@ -673,8 +673,8 @@ impl VulkanResidentQueueSubmitter {
             .collect::<Vec<_>>();
         unsafe {
             if let Err(error) =
-                self.device
-                    .queue_submit2(self.queue, &submit_infos, vk::Fence::null())
+                self.queue_submission
+                    .submit2(&self.device, &submit_infos, vk::Fence::null())
             {
                 for (completion, value) in &resource_completions {
                     completion.cancel(*value);

@@ -6,6 +6,7 @@ use crate::execution_schedule::{
 };
 
 include!("vulkan_compute/features.rs");
+include!("vulkan_compute/queue_submission.rs");
 include!("vulkan_compute/device_activity_lease.rs");
 include!("vulkan_compute/queue_progress_watchdog.rs");
 include!("vulkan_compute/spirv_interface.rs");

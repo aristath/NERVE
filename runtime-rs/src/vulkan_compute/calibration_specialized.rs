@@ -15,7 +15,7 @@ pub struct VulkanTextureCalibration {
     completion: Rc<VulkanMonotonicQueueCompletion>,
     timestamp_query_pool: vk::QueryPool,
     timestamp_period_ns: f32,
-    queue: vk::Queue,
+    queue_submission: VulkanQueueSubmissionGate,
     source: Option<VulkanResidentBuffer>,
     output: Option<VulkanResidentBuffer>,
 }
@@ -446,7 +446,7 @@ impl VulkanComputeDevice {
                 completion,
                 timestamp_query_pool,
                 timestamp_period_ns: self.timestamp_period_ns,
-                queue: self.queue,
+                queue_submission: self.compute_queue_submission.clone(),
                 source: Some(source),
                 output: Some(output),
             })
@@ -469,8 +469,8 @@ impl VulkanTextureCalibration {
                 .command_buffer_infos(&command_buffers)
                 .signal_semaphore_infos(&completion_signal)];
             if let Err(error) =
-                self.device
-                    .queue_submit2(self.queue(), &submission, vk::Fence::null())
+                self.queue_submission
+                    .submit2(&self.device, &submission, vk::Fence::null())
             {
                 self.completion.cancel(completion_value);
                 return Err(VulkanError(format!(
@@ -514,10 +514,6 @@ impl VulkanTextureCalibration {
             self.device_health.require_healthy()?;
             Ok((duration_ns.round() as u64).max(1))
         }
-    }
-
-    fn queue(&self) -> vk::Queue {
-        self.queue
     }
 
     pub fn output_bytes(&self, byte_count: usize) -> Result<Vec<u8>, VulkanError> {

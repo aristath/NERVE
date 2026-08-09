@@ -3,9 +3,9 @@ pub struct VulkanComputeDevice {
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
     queue_family_index: u32,
-    queue: vk::Queue,
-    transfer_queue: vk::Queue,
     transfer_queue_is_distinct: bool,
+    compute_queue_submission: VulkanQueueSubmissionGate,
+    transfer_queue_submission: VulkanQueueSubmissionGate,
     activity_lease: RefCell<Option<VulkanDeviceActivityLease>>,
     device_health: VulkanDeviceHealth,
     buffer_device_address_supported: bool,
@@ -527,7 +527,7 @@ struct VulkanResidentQueueSubmissionTemplateGroup {
 struct VulkanResidentQueueSubmitter {
     device: ash::Device,
     device_handle: vk::Device,
-    queue: vk::Queue,
+    queue_submission: VulkanQueueSubmissionGate,
     device_health: VulkanDeviceHealth,
     device_fault: Option<ash::ext::device_fault::Device>,
     device_address_registry: Arc<Mutex<VulkanDeviceAddressRegistry>>,
@@ -865,7 +865,7 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
                     submitter: VulkanResidentQueueSubmitter {
                         device: group.device.device.clone(),
                         device_handle: group.device.device.handle(),
-                        queue: group.device.queue,
+                        queue_submission: group.device.compute_queue_submission.clone(),
                         device_health: group.device.device_health.clone(),
                         device_fault: group.device.device_fault.clone(),
                         device_address_registry: Arc::clone(
@@ -1039,7 +1039,7 @@ fn offset_timeline_value(value: u64, offset: u64) -> Result<u64, VulkanError> {
 
 #[derive(Clone)]
 struct VulkanResidentMemoryAccess {
-    queue: vk::Queue,
+    queue_submission: VulkanQueueSubmissionGate,
     queue_family_index: u32,
     device_health: VulkanDeviceHealth,
     property_flags: vk::MemoryPropertyFlags,
