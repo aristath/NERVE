@@ -443,6 +443,16 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   experiment was removed completely. Do not retry asynchronous bulk snapshots;
   the resident transaction must avoid creating the baseline copy in the first
   place.
+- Replacing the compact all-hit predicate check with direct scans of every
+  persistently mapped `(feedback lane, demand segment)` miss-queue epoch was
+  rejected after the same complete gate. Behavior, token and state digests,
+  9,997 -> 382 -> 0 load convergence, zero-load truth, teardown, and exact GPU
+  reservations all matched. Copy submissions and waits were effectively
+  unchanged, proving the predicate check was not the source of those transfers,
+  while truth decode regressed from 8.6600 to 8.3782 tok/s and prefill from
+  8.7912 to 8.4948 tok/s. The experiment was removed completely. Preserve the
+  one compact predicate check until a normal completion/commit record can prove
+  all-hit status without scanning every queue.
 
 ## Work queue
 
