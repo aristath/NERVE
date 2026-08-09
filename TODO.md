@@ -330,6 +330,18 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   valid compiled-transaction building block, but it does not beat the 8.4228
   accepted DeepSeek baseline and therefore does not complete the device-kernel
   or persistent-stream work.
+- Fusing inverse RoPE with a reusable exact FP8 representation for its grouped
+  projection consumer was rejected by a complete product gate. The graph-driven
+  implementation contracted all 43 eligible producer/consumer pairs and every
+  measured response digest remained byte-identical, but mean decode fell from
+  the matched 7.9570 to 7.7696 tok/s and prefill fell from 7.8618 to 7.8238.
+  The measured fourth conversation had 1,149,648 resident hits and zero loads,
+  misses, evictions, reloads, transfers, or residency blocking, and teardown
+  restored all five pre-run GPU reservations exactly. Materializing and reading
+  a full reusable quantized representation costs more than the grouped kernel's
+  local on-the-fly conversion. The shaders, compiler path, runtime shape support,
+  tests, and compiled package were removed; do not move a local conversion into
+  a global representation pass unless multiple consumers amortize that pass.
 
 ## Work queue
 
