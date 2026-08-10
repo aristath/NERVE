@@ -520,9 +520,12 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
    prerequisite of the persistent stream transaction: a bounded transaction
    cannot be persistent while its normal all-hit path leaves the device.
 
-   - Keep selector-to-resource addresses plus validity/version metadata resident.
-     An all-hit gate must continue directly into expert execution without a host
-     fence, notification read, or execution-epoch round trip.
+   - Eliminate the remaining compact host all-hit predicate read and terminal
+     completion wait. Selector-to-resource addresses and generation metadata
+     are already resident, and physical allocation lifetime is now ordered by
+     consumer-queue address publication rather than a host execution epoch. An
+     all-hit gate must continue directly into expert execution without a host
+     fence or notification read.
    - Only a real miss may publish an immutable fault record and stop at the exact
      causal checkpoint. Resume only the uncommitted suffix after the host updates
      the address table and acknowledges the fault.
@@ -535,8 +538,8 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      the supervised transaction boundary in item 7, where the failed stream is
      quarantined rather than silently reused from partially advanced state.
    - Complete durable coverage for the remaining device-owned path: all-hit
-     windows without host predicate reads or execution-epoch round trips,
-     disjoint misses, eviction, address-version changes, repeated faults,
+     windows without host predicate reads, disjoint misses, eviction,
+     address-version changes, repeated faults,
      cancellation, poisoned-worker isolation, and teardown. All-hit and
      miss/resume must produce identical committed tokens, routed experts,
      sampler state, and state digests from the same checkpoint.
