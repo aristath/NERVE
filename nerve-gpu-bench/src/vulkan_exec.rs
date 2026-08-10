@@ -18,6 +18,11 @@ const F16_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_route
 const INT8_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_router_reduction.spv");
 const FORMAT_DEQUANT_SHADER_SPV: &[u8] = include_bytes!("shaders/format_dequant.spv");
 const FORMAT_DEQUANT_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/format_dequant_gemm.spv");
+const TENSOR_PARALLEL_SYNTHETIC_LAYERS: usize = 4;
+const TENSOR_PARALLEL_PAIR_PATTERN: &str = "synthetic_tensor_parallel_small_payload";
+const TENSOR_PARALLEL_TRIPLET_PATTERN: &str = "synthetic_tensor_parallel_group_small_payload";
+const TWO_TARGET_TENSOR_PARALLEL_STRATEGY: &str = "two_target_tensor_parallel";
+const THREE_TARGET_TENSOR_PARALLEL_STRATEGY: &str = "three_target_tensor_parallel";
 
 #[derive(Clone, Copy)]
 enum ShaderCode {
@@ -396,7 +401,7 @@ pub fn run_vulkan_pair_measurements(
                 workloads,
             ));
             if source_index < destination_index {
-                measurements.extend(run_vulkan_parallel_pair_measurements(
+                measurements.extend(run_vulkan_tensor_parallel_pair_measurements(
                     source,
                     destination,
                     payload_bytes,
@@ -559,7 +564,7 @@ fn run_vulkan_ordered_serial_pair_measurements(
         .collect()
 }
 
-fn run_vulkan_parallel_pair_measurements(
+fn run_vulkan_tensor_parallel_pair_measurements(
     left: &Target,
     right: &Target,
     payload_bytes: usize,
@@ -573,8 +578,8 @@ fn run_vulkan_parallel_pair_measurements(
             return failed_dense_pair_measurements(
                 &left.stable_target_id,
                 &right.stable_target_id,
-                "synthetic_tensor_split_small_payload",
-                "two_target_parallel",
+                TENSOR_PARALLEL_PAIR_PATTERN,
+                TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
                 payload_bytes,
                 formats,
                 workloads,
@@ -588,8 +593,8 @@ fn run_vulkan_parallel_pair_measurements(
             return failed_dense_pair_measurements(
                 &left.stable_target_id,
                 &right.stable_target_id,
-                "synthetic_tensor_split_small_payload",
-                "two_target_parallel",
+                TENSOR_PARALLEL_PAIR_PATTERN,
+                TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
                 payload_bytes,
                 formats,
                 workloads,
@@ -608,8 +613,8 @@ fn run_vulkan_parallel_pair_measurements(
                         return dense_pair_status_measurement(
                             &left.stable_target_id,
                             &right.stable_target_id,
-                            "synthetic_tensor_split_small_payload",
-                            "two_target_parallel",
+                            TENSOR_PARALLEL_PAIR_PATTERN,
+                            TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
                             "unsupported",
                             payload_bytes,
                             workload,
@@ -617,7 +622,7 @@ fn run_vulkan_parallel_pair_measurements(
                             &reason,
                         );
                     }
-                    match run_vulkan_dense_parallel_pair(
+                    match run_vulkan_dense_tensor_parallel_pair(
                         &left_device,
                         &right_device,
                         &left.stable_target_id,
@@ -631,8 +636,8 @@ fn run_vulkan_parallel_pair_measurements(
                         Err(message) => failed_dense_pair_measurement(
                             &left.stable_target_id,
                             &right.stable_target_id,
-                            "synthetic_tensor_split_small_payload",
-                            "two_target_parallel",
+                            TENSOR_PARALLEL_PAIR_PATTERN,
+                            TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
                             payload_bytes,
                             workload,
                             format,
@@ -744,8 +749,8 @@ fn run_vulkan_triplet_measurements(
                             ),
                             triplet_status_measurement(
                                 &target_ids,
-                                "synthetic_tensor_split_group_small_payload",
-                                "three_target_parallel",
+                                TENSOR_PARALLEL_TRIPLET_PATTERN,
+                                THREE_TARGET_TENSOR_PARALLEL_STRATEGY,
                                 "unsupported",
                                 payload_bytes,
                                 workload,
@@ -773,7 +778,7 @@ fn run_vulkan_triplet_measurements(
                             &message,
                         )
                     });
-                    let parallel = run_vulkan_dense_parallel_triplet(
+                    let tensor_parallel = run_vulkan_dense_tensor_parallel_triplet(
                         [&first_device, &second_device, &third_device],
                         &target_ids,
                         payload_bytes,
@@ -784,15 +789,15 @@ fn run_vulkan_triplet_measurements(
                     .unwrap_or_else(|message| {
                         failed_triplet_measurement(
                             &target_ids,
-                            "synthetic_tensor_split_group_small_payload",
-                            "three_target_parallel",
+                            TENSOR_PARALLEL_TRIPLET_PATTERN,
+                            THREE_TARGET_TENSOR_PARALLEL_STRATEGY,
                             payload_bytes,
                             workload,
                             format,
                             &message,
                         )
                     });
-                    [serial, parallel]
+                    [serial, tensor_parallel]
                 })
             })
         })
@@ -1504,6 +1509,7 @@ fn submit_dense_compute_sample(
     context: &DenseComputeContext,
     sample_index: usize,
 ) -> Result<Sample, String> {
+    let started = Instant::now();
     record_compute_dispatch(
         compute_device,
         &context.resources,
@@ -1533,9 +1539,11 @@ fn submit_dense_compute_sample(
             .wait_for_fences(&[context.fence], true, u64::MAX)
             .map_err(|error| format!("could not wait for Vulkan compute work: {error:?}"))?;
     }
+    let wall_duration_ns = started.elapsed().as_nanos();
+    let gpu_duration_ns = read_timestamp_duration_ns(compute_device, context.query_pool)?;
     Ok(Sample {
         sample_index,
-        duration_ns: read_timestamp_duration_ns(compute_device, context.query_pool)?,
+        duration_ns: wall_duration_ns.max(gpu_duration_ns),
         iterations: 1,
         bytes_read: context.buffer_size as u64,
         bytes_written: context.buffer_size as u64,
@@ -1622,7 +1630,180 @@ fn run_vulkan_dense_serial_pair(
     })
 }
 
-fn run_vulkan_dense_parallel_pair(
+struct TensorParallelExchange {
+    plan: TensorParallelExchangePlan,
+    partials: Vec<Vec<u8>>,
+    combined: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct TensorParallelExchangePlan {
+    collective: &'static str,
+    reduction: TensorParallelReduction,
+    exchange_bytes: usize,
+    write_participants: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TensorParallelReduction {
+    Sum,
+    Interleave,
+    Max,
+}
+
+struct TensorParallelExchangeMetrics {
+    bytes_read: u64,
+    bytes_written: u64,
+    operations: u64,
+}
+
+fn tensor_parallel_exchange_plan(
+    workload_class: &str,
+    activation_bytes: usize,
+    output_bytes: usize,
+    contexts: &[&DenseComputeContext],
+) -> TensorParallelExchangePlan {
+    let (collective, reduction, requested_bytes, write_participants) =
+        tensor_parallel_collective_spec(workload_class, activation_bytes, output_bytes);
+    let exchange_bytes = contexts
+        .iter()
+        .map(|context| context.readback.size as usize)
+        .chain(contexts.iter().map(|context| context.upload.size as usize))
+        .fold(requested_bytes, usize::min)
+        .max(1);
+    TensorParallelExchangePlan {
+        collective,
+        reduction,
+        exchange_bytes,
+        write_participants: write_participants.min(contexts.len()).max(1),
+    }
+}
+
+fn tensor_parallel_collective_spec(
+    workload_class: &str,
+    activation_bytes: usize,
+    output_bytes: usize,
+) -> (&'static str, TensorParallelReduction, usize, usize) {
+    match workload_class {
+        "dense_projection" => (
+            "all_reduce_output",
+            TensorParallelReduction::Sum,
+            output_bytes,
+            usize::MAX,
+        ),
+        "moe_expert" => (
+            "expert_activation_gather",
+            TensorParallelReduction::Interleave,
+            activation_bytes,
+            1,
+        ),
+        "router_reduction" => (
+            "router_score_reduce",
+            TensorParallelReduction::Max,
+            output_bytes.min((activation_bytes / 4).max(4 * 1024)),
+            1,
+        ),
+        _ => (
+            "all_reduce_output",
+            TensorParallelReduction::Sum,
+            output_bytes,
+            usize::MAX,
+        ),
+    }
+}
+
+fn create_tensor_parallel_exchange(plan: TensorParallelExchangePlan) -> TensorParallelExchange {
+    TensorParallelExchange {
+        plan,
+        partials: Vec::new(),
+        combined: vec![0_u8; plan.exchange_bytes],
+    }
+}
+
+fn run_tensor_parallel_exchange(
+    devices: &[&OpenVulkanComputeDevice],
+    contexts: &[&DenseComputeContext],
+    exchange: &mut TensorParallelExchange,
+) -> Result<TensorParallelExchangeMetrics, String> {
+    debug_assert_eq!(devices.len(), contexts.len());
+    if exchange.partials.len() != contexts.len() {
+        exchange.partials = vec![vec![0_u8; exchange.plan.exchange_bytes]; contexts.len()];
+    }
+
+    for (index, context) in contexts.iter().enumerate() {
+        read_buffer_bytes(
+            &devices[index].device,
+            &context.readback,
+            &mut exchange.partials[index],
+        )?;
+    }
+
+    reduce_tensor_parallel_partials(
+        exchange.plan.reduction,
+        &exchange.partials,
+        &mut exchange.combined,
+    );
+
+    for (index, context) in contexts
+        .iter()
+        .take(exchange.plan.write_participants)
+        .enumerate()
+    {
+        write_buffer_bytes(&devices[index].device, &context.upload, &exchange.combined)?;
+    }
+
+    let participant_count = contexts.len() as u64;
+    let write_participant_count = exchange.plan.write_participants as u64;
+    let exchange_bytes = exchange.combined.len() as u64;
+    Ok(TensorParallelExchangeMetrics {
+        bytes_read: participant_count * exchange_bytes,
+        bytes_written: write_participant_count * exchange_bytes,
+        operations: participant_count * exchange_bytes * exchange_operation_cost(exchange.plan),
+    })
+}
+
+fn exchange_operation_cost(plan: TensorParallelExchangePlan) -> u64 {
+    match plan.collective {
+        "router_score_reduce" => 2,
+        "expert_activation_gather" => 1,
+        _ => 1,
+    }
+}
+
+fn reduce_tensor_parallel_partials(
+    reduction: TensorParallelReduction,
+    partials: &[Vec<u8>],
+    combined: &mut [u8],
+) {
+    match reduction {
+        TensorParallelReduction::Sum => {
+            for (index, byte) in combined.iter_mut().enumerate() {
+                let mut value = 0_u8;
+                for partial in partials {
+                    value = value.wrapping_add(partial[index]);
+                }
+                *byte = value.rotate_left((index & 7) as u32);
+            }
+        }
+        TensorParallelReduction::Interleave => {
+            for (index, byte) in combined.iter_mut().enumerate() {
+                let partial = &partials[index % partials.len()];
+                *byte = partial[index].wrapping_add((index & 0xff) as u8);
+            }
+        }
+        TensorParallelReduction::Max => {
+            for (index, byte) in combined.iter_mut().enumerate() {
+                let mut value = 0_u8;
+                for partial in partials {
+                    value = value.max(partial[index]);
+                }
+                *byte = value;
+            }
+        }
+    }
+}
+
+fn run_vulkan_dense_tensor_parallel_pair(
     left_device: &OpenVulkanComputeDevice,
     right_device: &OpenVulkanComputeDevice,
     left_id: &str,
@@ -1640,82 +1821,111 @@ fn run_vulkan_dense_parallel_pair(
         create_dense_compute_context(left_device, left_payload_bytes, kernel.clone())?;
     let right_context =
         create_dense_compute_context(right_device, right_payload_bytes, kernel.clone())?;
-    let mut left_output = vec![0_u8; output_bytes.min(left_context.readback.size as usize)];
-    let mut right_output = vec![0_u8; output_bytes.min(right_context.readback.size as usize)];
+    let exchange_plan = tensor_parallel_exchange_plan(
+        workload_class,
+        activation_bytes,
+        output_bytes,
+        &[&left_context, &right_context],
+    );
+    let mut exchange = create_tensor_parallel_exchange(exchange_plan);
     let mut measured_samples = Vec::with_capacity(samples);
     for sample_index in 0..samples {
-        record_compute_dispatch(
-            left_device,
-            &left_context.resources,
-            left_context.command_buffer,
-            left_context.query_pool,
-            left_context.upload.buffer,
-            left_context.storage.buffer,
-            left_context.readback.buffer,
-            left_context.buffer_size,
-            &left_context.plan,
-        )?;
-        record_compute_dispatch(
-            right_device,
-            &right_context.resources,
-            right_context.command_buffer,
-            right_context.query_pool,
-            right_context.upload.buffer,
-            right_context.storage.buffer,
-            right_context.readback.buffer,
-            right_context.buffer_size,
-            &right_context.plan,
-        )?;
         let started = Instant::now();
-        unsafe {
-            left_device
-                .device
-                .reset_fences(&[left_context.fence])
-                .map_err(|error| format!("could not reset Vulkan left-pair fence: {error:?}"))?;
-            right_device
-                .device
-                .reset_fences(&[right_context.fence])
-                .map_err(|error| format!("could not reset Vulkan right-pair fence: {error:?}"))?;
-            left_device
-                .device
-                .queue_submit(
-                    left_device.queue,
-                    &[vk::SubmitInfo::default().command_buffers(&[left_context.command_buffer])],
-                    left_context.fence,
-                )
-                .map_err(|error| format!("could not submit Vulkan left-pair work: {error:?}"))?;
-            right_device
-                .device
-                .queue_submit(
-                    right_device.queue,
-                    &[vk::SubmitInfo::default().command_buffers(&[right_context.command_buffer])],
-                    right_context.fence,
-                )
-                .map_err(|error| format!("could not submit Vulkan right-pair work: {error:?}"))?;
-            left_device
-                .device
-                .wait_for_fences(&[left_context.fence], true, u64::MAX)
-                .map_err(|error| format!("could not wait for Vulkan left-pair work: {error:?}"))?;
-            right_device
-                .device
-                .wait_for_fences(&[right_context.fence], true, u64::MAX)
-                .map_err(|error| format!("could not wait for Vulkan right-pair work: {error:?}"))?;
+        let mut max_gpu_duration = 0_u128;
+        let mut bytes_read = 0_u64;
+        let mut bytes_written = 0_u64;
+        let mut operations = 0_u64;
+
+        for _ in 0..TENSOR_PARALLEL_SYNTHETIC_LAYERS {
+            record_compute_dispatch(
+                left_device,
+                &left_context.resources,
+                left_context.command_buffer,
+                left_context.query_pool,
+                left_context.upload.buffer,
+                left_context.storage.buffer,
+                left_context.readback.buffer,
+                left_context.buffer_size,
+                &left_context.plan,
+            )?;
+            record_compute_dispatch(
+                right_device,
+                &right_context.resources,
+                right_context.command_buffer,
+                right_context.query_pool,
+                right_context.upload.buffer,
+                right_context.storage.buffer,
+                right_context.readback.buffer,
+                right_context.buffer_size,
+                &right_context.plan,
+            )?;
+            unsafe {
+                left_device
+                    .device
+                    .reset_fences(&[left_context.fence])
+                    .map_err(|error| {
+                        format!("could not reset Vulkan left tensor-parallel fence: {error:?}")
+                    })?;
+                right_device
+                    .device
+                    .reset_fences(&[right_context.fence])
+                    .map_err(|error| {
+                        format!("could not reset Vulkan right tensor-parallel fence: {error:?}")
+                    })?;
+                left_device
+                    .device
+                    .queue_submit(
+                        left_device.queue,
+                        &[vk::SubmitInfo::default()
+                            .command_buffers(&[left_context.command_buffer])],
+                        left_context.fence,
+                    )
+                    .map_err(|error| {
+                        format!("could not submit Vulkan left tensor-parallel work: {error:?}")
+                    })?;
+                right_device
+                    .device
+                    .queue_submit(
+                        right_device.queue,
+                        &[vk::SubmitInfo::default()
+                            .command_buffers(&[right_context.command_buffer])],
+                        right_context.fence,
+                    )
+                    .map_err(|error| {
+                        format!("could not submit Vulkan right tensor-parallel work: {error:?}")
+                    })?;
+                left_device
+                    .device
+                    .wait_for_fences(&[left_context.fence], true, u64::MAX)
+                    .map_err(|error| {
+                        format!("could not wait for Vulkan left tensor-parallel work: {error:?}")
+                    })?;
+                right_device
+                    .device
+                    .wait_for_fences(&[right_context.fence], true, u64::MAX)
+                    .map_err(|error| {
+                        format!("could not wait for Vulkan right tensor-parallel work: {error:?}")
+                    })?;
+            }
+            let left_duration = read_timestamp_duration_ns(left_device, left_context.query_pool)?;
+            let right_duration =
+                read_timestamp_duration_ns(right_device, right_context.query_pool)?;
+            max_gpu_duration = max_gpu_duration.max(left_duration).max(right_duration);
+            bytes_read += left_context.buffer_size as u64 + right_context.buffer_size as u64;
+            bytes_written += left_context.buffer_size as u64 + right_context.buffer_size as u64;
+            operations += left_context.plan.operations + right_context.plan.operations;
+
+            let exchange_metrics = run_tensor_parallel_exchange(
+                &[left_device, right_device],
+                &[&left_context, &right_context],
+                &mut exchange,
+            )?;
+            bytes_read += exchange_metrics.bytes_read;
+            bytes_written += exchange_metrics.bytes_written;
+            operations += exchange_metrics.operations;
         }
-        let left_duration = read_timestamp_duration_ns(left_device, left_context.query_pool)?;
-        let right_duration = read_timestamp_duration_ns(right_device, right_context.query_pool)?;
-        read_buffer_bytes(
-            &left_device.device,
-            &left_context.readback,
-            &mut left_output,
-        )?;
-        read_buffer_bytes(
-            &right_device.device,
-            &right_context.readback,
-            &mut right_output,
-        )?;
         let duration = started.elapsed();
-        black_box(checksum_bytes(&left_output));
-        black_box(checksum_bytes(&right_output));
+        black_box(checksum_bytes(&exchange.combined));
         black_box(read_first_storage_word(
             &left_device.device,
             &left_context.readback,
@@ -1728,32 +1938,27 @@ fn run_vulkan_dense_parallel_pair(
         )?);
         measured_samples.push(Sample {
             sample_index,
-            duration_ns: duration.as_nanos().max(left_duration).max(right_duration),
-            iterations: 1,
-            bytes_read: left_context.buffer_size as u64
-                + right_context.buffer_size as u64
-                + activation_bytes as u64
-                + output_bytes as u64,
-            bytes_written: left_context.buffer_size as u64
-                + right_context.buffer_size as u64
-                + output_bytes as u64,
-            operations: left_context.plan.operations + right_context.plan.operations,
+            duration_ns: duration.as_nanos().max(max_gpu_duration),
+            iterations: TENSOR_PARALLEL_SYNTHETIC_LAYERS as u64,
+            bytes_read,
+            bytes_written,
+            operations,
         });
     }
 
     let summary = summarize_samples(&measured_samples);
     Ok(PairMeasurement {
         workload_id: format_workload_id(
-            "synthetic_tensor_split_small_payload",
+            TENSOR_PARALLEL_PAIR_PATTERN,
             workload_class,
             &kernel.format,
         ),
         comparison_group: "small_payload_placement_comparison".to_string(),
         workload_class: workload_class.to_string(),
-        placement_strategy: "two_target_parallel".to_string(),
+        placement_strategy: TWO_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
         source_target_id: left_id.to_string(),
         destination_target_id: right_id.to_string(),
-        pattern: "synthetic_tensor_split_small_payload".to_string(),
+        pattern: exchange_plan.collective.to_string(),
         operation_family: workload_class.to_string(),
         regime: "small_payload".to_string(),
         format: kernel.format,
@@ -1941,7 +2146,7 @@ fn run_vulkan_dense_serial_triplet(
     })
 }
 
-fn run_vulkan_dense_parallel_triplet(
+fn run_vulkan_dense_tensor_parallel_triplet(
     devices: [&OpenVulkanComputeDevice; 3],
     target_ids: &[String; 3],
     payload_bytes: usize,
@@ -1957,104 +2162,115 @@ fn run_vulkan_dense_parallel_triplet(
         create_dense_compute_context(devices[1], payload_split[1], kernel.clone())?,
         create_dense_compute_context(devices[2], payload_split[2], kernel.clone())?,
     ];
-    let mut outputs = contexts
-        .iter()
-        .map(|context| vec![0_u8; output_bytes.min(context.readback.size as usize)])
-        .collect::<Vec<_>>();
+    let exchange_plan = tensor_parallel_exchange_plan(
+        workload_class,
+        activation_bytes,
+        output_bytes,
+        &[&contexts[0], &contexts[1], &contexts[2]],
+    );
+    let mut exchange = create_tensor_parallel_exchange(exchange_plan);
     let mut measured_samples = Vec::with_capacity(samples);
     for sample_index in 0..samples {
-        for index in 0..3 {
-            record_compute_dispatch(
-                devices[index],
-                &contexts[index].resources,
-                contexts[index].command_buffer,
-                contexts[index].query_pool,
-                contexts[index].upload.buffer,
-                contexts[index].storage.buffer,
-                contexts[index].readback.buffer,
-                contexts[index].buffer_size,
-                &contexts[index].plan,
-            )?;
-        }
         let started = Instant::now();
-        for index in 0..3 {
-            unsafe {
-                devices[index]
-                    .device
-                    .reset_fences(&[contexts[index].fence])
-                    .map_err(|error| {
-                        format!("could not reset Vulkan triplet fence {index}: {error:?}")
-                    })?;
-                devices[index]
-                    .device
-                    .queue_submit(
-                        devices[index].queue,
-                        &[vk::SubmitInfo::default()
-                            .command_buffers(&[contexts[index].command_buffer])],
-                        contexts[index].fence,
-                    )
-                    .map_err(|error| {
-                        format!("could not submit Vulkan triplet work {index}: {error:?}")
-                    })?;
+        let mut max_gpu_duration = 0_u128;
+        let mut bytes_read = 0_u64;
+        let mut bytes_written = 0_u64;
+        let mut operations = 0_u64;
+
+        for _ in 0..TENSOR_PARALLEL_SYNTHETIC_LAYERS {
+            for index in 0..3 {
+                record_compute_dispatch(
+                    devices[index],
+                    &contexts[index].resources,
+                    contexts[index].command_buffer,
+                    contexts[index].query_pool,
+                    contexts[index].upload.buffer,
+                    contexts[index].storage.buffer,
+                    contexts[index].readback.buffer,
+                    contexts[index].buffer_size,
+                    &contexts[index].plan,
+                )?;
             }
-        }
-        for index in 0..3 {
-            unsafe {
-                devices[index]
-                    .device
-                    .wait_for_fences(&[contexts[index].fence], true, u64::MAX)
-                    .map_err(|error| {
-                        format!("could not wait for Vulkan triplet work {index}: {error:?}")
-                    })?;
+            for index in 0..3 {
+                unsafe {
+                    devices[index]
+                        .device
+                        .reset_fences(&[contexts[index].fence])
+                        .map_err(|error| {
+                            format!(
+                                "could not reset Vulkan triplet tensor-parallel fence {index}: {error:?}"
+                            )
+                        })?;
+                    devices[index]
+                        .device
+                        .queue_submit(
+                            devices[index].queue,
+                            &[vk::SubmitInfo::default()
+                                .command_buffers(&[contexts[index].command_buffer])],
+                            contexts[index].fence,
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "could not submit Vulkan triplet tensor-parallel work {index}: {error:?}"
+                            )
+                        })?;
+                }
             }
-        }
-        let timestamp_durations = [
-            read_timestamp_duration_ns(devices[0], contexts[0].query_pool)?,
-            read_timestamp_duration_ns(devices[1], contexts[1].query_pool)?,
-            read_timestamp_duration_ns(devices[2], contexts[2].query_pool)?,
-        ];
-        for index in 0..3 {
-            read_buffer_bytes(
-                &devices[index].device,
-                &contexts[index].readback,
-                &mut outputs[index],
+            for index in 0..3 {
+                unsafe {
+                    devices[index]
+                        .device
+                        .wait_for_fences(&[contexts[index].fence], true, u64::MAX)
+                        .map_err(|error| {
+                            format!(
+                                "could not wait for Vulkan triplet tensor-parallel work {index}: {error:?}"
+                            )
+                        })?;
+                }
+            }
+            for index in 0..3 {
+                max_gpu_duration = max_gpu_duration.max(read_timestamp_duration_ns(
+                    devices[index],
+                    contexts[index].query_pool,
+                )?);
+                bytes_read += contexts[index].buffer_size as u64;
+                bytes_written += contexts[index].buffer_size as u64;
+                operations += contexts[index].plan.operations;
+            }
+
+            let exchange_metrics = run_tensor_parallel_exchange(
+                &devices,
+                &[&contexts[0], &contexts[1], &contexts[2]],
+                &mut exchange,
             )?;
-            black_box(checksum_bytes(&outputs[index]));
+            bytes_read += exchange_metrics.bytes_read;
+            bytes_written += exchange_metrics.bytes_written;
+            operations += exchange_metrics.operations;
         }
         let duration = started.elapsed();
+        black_box(checksum_bytes(&exchange.combined));
         measured_samples.push(Sample {
             sample_index,
-            duration_ns: timestamp_durations
-                .into_iter()
-                .fold(duration.as_nanos(), u128::max),
-            iterations: 1,
-            bytes_read: contexts
-                .iter()
-                .map(|context| context.buffer_size as u64)
-                .sum::<u64>()
-                + activation_bytes as u64
-                + output_bytes as u64,
-            bytes_written: contexts
-                .iter()
-                .map(|context| context.buffer_size as u64)
-                .sum::<u64>()
-                + output_bytes as u64,
-            operations: contexts.iter().map(|context| context.plan.operations).sum(),
+            duration_ns: duration.as_nanos().max(max_gpu_duration),
+            iterations: TENSOR_PARALLEL_SYNTHETIC_LAYERS as u64,
+            bytes_read,
+            bytes_written,
+            operations,
         });
     }
 
     let summary = summarize_samples(&measured_samples);
     Ok(GroupMeasurement {
         workload_id: format_workload_id(
-            "synthetic_tensor_split_group_small_payload",
+            TENSOR_PARALLEL_TRIPLET_PATTERN,
             workload_class,
             &kernel.format,
         ),
         comparison_group: "small_payload_placement_comparison".to_string(),
         workload_class: workload_class.to_string(),
-        placement_strategy: "three_target_parallel".to_string(),
+        placement_strategy: THREE_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
         target_ids: target_ids.to_vec(),
-        pattern: "synthetic_tensor_split_group_small_payload".to_string(),
+        pattern: exchange_plan.collective.to_string(),
         operation_family: workload_class.to_string(),
         regime: "small_payload".to_string(),
         format: kernel.format,
@@ -2096,8 +2312,8 @@ fn failed_triplet_measurements(
                     ),
                     failed_triplet_measurement(
                         target_ids,
-                        "synthetic_tensor_split_group_small_payload",
-                        "three_target_parallel",
+                        TENSOR_PARALLEL_TRIPLET_PATTERN,
+                        THREE_TARGET_TENSOR_PARALLEL_STRATEGY,
                         payload_bytes,
                         workload,
                         format,
@@ -3034,8 +3250,8 @@ mod tests {
         let measurements = failed_dense_pair_measurements(
             "left",
             "right",
-            "synthetic_tensor_split_small_payload",
-            "two_target_parallel",
+            TENSOR_PARALLEL_PAIR_PATTERN,
+            TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
             64 * 1024,
             &formats,
             &workloads,
@@ -3048,14 +3264,14 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "synthetic_tensor_split_small_payload:dense_projection:f32",
-                "synthetic_tensor_split_small_payload:router_reduction:f32",
-                "synthetic_tensor_split_small_payload:dense_projection:mxfp4",
-                "synthetic_tensor_split_small_payload:router_reduction:mxfp4",
+                "synthetic_tensor_parallel_small_payload:dense_projection:f32",
+                "synthetic_tensor_parallel_small_payload:router_reduction:f32",
+                "synthetic_tensor_parallel_small_payload:dense_projection:mxfp4",
+                "synthetic_tensor_parallel_small_payload:router_reduction:mxfp4",
             ]
         );
         assert!(measurements.iter().all(|measurement| {
-            measurement.placement_strategy == "two_target_parallel"
+            measurement.placement_strategy == TWO_TARGET_TENSOR_PARALLEL_STRATEGY
                 && measurement.status == "failed"
                 && measurement.source_target_id == "left"
                 && measurement.destination_target_id == "right"
@@ -3070,7 +3286,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_triplet_measurements_cover_serial_and_parallel_axes() {
+    fn failed_triplet_measurements_cover_serial_and_tensor_parallel_axes() {
         let target_ids = ["a".to_string(), "b".to_string(), "c".to_string()];
         let formats = vec!["f32".to_string(), "unknown_format".to_string()];
         let workloads = vec!["moe_expert".to_string()];
@@ -3080,13 +3296,47 @@ mod tests {
             .iter()
             .map(|measurement| measurement.placement_strategy.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(strategies, ["three_target_serial", "three_target_parallel"]);
+        assert_eq!(
+            strategies,
+            ["three_target_serial", THREE_TARGET_TENSOR_PARALLEL_STRATEGY]
+        );
         assert!(measurements.iter().all(|measurement| {
             measurement.target_ids == target_ids
                 && measurement.participant_count == 3
                 && measurement.payload_bytes_per_participant == [4, 3, 3]
                 && measurement.status == "failed"
         }));
+    }
+
+    #[test]
+    fn tensor_parallel_collectives_are_workload_specific() {
+        assert_eq!(
+            tensor_parallel_collective_spec("dense_projection", 256 * 1024, 512 * 1024),
+            (
+                "all_reduce_output",
+                TensorParallelReduction::Sum,
+                512 * 1024,
+                usize::MAX
+            )
+        );
+        assert_eq!(
+            tensor_parallel_collective_spec("moe_expert", 256 * 1024, 512 * 1024),
+            (
+                "expert_activation_gather",
+                TensorParallelReduction::Interleave,
+                256 * 1024,
+                1
+            )
+        );
+        assert_eq!(
+            tensor_parallel_collective_spec("router_reduction", 256 * 1024, 512 * 1024),
+            (
+                "router_score_reduce",
+                TensorParallelReduction::Max,
+                64 * 1024,
+                1
+            )
+        );
     }
 
     #[test]

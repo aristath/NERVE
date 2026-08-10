@@ -44,10 +44,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         Command::Summarize { input } => {
             let payload = fs::read_to_string(&input)?;
-            let run = model::parse_benchmark_run_json(&payload)?;
-            run.validate_basic()
-                .map_err(|message| format!("invalid benchmark JSON: {message}"))?;
-            print_run_summary(&run)?;
+            print_json_summary(&payload)?;
         }
         Command::Run {
             output,
@@ -82,7 +79,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             let payload = if dry_plan {
                 plan_benchmarks(targets, selection, policy).to_json_pretty()?
             } else {
-                run_benchmarks(targets, selection, policy).to_json_pretty()?
+                run_benchmarks(targets, selection, policy)
+                    .to_placement_benchmark()
+                    .to_json()?
             };
             if let Some(path) = output {
                 fs::write(path, payload.as_bytes())?;
@@ -94,11 +93,38 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn print_json_summary(payload: &str) -> Result<(), Box<dyn Error>> {
+    let value = serde_json::from_str::<serde_json::Value>(payload)?;
+    match value.get("schema").and_then(serde_json::Value::as_str) {
+        Some(model::RUN_SCHEMA) => {
+            let run = model::parse_benchmark_run_json(payload)?;
+            run.validate_basic()
+                .map_err(|message| format!("invalid benchmark JSON: {message}"))?;
+            print_run_summary(&run)?;
+        }
+        Some(model::PLACEMENT_SCHEMA) => {
+            let run = model::parse_placement_benchmark_json(payload)?;
+            run.validate_basic()
+                .map_err(|message| format!("invalid benchmark JSON: {message}"))?;
+            print_placement_summary(&run)?;
+        }
+        Some(schema) => {
+            return Err(format!("unsupported benchmark JSON schema {schema:?}").into());
+        }
+        None => return Err("missing benchmark JSON schema".into()),
+    }
+    Ok(())
+}
+
 fn validate_json_document(payload: &str) -> Result<(), Box<dyn Error>> {
     let value = serde_json::from_str::<serde_json::Value>(payload)?;
     match value.get("schema").and_then(serde_json::Value::as_str) {
         Some(model::RUN_SCHEMA) => {
             let run = model::parse_benchmark_run_json(payload)?;
+            run.validate_basic()?;
+        }
+        Some(model::PLACEMENT_SCHEMA) => {
+            let run = model::parse_placement_benchmark_json(payload)?;
             run.validate_basic()?;
         }
         Some(model::PLAN_SCHEMA) => {
@@ -110,6 +136,15 @@ fn validate_json_document(payload: &str) -> Result<(), Box<dyn Error>> {
         }
         None => return Err("missing benchmark JSON schema".into()),
     }
+    Ok(())
+}
+
+fn print_placement_summary(run: &model::PlacementBenchmark) -> Result<(), Box<dyn Error>> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "schema: {}", run.schema)?;
+    writeln!(stdout, "payload_bytes: {}", run.payload_bytes)?;
+    writeln!(stdout, "samples: {}", run.samples)?;
+    writeln!(stdout, "results: {}", run.results.len())?;
     Ok(())
 }
 

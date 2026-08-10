@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub const RUN_SCHEMA: &str = "nerve.gpu_benchmark_run.v1";
 pub const PLAN_SCHEMA: &str = "nerve.gpu_benchmark_plan.v1";
 pub const TARGET_LIST_SCHEMA: &str = "nerve.gpu_benchmark_targets.v1";
+pub const PLACEMENT_SCHEMA: &str = "nerve.placement_bench";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
@@ -120,6 +121,37 @@ pub struct BenchmarkRun {
     pub pair_measurements: Vec<PairMeasurement>,
     pub group_measurements: Vec<GroupMeasurement>,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementBenchmark {
+    pub schema: String,
+    pub payload_bytes: usize,
+    pub samples: usize,
+    pub results: Vec<PlacementResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlacementResult {
+    pub kind: String,
+    pub strategy: String,
+    pub targets: Vec<String>,
+    pub workload: String,
+    pub format: String,
+    pub participants: usize,
+    pub payload_bytes: usize,
+    pub shard_bytes: Vec<usize>,
+    pub activation_bytes: usize,
+    pub output_bytes: usize,
+    pub iters: u64,
+    pub ns: u128,
+    pub total_ns: u128,
+    pub bytes: u64,
+    pub work_ops: u64,
+    pub bps: f64,
+    pub ops: f64,
+    pub transport: String,
+    pub collective: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -334,8 +366,17 @@ pub fn targets_to_json(targets: &[Target]) -> Result<String, serde_json::Error> 
 }
 
 impl BenchmarkRun {
-    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
+    pub fn to_placement_benchmark(&self) -> PlacementBenchmark {
+        let mut results = Vec::new();
+        results.extend(self.measurements.iter().filter_map(placement_single));
+        results.extend(self.pair_measurements.iter().filter_map(placement_pair));
+        results.extend(self.group_measurements.iter().filter_map(placement_group));
+        PlacementBenchmark {
+            schema: PLACEMENT_SCHEMA.to_string(),
+            payload_bytes: self.policy.payload_bytes,
+            samples: self.policy.samples,
+            results,
+        }
     }
 
     pub fn validate_basic(&self) -> Result<(), String> {
@@ -722,6 +763,31 @@ impl BenchmarkRun {
     }
 }
 
+impl PlacementBenchmark {
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    pub fn validate_basic(&self) -> Result<(), String> {
+        if self.schema != PLACEMENT_SCHEMA {
+            return Err(format!(
+                "unsupported placement benchmark schema {:?}",
+                self.schema
+            ));
+        }
+        if self.payload_bytes == 0 {
+            return Err("payload_bytes must be greater than zero".to_string());
+        }
+        if self.samples == 0 {
+            return Err("samples must be greater than zero".to_string());
+        }
+        for result in &self.results {
+            validate_placement_result(result)?;
+        }
+        Ok(())
+    }
+}
+
 struct CandidateMeasurementMatch<'a> {
     status: &'a str,
     summary: Option<&'a Summary>,
@@ -794,6 +860,246 @@ fn combined_candidate_status(statuses: &[&str]) -> String {
     }
 }
 
+struct PlacementMetrics {
+    ns: u128,
+    total_ns: u128,
+    iters: u64,
+    bytes: u64,
+    work_ops: u64,
+    bps: f64,
+    ops: f64,
+}
+
+fn placement_single(measurement: &Measurement) -> Option<PlacementResult> {
+    placement_metrics(
+        &measurement.status,
+        measurement.summary.as_ref(),
+        &measurement.samples,
+    )
+    .map(|metrics| PlacementResult {
+        kind: "single".to_string(),
+        strategy: placement_strategy(&measurement.placement_strategy).to_string(),
+        targets: vec![measurement.target_id.clone()],
+        workload: measurement.workload_class.clone(),
+        format: measurement.format.clone(),
+        participants: 1,
+        payload_bytes: measurement.payload_bytes,
+        shard_bytes: vec![measurement.payload_bytes],
+        activation_bytes: 0,
+        output_bytes: 0,
+        iters: metrics.iters,
+        ns: metrics.ns,
+        total_ns: metrics.total_ns,
+        bytes: metrics.bytes,
+        work_ops: metrics.work_ops,
+        bps: metrics.bps,
+        ops: metrics.ops,
+        transport: placement_transport(&measurement.placement_strategy).to_string(),
+        collective: placement_collective(
+            &measurement.placement_strategy,
+            &measurement.workload_class,
+        )
+        .to_string(),
+    })
+}
+
+fn placement_pair(measurement: &PairMeasurement) -> Option<PlacementResult> {
+    placement_metrics(
+        &measurement.status,
+        measurement.summary.as_ref(),
+        &measurement.samples,
+    )
+    .map(|metrics| PlacementResult {
+        kind: "pair".to_string(),
+        strategy: placement_strategy(&measurement.placement_strategy).to_string(),
+        targets: vec![
+            measurement.source_target_id.clone(),
+            measurement.destination_target_id.clone(),
+        ],
+        workload: measurement.workload_class.clone(),
+        format: measurement.format.clone(),
+        participants: 2,
+        payload_bytes: measurement.payload_bytes,
+        shard_bytes: vec![
+            measurement.source_payload_bytes,
+            measurement.destination_payload_bytes,
+        ],
+        activation_bytes: measurement.activation_bytes,
+        output_bytes: measurement.output_bytes,
+        iters: metrics.iters,
+        ns: metrics.ns,
+        total_ns: metrics.total_ns,
+        bytes: metrics.bytes,
+        work_ops: metrics.work_ops,
+        bps: metrics.bps,
+        ops: metrics.ops,
+        transport: placement_transport(&measurement.placement_strategy).to_string(),
+        collective: placement_collective(
+            &measurement.placement_strategy,
+            &measurement.workload_class,
+        )
+        .to_string(),
+    })
+}
+
+fn placement_group(measurement: &GroupMeasurement) -> Option<PlacementResult> {
+    placement_metrics(
+        &measurement.status,
+        measurement.summary.as_ref(),
+        &measurement.samples,
+    )
+    .map(|metrics| PlacementResult {
+        kind: "group".to_string(),
+        strategy: placement_strategy(&measurement.placement_strategy).to_string(),
+        targets: measurement.target_ids.clone(),
+        workload: measurement.workload_class.clone(),
+        format: measurement.format.clone(),
+        participants: measurement.participant_count,
+        payload_bytes: measurement.payload_bytes,
+        shard_bytes: measurement.payload_bytes_per_participant.clone(),
+        activation_bytes: measurement.activation_bytes,
+        output_bytes: measurement.output_bytes,
+        iters: metrics.iters,
+        ns: metrics.ns,
+        total_ns: metrics.total_ns,
+        bytes: metrics.bytes,
+        work_ops: metrics.work_ops,
+        bps: metrics.bps,
+        ops: metrics.ops,
+        transport: placement_transport(&measurement.placement_strategy).to_string(),
+        collective: placement_collective(
+            &measurement.placement_strategy,
+            &measurement.workload_class,
+        )
+        .to_string(),
+    })
+}
+
+fn placement_metrics(
+    status: &str,
+    summary: Option<&Summary>,
+    samples: &[Sample],
+) -> Option<PlacementMetrics> {
+    let _summary = (status == "completed").then_some(summary).flatten()?;
+    if samples.is_empty() {
+        return None;
+    }
+    let mut rows = samples
+        .iter()
+        .map(|sample| {
+            let iters = sample.iterations.max(1);
+            let ns = sample.duration_ns / u128::from(iters);
+            let bytes = (sample.bytes_read + sample.bytes_written) / iters;
+            let work_ops = sample.operations / iters;
+            (ns, sample.duration_ns, iters, bytes, work_ops)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.3.cmp(&right.3))
+            .then_with(|| left.4.cmp(&right.4))
+    });
+    let (ns, total_ns, iters, bytes, work_ops) = rows[rows.len() / 2];
+    let seconds = ns as f64 / 1_000_000_000.0;
+    Some(PlacementMetrics {
+        ns,
+        total_ns,
+        iters,
+        bytes,
+        work_ops,
+        bps: bytes as f64 / seconds.max(f64::EPSILON),
+        ops: work_ops as f64 / seconds.max(f64::EPSILON),
+    })
+}
+
+fn placement_strategy(strategy: &str) -> &str {
+    match strategy {
+        "single_target_serial" => "single",
+        "activation_transfer_only" => "transfer",
+        "two_target_serial" | "three_target_serial" => "serial",
+        "two_target_tensor_parallel" | "three_target_tensor_parallel" => "tp",
+        other => other,
+    }
+}
+
+fn placement_transport(strategy: &str) -> &'static str {
+    match strategy {
+        "single_target_serial" => "none",
+        "activation_transfer_only"
+        | "two_target_serial"
+        | "three_target_serial"
+        | "two_target_tensor_parallel"
+        | "three_target_tensor_parallel" => "host_staged",
+        "two_stage_serial_reference" | "two_shard_parallel_reference" => "host",
+        _ => "unknown",
+    }
+}
+
+fn placement_collective(strategy: &str, workload: &str) -> &'static str {
+    match strategy {
+        "single_target_serial" => "none",
+        "activation_transfer_only" => "copy",
+        "two_target_serial" | "three_target_serial" => "pipeline",
+        "two_target_tensor_parallel" | "three_target_tensor_parallel" => {
+            tensor_parallel_collective_name(workload)
+        }
+        "two_stage_serial_reference" => "pipeline",
+        "two_shard_parallel_reference" => "reference_shard_merge",
+        _ => "unknown",
+    }
+}
+
+fn tensor_parallel_collective_name(workload: &str) -> &'static str {
+    match workload {
+        "dense_projection" => "all_reduce_output",
+        "moe_expert" => "expert_activation_gather",
+        "router_reduction" => "router_score_reduce",
+        _ => "all_reduce_output",
+    }
+}
+
+fn validate_placement_result(result: &PlacementResult) -> Result<(), String> {
+    if result.kind.is_empty()
+        || result.strategy.is_empty()
+        || result.workload.is_empty()
+        || result.format.is_empty()
+        || result.targets.is_empty()
+        || result.transport.is_empty()
+        || result.collective.is_empty()
+        || result.shard_bytes.is_empty()
+    {
+        return Err("placement result contains empty identity fields".to_string());
+    }
+    if result.participants == 0 {
+        return Err("placement result participants must be greater than zero".to_string());
+    }
+    if result.participants != result.targets.len() {
+        return Err("placement result participants must match target count".to_string());
+    }
+    if result.participants != result.shard_bytes.len() {
+        return Err("placement result participants must match shard count".to_string());
+    }
+    if result.payload_bytes == 0 {
+        return Err("placement result payload_bytes must be greater than zero".to_string());
+    }
+    if result.iters == 0 {
+        return Err("placement result iters must be greater than zero".to_string());
+    }
+    if result.ns == 0 {
+        return Err("placement result ns must be greater than zero".to_string());
+    }
+    if result.total_ns < result.ns {
+        return Err("placement result total_ns must not be smaller than ns".to_string());
+    }
+    if !result.bps.is_finite() || !result.ops.is_finite() {
+        return Err("placement result throughput fields must be finite".to_string());
+    }
+    Ok(())
+}
+
 fn increment_summary_status(summary: &mut BenchmarkRunSummary, status: &str) {
     match status {
         "completed" => summary.completed_count += 1,
@@ -864,14 +1170,14 @@ fn coverage_warnings_for_run(
         && run.selected_target_ids.len() >= 2
     {
         expected.push("two_target_serial");
-        expected.push("two_target_parallel");
+        expected.push("two_target_tensor_parallel");
     }
     if run.policy.pair_measurements
         && run.policy.max_group_size >= 3
         && run.selected_target_ids.len() >= 3
     {
         expected.push("three_target_serial");
-        expected.push("three_target_parallel");
+        expected.push("three_target_tensor_parallel");
     }
 
     let mut warnings = Vec::new();
@@ -927,6 +1233,12 @@ fn coverage_warnings_for_run(
 }
 
 pub fn parse_benchmark_run_json(input: &str) -> Result<BenchmarkRun, serde_json::Error> {
+    serde_json::from_str(input)
+}
+
+pub fn parse_placement_benchmark_json(
+    input: &str,
+) -> Result<PlacementBenchmark, serde_json::Error> {
     serde_json::from_str(input)
 }
 
@@ -1096,7 +1408,7 @@ mod tests {
             group_measurements: Vec::new(),
             diagnostics: Vec::new(),
         };
-        let encoded = run.to_json_pretty().unwrap();
+        let encoded = serde_json::to_string_pretty(&run).unwrap();
         let parsed = parse_benchmark_run_json(&encoded).unwrap();
         parsed.validate_basic().unwrap();
     }
@@ -1251,6 +1563,188 @@ mod tests {
     }
 
     #[test]
+    fn placement_benchmark_contains_only_completed_rankable_results() {
+        let mut run = BenchmarkRun {
+            schema: RUN_SCHEMA.to_string(),
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: 2,
+            implementation: Implementation::current(),
+            policy: RunPolicy {
+                payload_bytes: 1024,
+                samples: 1,
+                benchmark_formats: vec!["f32".to_string()],
+                benchmark_workloads: vec!["dense_projection".to_string()],
+                include_targets: Vec::new(),
+                exclude_targets: Vec::new(),
+                exclude_pci: Vec::new(),
+                exclude_kinds: Vec::new(),
+                pair_measurements: true,
+                max_group_size: 2,
+                execute: true,
+            },
+            discovered_targets: vec![test_target("gpu:a"), test_target("gpu:b")],
+            selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
+            skipped_targets: Vec::new(),
+            workload_specs: Vec::new(),
+            comparison_sets: Vec::new(),
+            measurements: Vec::new(),
+            pair_measurements: Vec::new(),
+            group_measurements: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        run.measurements.push(Measurement {
+            workload_id: "single_target_small_payload:dense_projection:f32".to_string(),
+            comparison_group: "small_payload_placement_comparison".to_string(),
+            workload_class: "dense_projection".to_string(),
+            placement_strategy: "single_target_serial".to_string(),
+            target_id: "gpu:a".to_string(),
+            pattern: "single".to_string(),
+            operation_family: "dense_projection".to_string(),
+            regime: "small_payload".to_string(),
+            format: "f32".to_string(),
+            status: "completed".to_string(),
+            reason: None,
+            payload_bytes: 1024,
+            working_set_bytes: 1024,
+            samples: vec![Sample {
+                sample_index: 0,
+                duration_ns: 12,
+                iterations: 1,
+                bytes_read: 64,
+                bytes_written: 64,
+                operations: 16,
+            }],
+            summary: Some(Summary {
+                min_duration_ns: 10,
+                median_duration_ns: 12,
+                bytes_per_second: 100.0,
+                operations_per_second: 200.0,
+            }),
+        });
+        run.measurements.push(Measurement {
+            workload_id: "single_target_small_payload:dense_projection:bf16".to_string(),
+            comparison_group: "small_payload_placement_comparison".to_string(),
+            workload_class: "dense_projection".to_string(),
+            placement_strategy: "single_target_serial".to_string(),
+            target_id: "gpu:a".to_string(),
+            pattern: "single".to_string(),
+            operation_family: "dense_projection".to_string(),
+            regime: "small_payload".to_string(),
+            format: "bf16".to_string(),
+            status: "unsupported".to_string(),
+            reason: Some("not available".to_string()),
+            payload_bytes: 1024,
+            working_set_bytes: 1024,
+            samples: Vec::new(),
+            summary: None,
+        });
+        run.pair_measurements.push(PairMeasurement {
+            workload_id: "synthetic_tensor_parallel_small_payload:dense_projection:f32".to_string(),
+            comparison_group: "small_payload_placement_comparison".to_string(),
+            workload_class: "dense_projection".to_string(),
+            placement_strategy: "two_target_tensor_parallel".to_string(),
+            source_target_id: "gpu:a".to_string(),
+            destination_target_id: "gpu:b".to_string(),
+            pattern: "synthetic_tensor_parallel_small_payload".to_string(),
+            operation_family: "dense_projection".to_string(),
+            regime: "small_payload".to_string(),
+            format: "f32".to_string(),
+            status: "completed".to_string(),
+            reason: None,
+            payload_bytes: 1024,
+            source_payload_bytes: 512,
+            destination_payload_bytes: 512,
+            activation_bytes: 1024,
+            output_bytes: 64,
+            samples: vec![Sample {
+                sample_index: 0,
+                duration_ns: 100,
+                iterations: 4,
+                bytes_read: 400,
+                bytes_written: 200,
+                operations: 80,
+            }],
+            summary: Some(Summary {
+                min_duration_ns: 100,
+                median_duration_ns: 100,
+                bytes_per_second: 300.0,
+                operations_per_second: 400.0,
+            }),
+        });
+
+        let placement = run.to_placement_benchmark();
+        placement.validate_basic().unwrap();
+        assert_eq!(placement.schema, PLACEMENT_SCHEMA);
+        assert_eq!(placement.results.len(), 2);
+        assert_eq!(placement.results[0].kind, "single");
+        assert_eq!(placement.results[0].strategy, "single");
+        assert_eq!(placement.results[0].targets, ["gpu:a"]);
+        assert_eq!(placement.results[0].participants, 1);
+        assert_eq!(placement.results[0].payload_bytes, 1024);
+        assert_eq!(placement.results[0].shard_bytes, [1024]);
+        assert_eq!(placement.results[0].activation_bytes, 0);
+        assert_eq!(placement.results[0].output_bytes, 0);
+        assert_eq!(placement.results[0].ns, 12);
+        assert_eq!(placement.results[0].total_ns, 12);
+        assert_eq!(placement.results[0].iters, 1);
+        assert_eq!(placement.results[0].bytes, 128);
+        assert_eq!(placement.results[0].work_ops, 16);
+        assert!(placement.results[0].bps > 0.0);
+        assert!(placement.results[0].ops > 0.0);
+        assert_eq!(placement.results[0].transport, "none");
+        assert_eq!(placement.results[0].collective, "none");
+        assert_eq!(placement.results[1].kind, "pair");
+        assert_eq!(placement.results[1].strategy, "tp");
+        assert_eq!(placement.results[1].targets, ["gpu:a", "gpu:b"]);
+        assert_eq!(placement.results[1].participants, 2);
+        assert_eq!(placement.results[1].payload_bytes, 1024);
+        assert_eq!(placement.results[1].shard_bytes, [512, 512]);
+        assert_eq!(placement.results[1].activation_bytes, 1024);
+        assert_eq!(placement.results[1].output_bytes, 64);
+        assert_eq!(placement.results[1].ns, 25);
+        assert_eq!(placement.results[1].total_ns, 100);
+        assert_eq!(placement.results[1].iters, 4);
+        assert_eq!(placement.results[1].bytes, 150);
+        assert_eq!(placement.results[1].work_ops, 20);
+        assert!(placement.results[1].bps > 0.0);
+        assert!(placement.results[1].ops > 0.0);
+        assert_eq!(placement.results[1].transport, "host_staged");
+        assert_eq!(placement.results[1].collective, "all_reduce_output");
+
+        let encoded = placement.to_json().unwrap();
+        assert!(!encoded.contains("discovered_targets"));
+        assert!(!encoded.contains("unsupported"));
+        parse_placement_benchmark_json(&encoded)
+            .unwrap()
+            .validate_basic()
+            .unwrap();
+    }
+
+    #[test]
+    fn placement_collectives_describe_strategy_and_workload() {
+        assert_eq!(
+            placement_collective("two_target_tensor_parallel", "dense_projection"),
+            "all_reduce_output"
+        );
+        assert_eq!(
+            placement_collective("two_target_tensor_parallel", "moe_expert"),
+            "expert_activation_gather"
+        );
+        assert_eq!(
+            placement_collective("three_target_tensor_parallel", "router_reduction"),
+            "router_score_reduce"
+        );
+        assert_eq!(
+            placement_collective("two_target_serial", "moe_expert"),
+            "pipeline"
+        );
+        assert_eq!(
+            placement_transport("three_target_tensor_parallel"),
+            "host_staged"
+        );
+    }
+
+    #[test]
     fn warns_when_required_pair_strategy_has_no_completed_measurement() {
         let mut run = BenchmarkRun {
             schema: RUN_SCHEMA.to_string(),
@@ -1339,7 +1833,7 @@ mod tests {
             summary
                 .coverage_warnings
                 .iter()
-                .any(|warning| warning.contains("two_target_parallel"))
+                .any(|warning| warning.contains("two_target_tensor_parallel"))
         );
     }
 
@@ -1384,10 +1878,10 @@ mod tests {
                         notes: String::new(),
                     },
                     ComparisonCandidate {
-                        candidate_id: "cmp:parallel".to_string(),
-                        placement_strategy: "two_target_parallel".to_string(),
+                        candidate_id: "cmp:tp".to_string(),
+                        placement_strategy: "two_target_tensor_parallel".to_string(),
                         measurement_kind: "pair".to_string(),
-                        workload_id: "synthetic_tensor_split_small_payload".to_string(),
+                        workload_id: "synthetic_tensor_parallel_small_payload".to_string(),
                         target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
                         notes: String::new(),
                     },
@@ -1424,7 +1918,7 @@ mod tests {
             summary
                 .coverage_warnings
                 .iter()
-                .any(|warning| warning.contains("cmp:parallel"))
+                .any(|warning| warning.contains("cmp:tp"))
         );
     }
 
@@ -1474,7 +1968,7 @@ mod tests {
                 target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
                 candidates: vec![ComparisonCandidate {
                     candidate_id: "cmp:bad".to_string(),
-                    placement_strategy: "two_target_parallel".to_string(),
+                    placement_strategy: "two_target_tensor_parallel".to_string(),
                     measurement_kind: "pair".to_string(),
                     workload_id: "missing:dense_projection:f32".to_string(),
                     target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
@@ -1514,12 +2008,12 @@ mod tests {
             selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
             skipped_targets: Vec::new(),
             workload_specs: vec![WorkloadSpec {
-                workload_id: "synthetic_tensor_split_small_payload:dense_projection:f32"
+                workload_id: "synthetic_tensor_parallel_small_payload:dense_projection:f32"
                     .to_string(),
                 comparison_group: "small_payload_placement_comparison".to_string(),
                 workload_class: "dense_projection".to_string(),
-                placement_strategy: "two_target_parallel".to_string(),
-                pattern: "synthetic_tensor_split_small_payload".to_string(),
+                placement_strategy: "two_target_tensor_parallel".to_string(),
+                pattern: "synthetic_tensor_parallel_small_payload".to_string(),
                 format: "f32".to_string(),
                 participant_count: 2,
                 payload_bytes: 1024,
@@ -1537,9 +2031,9 @@ mod tests {
                 target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
                 candidates: vec![ComparisonCandidate {
                     candidate_id: "cmp:bad".to_string(),
-                    placement_strategy: "two_target_parallel".to_string(),
+                    placement_strategy: "two_target_tensor_parallel".to_string(),
                     measurement_kind: "pair".to_string(),
-                    workload_id: "synthetic_tensor_split_small_payload:dense_projection:f32"
+                    workload_id: "synthetic_tensor_parallel_small_payload:dense_projection:f32"
                         .to_string(),
                     target_ids: vec!["gpu:a".to_string()],
                     notes: String::new(),

@@ -911,16 +911,16 @@ fn build_comparison_sets(
                             ),
                             comparison_candidate(
                                 &comparison_id,
-                                "parallel_pair",
-                                "two_target_parallel",
+                                "tensor_parallel_pair",
+                                "two_target_tensor_parallel",
                                 "pair",
                                 &format_workload_id(
-                                    "synthetic_tensor_split_small_payload",
+                                    "synthetic_tensor_parallel_small_payload",
                                     workload,
                                     format,
                                 ),
                                 vec![left.clone(), right.clone()],
-                                "Split the same logical payload across both targets in parallel.",
+                                "Split the same logical payload across both targets with per-layer tensor-parallel exchange.",
                             ),
                         ],
                     });
@@ -998,16 +998,16 @@ fn build_comparison_sets(
                                     ),
                                     comparison_candidate(
                                         &comparison_id,
-                                        "parallel_triplet",
-                                        "three_target_parallel",
+                                        "tensor_parallel_triplet",
+                                        "three_target_tensor_parallel",
                                         "group",
                                         &format_workload_id(
-                                            "synthetic_tensor_split_group_small_payload",
+                                            "synthetic_tensor_parallel_group_small_payload",
                                             workload,
                                             format,
                                         ),
                                         vec![first.clone(), second.clone(), third.clone()],
-                                        "Split the same logical payload across all three targets in parallel.",
+                                        "Split the same logical payload across all three targets with per-layer tensor-parallel exchange.",
                                     ),
                                 ],
                             });
@@ -1139,18 +1139,18 @@ fn build_workload_specs(
                 description: format!("Run half the {workload} logical payload using {format} on the first target, transfer activation, then run the other half on the second target."),
             });
             specs.push(WorkloadSpec {
-                workload_id: format_workload_id("synthetic_tensor_split_small_payload", workload, format),
+                workload_id: format_workload_id("synthetic_tensor_parallel_small_payload", workload, format),
                 comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
                 workload_class: workload.clone(),
-                placement_strategy: "two_target_parallel".to_string(),
-                pattern: "synthetic_tensor_split_small_payload".to_string(),
+                placement_strategy: "two_target_tensor_parallel".to_string(),
+                pattern: "synthetic_tensor_parallel_small_payload".to_string(),
                 format: format.clone(),
                 participant_count: 2,
                 payload_bytes,
                 parameter_bytes_per_participant: half_payload,
                 activation_bytes,
                 output_bytes,
-                description: format!("Split the same {workload} logical {format} payload across two targets, broadcast activation, compute shards, then collect output."),
+                description: format!("Split the same {workload} logical {format} payload across two targets, repeatedly broadcast activation, compute shards, reduce partial outputs, and broadcast the next activation."),
             });
             if max_group_size >= 3 {
                 let third_payload = payload_bytes / 3;
@@ -1169,18 +1169,18 @@ fn build_workload_specs(
                     description: format!("Run thirds of the {workload} logical {format} payload across three ordered targets with activation movement between stages."),
                 });
                 specs.push(WorkloadSpec {
-                    workload_id: format_workload_id("synthetic_tensor_split_group_small_payload", workload, format),
+                    workload_id: format_workload_id("synthetic_tensor_parallel_group_small_payload", workload, format),
                     comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
                     workload_class: workload.clone(),
-                    placement_strategy: "three_target_parallel".to_string(),
-                    pattern: "synthetic_tensor_split_group_small_payload".to_string(),
+                    placement_strategy: "three_target_tensor_parallel".to_string(),
+                    pattern: "synthetic_tensor_parallel_group_small_payload".to_string(),
                     format: format.clone(),
                     participant_count: 3,
                     payload_bytes,
                     parameter_bytes_per_participant: third_payload,
                     activation_bytes,
                     output_bytes,
-                    description: format!("Split the same {workload} logical {format} payload across three targets, broadcast activation, compute shards, then collect output."),
+                    description: format!("Split the same {workload} logical {format} payload across three targets, repeatedly broadcast activation, compute shards, reduce partial outputs, and broadcast the next activation."),
                 });
             }
         }
@@ -1322,7 +1322,7 @@ mod tests {
                 "single_target_small_payload:dense_projection:f32",
                 "ordered_activation_transfer:dense_projection:f32",
                 "synthetic_layer_split_small_payload:dense_projection:f32",
-                "synthetic_tensor_split_small_payload:dense_projection:f32",
+                "synthetic_tensor_parallel_small_payload:dense_projection:f32",
             ]
         );
         let layer = specs
@@ -1343,7 +1343,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(strategies.contains("single_target_serial"));
         assert!(strategies.contains("two_target_serial"));
-        assert!(strategies.contains("two_target_parallel"));
+        assert!(strategies.contains("two_target_tensor_parallel"));
     }
 
     #[test]
@@ -1383,7 +1383,9 @@ mod tests {
             .map(|spec| spec.workload_id.as_str())
             .collect::<Vec<_>>();
         assert!(ids.contains(&"synthetic_layer_split_group_small_payload:dense_projection:f32"));
-        assert!(ids.contains(&"synthetic_tensor_split_group_small_payload:dense_projection:f32"));
+        assert!(
+            ids.contains(&"synthetic_tensor_parallel_group_small_payload:dense_projection:f32")
+        );
         let triplet_specs = specs
             .iter()
             .filter(|spec| spec.participant_count == 3)
@@ -1413,12 +1415,12 @@ mod tests {
             assert!(specs.iter().any(|spec| {
                 spec.workload_id
                     == format_workload_id(
-                        "synthetic_tensor_split_group_small_payload",
+                        "synthetic_tensor_parallel_group_small_payload",
                         "router_reduction",
                         format,
                     )
                     && spec.format == *format
-                    && spec.placement_strategy == "three_target_parallel"
+                    && spec.placement_strategy == "three_target_tensor_parallel"
             }));
         }
 
@@ -1436,9 +1438,9 @@ mod tests {
             })
             .unwrap();
         assert!(mxfp4.candidates.iter().any(|candidate| {
-            candidate.placement_strategy == "two_target_parallel"
+            candidate.placement_strategy == "two_target_tensor_parallel"
                 && candidate.workload_id
-                    == "synthetic_tensor_split_small_payload:dense_projection:mxfp4"
+                    == "synthetic_tensor_parallel_small_payload:dense_projection:mxfp4"
         }));
     }
 
@@ -1475,7 +1477,7 @@ mod tests {
         assert!(run.pair_measurements.is_empty());
         assert!(run.group_measurements.is_empty());
         assert!(run.summary().candidate_statuses.iter().any(|candidate| {
-            candidate.placement_strategy == "three_target_parallel"
+            candidate.placement_strategy == "three_target_tensor_parallel"
                 && candidate.measurement_kind == "group"
                 && candidate.status == "missing"
                 && candidate.matched_measurement_count == 0
@@ -1518,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn pair_comparison_sets_include_single_serial_and_parallel_candidates() {
+    fn pair_comparison_sets_include_single_serial_and_tensor_parallel_candidates() {
         let targets = vec![
             target("gpu:a", "discrete_gpu"),
             target("gpu:b", "discrete_gpu"),
@@ -1558,12 +1560,12 @@ mod tests {
                 "single_target_serial",
                 "two_target_serial",
                 "two_target_serial",
-                "two_target_parallel",
+                "two_target_tensor_parallel",
             ]
         );
         assert!(run.pair_measurements.is_empty());
         assert!(run.summary().candidate_statuses.iter().any(|candidate| {
-            candidate.placement_strategy == "two_target_parallel"
+            candidate.placement_strategy == "two_target_tensor_parallel"
                 && candidate.measurement_kind == "pair"
                 && candidate.status == "missing"
                 && candidate.matched_measurement_count == 0
@@ -1571,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn triplet_comparison_sets_include_single_serial_and_parallel_candidates() {
+    fn triplet_comparison_sets_include_single_serial_and_tensor_parallel_candidates() {
         let targets = vec![
             target("gpu:a", "discrete_gpu"),
             target("gpu:b", "discrete_gpu"),
@@ -1617,13 +1619,13 @@ mod tests {
                 "single_target_serial",
                 "single_target_serial",
                 "three_target_serial",
-                "three_target_parallel",
+                "three_target_tensor_parallel",
             ]
         );
         let summary = run.summary();
         assert!(summary.candidate_statuses.iter().any(|candidate| {
             candidate.comparison_id == triplet.comparison_id
-                && candidate.placement_strategy == "three_target_parallel"
+                && candidate.placement_strategy == "three_target_tensor_parallel"
                 && candidate.measurement_kind == "group"
                 && candidate.status == "missing"
                 && candidate.matched_measurement_count == 0
