@@ -26,7 +26,7 @@ fn resident_greedy_feedback_loop_runs_two_ticks() {
         create_fixture_model_resident_greedy_stream_processor(&device, "feedback").unwrap();
     assert_eq!(processor.device_id, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID);
     assert_eq!(processor.component_count, 1);
-    assert_eq!(processor.per_tick_dispatch_count, 13);
+    assert_eq!(processor.per_tick_dispatch_count, 14);
     assert!(processor.per_tick_descriptor_count > processor.per_tick_dispatch_count);
     assert_eq!(processor.per_tick_push_constant_byte_count, 0);
     assert_eq!(processor.dynamic_state_capacity_activations, 4);
@@ -48,9 +48,9 @@ fn resident_greedy_feedback_loop_runs_two_ticks() {
         run.tick_runs[1].input_token_id,
         run.tick_runs[0].sampled_token_id
     );
-    assert_eq!(run.tick_runs[0].tick_run.dispatch_count, 12);
+    assert_eq!(run.tick_runs[0].tick_run.dispatch_count, 13);
     assert_eq!(run.tick_runs[0].sampler_run.descriptor_count, 5);
-    assert_eq!(run.tick_runs[1].tick_run.dispatch_count, 12);
+    assert_eq!(run.tick_runs[1].tick_run.dispatch_count, 13);
     assert_eq!(run.tick_runs[1].sampler_run.descriptor_count, 5);
     assert_eq!(run.sampled_token_ids, vec![16, 16]);
     assert_eq!(run.tick_runs[0].sampler_run.token_id, 16);
@@ -84,7 +84,7 @@ fn resident_greedy_prompt_event_drains_external_input_before_feedback() {
     );
     assert_eq!(run.stop_reason, "max_new_tokens");
     assert_eq!(run.tick_runs.len(), 3);
-    assert_eq!(run.per_tick_dispatch_count, 13);
+    assert_eq!(run.per_tick_dispatch_count, 14);
     assert!(run.per_tick_descriptor_count > run.per_tick_dispatch_count);
     assert_eq!(run.per_tick_push_constant_byte_count, 0);
 
@@ -97,7 +97,7 @@ fn resident_greedy_prompt_event_drains_external_input_before_feedback() {
     assert_eq!(run.tick_runs[0].public_output_token_id, None);
     assert_eq!(run.tick_runs[0].private_feedback_token_id, None);
     assert!(run.tick_runs[0].sampler_run.is_none());
-    assert_eq!(run.tick_runs[0].tick_run.dispatch_count, 10);
+    assert_eq!(run.tick_runs[0].tick_run.dispatch_count, 11);
     assert!(run.tick_runs[0].tick_run.output_run.is_none());
 
     assert_eq!(run.tick_runs[1].stream_tick, 1);
@@ -122,7 +122,7 @@ fn resident_greedy_prompt_event_drains_external_input_before_feedback() {
         run.tick_runs[1].sampler_run.as_ref().unwrap().token_id,
         run.generated_token_ids[0]
     );
-    assert_eq!(run.tick_runs[1].tick_run.dispatch_count, 12);
+    assert_eq!(run.tick_runs[1].tick_run.dispatch_count, 13);
     assert!(run.tick_runs[1].tick_run.output_run.is_some());
 
     assert_eq!(run.tick_runs[2].stream_tick, 2);
@@ -136,7 +136,7 @@ fn resident_greedy_prompt_event_drains_external_input_before_feedback() {
     assert_eq!(run.tick_runs[2].public_output_token_id, None);
     assert_eq!(run.tick_runs[2].private_feedback_token_id, None);
     assert!(run.tick_runs[2].sampler_run.is_none());
-    assert_eq!(run.tick_runs[2].tick_run.dispatch_count, 10);
+    assert_eq!(run.tick_runs[2].tick_run.dispatch_count, 11);
     assert!(run.tick_runs[2].tick_run.output_run.is_none());
 }
 
