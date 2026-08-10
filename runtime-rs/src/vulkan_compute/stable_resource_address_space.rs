@@ -1506,6 +1506,11 @@ impl VulkanStableResourceAddressTable {
                     self.resident_allocations[*slot] = Some(Arc::clone(allocation));
                 }
             });
+        // Publication is a physical lifetime boundary. The consumer-queue
+        // write is ordered after previously submitted users of the old
+        // addresses, while `previous_allocations` pins their backing until
+        // that write completes. Later submissions observe the new generation
+        // (or a cleared record) before they can dereference the slot.
         if let Err(failure) = transfer.submit_consumer_serialized(&writes) {
             if !failure.submission_accepted {
                 for (slot, allocation) in previous_allocations {

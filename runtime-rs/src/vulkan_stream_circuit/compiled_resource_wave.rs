@@ -230,11 +230,6 @@ impl VulkanCompiledResourceDeviceStore {
         if !self.residency_policy.evicts_inactive_resources() {
             return Ok(());
         }
-        let _execution = self.execution_barrier.write().map_err(|_| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource execution barrier was poisoned",
-            )
-        })?;
         let (snapshot, new_payload_bytes, required_payload_bytes) = residency_requirement()?;
         if required_payload_bytes == 0 {
             return Ok(());
@@ -580,17 +575,6 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled resource residency mutation lock was poisoned",
             )
         })?;
-        let Some(_execution) =
-            try_begin_compiled_resource_reclamation(&self.execution_barrier)?
-        else {
-                // Reclamation is called from the allocator. The requesting
-                // thread may itself own an execution read epoch, so waiting
-                // for exclusivity here can self-deadlock. Reclamation is
-                // opportunistic: another registered store may satisfy the
-                // request, otherwise allocation reports insufficient
-                // headroom instead of freezing the runtime.
-            return Ok(0);
-        };
         let mut released_device_bytes = self
             .reclaim_promoted_representation_capacity(requested_bytes)?;
         if released_device_bytes >= requested_bytes {
@@ -671,11 +655,6 @@ impl VulkanCompiledResourceDeviceStore {
         let host_visible_arena = self.host_visible_arena.as_ref().ok_or_else(|| {
             VulkanCompiledResourceDeviceStoreError::new(
                 "shared compiled-resource host cache store has no host-visible arena",
-            )
-        })?;
-        let _execution = self.execution_barrier.write().map_err(|_| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource execution barrier was poisoned",
             )
         })?;
         let mut released_bytes = host_visible_arena
@@ -842,11 +821,6 @@ impl VulkanCompiledResourceDeviceStore {
             };
         }
 
-        let _execution = self.execution_barrier.write().map_err(|_| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource execution barrier was poisoned",
-            )
-        })?;
         let (
             snapshot,
             new_payload_bytes,
@@ -993,27 +967,14 @@ impl VulkanCompiledResourceDeviceStore {
             .map_err(compiled_device_store_vulkan_error)
     }
 
-    fn begin_execution(
+    fn ensure_execution_headroom(
         &self,
         device: &VulkanComputeDevice,
-    ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanCompiledResourceDeviceStoreError>
-    {
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
         device
             .ensure_device_local_memory_headroom()
-            .map_err(compiled_device_store_vulkan_error)?;
-        self.begin_execution_after_headroom_check()
-    }
-
-    fn begin_execution_after_headroom_check(
-        &self,
-    ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanCompiledResourceDeviceStoreError>
-    {
-        let guard = self.execution_barrier.read().map_err(|_| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource execution barrier was poisoned",
-            )
-        })?;
-        Ok(VulkanCompiledResourceExecutionGuard { _guard: guard })
+            .map(|_| ())
+            .map_err(compiled_device_store_vulkan_error)
     }
 
     fn publish_loaded_compiled_resource_wave(

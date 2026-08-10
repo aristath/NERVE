@@ -509,7 +509,7 @@ impl VulkanDemandResidencySegment {
             .get(&chain_key)
             .ok_or_else(|| {
                 demand_dispatch_error(format!(
-                    "resident feedback demand lane {feedback_lane} was not preallocated before entering the execution epoch"
+                    "resident feedback demand lane {feedback_lane} was not preallocated before submission"
                 ))
             })?
             .enqueue_feedback_initial(
@@ -858,25 +858,26 @@ impl VulkanDemandResidencyDispatchChain {
                 .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
             self.continuation_enabled.set(true);
         }
-        {
-            let _execution = context.store.begin_execution(device).map_err(|error| {
+        context
+            .store
+            .ensure_execution_headroom(device)
+            .map_err(|error| {
                 demand_dispatch_error(format!(
-                    "failed to enter compiled-resource execution epoch: {error}"
+                    "failed to establish compiled-resource execution headroom: {error}"
                 ))
             })?;
-            self.run_from_gate(
-                device,
-                None,
-                dispatches,
-                control,
-                prefix_dispatches,
-                suffix_dispatches,
-                wait_points,
-                &[],
-                input_copies,
-                post_copies,
-            )?;
-        }
+        self.run_from_gate(
+            device,
+            None,
+            dispatches,
+            control,
+            prefix_dispatches,
+            suffix_dispatches,
+            wait_points,
+            &[],
+            input_copies,
+            post_copies,
+        )?;
         let mut resume_count = 0usize;
         loop {
             let notification_epoch = self
@@ -954,9 +955,9 @@ impl VulkanDemandResidencyDispatchChain {
             // published by the gate.
             let resource_indices = exact_demand_miss_resource_indices(&missing.requests)
                 .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
-            let (_, _execution) = context
+            let _ = context
                 .store
-                .load_selector_resources_for_execution(
+                .load_selector_resources_for_resume(
                     device,
                     &gate.selector_id,
                     &resource_indices,
@@ -1144,7 +1145,7 @@ impl VulkanDemandResidencyDispatchChain {
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         let _ = context
             .store
-            .load_selector_resources_for_execution(
+            .load_selector_resources_for_resume(
                 device,
                 &gate.selector_id,
                 &resource_indices,

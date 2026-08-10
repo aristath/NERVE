@@ -452,10 +452,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 // snapshot geometry depends on the effective verification
                 // width. Mounting allocates activation banks, sampler views,
                 // pipelines, and command resources. Restore the device's
-                // protected construction headroom before any execution epoch
-                // takes a shared residency guard; once that guard exists an
-                // allocator-triggered eviction would correctly refuse to
-                // self-deadlock.
+                // protected construction headroom before mounting; any
+                // allocator-triggered reclaim retires addresses in consumer
+                // queue order before later work can observe them.
                 device
                     .ensure_device_local_memory_headroom()
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -721,14 +720,10 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         }
 
         let mut transport_stats = VulkanPlacedEdgeTransportStats::default();
-        let demand_execution_guards = if deferred_demand_pipeline {
+        if deferred_demand_pipeline {
             runner
                 .execution_graph
                 .reset_deferred_demand_pipeline_predicate()?;
-            // A demand-chain shape owns conditional predicates, miss queues,
-            // and command resources. Materialize every participating slice
-            // before acquiring any shared execution guard: allocator-driven
-            // reclamation correctly refuses to evict through a live epoch.
             runner
                 .execution_graph
                 .prepare_deferred_demand_pipeline_executions(
@@ -738,14 +733,12 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 )?;
             runner
                 .execution_graph
-                .begin_deferred_demand_pipeline_executions(
+                .ensure_deferred_demand_pipeline_headroom(
                     devices,
                     &runner.pipeline,
                     input_token_ids.len(),
-                )?
-        } else {
-            Vec::new()
-        };
+                )?;
+        }
         if deferred_demand_pipeline {
             let submission_batch = VulkanResidentQueueSubmissionBatch::new();
             runner
@@ -828,8 +821,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     &runner.pipeline,
                     input_token_ids.len(),
                 )?;
-            drop(demand_execution_guards);
-
             let mut unresolved_pipeline_start = 0usize;
             loop {
                 let submitted_pipeline = &runner.pipeline[unresolved_pipeline_start..];
@@ -861,9 +852,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     .execution_graph
                     .reset_deferred_demand_pipeline_predicate()?;
                 let retry_pipeline = &runner.pipeline[retry_start..];
-                let retry_execution_guards = runner
+                runner
                     .execution_graph
-                    .begin_deferred_demand_pipeline_executions(
+                    .ensure_deferred_demand_pipeline_headroom(
                         devices,
                         retry_pipeline,
                         input_token_ids.len(),
@@ -926,7 +917,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         retry_pipeline,
                         input_token_ids.len(),
                     )?;
-                drop(retry_execution_guards);
                 unresolved_pipeline_start = retry_start;
             }
         }

@@ -591,31 +591,24 @@ impl VulkanResidentPlacedComponentBatchRunner {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
     }
 
-    fn begin_deferred_demand_pipeline_executions<'a>(
-        &'a self,
-        devices: &'a BTreeMap<String, Rc<VulkanComputeDevice>>,
+    fn ensure_deferred_demand_pipeline_headroom(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         pipeline: &[usize],
         batch_width: usize,
-    ) -> Result<
-        Vec<VulkanCompiledResourceExecutionGuard<'a>>,
-        VulkanResidentInProcessPlacedRuntimeError,
-    > {
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         if !self.has_deferred_demand_pipeline() {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                 VulkanError("component batch has no deferred demand pipeline".to_string()),
             ));
         }
-        // Refuse to acquire even the first read guard unless every chain shape
-        // is already materialized. This turns the allocation-order invariant
-        // into an enforced runtime boundary rather than a caller convention.
+        // Refuse to submit unless every chain shape is already materialized.
+        // Construction may allocate, so it remains a distinct preparation
+        // phase before the multi-device headroom check.
         for device_index in pipeline.iter().copied() {
             self.slice(device_index)?
                 .require_prepared_pipeline_demand_submission(batch_width)?;
         }
-        // Pressure must be resolved on every participating device before any
-        // execution read guard is held. A reclaimer needs the corresponding
-        // store's execution barrier exclusively, and acquiring guards while
-        // still preflighting later devices would permit a cross-store deadlock.
         for device_index in pipeline.iter().copied() {
             let device_id = self.device_ids.get(device_index).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
@@ -631,14 +624,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 .ensure_device_local_memory_headroom()
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }
-        pipeline
-            .iter()
-            .copied()
-            .map(|device_index| {
-                self.slice(device_index)?
-                    .begin_pipeline_demand_execution_after_headroom_check()
-            })
-            .collect()
+        Ok(())
     }
 
     fn prepare_deferred_demand_pipeline_executions(

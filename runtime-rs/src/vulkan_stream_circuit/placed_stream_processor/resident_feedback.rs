@@ -334,10 +334,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             // Template construction may materialize a previously unseen
             // demand-chain shape. That construction allocates command
             // resources and can invoke reclamation, so it must finish before
-            // this feedback window takes the shared execution epoch. The
-            // mounted template uses stable address-table slots; the epoch
-            // below protects their resolved payloads from submission through
-            // terminal completion.
+            // this feedback window performs its device headroom check.
             let mut mounted = self.mount_demand_resident_feedback_attempt(
                 devices,
                 start_stream_tick,
@@ -350,14 +347,10 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             let mut resolved_checkpoints = BTreeMap::new();
             let mut resolved_resource_count = 0usize;
             let mut aggregate_transport_stats = VulkanPlacedEdgeTransportStats::default();
-            let mut prepared_execution_guards = None;
             loop {
-                let execution_guards = match prepared_execution_guards.take() {
-                    Some(guards) => guards,
-                    None => demand
-                        .begin_execution(&self.device_slices, devices)
-                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-                };
+                demand
+                    .ensure_execution_headroom(&self.device_slices, devices)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 if self.resident_feedback_window_is_complete(devices, &mounted.pending)? {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                         VulkanError(format!(
@@ -382,7 +375,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         ),
                     ));
                 }
-                drop(execution_guards);
                 aggregate_transport_stats.accumulate(&mounted.pending.transport_stats);
                 let Some((checkpoint, resource_indices)) = demand.resolve_first_miss(
                     &self.device_slices,
@@ -428,16 +420,12 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 demand
                     .reset_pipeline_predicate()
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                let execution_guards = demand
-                    .begin_execution(&self.device_slices, devices)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 mounted = self.mount_demand_resident_feedback_continuation(
                     devices,
                     start_stream_tick,
                     tick_count,
                     &resume,
                 )?;
-                prepared_execution_guards = Some(execution_guards);
             }
         })();
         match attempt {

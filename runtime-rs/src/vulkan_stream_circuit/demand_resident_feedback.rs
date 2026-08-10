@@ -558,11 +558,11 @@ impl VulkanResidentDemandFeedbackState {
         )
     }
 
-    fn begin_execution<'a>(
+    fn ensure_execution_headroom(
         &self,
-        device_slices: &'a [VulkanResidentInProcessPlacedStreamProcessorDevice],
+        device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
-    ) -> Result<Vec<VulkanCompiledResourceExecutionGuard<'a>>, VulkanError> {
+    ) -> Result<(), VulkanError> {
         let mut entered_stores = BTreeSet::new();
         device_slices
             .iter()
@@ -575,21 +575,20 @@ impl VulkanResidentDemandFeedbackState {
             .filter(|(_, context)| {
                 entered_stores.insert(Arc::as_ptr(&context.store) as usize)
             })
-            .map(|(slice, context)| {
+            .try_for_each(|(slice, context)| {
                 let device = devices.get(&slice.device_id).ok_or_else(|| {
                     VulkanError(format!(
                         "demand feedback has no bound device {:?}",
                         slice.device_id
                     ))
                 })?;
-                context.store.begin_execution(device).map_err(|error| {
+                context.store.ensure_execution_headroom(device).map_err(|error| {
                     VulkanError(format!(
-                        "failed to enter demand feedback execution epoch on {:?}: {error}",
+                        "failed to establish demand feedback headroom on {:?}: {error}",
                         slice.device_id
                     ))
                 })
             })
-            .collect()
     }
 
     fn resolve_first_miss(

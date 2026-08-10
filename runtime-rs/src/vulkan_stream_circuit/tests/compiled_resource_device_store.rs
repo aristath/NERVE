@@ -2267,19 +2267,6 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
     drop(store);
 }
 #[test]
-fn compiled_resource_reclamation_never_waits_on_active_execution() {
-    let barrier = std::sync::RwLock::new(());
-    let _execution = barrier.read().unwrap();
-
-    assert!(
-        try_begin_compiled_resource_reclamation(&barrier)
-            .unwrap()
-            .is_none(),
-        "an allocator callback must decline reclamation instead of waiting on an active execution epoch"
-    );
-}
-
-#[test]
 fn adaptive_representation_cache_promotes_restores_and_tears_down_atomically() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let root = crate::test_support::TempDir::new("adaptive_representation_cache");

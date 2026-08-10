@@ -281,11 +281,6 @@ impl VulkanCompiledResourceDeviceStore {
                     "compiled resource residency mutation lock was poisoned",
                 )
             })?;
-            let _execution = self.execution_barrier.write().map_err(|_| {
-                VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled resource execution barrier was poisoned",
-                )
-            })?;
             self.ensure_device_work_is_available()?;
             let still_inactive = self
                 .manager

@@ -385,6 +385,7 @@ fn host_visible_stable_resource_is_directly_gpu_addressable() {
             .allocate_groups(&device, &[(&[0], &[1024])], 256)
             .unwrap()[0][0],
     );
+    let allocation_lifetime = Arc::downgrade(&allocation);
     assert!(allocation.buffer().memory_access.is_directly_mappable());
     let values = (0..256u32)
         .map(|value| value.wrapping_mul(7).wrapping_add(23))
@@ -424,8 +425,16 @@ fn host_visible_stable_resource_is_directly_gpu_addressable() {
         stable_resource_bytes_to_u32(&output.read_bytes(16).unwrap()),
         vec![23, values[255], 1, 1]
     );
-    table.clear_group(&mut transfer, &publications).unwrap();
     drop(allocation);
+    assert!(
+        allocation_lifetime.upgrade().is_some(),
+        "a published address must retain its physical allocation"
+    );
+    table.clear_group(&mut transfer, &publications).unwrap();
+    assert!(
+        allocation_lifetime.upgrade().is_none(),
+        "an ordered clear must release its allocation after the consumer queue observes it"
+    );
     arena.release_backing().unwrap();
 }
 

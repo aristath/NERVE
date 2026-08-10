@@ -107,7 +107,7 @@ impl VulkanDemandResidencyBatchSegment {
             return Ok(());
         }
         Err(demand_batch_error(format!(
-            "deferred demand batch width {batch_width} was not prepared before entering its execution epoch"
+            "deferred demand batch width {batch_width} was not prepared before submission"
         )))
     }
 
@@ -311,20 +311,6 @@ impl VulkanDemandResidencyBatchSegment {
             pipeline_continuation_predicate,
             chains: RefCell::new(BTreeMap::new()),
         }))
-    }
-
-    fn begin_execution_after_headroom_check(
-        &self,
-    ) -> Result<VulkanCompiledResourceExecutionGuard<'_>, VulkanResidentInProcessPlacedRuntimeError>
-    {
-        self.context
-            .store
-            .begin_execution_after_headroom_check()
-            .map_err(|error| {
-                demand_batch_error(format!(
-                    "failed to enter compiled-resource deferred batch execution epoch: {error}"
-                ))
-            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -689,23 +675,24 @@ impl VulkanDemandResidencyBatchChain {
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             self.continuation_enabled.set(true);
         }
-        {
-            let _execution = context.store.begin_execution(device).map_err(|error| {
+        context
+            .store
+            .ensure_execution_headroom(device)
+            .map_err(|error| {
                 demand_batch_error(format!(
-                    "failed to enter compiled-resource batch execution epoch: {error}"
+                    "failed to establish compiled-resource batch headroom: {error}"
                 ))
             })?;
-            self.run_from_gate(
-                device,
-                None,
-                steps,
-                batch_control_buffers,
-                batch_width,
-                stream_ticks,
-                dynamic_state_capacity_activations,
-                true,
-            )?;
-        }
+        self.run_from_gate(
+            device,
+            None,
+            steps,
+            batch_control_buffers,
+            batch_width,
+            stream_ticks,
+            dynamic_state_capacity_activations,
+            true,
+        )?;
         self.resolve_completed_submission(
             device,
             steps,
@@ -906,9 +893,9 @@ impl VulkanDemandResidencyBatchChain {
                 })?;
             let resource_indices = exact_demand_miss_resource_indices(&missing.requests)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            let (_, _execution) = context
+            let _ = context
                 .store
-                .load_selector_resources_for_execution(
+                .load_selector_resources_for_resume(
                     device,
                     &gate.selector_id,
                     &resource_indices,

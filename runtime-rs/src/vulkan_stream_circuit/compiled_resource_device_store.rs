@@ -15,20 +15,6 @@ impl Display for VulkanCompiledResourceDeviceStoreError {
 
 impl Error for VulkanCompiledResourceDeviceStoreError {}
 
-fn try_begin_compiled_resource_reclamation(
-    execution_barrier: &std::sync::RwLock<()>,
-) -> Result<Option<std::sync::RwLockWriteGuard<'_, ()>>, VulkanCompiledResourceDeviceStoreError> {
-    match execution_barrier.try_write() {
-        Ok(guard) => Ok(Some(guard)),
-        Err(std::sync::TryLockError::WouldBlock) => Ok(None),
-        Err(std::sync::TryLockError::Poisoned(_)) => {
-            Err(VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource execution barrier was poisoned",
-            ))
-        }
-    }
-}
-
 fn upload_compiled_resource_tier(
     device: &VulkanComputeDevice,
     transfer: &mut VulkanResidentTransferStream,
@@ -450,10 +436,6 @@ struct VulkanCompiledResourceStoreLoadGuard<'a> {
     store: &'a VulkanCompiledResourceDeviceStore,
 }
 
-struct VulkanCompiledResourceExecutionGuard<'a> {
-    _guard: std::sync::RwLockReadGuard<'a, ()>,
-}
-
 struct VulkanCompiledResourceLoadPlan {
     descriptor: DeviceResourceGroupDescriptor,
     resolved: ResolvedCompiledResourceGroup,
@@ -507,7 +489,6 @@ pub struct VulkanCompiledResourceDeviceStore {
     shared_host_cache: Option<Arc<VulkanCompiledResourceSharedHostCache>>,
     memory_plan: Option<std::sync::Mutex<VulkanCompiledResourceMemoryPlan>>,
     address_state: std::sync::Mutex<VulkanCompiledResourceDeviceAddressState>,
-    execution_barrier: std::sync::RwLock<()>,
     residency_mutation: std::sync::Mutex<()>,
     backing_store: CompiledResourceBackingStore,
     representation_backing_store: Option<CompiledResourceBackingStore>,
@@ -897,7 +878,6 @@ impl VulkanCompiledResourceDeviceStore {
                 chunk_groups: BTreeMap::new(),
                 promoted_representations: BTreeMap::new(),
             }),
-            execution_barrier: std::sync::RwLock::new(()),
             residency_mutation: std::sync::Mutex::new(()),
             backing_store,
             representation_backing_store,
@@ -1115,16 +1095,13 @@ impl VulkanCompiledResourceDeviceStore {
         )
     }
 
-    fn load_selector_resources_for_execution(
+    fn load_selector_resources_for_resume(
         &self,
         device: &VulkanComputeDevice,
         selector_id: &str,
         resource_indices: &[usize],
         owner: DeviceResourceResidencyOwnerId,
-    ) -> Result<
-        (usize, VulkanCompiledResourceExecutionGuard<'_>),
-        VulkanCompiledResourceDeviceStoreError,
-    > {
+    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
         device
             .ensure_device_local_memory_headroom()
             .map_err(compiled_device_store_vulkan_error)?;
@@ -1146,10 +1123,7 @@ impl VulkanCompiledResourceDeviceStore {
             owner,
             shared_host_mutation.as_ref(),
         )?;
-        // The pressure gate ran before acquiring the residency mutation lock;
-        // a reclaimer may need that lock and the execution barrier exclusively.
-        let execution = self.begin_execution_after_headroom_check()?;
-        Ok((loaded, execution))
+        Ok(loaded)
     }
 
     fn load_selector_resources_while_active_locked(
@@ -1770,9 +1744,9 @@ impl VulkanCompiledResourceDeviceStore {
             .as_ref()
             .map(|cache| cache.begin_mutation())
             .transpose()?;
-        let _execution = self.execution_barrier.write().map_err(|_| {
+        let _mutation = self.residency_mutation.lock().map_err(|_| {
             VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource execution barrier was poisoned during teardown",
+                "compiled resource residency mutation lock was poisoned during teardown",
             )
         })?;
         let release = self

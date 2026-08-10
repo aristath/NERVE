@@ -154,9 +154,8 @@ impl VulkanComputeDevice {
     }
 
     /// Restores the device-local headroom protected when this physical device
-    /// was opened. This must run before entering an execution epoch: registered
-    /// residency reclaimers take the execution barrier exclusively while they
-    /// retire evictable resources.
+    /// was opened. Residency reclaimers retire evictable resources through
+    /// queue-ordered address invalidation before releasing their allocations.
     pub fn ensure_device_local_memory_headroom(
         &self,
     ) -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError> {
