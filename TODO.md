@@ -513,6 +513,17 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
   were removed completely. Preserving causal correctness across lanes is not
   sufficient: the next verification topology must overlap useful proposal or
   target work rather than serially queueing the same scalar token dependency.
+- Deferring demand-fault discovery to the ordinary scheduler completion path
+  was also rejected and removed completely. It eliminated the separate compact
+  all-hit predicate read and moved miss continuation behind the existing
+  terminal value, while preserving every response byte, exact causal state,
+  9,995 -> 384 -> 0 warmup convergence, a zero-load truth conversation, and
+  byte-exact GPU reservation restoration. It nevertheless reached only 8.6174
+  decode / 8.8102 prefill tok/s versus the accepted 8.7166 / 8.7574. This
+  rearranged the same fragmented submission graph and turned the scheduler's
+  normal completion boundary into the residency state machine; it did not make
+  the bounded transaction persistent. Do not retry host-side completion
+  inference as a substitute for a device-side fault branch.
 
 ## Work queue
 
