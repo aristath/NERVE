@@ -526,6 +526,14 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
      consumer-queue address publication rather than a host execution epoch. An
      all-hit gate must continue directly into expert execution without a host
      fence or notification read.
+     Normal predicate restoration is now performed by the directly executed
+     residency gate, and normal completion reads only the synchronized output
+     device's view of the one shared predicate rather than resetting and reading
+     every device view. The complete DeepSeek gate remained byte-identical with
+     zero truth loads at 8.7166 decode / 8.7574 prefill tok/s; Qwen 35B and 9B
+     regression gates were also byte-identical and all-hit. The remaining
+     boundary is exactly one compact output-view read plus the terminal wait;
+     remove that boundary rather than broadening the host completion snapshot.
    - Only a real miss may publish an immutable fault record and stop at the exact
      causal checkpoint. Resume only the uncommitted suffix after the host updates
      the address table and acknowledges the fault.
