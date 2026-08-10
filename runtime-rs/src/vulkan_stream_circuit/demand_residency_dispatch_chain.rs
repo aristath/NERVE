@@ -1336,13 +1336,12 @@ impl VulkanDemandResidencyDispatchChain {
         let gate_push_constants = self
             .gates
             .iter()
-            .enumerate()
-            .map(|(gate_index, gate)| {
+            .map(|gate| {
                 gate.gate
                     .push_constants(
                         gate.selection_count,
                         gate.checkpoint_tag,
-                        resume_gate_index == Some(gate_index),
+                        gate.command_index == direct_gate_command_index,
                     )
             })
             .collect::<Result<Vec<_>, _>>()

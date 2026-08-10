@@ -328,9 +328,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             );
         };
         let attempt = (|| {
-            demand
-                .reset_pipeline_predicate()
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             // Template construction may materialize a previously unseen
             // demand-chain shape. That construction allocates command
             // resources and can invoke reclamation, so it must finish before
@@ -417,9 +414,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     ));
                 }
                 let resume = self.demand_feedback_tick_resume(checkpoint)?;
-                demand
-                    .reset_pipeline_predicate()
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 mounted = self.mount_demand_resident_feedback_continuation(
                     devices,
                     start_stream_tick,

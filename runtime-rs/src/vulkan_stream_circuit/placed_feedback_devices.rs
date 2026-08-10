@@ -832,6 +832,7 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
             (true, Some(predicates)) => Some(VulkanResidentDemandFeedbackState::new(
                 predicates,
                 device_slices,
+                &model.output_device_id,
             )?),
             (true, None) => {
                 return Err(VulkanError(

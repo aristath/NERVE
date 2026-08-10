@@ -1,5 +1,7 @@
 struct VulkanResidentDemandFeedbackState {
     predicates_by_device: BTreeMap<String, Arc<VulkanResidentBuffer>>,
+    completion_predicate_device_id: String,
+    completion_predicate: Arc<VulkanResidentBuffer>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -483,6 +485,7 @@ impl VulkanResidentDemandFeedbackState {
     fn new(
         predicates_by_device: BTreeMap<String, Arc<VulkanResidentBuffer>>,
         device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
+        output_device_id: &str,
     ) -> Result<Self, VulkanError> {
         if predicates_by_device.len() != device_slices.len()
             || device_slices
@@ -507,8 +510,18 @@ impl VulkanResidentDemandFeedbackState {
                 "demand feedback state contains no residency checkpoints".to_string(),
             ));
         }
+        let completion_predicate = predicates_by_device
+            .get(output_device_id)
+            .cloned()
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "demand feedback predicates do not contain output device {output_device_id:?}"
+                ))
+            })?;
         Ok(Self {
             predicates_by_device,
+            completion_predicate_device_id: output_device_id.to_string(),
+            completion_predicate,
         })
     }
 
@@ -532,12 +545,14 @@ impl VulkanResidentDemandFeedbackState {
     }
 
     fn pipeline_has_pending_miss(&self) -> Result<bool, VulkanError> {
-        let predicates = self.pipeline_predicate_diagnostic()?;
-        demand_feedback_pipeline_has_pending_miss(
-            predicates
-                .iter()
-                .map(|(device_id, value)| (device_id.as_str(), *value)),
-        )
+        let bytes = self.completion_predicate.read_bytes(size_of::<u32>())?;
+        let value = u32::from_le_bytes(bytes.try_into().map_err(|_| {
+            VulkanError("demand feedback completion predicate did not contain one u32".to_string())
+        })?);
+        demand_feedback_pipeline_has_pending_miss([(
+            self.completion_predicate_device_id.as_str(),
+            value,
+        )])
     }
 
     fn resolution_bound(
@@ -602,14 +617,11 @@ impl VulkanResidentDemandFeedbackState {
         VulkanResidentInProcessPlacedRuntimeError,
     >
     {
-        // Every feedback gate shares the window's continuation predicate. A
-        // fully resident traversal leaves that compact signal enabled, so it
-        // is both necessary and sufficient to prove that no per-lane miss
-        // queue can contain a new notification. Keep the detailed queue scan
-        // for the exceptional miss path only. Without this fast path, steady
-        // decode performs one host-visible BAR read for every
-        // (feedback-lane, demand-segment) pair even though no resource needs
-        // service.
+        // Every feedback gate shares one physical continuation predicate. The
+        // terminal output timeline depends on every device visit, so its
+        // output-device view is the synchronized completion value for the
+        // entire window. Keep the per-device diagnostic and detailed queue
+        // scan for the exceptional miss path only.
         if !self.pipeline_has_pending_miss().map_err(
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
         )? {
