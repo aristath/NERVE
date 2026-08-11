@@ -1031,6 +1031,9 @@ impl VulkanRuntimeDistributedPlacementSession {
                     &distributed_execution_plan,
                     &distributed_parameter_buffers,
                     &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    None,
+                    "target",
                     &distributed_activation_buffers,
                     &loaded_manifest,
                     |device_id| {

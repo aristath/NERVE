@@ -1187,6 +1187,17 @@ impl VulkanCompiledResourceDeviceStore {
         .map_err(compiled_device_store_vulkan_error)
     }
 
+    pub(crate) fn owned_selector_resource_indices(
+        &self,
+        selector_id: &str,
+    ) -> Option<&BTreeSet<usize>> {
+        self.selector_ownership.resources(selector_id)
+    }
+
+    pub(crate) fn residency_policy(&self) -> ResourceResidencyPolicy {
+        self.residency_policy
+    }
+
     pub fn load_selector_resource(
         &self,
         device: &VulkanComputeDevice,

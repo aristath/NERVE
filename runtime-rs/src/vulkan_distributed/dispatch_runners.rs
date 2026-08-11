@@ -2,6 +2,29 @@ pub struct VulkanDistributedDispatchRunners {
     pub dispatches: Vec<VulkanDistributedDispatchRunner>,
     pub dispatch_count: usize,
     pub shard_count: usize,
+    transaction_predicates: BTreeMap<String, Arc<VulkanResidentBuffer>>,
+}
+
+fn selected_resource_activation<'a>(
+    dispatch: &'a VulkanDistributedDispatchPlan,
+    selection_signal: &str,
+) -> Result<&'a VulkanDistributedActivationSlot, VulkanDistributedDispatchRunnerError> {
+    let matching = std::iter::once(&dispatch.input_activation)
+        .chain(dispatch.auxiliary_input_activations.iter())
+        .filter(|activation| {
+            activation.component_id == dispatch.component_id
+                && activation.signal_id == selection_signal
+        })
+        .collect::<Vec<_>>();
+    let [activation] = matching.as_slice() else {
+        return Err(VulkanDistributedDispatchRunnerError(format!(
+            "distributed selected-resource dispatch {}.{} resolves {} activation signals named {selection_signal:?}",
+            dispatch.component_id,
+            dispatch.node_id,
+            matching.len()
+        )));
+    };
+    Ok(*activation)
 }
 
 fn distributed_sequence_for_kind<'a, T>(
@@ -360,6 +383,9 @@ impl VulkanDistributedDispatchRunners {
         execution_plan: &VulkanDistributedExecutionPlan,
         parameter_buffers: &VulkanDistributedParameterBuffers,
         dynamic_resource_buffers: &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
+        resource_stores: &BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
+        transaction_predicates: Option<&BTreeMap<String, Arc<VulkanResidentBuffer>>>,
+        execution_scope: &str,
         activation_buffers: &VulkanDistributedActivationBuffers,
         loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         mut device_for: F,
@@ -390,6 +416,8 @@ impl VulkanDistributedDispatchRunners {
                 })?;
                 let mut resident_dispatches = Vec::with_capacity(planned_island.dispatches.len());
                 let mut planned_shards = Vec::with_capacity(planned_island.dispatches.len());
+                let mut selected_resource_gates =
+                    Vec::with_capacity(planned_island.dispatches.len());
                 for (dispatch_offset, planned_dispatch) in
                     planned_island.dispatches.iter().enumerate()
                 {
@@ -491,7 +519,103 @@ impl VulkanDistributedDispatchRunners {
                         private_input,
                         private_output,
                     )?);
+                    let requires_demand_gates = resource_stores
+                        .get(&planned_shard.device_id)
+                        .is_some_and(|store| store.residency_policy().is_demand_loaded())
+                        && !planned_dispatch.selected_resource_partitions.is_empty();
+                    let gates = if requires_demand_gates {
+                        let store = resource_stores
+                            .get(&planned_shard.device_id)
+                            .cloned()
+                            .expect("demand-gated store was checked");
+                        let dynamic_resources = dynamic_resource_buffers
+                            .get(&planned_shard.device_id)
+                            .ok_or_else(|| {
+                                VulkanDistributedDispatchRunnerError(format!(
+                                    "distributed selected-resource dispatch {}.{} has no dynamic buffers on {:?}",
+                                    planned_dispatch.component_id,
+                                    planned_dispatch.node_id,
+                                    planned_shard.device_id
+                                ))
+                            })?;
+                        let transaction_predicate = transaction_predicates
+                            .and_then(|predicates| predicates.get(&planned_shard.device_id))
+                            .cloned()
+                            .ok_or_else(|| {
+                                VulkanDistributedDispatchRunnerError(format!(
+                                    "distributed selected-resource dispatch {}.{} has no transaction predicate on {:?}",
+                                    planned_dispatch.component_id,
+                                    planned_dispatch.node_id,
+                                    planned_shard.device_id
+                                ))
+                            })?;
+                        let local_predicate = Arc::new(
+                            device
+                                .create_conditional_resident_buffer(std::mem::size_of::<u32>())
+                                .map_err(VulkanDistributedDispatchRunnerError::from)?,
+                        );
+                        local_predicate
+                            .write_bytes(&1u32.to_le_bytes())
+                            .map_err(VulkanDistributedDispatchRunnerError::from)?;
+                        planned_dispatch
+                            .selected_resource_partitions
+                            .iter()
+                            .enumerate()
+                            .map(|(partition_index, partition)| {
+                                let selection_activation = selected_resource_activation(
+                                    planned_dispatch,
+                                    &partition.selection_signal,
+                                )?;
+                                let selection_buffer = activation_buffers
+                                    .activation_buffer(
+                                        &planned_dispatch.owner_device_id,
+                                        selection_activation,
+                                        &planned_shard.device_id,
+                                    )
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        VulkanDistributedDispatchRunnerError(format!(
+                                            "distributed selected-resource dispatch {}.{} has no selection buffer {:?} on {:?}",
+                                            planned_dispatch.component_id,
+                                            planned_dispatch.node_id,
+                                            partition.selection_signal,
+                                            planned_shard.device_id
+                                        ))
+                                    })?;
+                                VulkanDistributedSelectedResourceGate::new(
+                                    device,
+                                    execution_scope,
+                                    planned_dispatch,
+                                    partition,
+                                    selection_buffer,
+                                    selection_activation.signal_byte_capacity,
+                                    1,
+                                    dynamic_resources,
+                                    Arc::clone(&store),
+                                    Arc::clone(&local_predicate),
+                                    Arc::clone(&transaction_predicate),
+                                    u32::try_from(partition_index + 1).map_err(|_| {
+                                        VulkanDistributedDispatchRunnerError(
+                                            "distributed selected-resource checkpoint tag exceeds u32"
+                                                .to_string(),
+                                        )
+                                    })?,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        Vec::new()
+                    };
+                    selected_resource_gates.push(gates);
                     planned_shards.push(planned_shard.clone());
+                }
+                if selected_resource_gates.iter().any(|gates| !gates.is_empty())
+                    && planned_island.dispatches.len() != 1
+                {
+                    return Err(VulkanDistributedDispatchRunnerError(format!(
+                        "selected-resource checkpoint {}..{} is grouped with unrelated physical dispatches",
+                        leader.dispatch_index, tail.dispatch_index
+                    )));
                 }
                 let sequence = device.create_resident_kernel_sequence().map_err(|error| {
                     VulkanDistributedDispatchRunnerError(format!(
@@ -504,13 +628,33 @@ impl VulkanDistributedDispatchRunners {
                     .zip(&planned_island.dispatches)
                     .map(|(shard, dispatch)| distributed_shard_push_constants(dispatch, shard))
                     .collect::<Result<Vec<_>, _>>()?;
-                let steps = resident_dispatches
+                let base_steps = resident_dispatches
                     .iter()
                     .zip(&push_constants)
                     .map(|(dispatch, push_constants)| {
                         VulkanResidentKernelSequenceStep::new(dispatch, push_constants)
                     })
                     .collect::<Vec<_>>();
+                let mut steps = Vec::new();
+                for ((base_step, gates), planned_dispatch) in base_steps
+                    .into_iter()
+                    .zip(&selected_resource_gates)
+                    .zip(&planned_island.dispatches)
+                {
+                    steps.extend(
+                        gates
+                            .iter()
+                            .map(VulkanDistributedSelectedResourceGate::gate_step),
+                    );
+                    let step = match gates.first() {
+                        Some(gate) => gate.guard_step(
+                            base_step,
+                            u32::try_from(planned_dispatch.dispatch_index).unwrap_or(u32::MAX),
+                        )?,
+                        None => base_step,
+                    };
+                    steps.push(step);
+                }
                 device
                     .record_resident_kernel_sequence(&sequence, &steps)
                     .map_err(|error| {
@@ -523,6 +667,7 @@ impl VulkanDistributedDispatchRunners {
                     device_id: leader_shard.device_id.clone(),
                     planned: planned_shards,
                     resident_dispatches,
+                    selected_resource_gates,
                     sequence,
                     feedback_sequence: None,
                 });
@@ -572,6 +717,9 @@ impl VulkanDistributedDispatchRunners {
                         owner_device,
                         planned_dispatch,
                         activation_buffers,
+                        transaction_predicates.and_then(|predicates| {
+                            predicates.get(&planned_island.owner_device_id)
+                        }),
                     )?)
                 }
             };
@@ -588,6 +736,7 @@ impl VulkanDistributedDispatchRunners {
             dispatch_count: execution_plan.dispatches.len(),
             dispatches,
             shard_count,
+            transaction_predicates: transaction_predicates.cloned().unwrap_or_default(),
         })
     }
 
@@ -623,6 +772,21 @@ impl VulkanDistributedDispatchRunners {
     ) -> Option<usize> {
         self.execution_island(owner_device_id, dispatch_index)
             .map(|group| group.leader().dispatch_index)
+    }
+
+    pub fn requires_residency_checkpoint(
+        &self,
+        owner_device_id: &str,
+        dispatch_index: usize,
+    ) -> bool {
+        self.dispatch(owner_device_id, dispatch_index).is_some_and(|dispatch| {
+            dispatch.shards.iter().any(|shard| {
+                shard
+                    .selected_resource_gates
+                    .iter()
+                    .any(|gates| !gates.is_empty())
+            })
+        })
     }
 
     pub fn reserve_dependency_value(
@@ -708,7 +872,7 @@ impl VulkanDistributedDispatchRunners {
                         distributed_shard_push_constants(dispatch, planned)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let steps = shard
+                let base_steps = shard
                     .resident_dispatches
                     .iter()
                     .zip(&push_constants)
@@ -723,6 +887,26 @@ impl VulkanDistributedDispatchRunners {
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(VulkanDistributedDispatchRunnerError::from)?;
+                let mut steps = Vec::new();
+                for ((base_step, gates), planned_dispatch) in base_steps
+                    .into_iter()
+                    .zip(&shard.selected_resource_gates)
+                    .zip(&dispatch.planned.dispatches)
+                {
+                    steps.extend(
+                        gates
+                            .iter()
+                            .map(VulkanDistributedSelectedResourceGate::gate_step),
+                    );
+                    let step = match gates.first() {
+                        Some(gate) => gate.guard_step(
+                            base_step,
+                            u32::try_from(planned_dispatch.dispatch_index).unwrap_or(u32::MAX),
+                        )?,
+                        None => base_step,
+                    };
+                    steps.push(step);
+                }
                 let sequence = device
                     .create_resident_kernel_sequence()
                     .map_err(VulkanDistributedDispatchRunnerError::from)?;
@@ -966,7 +1150,7 @@ impl VulkanDistributedDispatchRunners {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut first_error = None;
-        for (shard, device) in resolved_shards {
+        for (shard, device) in &resolved_shards {
             let sequence = distributed_sequence_for_kind(
                 &shard.sequence,
                 shard.feedback_sequence.as_ref(),
@@ -1004,6 +1188,56 @@ impl VulkanDistributedDispatchRunners {
         }
         if let Some(error) = first_error {
             return Err(VulkanDistributedDispatchRunnerError(error));
+        }
+        let mut affected_shards = Vec::new();
+        for (shard, device) in &resolved_shards {
+            let mut affected = false;
+            for gate in shard.selected_resource_gates.iter().flatten() {
+                affected |= gate.resolve_completed_miss(device)?;
+            }
+            if affected {
+                affected_shards.push((*shard, *device));
+            }
+        }
+        if !affected_shards.is_empty() {
+            let mut restored = BTreeSet::new();
+            for predicate in self.transaction_predicates.values() {
+                if restored.insert(Arc::as_ptr(predicate) as usize) {
+                    predicate
+                        .write_bytes(&1u32.to_le_bytes())
+                        .map_err(VulkanDistributedDispatchRunnerError::from)?;
+                }
+            }
+            for (shard, device) in affected_shards {
+                let sequence = distributed_sequence_for_kind(
+                    &shard.sequence,
+                    shard.feedback_sequence.as_ref(),
+                    sequence_kind,
+                    &shard.device_id,
+                )?;
+                device
+                    .run_recorded_resident_kernel_sequence(sequence)
+                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
+                for gate in shard.selected_resource_gates.iter().flatten() {
+                    if gate.notification_epoch()? != gate.observed_notification_epoch() {
+                        return Err(VulkanDistributedDispatchRunnerError(format!(
+                            "distributed selected-resource checkpoint on {:?} faulted again immediately after loading",
+                            shard.device_id
+                        )));
+                    }
+                }
+            }
+            if let Some(reduction) = &dispatch.reduction {
+                let owner_device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
+                    VulkanDistributedDispatchRunnerError(format!(
+                        "failed to resolve distributed reduction owner {:?}: {error}",
+                        dispatch.planned.owner_device_id
+                    ))
+                })?;
+                owner_device
+                    .run_recorded_resident_kernel_sequence(&reduction.sequence)
+                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
+            }
         }
         Ok(())
     }
@@ -1064,6 +1298,8 @@ pub struct VulkanDistributedDispatchShardRunner {
     pub device_id: String,
     pub planned: Vec<VulkanDistributedDispatchShard>,
     pub resident_dispatches: Vec<VulkanResidentKernelDispatch>,
+    pub(crate) selected_resource_gates:
+        Vec<Vec<VulkanDistributedSelectedResourceGate>>,
     pub sequence: VulkanResidentKernelSequence,
     feedback_sequence: Option<VulkanResidentKernelSequence>,
 }

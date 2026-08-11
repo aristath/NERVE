@@ -132,6 +132,7 @@ fn create_distributed_reduction_runner(
     device: &VulkanComputeDevice,
     planned_dispatch: &VulkanDistributedDispatchPlan,
     activation_buffers: &VulkanDistributedActivationBuffers,
+    transaction_predicate: Option<&Arc<VulkanResidentBuffer>>,
 ) -> Result<VulkanDistributedReductionRunner, VulkanDistributedDispatchRunnerError> {
     let lane_count = activation_buffers.lane_capacity;
     let partials = activation_buffers
@@ -201,6 +202,7 @@ fn create_distributed_reduction_runner(
         partials,
         output,
         residual,
+        transaction_predicate,
     )
 }
 
@@ -211,6 +213,7 @@ pub(crate) fn create_distributed_reduction_runner_for_buffers(
     partials: &Arc<VulkanResidentBuffer>,
     output: &Arc<VulkanResidentBuffer>,
     residual: Option<&Arc<VulkanResidentBuffer>>,
+    transaction_predicate: Option<&Arc<VulkanResidentBuffer>>,
 ) -> Result<VulkanDistributedReductionRunner, VulkanDistributedDispatchRunnerError> {
     let reduction = planned_dispatch.reduction.as_ref().ok_or_else(|| {
         VulkanDistributedDispatchRunnerError(format!(
@@ -307,14 +310,15 @@ pub(crate) fn create_distributed_reduction_runner_for_buffers(
     let sequence = device
         .create_resident_kernel_sequence()
         .map_err(VulkanDistributedDispatchRunnerError::from)?;
+    let step = VulkanResidentKernelSequenceStep::new(&resident_dispatch, &push_constants);
+    let step = match transaction_predicate {
+        Some(predicate) => step
+            .with_condition(predicate, 0, false, 0)
+            .map_err(VulkanDistributedDispatchRunnerError::from)?,
+        None => step,
+    };
     device
-        .record_resident_kernel_sequence(
-            &sequence,
-            &[VulkanResidentKernelSequenceStep::new(
-                &resident_dispatch,
-                &push_constants,
-            )],
-        )
+        .record_resident_kernel_sequence(&sequence, &[step])
         .map_err(VulkanDistributedDispatchRunnerError::from)?;
     Ok(VulkanDistributedReductionRunner {
         _resident_dispatch: resident_dispatch,

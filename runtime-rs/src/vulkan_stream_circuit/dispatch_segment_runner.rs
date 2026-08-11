@@ -11,6 +11,7 @@ pub struct VulkanMountedPlacedResidentDispatchSegmentRunner {
     feedback_sequences: RefCell<Vec<VulkanResidentKernelSequence>>,
     feedback_indirect: Option<VulkanResidentFeedbackIndirectSequence>,
     demand_residency: Option<VulkanDemandResidencySegment>,
+    pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
 }
 
 impl VulkanMountedPlacedResidentDispatchSegmentRunner {
@@ -84,6 +85,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
             });
         }
 
+        let pipeline_continuation_predicate = demand_pipeline_predicate.clone();
         let demand_residency = match (physical_residency_schedule, demand_context) {
             (Some(schedule), Some(context)) => VulkanDemandResidencySegment::from_segment(
                 mounted,
@@ -118,6 +120,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
             feedback_sequences: RefCell::new(Vec::new()),
             feedback_indirect: None,
             demand_residency,
+            pipeline_continuation_predicate,
         })
     }
 
@@ -446,7 +449,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
             .iter()
             .enumerate()
             .map(|(command_index, (dispatch, push_constants))| {
-                if let Some(indirect) = indirect {
+                let step = if let Some(indirect) = indirect {
                     let byte_offset =
                         *indirect.byte_offsets.get(command_index).ok_or_else(|| {
                             VulkanMountedPlacedResidentKernelDispatchError::Vulkan(VulkanError(
@@ -460,12 +463,15 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                         &indirect.buffer,
                         byte_offset,
                     )
-                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
+                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?
                 } else {
-                    Ok(VulkanResidentKernelSequenceStep::new(
-                        dispatch,
-                        push_constants,
-                    ))
+                    VulkanResidentKernelSequenceStep::new(dispatch, push_constants)
+                };
+                match &self.pipeline_continuation_predicate {
+                    Some(predicate) => step
+                        .with_condition(predicate, 0, false, 0)
+                        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan),
+                    None => Ok(step),
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;

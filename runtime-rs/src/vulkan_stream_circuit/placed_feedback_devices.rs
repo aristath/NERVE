@@ -746,7 +746,12 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                 .physical_residency_schedule()
                 .checkpoints
                 .is_empty()
-        });
+        }) || model
+            .distributed_execution_plans
+            .decode
+            .dispatches
+            .iter()
+            .any(|dispatch| !dispatch.selected_resource_partitions.is_empty());
         let window_width = VULKAN_BACKEND_LOOP_MAX_WINDOW
             .min(sampler.history_capacity_activations.max(1));
         let demand_checkpoint_resume_is_unambiguous = if has_demand_checkpoints {

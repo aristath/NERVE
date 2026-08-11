@@ -371,19 +371,22 @@ where
     F: Fn(&str) -> Result<&'a VulkanComputeDevice, E>,
     E: Display,
 {
-    if !model.resource_residency_policy.is_demand_loaded()
-        || !model
+    let has_local_checkpoints = model
             .device_slices
             .iter()
-            .any(|slice| !slice.physical_residency_schedule().checkpoints.is_empty())
+            .any(|slice| !slice.physical_residency_schedule().checkpoints.is_empty());
+    let has_distributed_checkpoints = model
+        .distributed_execution_plans
+        .decode
+        .dispatches
+        .iter()
+        .any(|dispatch| !dispatch.selected_resource_partitions.is_empty());
+    if !model.resource_residency_policy.is_demand_loaded()
+        || (!has_local_checkpoints && !has_distributed_checkpoints)
     {
         return Ok(None);
     }
-    let device_ids = model
-        .device_slices
-        .iter()
-        .map(|slice| slice.device_id.clone())
-        .collect::<Vec<_>>();
+    let device_ids = model.device_ids.clone();
     if device_ids.is_empty() {
         return Err(VulkanError(
             "demand-resident feedback has no placed devices".to_string(),

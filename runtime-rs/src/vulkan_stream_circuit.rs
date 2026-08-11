@@ -62,12 +62,13 @@ use crate::vulkan_compute::{
     VulkanDeviceLocalMemoryPermit, VulkanDeviceLocalMemoryReclaimer,
     VulkanDeviceLocalMemoryReclaimerRegistration, VulkanError, VulkanGpuResidencyAddressMapping,
     VulkanGpuResidencyGate, VulkanGpuResidencyGateConfig, VulkanGpuResidencyMissQueue,
-    VulkanGpuResidencyMissingRequest, VulkanResidentBuffer, VulkanResidentBufferCopy,
-    VulkanResidentBufferCopyBatch, VulkanResidentBufferPool, VulkanResidentBufferPoolAllocation,
-    VulkanResidentBufferPoolKey, VulkanResidentBufferRangeCopy, VulkanResidentBufferReadRange,
-    VulkanResidentBufferReadbackBinding, VulkanResidentBufferWriteRange,
-    VulkanResidentExecutionQuantumMeasurement, VulkanResidentKernelBufferAccess,
-    VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
+    VulkanGpuResidencyMissingRequest, VulkanGpuResidencyMissingSnapshot, VulkanResidentBuffer,
+    VulkanResidentBufferCopy, VulkanResidentBufferCopyBatch, VulkanResidentBufferPool,
+    VulkanResidentBufferPoolAllocation, VulkanResidentBufferPoolKey, VulkanResidentBufferRangeCopy,
+    VulkanResidentBufferReadRange, VulkanResidentBufferReadbackBinding,
+    VulkanResidentBufferWriteRange, VulkanResidentExecutionQuantumMeasurement,
+    VulkanResidentKernelBufferAccess, VulkanResidentKernelBufferBinding,
+    VulkanResidentKernelDispatch, VulkanResidentKernelSequence,
     VulkanResidentKernelSequenceInputCopy, VulkanResidentKernelSequenceSnapshotCopy,
     VulkanResidentKernelSequenceStep, VulkanResidentMappedBufferCopy,
     VulkanResidentQueueSubmissionBatch, VulkanResidentQueueSubmissionTemplate,
@@ -97,10 +98,10 @@ use crate::vulkan_distributed::{
     VulkanDistributedParameterExclusionPlan, VulkanDistributedQueueSynchronization,
     VulkanDistributedReductionBuffer, VulkanDistributedReductionFinalizationPlan,
     VulkanDistributedReductionPlan, VulkanDistributedReductionRunner,
-    VulkanDistributedSelectedResourceStorePlan, VulkanPhysicalExecutionIslandPlan,
-    VulkanPhysicalExecutionTransportKind, allocate_distributed_shared_buffer,
-    create_distributed_reduction_runner_for_buffers, distributed_shard_push_constants,
-    resolved_physical_execution_islands,
+    VulkanDistributedSelectedResourcePartitionPlan, VulkanDistributedSelectedResourceStorePlan,
+    VulkanPhysicalExecutionIslandPlan, VulkanPhysicalExecutionTransportKind,
+    allocate_distributed_shared_buffer, create_distributed_reduction_runner_for_buffers,
+    distributed_shard_push_constants, resolved_physical_execution_islands,
 };
 
 mod package;
@@ -214,6 +215,7 @@ include!("vulkan_stream_circuit/compiled_resource_representation_cache.rs");
 include!("vulkan_stream_circuit/compiled_resource_teardown.rs");
 include!("vulkan_stream_circuit/demand_residency_dispatch_chain.rs");
 include!("vulkan_stream_circuit/demand_residency_batch_chain.rs");
+include!("vulkan_stream_circuit/distributed_selected_resource_gate.rs");
 include!("vulkan_stream_circuit/demand_resident_feedback.rs");
 include!("vulkan_stream_circuit/resident_package_resource_loading.rs");
 include!("vulkan_stream_circuit/resident_package_kernel_loading.rs");

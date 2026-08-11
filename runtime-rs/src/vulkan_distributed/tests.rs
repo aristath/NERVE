@@ -1768,6 +1768,19 @@ mod tests {
         assert!(dispatch.has_lazy_resource_requirements);
         assert_eq!(dispatch.distributed_parameter_byte_count, 0);
         assert_eq!(dispatch.selected_resource_partitions.len(), 1);
+        let routes = selected_resource_activation(dispatch, "routes").unwrap();
+        assert_eq!(routes.signal_id, "routes");
+        assert_eq!(routes.binding, 1);
+        assert!(selected_resource_activation(dispatch, "missing-routes")
+            .unwrap_err()
+            .to_string()
+            .contains("resolves 0 activation signals"));
+        let mut ambiguous_routes = dispatch.clone();
+        ambiguous_routes.input_activation = routes.clone();
+        assert!(selected_resource_activation(&ambiguous_routes, "routes")
+            .unwrap_err()
+            .to_string()
+            .contains("resolves 2 activation signals"));
         assert_eq!(
             dispatch.selected_resource_partitions[0].atomic_group_byte_counts,
             vec![8; 8]
