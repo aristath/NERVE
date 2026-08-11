@@ -1,4 +1,5 @@
 mod benchmark;
+mod calibration_device_state;
 mod catalog_merge;
 mod cli;
 mod discovery;
