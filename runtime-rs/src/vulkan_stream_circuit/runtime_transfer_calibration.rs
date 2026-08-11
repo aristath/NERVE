@@ -6,6 +6,8 @@ pub struct VulkanRuntimePlacementTransferCalibrationReport {
     pub route: VulkanSharedResidentBufferRoute,
     pub warmup_ns: u64,
     pub measured_ns: u64,
+    pub fixture_digest: String,
+    pub output_digest: String,
 }
 
 pub fn vulkan_runtime_placement_transfer_byte_counts(
@@ -66,8 +68,10 @@ fn calibrate_vulkan_runtime_placement_transfer(
     target: &VulkanComputeDevice,
     byte_count: usize,
 ) -> Result<VulkanRuntimePlacementTransferCalibrationReport, VulkanError> {
+    let fixture = runtime_transfer_calibration_fixture(byte_count);
+    let fixture_digest = format!("sha256:{:x}", Sha256::digest(&fixture));
     let source_buffer = source.create_resident_buffer(byte_count)?;
-    source_buffer.write_bytes(&vec![0x5a; byte_count])?;
+    source_buffer.write_bytes(&fixture)?;
     let target_buffer = target.create_resident_buffer(byte_count)?;
     let shared = if source.supports_opaque_fd_timeline_semaphores()
         && target.supports_opaque_fd_timeline_semaphores()
@@ -112,6 +116,9 @@ fn calibrate_vulkan_runtime_placement_transfer(
     };
     let warmup_ns = measure()?;
     let measured_ns = measure()?.min(measure()?).max(1);
+    let output = target_buffer.read_bytes(byte_count)?;
+    validate_runtime_transfer_calibration_output(&fixture, &output)?;
+    let output_digest = format!("sha256:{:x}", Sha256::digest(&output));
     Ok(VulkanRuntimePlacementTransferCalibrationReport {
         source_device_id: source_device_id.to_string(),
         target_device_id: target_device_id.to_string(),
@@ -119,5 +126,57 @@ fn calibrate_vulkan_runtime_placement_transfer(
         route: shared.route,
         warmup_ns,
         measured_ns,
+        fixture_digest,
+        output_digest,
     })
+}
+
+fn runtime_transfer_calibration_fixture(byte_count: usize) -> Vec<u8> {
+    (0..byte_count)
+        .map(|index| {
+            let index = index as u64;
+            index
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .rotate_left((index & 31) as u32) as u8
+                ^ 0xa5
+        })
+        .collect()
+}
+
+fn validate_runtime_transfer_calibration_output(
+    fixture: &[u8],
+    output: &[u8],
+) -> Result<(), VulkanError> {
+    if fixture != output {
+        return Err(VulkanError(
+            "runtime transfer calibration produced invalid destination bytes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod runtime_transfer_calibration_validation_tests {
+    use super::*;
+
+    #[test]
+    fn fixture_is_nonuniform_and_deterministic() {
+        let first = runtime_transfer_calibration_fixture(4096);
+        let second = runtime_transfer_calibration_fixture(4096);
+        assert_eq!(first, second);
+        assert!(first.windows(2).any(|pair| pair[0] != pair[1]));
+        assert_ne!(&first[..1024], &first[1024..2048]);
+    }
+
+    #[test]
+    fn validation_rejects_corruption_at_every_boundary() {
+        let fixture = runtime_transfer_calibration_fixture(257);
+        validate_runtime_transfer_calibration_output(&fixture, &fixture).unwrap();
+        for index in [0, fixture.len() / 2, fixture.len() - 1] {
+            let mut corrupt = fixture.clone();
+            corrupt[index] ^= 1;
+            assert!(validate_runtime_transfer_calibration_output(&fixture, &corrupt).is_err());
+        }
+        assert!(validate_runtime_transfer_calibration_output(&fixture, &fixture[..256]).is_err());
+    }
 }

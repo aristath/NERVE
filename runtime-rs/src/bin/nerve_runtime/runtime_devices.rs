@@ -376,13 +376,15 @@ fn runtime_capacity_packed_model(
                         report.measured_ns,
                     )?;
                     eprintln!(
-                        "nerve runtime placement calibration: transfer={}=>{}, bytes={}, route={:?}, warmup_ns={}, measured_ns={}",
+                        "nerve runtime placement calibration: transfer={}=>{}, bytes={}, route={:?}, warmup_ns={}, measured_ns={}, fixture_digest={}, output_digest={}",
                         report.source_device_id,
                         report.target_device_id,
                         report.byte_count,
                         report.route,
                         report.warmup_ns,
                         report.measured_ns,
+                        report.fixture_digest,
+                        report.output_digest,
                     );
                 }
             }
