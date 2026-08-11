@@ -268,8 +268,8 @@ fn stable_resource_arena_reuses_one_chunk_across_many_logical_evictions() {
     let mut committed_byte_capacity = None;
 
     // This deliberately exceeds the 649 logical eviction cycles observed in
-    // the crash-producing DeepSeek run. Logical generations must not become
-    // Vulkan allocation/free generations.
+    // the crash-producing near-capacity sparse-model run. Logical generations
+    // must not become Vulkan allocation/free generations.
     for generation in 0..1024 {
         assert_eq!(
             arena
