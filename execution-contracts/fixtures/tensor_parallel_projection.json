@@ -1,0 +1,69 @@
+{
+  "schema": "nerve.physical_execution_contract.v1",
+  "contract_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "operation_family": "parallel_projection",
+  "region_family": "ffn_gate_up",
+  "member_node_ids": [
+    "gate_up"
+  ],
+  "artifact": {
+    "path": "shaders/gate_up.spv",
+    "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "entry_point": "main"
+  },
+  "implementation_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "phases": [
+    "decode",
+    "prefill"
+  ],
+  "formats": {
+    "storage": "fp8_e4m3",
+    "compute": "fp8_e4m3",
+    "accumulation": "f32"
+  },
+  "geometry": {
+    "shape_class": "projection_m4096_n11008",
+    "dimensions": {
+      "input_width": 4096,
+      "output_rows": 11008
+    },
+    "dynamic_dimensions": []
+  },
+  "strategy": "tensor_parallel",
+  "parameter_partitions": [
+    {
+      "binding": 2,
+      "dimension": 0,
+      "kind": "contiguous",
+      "alignment_elements": 128
+    }
+  ],
+  "inputs": [
+    {
+      "binding": 0,
+      "distribution": "replicated"
+    }
+  ],
+  "outputs": [
+    {
+      "binding": 1,
+      "collection": "concatenated",
+      "dimension": 0,
+      "alignment_elements": 128
+    }
+  ],
+  "local_intermediates": [],
+  "resources": [
+    {
+      "resource": "weight",
+      "kind": "persistent_parameter",
+      "residency": "permanent",
+      "access": "read",
+      "binding": 2
+    }
+  ],
+  "equivalence": {
+    "output": "bit_exact",
+    "state": "bit_exact"
+  }
+}
