@@ -2,6 +2,7 @@ const DISTRIBUTED_SUM_F32_LOCAL_SIZE_X: usize = 64;
 const DISTRIBUTED_SUM_F32_PUSH_CONSTANT_BYTE_COUNT: u32 = 12;
 
 pub(crate) struct VulkanDistributedReductionRunner {
+    _predicate_clear_dispatch: Option<VulkanResidentKernelDispatch>,
     _resident_dispatch: VulkanResidentKernelDispatch,
     pub(crate) sequence: VulkanResidentKernelSequence,
 }
@@ -26,6 +27,14 @@ fn distributed_sum_f32_spirv_words(
     embedded_distributed_reduction_spirv_words(
         include_bytes!(concat!(env!("OUT_DIR"), "/distributed_sum_f32.spv")),
         "sum_f32",
+    )
+}
+
+fn distributed_clear_predicate_spirv_words(
+) -> Result<Vec<u32>, VulkanDistributedDispatchRunnerError> {
+    embedded_distributed_reduction_spirv_words(
+        include_bytes!(concat!(env!("OUT_DIR"), "/distributed_clear_predicate.spv")),
+        "clear_predicate",
     )
 }
 
@@ -133,6 +142,7 @@ fn create_distributed_reduction_runner(
     planned_dispatch: &VulkanDistributedDispatchPlan,
     activation_buffers: &VulkanDistributedActivationBuffers,
     transaction_predicate: Option<&Arc<VulkanResidentBuffer>>,
+    shard_residency_predicates: &[Arc<VulkanResidentBuffer>],
 ) -> Result<VulkanDistributedReductionRunner, VulkanDistributedDispatchRunnerError> {
     let lane_count = activation_buffers.lane_capacity;
     let partials = activation_buffers
@@ -203,6 +213,7 @@ fn create_distributed_reduction_runner(
         output,
         residual,
         transaction_predicate,
+        shard_residency_predicates,
     )
 }
 
@@ -214,6 +225,7 @@ pub(crate) fn create_distributed_reduction_runner_for_buffers(
     output: &Arc<VulkanResidentBuffer>,
     residual: Option<&Arc<VulkanResidentBuffer>>,
     transaction_predicate: Option<&Arc<VulkanResidentBuffer>>,
+    shard_residency_predicates: &[Arc<VulkanResidentBuffer>],
 ) -> Result<VulkanDistributedReductionRunner, VulkanDistributedDispatchRunnerError> {
     let reduction = planned_dispatch.reduction.as_ref().ok_or_else(|| {
         VulkanDistributedDispatchRunnerError(format!(
@@ -310,17 +322,66 @@ pub(crate) fn create_distributed_reduction_runner_for_buffers(
     let sequence = device
         .create_resident_kernel_sequence()
         .map_err(VulkanDistributedDispatchRunnerError::from)?;
-    let step = VulkanResidentKernelSequenceStep::new(&resident_dispatch, &push_constants);
-    let step = match transaction_predicate {
-        Some(predicate) => step
+    let predicate_clear_dispatch = match (
+        transaction_predicate,
+        shard_residency_predicates.is_empty(),
+    ) {
+        (_, true) => None,
+        (None, false) => {
+            return Err(VulkanDistributedDispatchRunnerError(
+                "distributed residency predicates require a transaction predicate".to_string(),
+            ));
+        }
+        (Some(predicate), false) => Some(
+            device
+                .create_resident_kernel_dispatch_2d_labeled(
+                    &distributed_clear_predicate_spirv_words()?,
+                    &[VulkanResidentKernelBufferBinding::new(
+                        0,
+                        predicate,
+                        size_of::<u32>(),
+                    )
+                    .with_access(VulkanResidentKernelBufferAccess::Write)],
+                    1,
+                    1,
+                    1,
+                    0,
+                    Some(format!(
+                        "component={} node={} distributed=commit_residency",
+                        planned_dispatch.component_id, planned_dispatch.node_id,
+                    )),
+                )
+                .map_err(VulkanDistributedDispatchRunnerError::from)?,
+        ),
+    };
+    let mut steps = Vec::with_capacity(shard_residency_predicates.len() + 1);
+    if let Some(clear) = &predicate_clear_dispatch {
+        for (predicate_index, predicate) in shard_residency_predicates.iter().enumerate() {
+            steps.push(
+                VulkanResidentKernelSequenceStep::new(clear, &[])
+                    .with_condition(
+                        predicate,
+                        0,
+                        true,
+                        u32::try_from(predicate_index + 1).unwrap_or(u32::MAX),
+                    )
+                    .map_err(VulkanDistributedDispatchRunnerError::from)?,
+            );
+        }
+    }
+    let reduction_step = VulkanResidentKernelSequenceStep::new(&resident_dispatch, &push_constants);
+    let reduction_step = match transaction_predicate {
+        Some(predicate) => reduction_step
             .with_condition(predicate, 0, false, 0)
             .map_err(VulkanDistributedDispatchRunnerError::from)?,
-        None => step,
+        None => reduction_step,
     };
+    steps.push(reduction_step);
     device
-        .record_resident_kernel_sequence(&sequence, &[step])
+        .record_resident_kernel_sequence(&sequence, &steps)
         .map_err(VulkanDistributedDispatchRunnerError::from)?;
     Ok(VulkanDistributedReductionRunner {
+        _predicate_clear_dispatch: predicate_clear_dispatch,
         _resident_dispatch: resident_dispatch,
         sequence,
     })

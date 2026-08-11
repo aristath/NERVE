@@ -144,6 +144,7 @@ fn create_distributed_input_column_component_batch_dispatch(
         output,
         residual,
         None,
+        &[],
     )
     .map_err(|error| {
         VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(error.to_string()))

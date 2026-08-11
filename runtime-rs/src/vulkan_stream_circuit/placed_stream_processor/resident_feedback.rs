@@ -46,6 +46,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             demand
                 .reset_pipeline_predicate()
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            self.distributed_dispatch_runners
+                .reset_residency_predicates()
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Tick(
+                        VulkanMountedPlacedResidentInProcessStreamTickError::Distributed(error),
+                    )
+                })?;
         }
         Ok(())
     }
@@ -377,7 +384,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     resolved_checkpoints: BTreeMap::new(),
                 });
             demand
-                .ensure_execution_headroom(&self.device_slices, devices)
+                .ensure_execution_headroom(devices)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             if self.resident_feedback_window_is_complete(devices, &mounted.pending)? {
                 return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
@@ -445,11 +452,13 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                             .to_string(),
                     ))
                 })?;
-                let (checkpoint, resource_indices) = demand
+                let resolution = demand
                     .resolve_published_fault(
                         &self.device_slices,
                         devices,
+                        &self.distributed_dispatch_runners,
                         pending.tick_count,
+                        completion.executed_tick_count,
                         VulkanResidentPlacedTokenTickTail::Sample.sequence_variant(),
                     )?
                     .ok_or_else(|| {
@@ -458,13 +467,14 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                                 .to_string(),
                         ))
                     })?;
-                state.resolved_resource_count = state
-                    .resolved_resource_count
-                    .checked_add(
+                for (checkpoint, resource_indices) in &resolution.resolved {
+                    state.resolved_resource_count = state
+                        .resolved_resource_count
+                        .checked_add(
                         record_demand_feedback_resolution(
                             &mut state.resolved_checkpoints,
-                            checkpoint,
-                            &resource_indices,
+                                *checkpoint,
+                                resource_indices,
                         )
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     )
@@ -473,6 +483,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                             "demand feedback resolved-resource count overflowed".to_string(),
                         ))
                     })?;
+                }
                 if state.resolved_resource_count > state.maximum_resolution_count {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                         VulkanError(format!(
@@ -483,7 +494,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 }
                 pending.demand_resolved_checkpoints =
                     state.resolved_checkpoints.keys().copied().collect();
-                let resume = self.demand_feedback_tick_resume(checkpoint)?;
+                let resume = self.demand_feedback_tick_resume(resolution.resume_checkpoint)?;
                 let mut mounted = self.mount_demand_resident_feedback_continuation(
                     devices,
                     pending.start_stream_tick,
@@ -491,7 +502,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     &resume,
                 )?;
                 demand
-                    .ensure_execution_headroom(&self.device_slices, devices)
+                    .ensure_execution_headroom(devices)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 if self.resident_feedback_window_is_complete(devices, &mounted.pending)? {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
@@ -531,53 +542,94 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         checkpoint: VulkanDemandFeedbackCheckpoint,
     ) -> Result<VulkanPlacedDemandFeedbackTickResume, VulkanResidentInProcessPlacedRuntimeError>
     {
-        let target_slice = self.device_slices.get(checkpoint.slice_index).ok_or_else(|| {
-            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
-                "demand feedback checkpoint slice {} is out of bounds",
-                checkpoint.slice_index
-            )))
-        })?;
-        let target_segment = target_slice
-            .resident_execution_plan
-            .dispatch_segments
-            .get(checkpoint.segment_index)
-            .ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
-                    "demand feedback checkpoint segment {} is out of bounds on {:?}",
-                    checkpoint.segment_index, target_slice.device_id
-                )))
-            })?;
-        let gate_count = target_segment
-            .demand_residency
-            .as_ref()
-            .map(|demand| demand.gate_specs.len())
-            .unwrap_or(0);
-        if checkpoint.gate_index >= gate_count {
-            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                VulkanError(format!(
-                    "demand feedback gate {} is out of bounds for segment {} on {:?}",
-                    checkpoint.gate_index, checkpoint.segment_index, target_slice.device_id
-                )),
-            ));
-        }
         let tick_plans = self
             .device_slices
             .iter()
             .map(|slice| slice.resident_execution_plan.tick_plan.as_ref())
             .collect::<Vec<_>>();
-        let plan = demand_feedback_resume_plan(
-            &tick_plans,
-            checkpoint.slice_index,
-            target_segment.start_stage_index,
-        )
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let (target_slice_index, target_stage_index, local_gate_index, plan) = match checkpoint.target {
+            VulkanDemandFeedbackCheckpointTarget::Local {
+                slice_index,
+                segment_index,
+                gate_index,
+            } => {
+                let target_slice = self.device_slices.get(slice_index).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "demand feedback checkpoint slice {slice_index} is out of bounds"
+                    )))
+                })?;
+                let target_segment = target_slice
+                    .resident_execution_plan
+                    .dispatch_segments
+                    .get(segment_index)
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                            "demand feedback checkpoint segment {segment_index} is out of bounds on {:?}",
+                            target_slice.device_id
+                        )))
+                    })?;
+                let gate_count = target_segment
+                    .demand_residency
+                    .as_ref()
+                    .map(|demand| demand.gate_specs.len())
+                    .unwrap_or(0);
+                if gate_index >= gate_count {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "demand feedback gate {gate_index} is out of bounds for segment {segment_index} on {:?}",
+                            target_slice.device_id
+                        )),
+                    ));
+                }
+                let target_stage_index = target_segment.start_stage_index;
+                let plan = demand_feedback_resume_plan(
+                    &tick_plans,
+                    slice_index,
+                    target_stage_index,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                (slice_index, target_stage_index, Some(gate_index), plan)
+            }
+            VulkanDemandFeedbackCheckpointTarget::Distributed {
+                slice_index,
+                dispatch_index,
+                ..
+            } => {
+                let target_slice = self.device_slices.get(slice_index).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "distributed demand feedback checkpoint slice {slice_index} is out of bounds"
+                    )))
+                })?;
+                let (distributed_stage_index, _) = target_slice
+                    .resident_execution_plan
+                    .distributed_dispatch_stage_range(dispatch_index)
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                            "distributed demand feedback dispatch {dispatch_index} has no stage on {:?}",
+                            target_slice.device_id
+                        )))
+                    })?;
+                let plan = demand_feedback_resume_plan_after_stage(
+                    &tick_plans,
+                    slice_index,
+                    distributed_stage_index,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                (
+                    slice_index,
+                    distributed_stage_index + 1,
+                    None,
+                    plan,
+                )
+            }
+        };
         Ok(VulkanPlacedDemandFeedbackTickResume {
             feedback_lane: checkpoint.feedback_lane,
             schedule_start_turn_index: plan.schedule_start_turn_index,
             next_stage_indices: plan.next_stage_indices,
-            target_slice_index: checkpoint.slice_index,
-            target_segment_start_stage_index: target_segment.start_stage_index,
-            gate_index: checkpoint.gate_index,
+            target_slice_index,
+            target_stage_index,
+            local_gate_index,
         })
     }
 

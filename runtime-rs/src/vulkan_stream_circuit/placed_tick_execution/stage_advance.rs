@@ -205,19 +205,10 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             slice.device_id(),
                             distributed.dispatch_index,
                         );
-                    if requires_residency_checkpoint && submission_batch.is_some() {
-                        return Err(
-                            VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
-                                VulkanError(format!(
-                                    "distributed residency checkpoint {} on {:?} cannot be hidden inside an unresolved host submission batch",
-                                    distributed.dispatch_index,
-                                    slice.device_id()
-                                )),
-                            ),
-                        );
-                    }
+                    let requires_host_checkpoint =
+                        requires_residency_checkpoint && submission_batch.is_none();
                     let has_owner_continuation =
-                        dependencies.has_owner_continuation && !requires_residency_checkpoint;
+                        dependencies.has_owner_continuation && !requires_host_checkpoint;
                     if !has_owner_continuation
                         && completion_bridge.is_none()
                         && !completion_staging
@@ -249,9 +240,9 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             dependency_value,
                             consume_owner_ready_signal: consumes_ready,
                             prepare_owner_continuation: has_owner_continuation
-                                || (!requires_residency_checkpoint
+                                || (!requires_host_checkpoint
                                     && (completion_bridge.is_some() || completion_staging)),
-                            signal_completion: requires_residency_checkpoint
+                            signal_completion: requires_host_checkpoint
                                 || (submission_policy.signal_completion
                                     && submission_batch.is_none()),
                             sequence_kind:
@@ -303,7 +294,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                         return Err(error.into());
                     }
                     ready_dependency = None;
-                    if requires_residency_checkpoint {
+                    if requires_host_checkpoint {
                         distributed_runners
                             .wait_dispatch(
                                 slice.device_id(),

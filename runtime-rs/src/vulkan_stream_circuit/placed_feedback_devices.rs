@@ -740,18 +740,19 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                                 source: VulkanKernelScalarSource::PushConstant,
                             }]
                 });
-        let has_demand_checkpoints = device_slices.iter().any(|slice| {
-            !slice
-                .package_slice
-                .physical_residency_schedule()
-                .checkpoints
-                .is_empty()
-        }) || model
-            .distributed_execution_plans
-            .decode
-            .dispatches
-            .iter()
-            .any(|dispatch| !dispatch.selected_resource_partitions.is_empty());
+        let has_demand_checkpoints = model.resource_residency_policy.is_demand_loaded()
+            && (device_slices.iter().any(|slice| {
+                !slice
+                    .package_slice
+                    .physical_residency_schedule()
+                    .checkpoints
+                    .is_empty()
+            }) || model
+                .distributed_execution_plans
+                .decode
+                .dispatches
+                .iter()
+                .any(|dispatch| !dispatch.selected_resource_partitions.is_empty()));
         let window_width = VULKAN_BACKEND_LOOP_MAX_WINDOW
             .min(sampler.history_capacity_activations.max(1));
         let demand_checkpoint_resume_is_unambiguous = if has_demand_checkpoints {
@@ -763,6 +764,8 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
         } else {
             true
         };
+        let demand_pipeline_is_guarded = !has_demand_checkpoints
+            || demand_pipeline_predicates.is_some();
         let eligibility = VulkanResidentInProcessPlacedFeedbackLoopEligibility {
             device_slice_count: device_slices.len(),
             every_slice_has_terminal_segment: device_slices
@@ -777,15 +780,7 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                         dependency.has_owner_producer && dependency.has_owner_continuation
                     })
             }),
-            demand_dispatches_are_pipeline_guarded: !has_demand_checkpoints
-                || device_slices.iter().all(|slice| {
-                    slice.resident_execution_plan.distributed_dispatch_count == 0
-                        && slice
-                            .resident_execution_plan
-                            .dispatch_segments
-                            .iter()
-                            .all(|segment| segment.demand_residency.is_some())
-                }),
+            demand_dispatches_are_pipeline_guarded: demand_pipeline_is_guarded,
             demand_checkpoint_resume_is_unambiguous,
             every_edge_is_resident_replayable,
             feedback_stream_control_is_resident_replayable,
@@ -841,6 +836,7 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
         ) {
             (true, Some(predicates)) => Some(VulkanResidentDemandFeedbackState::new(
                 predicates,
+                model,
                 device_slices,
                 &model.output_device_id,
             )?),

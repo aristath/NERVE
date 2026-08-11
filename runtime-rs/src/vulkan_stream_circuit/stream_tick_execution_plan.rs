@@ -327,6 +327,16 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         self.physical_execution_islands.get(&stage_index)
     }
 
+    fn distributed_dispatch_stage_range(
+        &self,
+        dispatch_index: usize,
+    ) -> Option<(usize, usize)> {
+        self.physical_execution_islands
+            .iter()
+            .find(|(_, island)| island.leader().dispatch_index == dispatch_index)
+            .map(|(start_stage_index, island)| (*start_stage_index, island.end_stage_index))
+    }
+
     fn distributed_dispatch_dependencies_at_stage(
         &self,
         stage_index: usize,

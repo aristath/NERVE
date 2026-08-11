@@ -5,6 +5,22 @@ pub struct VulkanDistributedDispatchRunners {
     transaction_predicates: BTreeMap<String, Arc<VulkanResidentBuffer>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VulkanDistributedResolvedResidencyMiss {
+    pub shard_index: usize,
+    pub gate_index: usize,
+    pub selector_id: String,
+    pub checkpoint_tag: u32,
+    pub resource_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VulkanDistributedResolvedResidencyFault {
+    pub owner_device_id: String,
+    pub dispatch_index: usize,
+    pub misses: Vec<VulkanDistributedResolvedResidencyMiss>,
+}
+
 fn selected_resource_activation<'a>(
     dispatch: &'a VulkanDistributedDispatchPlan,
     selection_signal: &str,
@@ -406,6 +422,7 @@ impl VulkanDistributedDispatchRunners {
                 ))
             })?;
             let mut shards = Vec::with_capacity(leader.shards.len());
+            let mut owner_shard_residency_predicates = Vec::new();
             for shard_index in 0..leader.shards.len() {
                 let leader_shard = &leader.shards[shard_index];
                 let device = device_for(&leader_shard.device_id).map_err(|error| {
@@ -414,6 +431,57 @@ impl VulkanDistributedDispatchRunners {
                         leader_shard.device_id
                     ))
                 })?;
+                let shard_requires_demand_gate = planned_island.dispatches.iter().any(|dispatch| {
+                    !dispatch.selected_resource_partitions.is_empty()
+                        && resource_stores
+                            .get(&leader_shard.device_id)
+                            .is_some_and(|store| store.residency_policy().is_demand_loaded())
+                });
+                let shard_residency_predicate = if shard_requires_demand_gate {
+                    let (owner_view, shard_view) = if owner_device
+                        .shares_logical_device_with(device)
+                    {
+                        let predicate = Arc::new(
+                            owner_device
+                                .create_conditional_resident_buffer(size_of::<u32>())
+                                .map_err(VulkanDistributedDispatchRunnerError::from)?,
+                        );
+                        (Arc::clone(&predicate), predicate)
+                    } else {
+                        let mut buffers = owner_device
+                            .create_shared_conditional_resident_buffers(
+                                &[device],
+                                size_of::<u32>(),
+                            )
+                            .map_err(VulkanDistributedDispatchRunnerError::from)?
+                            .buffers
+                            .into_iter();
+                        let owner_view = buffers.next().ok_or_else(|| {
+                            VulkanDistributedDispatchRunnerError(
+                                "distributed shard predicate has no owner view".to_string(),
+                            )
+                        })?;
+                        let shard_view = buffers.next().ok_or_else(|| {
+                            VulkanDistributedDispatchRunnerError(
+                                "distributed shard predicate has no participant view".to_string(),
+                            )
+                        })?;
+                        if buffers.next().is_some() {
+                            return Err(VulkanDistributedDispatchRunnerError(
+                                "distributed shard predicate produced unexpected views"
+                                    .to_string(),
+                            ));
+                        }
+                        (owner_view, shard_view)
+                    };
+                    owner_view
+                        .write_bytes(&1u32.to_le_bytes())
+                        .map_err(VulkanDistributedDispatchRunnerError::from)?;
+                    owner_shard_residency_predicates.push(owner_view);
+                    Some(shard_view)
+                } else {
+                    None
+                };
                 let mut resident_dispatches = Vec::with_capacity(planned_island.dispatches.len());
                 let mut planned_shards = Vec::with_capacity(planned_island.dispatches.len());
                 let mut selected_resource_gates =
@@ -549,14 +617,14 @@ impl VulkanDistributedDispatchRunners {
                                     planned_shard.device_id
                                 ))
                             })?;
-                        let local_predicate = Arc::new(
-                            device
-                                .create_conditional_resident_buffer(std::mem::size_of::<u32>())
-                                .map_err(VulkanDistributedDispatchRunnerError::from)?,
-                        );
-                        local_predicate
-                            .write_bytes(&1u32.to_le_bytes())
-                            .map_err(VulkanDistributedDispatchRunnerError::from)?;
+                        let local_predicate = shard_residency_predicate
+                            .as_ref()
+                            .cloned()
+                            .ok_or_else(|| {
+                                VulkanDistributedDispatchRunnerError(
+                                    "distributed demand gate has no shard predicate".to_string(),
+                                )
+                            })?;
                         planned_dispatch
                             .selected_resource_partitions
                             .iter()
@@ -641,11 +709,9 @@ impl VulkanDistributedDispatchRunners {
                     .zip(&selected_resource_gates)
                     .zip(&planned_island.dispatches)
                 {
-                    steps.extend(
-                        gates
-                            .iter()
-                            .map(VulkanDistributedSelectedResourceGate::gate_step),
-                    );
+                    for gate in gates {
+                        steps.push(gate.gate_step()?);
+                    }
                     let step = match gates.first() {
                         Some(gate) => gate.guard_step(
                             base_step,
@@ -720,9 +786,16 @@ impl VulkanDistributedDispatchRunners {
                         transaction_predicates.and_then(|predicates| {
                             predicates.get(&planned_island.owner_device_id)
                         }),
+                        &owner_shard_residency_predicates,
                     )?)
                 }
             };
+            if !owner_shard_residency_predicates.is_empty() && reduction.is_none() {
+                return Err(VulkanDistributedDispatchRunnerError(format!(
+                    "selected-resource dispatch {}..{} has no coordinator reduction to commit shard residency",
+                    leader.dispatch_index, tail.dispatch_index
+                )));
+            }
             dispatches.push(VulkanDistributedDispatchRunner {
                 planned: planned_island.clone(),
                 shards,
@@ -787,6 +860,29 @@ impl VulkanDistributedDispatchRunners {
                     .any(|gates| !gates.is_empty())
             })
         })
+    }
+
+    pub(crate) fn feedback_dispatch_count(
+        &self,
+    ) -> Result<usize, VulkanDistributedDispatchRunnerError> {
+        self.dispatches
+            .iter()
+            .flat_map(|dispatch| &dispatch.shards)
+            .try_fold(0usize, |total, shard| {
+                let gate_count = shard
+                    .selected_resource_gates
+                    .iter()
+                    .map(Vec::len)
+                    .sum::<usize>();
+                total
+                    .checked_add(shard.resident_dispatches.len())
+                    .and_then(|count| count.checked_add(gate_count))
+                    .ok_or_else(|| {
+                        VulkanDistributedDispatchRunnerError(
+                            "distributed feedback dispatch count overflowed".to_string(),
+                        )
+                    })
+            })
     }
 
     pub fn reserve_dependency_value(
@@ -861,8 +957,19 @@ impl VulkanDistributedDispatchRunners {
                         shard.device_id
                     ))
                 })?;
+                let feedback_dispatches = shard
+                    .resident_dispatches
+                    .iter()
+                    .zip(&shard.selected_resource_gates)
+                    .flat_map(|(dispatch, gates)| {
+                        gates
+                            .iter()
+                            .map(VulkanDistributedSelectedResourceGate::dispatch)
+                            .chain(std::iter::once(dispatch))
+                    })
+                    .collect::<Vec<_>>();
                 let indirect = control
-                    .register_sequence(&shard.device_id, &shard.resident_dispatches)
+                    .register_sequence(&shard.device_id, feedback_dispatches)
                     .map_err(VulkanDistributedDispatchRunnerError::from)?;
                 let push_constants = shard
                     .planned
@@ -872,32 +979,35 @@ impl VulkanDistributedDispatchRunners {
                         distributed_shard_push_constants(dispatch, planned)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let base_steps = shard
+                let mut steps = Vec::new();
+                let mut byte_offsets = indirect.byte_offsets.iter().copied();
+                for (((resident_dispatch, push_constants), gates), planned_dispatch) in shard
                     .resident_dispatches
                     .iter()
                     .zip(&push_constants)
-                    .zip(&indirect.byte_offsets)
-                    .map(|((resident_dispatch, push_constants), byte_offset)| {
-                        VulkanResidentKernelSequenceStep::new_indirect(
-                            resident_dispatch,
-                            push_constants,
-                            &indirect.buffer,
-                            *byte_offset,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                let mut steps = Vec::new();
-                for ((base_step, gates), planned_dispatch) in base_steps
-                    .into_iter()
                     .zip(&shard.selected_resource_gates)
                     .zip(&dispatch.planned.dispatches)
                 {
-                    steps.extend(
-                        gates
-                            .iter()
-                            .map(VulkanDistributedSelectedResourceGate::gate_step),
-                    );
+                    for gate in gates {
+                        let byte_offset = byte_offsets.next().ok_or_else(|| {
+                            VulkanDistributedDispatchRunnerError(
+                                "distributed feedback gate has no indirect command".to_string(),
+                            )
+                        })?;
+                        steps.push(gate.indirect_gate_step(&indirect.buffer, byte_offset)?);
+                    }
+                    let byte_offset = byte_offsets.next().ok_or_else(|| {
+                        VulkanDistributedDispatchRunnerError(
+                            "distributed feedback dispatch has no indirect command".to_string(),
+                        )
+                    })?;
+                    let base_step = VulkanResidentKernelSequenceStep::new_indirect(
+                        resident_dispatch,
+                        push_constants,
+                        &indirect.buffer,
+                        byte_offset,
+                    )
+                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
                     let step = match gates.first() {
                         Some(gate) => gate.guard_step(
                             base_step,
@@ -906,6 +1016,11 @@ impl VulkanDistributedDispatchRunners {
                         None => base_step,
                     };
                     steps.push(step);
+                }
+                if byte_offsets.next().is_some() {
+                    return Err(VulkanDistributedDispatchRunnerError(
+                        "distributed feedback indirect commands exceed recorded steps".to_string(),
+                    ));
                 }
                 let sequence = device
                     .create_resident_kernel_sequence()
@@ -1119,6 +1234,143 @@ impl VulkanDistributedDispatchRunners {
         })
     }
 
+    pub(crate) fn pending_residency_dispatches(
+        &self,
+    ) -> Result<Vec<(String, usize)>, VulkanDistributedDispatchRunnerError> {
+        let mut pending = Vec::new();
+        for dispatch in &self.dispatches {
+            let has_pending = dispatch
+                .shards
+                .iter()
+                .flat_map(|shard| shard.selected_resource_gates.iter().flatten())
+                .try_fold(false, |pending, gate| {
+                    Ok::<_, VulkanDistributedDispatchRunnerError>(
+                        pending
+                            || gate.notification_epoch()? != gate.observed_notification_epoch(),
+                    )
+                })?;
+            if has_pending {
+                pending.push((
+                    dispatch.planned.owner_device_id.clone(),
+                    dispatch.planned.leader().dispatch_index,
+                ));
+            }
+        }
+        Ok(pending)
+    }
+
+    pub(crate) fn reset_residency_predicates(
+        &self,
+    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
+        for gate in self
+            .dispatches
+            .iter()
+            .flat_map(|dispatch| &dispatch.shards)
+            .flat_map(|shard| shard.selected_resource_gates.iter().flatten())
+        {
+            gate.reset_local_predicate()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_completed_residency_fault<'a, F, E>(
+        &self,
+        owner_device_id: &str,
+        dispatch_index: usize,
+        sequence_kind: VulkanDistributedDispatchSequenceKind,
+        mut device_for: F,
+    ) -> Result<Option<VulkanDistributedResolvedResidencyFault>, VulkanDistributedDispatchRunnerError>
+    where
+        F: FnMut(&str) -> Result<&'a VulkanComputeDevice, E>,
+        E: Display,
+    {
+        let dispatch = self.dispatch(owner_device_id, dispatch_index).ok_or_else(|| {
+            VulkanDistributedDispatchRunnerError(format!(
+                "distributed runner has no dispatch {dispatch_index} owned by {owner_device_id:?}"
+            ))
+        })?;
+        let resolved_shards = dispatch
+            .shards
+            .iter()
+            .map(|shard| {
+                device_for(&shard.device_id)
+                    .map(|device| (shard, device))
+                    .map_err(|error| {
+                        VulkanDistributedDispatchRunnerError(format!(
+                            "failed to resolve distributed shard device {:?}: {error}",
+                            shard.device_id
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut affected_shards = Vec::new();
+        let mut misses = Vec::new();
+        for (shard_index, (shard, device)) in resolved_shards.iter().enumerate() {
+            let mut affected = false;
+            for (gate_index, gate) in shard.selected_resource_gates.iter().flatten().enumerate() {
+                if let Some(miss) = gate.resolve_completed_miss(device)? {
+                    affected = true;
+                    misses.push(VulkanDistributedResolvedResidencyMiss {
+                        shard_index,
+                        gate_index,
+                        selector_id: miss.selector_id,
+                        checkpoint_tag: miss.checkpoint_tag,
+                        resource_indices: miss.resource_indices,
+                    });
+                }
+            }
+            if affected {
+                affected_shards.push((*shard, *device));
+            }
+        }
+        if affected_shards.is_empty() {
+            return Ok(None);
+        }
+        let mut restored = BTreeSet::new();
+        for predicate in self.transaction_predicates.values() {
+            if restored.insert(Arc::as_ptr(predicate) as usize) {
+                predicate
+                    .write_bytes(&1u32.to_le_bytes())
+                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
+            }
+        }
+        for (shard, device) in affected_shards {
+            let sequence = distributed_sequence_for_kind(
+                &shard.sequence,
+                shard.feedback_sequence.as_ref(),
+                sequence_kind,
+                &shard.device_id,
+            )?;
+            device
+                .run_recorded_resident_kernel_sequence(sequence)
+                .map_err(VulkanDistributedDispatchRunnerError::from)?;
+            for gate in shard.selected_resource_gates.iter().flatten() {
+                if gate.notification_epoch()? != gate.observed_notification_epoch() {
+                    return Err(VulkanDistributedDispatchRunnerError(format!(
+                        "distributed selected-resource checkpoint on {:?} faulted again immediately after loading",
+                        shard.device_id
+                    )));
+                }
+            }
+        }
+        if let Some(reduction) = &dispatch.reduction {
+            let owner_device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "failed to resolve distributed reduction owner {:?}: {error}",
+                    dispatch.planned.owner_device_id
+                ))
+            })?;
+            owner_device
+                .run_recorded_resident_kernel_sequence(&reduction.sequence)
+                .map_err(VulkanDistributedDispatchRunnerError::from)?;
+        }
+        Ok(Some(VulkanDistributedResolvedResidencyFault {
+            owner_device_id: owner_device_id.to_string(),
+            dispatch_index,
+            misses,
+        }))
+    }
+
     pub fn wait_dispatch<'a, F, E>(
         &self,
         owner_device_id: &str,
@@ -1189,56 +1441,12 @@ impl VulkanDistributedDispatchRunners {
         if let Some(error) = first_error {
             return Err(VulkanDistributedDispatchRunnerError(error));
         }
-        let mut affected_shards = Vec::new();
-        for (shard, device) in &resolved_shards {
-            let mut affected = false;
-            for gate in shard.selected_resource_gates.iter().flatten() {
-                affected |= gate.resolve_completed_miss(device)?;
-            }
-            if affected {
-                affected_shards.push((*shard, *device));
-            }
-        }
-        if !affected_shards.is_empty() {
-            let mut restored = BTreeSet::new();
-            for predicate in self.transaction_predicates.values() {
-                if restored.insert(Arc::as_ptr(predicate) as usize) {
-                    predicate
-                        .write_bytes(&1u32.to_le_bytes())
-                        .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                }
-            }
-            for (shard, device) in affected_shards {
-                let sequence = distributed_sequence_for_kind(
-                    &shard.sequence,
-                    shard.feedback_sequence.as_ref(),
-                    sequence_kind,
-                    &shard.device_id,
-                )?;
-                device
-                    .run_recorded_resident_kernel_sequence(sequence)
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                for gate in shard.selected_resource_gates.iter().flatten() {
-                    if gate.notification_epoch()? != gate.observed_notification_epoch() {
-                        return Err(VulkanDistributedDispatchRunnerError(format!(
-                            "distributed selected-resource checkpoint on {:?} faulted again immediately after loading",
-                            shard.device_id
-                        )));
-                    }
-                }
-            }
-            if let Some(reduction) = &dispatch.reduction {
-                let owner_device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
-                    VulkanDistributedDispatchRunnerError(format!(
-                        "failed to resolve distributed reduction owner {:?}: {error}",
-                        dispatch.planned.owner_device_id
-                    ))
-                })?;
-                owner_device
-                    .run_recorded_resident_kernel_sequence(&reduction.sequence)
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-            }
-        }
+        let _ = self.resolve_completed_residency_fault(
+            owner_device_id,
+            dispatch_index,
+            sequence_kind,
+            |device_id| device_for(device_id),
+        )?;
         Ok(())
     }
 

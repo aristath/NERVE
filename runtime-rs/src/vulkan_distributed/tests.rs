@@ -730,6 +730,8 @@ mod tests {
         assert_eq!(words.first().copied(), Some(0x0723_0203));
         let bf16_words = distributed_sum_f32_add_bf16_residual_spirv_words().unwrap();
         assert_eq!(bf16_words.first().copied(), Some(0x0723_0203));
+        let predicate_words = distributed_clear_predicate_spirv_words().unwrap();
+        assert_eq!(predicate_words.first().copied(), Some(0x0723_0203));
         let reduction = VulkanDistributedReductionPlan {
             operation: ReductionOperation::SumF32,
             element_count: 4096,

@@ -115,7 +115,7 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
             slice.cursor.completed_stage_count = *next_stage_index;
         }
         if slices[resume.target_slice_index].cursor.next_stage_index
-            != resume.target_segment_start_stage_index
+            != resume.target_stage_index
         {
             return Err(
                 VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(VulkanError(
@@ -257,11 +257,10 @@ fn run_mounted_placed_resident_stream_tick_slices_in_process_with_schedule_and_d
                             output_turn,
                             demand_resume: demand_resume
                                 .filter(|resume| resume.target_slice_index == *device_index)
-                                .map(|resume| {
-                                    (
-                                        resume.target_segment_start_stage_index,
-                                        resume.gate_index,
-                                    )
+                                .and_then(|resume| {
+                                    resume.local_gate_index.map(|gate_index| {
+                                        (resume.target_stage_index, gate_index)
+                                    })
                                 }),
                             submission_batch,
                         },

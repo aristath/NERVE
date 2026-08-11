@@ -197,9 +197,11 @@ fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() 
 fn demand_feedback_allows_one_checkpoint_to_discover_distinct_resource_sets() {
     let checkpoint = VulkanDemandFeedbackCheckpoint {
         feedback_lane: 1,
-        slice_index: 2,
-        segment_index: 3,
-        gate_index: 4,
+        target: VulkanDemandFeedbackCheckpointTarget::Local {
+            slice_index: 2,
+            segment_index: 3,
+            gate_index: 4,
+        },
     };
     let mut resolved = BTreeMap::new();
     assert_eq!(
@@ -220,9 +222,11 @@ fn demand_feedback_allows_one_checkpoint_to_discover_distinct_resource_sets() {
 fn demand_feedback_rejects_a_resource_that_faults_twice_at_one_checkpoint() {
     let checkpoint = VulkanDemandFeedbackCheckpoint {
         feedback_lane: 1,
-        slice_index: 2,
-        segment_index: 3,
-        gate_index: 4,
+        target: VulkanDemandFeedbackCheckpointTarget::Local {
+            slice_index: 2,
+            segment_index: 3,
+            gate_index: 4,
+        },
     };
     let mut resolved = BTreeMap::new();
     record_demand_feedback_resolution(&mut resolved, checkpoint, &[4, 68]).unwrap();
@@ -230,6 +234,38 @@ fn demand_feedback_rejects_a_resource_that_faults_twice_at_one_checkpoint() {
         record_demand_feedback_resolution(&mut resolved, checkpoint, &[68, 89]).unwrap_err();
     assert!(error.0.contains("missed resources [68] again"));
     assert_eq!(resolved.get(&checkpoint), Some(&BTreeSet::from([4, 68])));
+}
+
+#[test]
+fn distributed_demand_feedback_tracks_each_shard_checkpoint_independently() {
+    let first = VulkanDemandFeedbackCheckpoint {
+        feedback_lane: 2,
+        target: VulkanDemandFeedbackCheckpointTarget::Distributed {
+            slice_index: 0,
+            dispatch_index: 17,
+            shard_index: 0,
+            gate_index: 0,
+        },
+    };
+    let second = VulkanDemandFeedbackCheckpoint {
+        feedback_lane: 2,
+        target: VulkanDemandFeedbackCheckpointTarget::Distributed {
+            slice_index: 0,
+            dispatch_index: 17,
+            shard_index: 1,
+            gate_index: 0,
+        },
+    };
+    let mut resolved = BTreeMap::new();
+    assert_eq!(
+        record_demand_feedback_resolution(&mut resolved, first, &[4]).unwrap(),
+        1
+    );
+    assert_eq!(
+        record_demand_feedback_resolution(&mut resolved, second, &[4]).unwrap(),
+        1
+    );
+    assert_eq!(resolved.len(), 2);
 }
 
 #[test]
@@ -419,6 +455,10 @@ fn demand_feedback_resume_plan_keeps_only_the_causal_prefix() {
     let terminal = demand_feedback_resume_plan(&plans, 2, 1).unwrap();
     assert_eq!(terminal.schedule_start_turn_index, 0);
     assert_eq!(terminal.next_stage_indices, [2, 3, 1]);
+
+    let after_middle = demand_feedback_resume_plan_after_stage(&plans, 1, 1).unwrap();
+    assert_eq!(after_middle.schedule_start_turn_index, 0);
+    assert_eq!(after_middle.next_stage_indices, [2, 2, 0]);
 }
 
 #[test]
