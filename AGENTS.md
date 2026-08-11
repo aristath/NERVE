@@ -10,16 +10,17 @@
 
 ## GPU residency
 
-- Do not use the NVIDIA GPU for any NERVE workload. This includes model execution, tests, benchmarks, compilation probes, device enumeration, and diagnostic probes.
-- Do not use the AMD integrated GPU at PCI `0000:8a:00.0` for any NERVE workload. Only explicitly allowlisted discrete AMD GPUs may be used for execution, tests, benchmarks, compilation probes, device enumeration, or diagnostics.
-- Inspect every selected AMD GPU immediately before a workload and record its
+- All detected compute targets are eligible for NERVE workloads, including
+  integrated GPUs, discrete GPUs from any vendor, and the CPU. A caller may
+  explicitly exclude targets for a particular run.
+- Inspect every selected target immediately before a workload and record its
   current VRAM allocation, usable capacity, and activity. Existing allocations
   are reservations, not a reason to discard the device.
-- NERVE may share an AMD GPU with an existing workload when the measured safe
+- NERVE may share a target with an existing workload when the measured safe
   remaining capacity is sufficient. It must preserve the existing allocation,
   stay within the unreserved budget, and must not unload or disrupt unrelated
   work merely to obtain an idle device.
-- Placement must consider all compatible AMD GPUs and distribute work according
+- Placement must consider all compatible targets and distribute work according
   to their measured remaining capacity and communication cost. Do not hardcode
   a device count or require an idle baseline.
 - After a workload, verify that NERVE released the capacity it acquired and that
@@ -28,6 +29,8 @@
 
 ## Multi-GPU placement
 
-- Never use tensor parallelism on this workstation. Its GPU interconnect does not have enough lanes for tensor-parallel execution to be a useful or fair configuration.
-- Multi-GPU NERVE workloads must use contiguous component/layer placement unless the user explicitly requests another non-tensor-parallel wiring.
-- Performance comparisons with another inference engine must use equivalent execution settings and placement strategies. Do not compare a tensor-parallel run with a layer/model-parallel run.
+- Benchmark single-target, serialized multi-target, and tensor-parallel execution
+  with equivalent model work so placement decisions can be based on measured
+  end-to-end cost.
+- Multi-target benchmarks must include the computation, synchronization,
+  transfers, and collectives required by the measured placement strategy.
