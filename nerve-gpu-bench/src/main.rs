@@ -2,6 +2,7 @@ mod benchmark;
 mod cli;
 mod discovery;
 mod model;
+mod package_calibration;
 mod policy;
 mod vulkan_exec;
 mod vulkan_features;
@@ -50,6 +51,21 @@ fn run() -> Result<(), Box<dyn Error>> {
         Command::Summarize { input } => {
             let payload = fs::read_to_string(&input)?;
             print_json_summary(&payload)?;
+        }
+        Command::CalibratePackage {
+            package,
+            component,
+            phase,
+            target_ids,
+            output,
+        } => {
+            package_calibration::run_package_calibration(
+                &package,
+                &component,
+                phase,
+                &target_ids,
+                &output,
+            )?;
         }
         Command::Run {
             output,

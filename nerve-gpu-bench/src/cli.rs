@@ -24,6 +24,13 @@ pub enum Command {
     Summarize {
         input: PathBuf,
     },
+    CalibratePackage {
+        package: PathBuf,
+        component: String,
+        phase: PackageCalibrationPhase,
+        target_ids: Vec<String>,
+        output: PathBuf,
+    },
     Run {
         output: Option<PathBuf>,
         payload_bytes: usize,
@@ -39,6 +46,12 @@ pub enum Command {
         dry_plan: bool,
         execute: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageCalibrationPhase {
+    Decode,
+    Prefill { activation_batch_width: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,12 +78,145 @@ where
         "list" => parse_list(args.collect()),
         "summarize" => parse_input_file_command("summarize", args.collect()),
         "validate" => parse_validate(args.collect()),
+        "calibrate-package" => parse_calibrate_package(args.collect()),
         "run" => parse_run(args.collect()),
         other => Err(CliError(format!(
             "unknown command {other:?}\n\n{}",
             usage()
         ))),
     }
+}
+
+fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> {
+    let mut package = None;
+    let mut component = None;
+    let mut phase = None;
+    let mut activation_batch_width = None;
+    let mut target_ids = Vec::new();
+    let mut output = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--package" => {
+                let value = PathBuf::from(required_value(&arguments, &mut index, "--package")?);
+                if package.replace(value).is_some() {
+                    return Err(CliError("--package may only be specified once".to_string()));
+                }
+            }
+            "--component" => {
+                let value = required_value(&arguments, &mut index, "--component")?;
+                if component.replace(value).is_some() {
+                    return Err(CliError(
+                        "--component may only be specified once".to_string(),
+                    ));
+                }
+            }
+            "--phase" => {
+                let value = required_value(&arguments, &mut index, "--phase")?;
+                if phase.replace(value).is_some() {
+                    return Err(CliError("--phase may only be specified once".to_string()));
+                }
+            }
+            "--batch-width" => {
+                let value = parse_usize(
+                    &required_value(&arguments, &mut index, "--batch-width")?,
+                    "--batch-width",
+                )?;
+                if activation_batch_width.replace(value).is_some() {
+                    return Err(CliError(
+                        "--batch-width may only be specified once".to_string(),
+                    ));
+                }
+            }
+            "--target" => {
+                target_ids.push(required_value(&arguments, &mut index, "--target")?);
+            }
+            "--output" => {
+                let value = PathBuf::from(required_value(&arguments, &mut index, "--output")?);
+                if output.replace(value).is_some() {
+                    return Err(CliError("--output may only be specified once".to_string()));
+                }
+            }
+            other => {
+                return Err(CliError(format!(
+                    "unknown calibrate-package argument {other:?}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+        index += 1;
+    }
+    let package =
+        package.ok_or_else(|| CliError("calibrate-package requires --package PATH".to_string()))?;
+    let component = component
+        .filter(|component| !component.is_empty())
+        .ok_or_else(|| CliError("calibrate-package requires --component ID".to_string()))?;
+    let phase_name = phase
+        .filter(|phase| !phase.is_empty())
+        .ok_or_else(|| CliError("calibrate-package requires --phase decode|prefill".to_string()))?;
+    let phase = match (phase_name.as_str(), activation_batch_width) {
+        ("decode", None) => PackageCalibrationPhase::Decode,
+        ("decode", Some(_)) => {
+            return Err(CliError(
+                "decode package calibration must not specify --batch-width".to_string(),
+            ));
+        }
+        ("prefill", Some(activation_batch_width)) if activation_batch_width > 0 => {
+            PackageCalibrationPhase::Prefill {
+                activation_batch_width,
+            }
+        }
+        ("prefill", _) => {
+            return Err(CliError(
+                "prefill package calibration requires a positive --batch-width".to_string(),
+            ));
+        }
+        _ => {
+            return Err(CliError(
+                "calibrate-package --phase must be decode or prefill".to_string(),
+            ));
+        }
+    };
+    if target_ids.is_empty() {
+        return Err(CliError(
+            "calibrate-package requires at least one ordered --target vulkan-uuid:ID".to_string(),
+        ));
+    }
+    if let Some(target_id) = target_ids
+        .iter()
+        .find(|target_id| !is_canonical_vulkan_target_id(target_id))
+    {
+        return Err(CliError(format!(
+            "calibrate-package target {target_id:?} is not a canonical vulkan-uuid identity"
+        )));
+    }
+    let mut distinct_target_ids = target_ids.clone();
+    distinct_target_ids.sort();
+    distinct_target_ids.dedup();
+    if distinct_target_ids.len() != target_ids.len() {
+        return Err(CliError(
+            "calibrate-package requires distinct ordered target identities".to_string(),
+        ));
+    }
+    let output =
+        output.ok_or_else(|| CliError("calibrate-package requires --output PATH".to_string()))?;
+    Ok(Command::CalibratePackage {
+        package,
+        component,
+        phase,
+        target_ids,
+        output,
+    })
+}
+
+fn is_canonical_vulkan_target_id(target_id: &str) -> bool {
+    target_id.strip_prefix("vulkan-uuid:").is_some_and(|uuid| {
+        uuid.len() == 32
+            && uuid
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn parse_validate(arguments: Vec<String>) -> Result<Command, CliError> {
@@ -259,7 +405,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -450,6 +596,205 @@ mod tests {
         match command {
             Command::Summarize { input } => assert_eq!(input, PathBuf::from("result.json")),
             _ => panic!("expected summarize command"),
+        }
+    }
+
+    #[test]
+    fn parses_ordered_decode_package_calibration_candidate() {
+        let owner = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let worker = "vulkan-uuid:ffeeddccbbaa99887766554433221100";
+        assert_eq!(
+            parse_args(
+                [
+                    "calibrate-package",
+                    "--package",
+                    "compiled/vulkan_resident_package.json",
+                    "--component",
+                    "transformer.block.7",
+                    "--phase",
+                    "decode",
+                    "--target",
+                    owner,
+                    "--target",
+                    worker,
+                    "--output",
+                    "placement.json",
+                ]
+                .map(str::to_string)
+            )
+            .unwrap(),
+            Command::CalibratePackage {
+                package: PathBuf::from("compiled/vulkan_resident_package.json"),
+                component: "transformer.block.7".to_string(),
+                phase: PackageCalibrationPhase::Decode,
+                target_ids: vec![owner.to_string(), worker.to_string()],
+                output: PathBuf::from("placement.json"),
+            },
+        );
+    }
+
+    #[test]
+    fn parses_exact_prefill_package_calibration_shape() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let command = parse_args(
+            [
+                "calibrate-package",
+                "--package",
+                "package.json",
+                "--component",
+                "block",
+                "--phase",
+                "prefill",
+                "--batch-width",
+                "64",
+                "--target",
+                target,
+                "--output",
+                "placement.json",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::CalibratePackage {
+                phase: PackageCalibrationPhase::Prefill {
+                    activation_batch_width: 64
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_noncanonical_package_calibration_requests() {
+        let base = [
+            "calibrate-package",
+            "--package",
+            "package.json",
+            "--component",
+            "block",
+            "--phase",
+            "decode",
+            "--target",
+            "vulkan-uuid:00112233445566778899aabbccddeeff",
+            "--output",
+            "placement.json",
+        ];
+        let with_decode_width = base
+            .iter()
+            .copied()
+            .chain(["--batch-width", "2"])
+            .map(str::to_string);
+        assert!(
+            parse_args(with_decode_width)
+                .unwrap_err()
+                .to_string()
+                .contains("must not specify")
+        );
+
+        for invalid_target in [
+            "gpu0",
+            "vulkan-uuid:0011",
+            "vulkan-uuid:00112233445566778899AABBCCDDEEFF",
+        ] {
+            let arguments = base
+                .iter()
+                .copied()
+                .map(|argument| {
+                    if argument == "vulkan-uuid:00112233445566778899aabbccddeeff" {
+                        invalid_target
+                    } else {
+                        argument
+                    }
+                })
+                .map(str::to_string);
+            assert!(
+                parse_args(arguments)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("canonical vulkan-uuid")
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_missing_width_and_duplicate_package_targets() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let missing_width = parse_args(
+            [
+                "calibrate-package",
+                "--package",
+                "package.json",
+                "--component",
+                "block",
+                "--phase",
+                "prefill",
+                "--target",
+                target,
+                "--output",
+                "placement.json",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(missing_width.to_string().contains("positive --batch-width"));
+
+        let repeated_target = parse_args(
+            [
+                "calibrate-package",
+                "--package",
+                "package.json",
+                "--component",
+                "block",
+                "--phase",
+                "decode",
+                "--target",
+                target,
+                "--target",
+                target,
+                "--output",
+                "placement.json",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(repeated_target.to_string().contains("distinct ordered"));
+    }
+
+    #[test]
+    fn rejects_repeated_scalar_package_calibration_options() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        for (option, second) in [
+            ("--package", "other.json"),
+            ("--component", "other"),
+            ("--phase", "prefill"),
+            ("--batch-width", "32"),
+            ("--output", "other.json"),
+        ] {
+            let mut arguments = [
+                "calibrate-package",
+                "--package",
+                "package.json",
+                "--component",
+                "block",
+                "--phase",
+                "prefill",
+                "--batch-width",
+                "64",
+                "--target",
+                target,
+                "--output",
+                "placement.json",
+            ]
+            .map(str::to_string)
+            .to_vec();
+            arguments.extend([option.to_string(), second.to_string()]);
+            let error = parse_args(arguments).unwrap_err();
+            assert!(
+                error.to_string().contains("may only be specified once"),
+                "{option} produced {error}"
+            );
         }
     }
 }
