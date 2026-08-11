@@ -78,6 +78,47 @@ fn distributed_sum_f32_push_constants(
     Ok(fields.into_iter().flat_map(u32::to_le_bytes).collect())
 }
 
+fn distributed_reduction_buffer_capacities(
+    reduction: &VulkanDistributedReductionPlan,
+    participant_count: usize,
+    lane_count: usize,
+) -> Result<(usize, usize), VulkanDistributedDispatchRunnerError> {
+    if participant_count == 0 || lane_count == 0 {
+        return Err(VulkanDistributedDispatchRunnerError(
+            "distributed reduction requires at least one participant and lane".to_string(),
+        ));
+    }
+    let partial_byte_capacity = reduction
+        .partial_byte_capacity
+        .checked_mul(participant_count)
+        .and_then(|bytes| bytes.checked_mul(lane_count))
+        .ok_or_else(|| {
+            VulkanDistributedDispatchRunnerError(
+                "distributed reduction plane capacity overflowed".to_string(),
+            )
+        })?;
+    let output_frame_byte_capacity = match &reduction.finalization {
+        VulkanDistributedReductionFinalizationPlan::StoreF32 => {
+            reduction.partial_byte_capacity
+        }
+        VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. } => {
+            reduction.element_count.checked_mul(2).ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(
+                    "distributed BF16 reduction capacity overflowed".to_string(),
+                )
+            })?
+        }
+    };
+    let output_byte_capacity = output_frame_byte_capacity
+        .checked_mul(lane_count)
+        .ok_or_else(|| {
+            VulkanDistributedDispatchRunnerError(
+                "distributed reduction output capacity overflowed".to_string(),
+            )
+        })?;
+    Ok((partial_byte_capacity, output_byte_capacity))
+}
+
 fn create_distributed_reduction_runner(
     device: &VulkanComputeDevice,
     planned_dispatch: &VulkanDistributedDispatchPlan,
@@ -95,12 +136,7 @@ fn create_distributed_reduction_runner(
             planned_dispatch.component_id, planned_dispatch.node_id, reduction.operation
         )));
     }
-    if activation_buffers.lane_capacity != 1 {
-        return Err(VulkanDistributedDispatchRunnerError(format!(
-            "scalar distributed reduction requires one lane, activation buffers have {}",
-            activation_buffers.lane_capacity
-        )));
-    }
+    let lane_count = activation_buffers.lane_capacity;
     let partials = activation_buffers
         .reduction_partial_buffer(
             &planned_dispatch.owner_device_id,
@@ -125,14 +161,12 @@ fn create_distributed_reduction_runner(
                 planned_dispatch.component_id, planned_dispatch.node_id
             ))
         })?;
-    let partial_byte_capacity = reduction
-        .partial_byte_capacity
-        .checked_mul(planned_dispatch.shards.len())
-        .ok_or_else(|| {
-            VulkanDistributedDispatchRunnerError(
-                "distributed reduction plane capacity overflowed".to_string(),
-            )
-        })?;
+    let (partial_byte_capacity, output_byte_capacity) =
+        distributed_reduction_buffer_capacities(
+            reduction,
+            planned_dispatch.shards.len(),
+            lane_count,
+        )?;
     let (spirv, work_item_count, bindings) = match &reduction.finalization {
         VulkanDistributedReductionFinalizationPlan::StoreF32 => (
             distributed_sum_f32_spirv_words()?,
@@ -143,7 +177,7 @@ fn create_distributed_reduction_runner(
                 VulkanResidentKernelBufferBinding::new(
                     1,
                     output,
-                    reduction.partial_byte_capacity,
+                    output_byte_capacity,
                 )
                 .with_access(VulkanResidentKernelBufferAccess::Write),
             ],
@@ -177,20 +211,15 @@ fn create_distributed_reduction_runner(
                         residual_activation.signal_id
                     ))
                 })?;
-            let bf16_byte_capacity = reduction.element_count.checked_mul(2).ok_or_else(|| {
-                VulkanDistributedDispatchRunnerError(
-                    "distributed BF16 reduction capacity overflowed".to_string(),
-                )
-            })?;
             (
                 distributed_sum_f32_add_bf16_residual_spirv_words()?,
                 reduction.element_count / 2,
                 vec![
                     VulkanResidentKernelBufferBinding::new(0, partials, partial_byte_capacity)
                         .with_access(VulkanResidentKernelBufferAccess::Read),
-                    VulkanResidentKernelBufferBinding::new(1, residual, bf16_byte_capacity)
+                    VulkanResidentKernelBufferBinding::new(1, residual, output_byte_capacity)
                         .with_access(VulkanResidentKernelBufferAccess::Read),
-                    VulkanResidentKernelBufferBinding::new(2, output, bf16_byte_capacity)
+                    VulkanResidentKernelBufferBinding::new(2, output, output_byte_capacity)
                         .with_access(VulkanResidentKernelBufferAccess::Write),
                 ],
             )
@@ -206,23 +235,32 @@ fn create_distributed_reduction_runner(
             )
         })?;
     let resident_dispatch = device
-        .create_resident_kernel_dispatch_labeled(
+        .create_resident_kernel_dispatch_2d_labeled(
             &spirv,
             &bindings,
             workgroup_count_x,
+            u32::try_from(lane_count).map_err(|_| {
+                VulkanDistributedDispatchRunnerError(
+                    "distributed reduction lane count exceeds u32".to_string(),
+                )
+            })?,
             u32::try_from(DISTRIBUTED_SUM_F32_LOCAL_SIZE_X)
                 .expect("distributed reduction local size fits u32"),
             DISTRIBUTED_SUM_F32_PUSH_CONSTANT_BYTE_COUNT,
             Some(format!(
-                "component={} node={} distributed=sum_f32 participants={}",
+                "component={} node={} distributed=sum_f32 participants={} lanes={}",
                 planned_dispatch.component_id,
                 planned_dispatch.node_id,
-                planned_dispatch.shards.len()
+                planned_dispatch.shards.len(),
+                lane_count,
             )),
         )
         .map_err(VulkanDistributedDispatchRunnerError::from)?;
-    let push_constants =
-        distributed_sum_f32_push_constants(reduction, planned_dispatch.shards.len(), 1)?;
+    let push_constants = distributed_sum_f32_push_constants(
+        reduction,
+        planned_dispatch.shards.len(),
+        lane_count,
+    )?;
     let sequence = device
         .create_resident_kernel_sequence()
         .map_err(VulkanDistributedDispatchRunnerError::from)?;

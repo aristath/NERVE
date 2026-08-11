@@ -413,6 +413,45 @@ mod tests {
     }
 
     #[test]
+    fn distributed_reduction_capacities_cover_every_participant_and_lane() {
+        let store_f32 = VulkanDistributedReductionPlan {
+            operation: ReductionOperation::SumF32,
+            element_count: 4_096,
+            partial_byte_capacity: 4_096 * 4,
+            finalization: VulkanDistributedReductionFinalizationPlan::StoreF32,
+        };
+        assert_eq!(
+            distributed_reduction_buffer_capacities(&store_f32, 5, 3).unwrap(),
+            (4_096 * 4 * 5 * 3, 4_096 * 4 * 3)
+        );
+
+        let add_bf16 = VulkanDistributedReductionPlan {
+            finalization:
+                VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
+                    residual_input_index: 1,
+                },
+            ..store_f32.clone()
+        };
+        assert_eq!(
+            distributed_reduction_buffer_capacities(&add_bf16, 5, 3).unwrap(),
+            (4_096 * 4 * 5 * 3, 4_096 * 2 * 3)
+        );
+    }
+
+    #[test]
+    fn distributed_reduction_capacities_reject_empty_or_overflowing_geometry() {
+        let reduction = VulkanDistributedReductionPlan {
+            operation: ReductionOperation::SumF32,
+            element_count: 4_096,
+            partial_byte_capacity: usize::MAX,
+            finalization: VulkanDistributedReductionFinalizationPlan::StoreF32,
+        };
+        assert!(distributed_reduction_buffer_capacities(&reduction, 0, 1).is_err());
+        assert!(distributed_reduction_buffer_capacities(&reduction, 1, 0).is_err());
+        assert!(distributed_reduction_buffer_capacities(&reduction, 2, 1).is_err());
+    }
+
+    #[test]
     fn plans_input_column_partials_with_typed_f32_reduction() {
         let activation = |binding, usage, signal: &str, bytes| VulkanResolvedDescriptorBinding {
             binding,
