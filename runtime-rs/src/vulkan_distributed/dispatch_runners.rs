@@ -744,18 +744,24 @@ impl VulkanDistributedDispatchRunners {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let resolved_shards = resolved_shards
+            .into_iter()
+            .map(|(shard, device)| {
+                distributed_sequence_for_kind(
+                    &shard.sequence,
+                    shard.feedback_sequence.as_ref(),
+                    sequence_kind,
+                    &shard.device_id,
+                )
+                .map(|sequence| (shard, device, sequence))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut submitted: Vec<(
             &VulkanComputeDevice,
             &VulkanDistributedDispatchShardRunner,
             &VulkanResidentKernelSequence,
         )> = Vec::with_capacity(dispatch.shards.len());
-        for (shard, device) in resolved_shards {
-            let sequence = distributed_sequence_for_kind(
-                &shard.sequence,
-                shard.feedback_sequence.as_ref(),
-                sequence_kind,
-                &shard.device_id,
-            )?;
+        for (shard, device, sequence) in resolved_shards {
             let synchronization = dispatch
                 .helper_synchronization
                 .iter()
