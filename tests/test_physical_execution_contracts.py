@@ -350,6 +350,7 @@ def test_compiler_emits_local_batch_and_legal_distributed_contracts(tmp_path: Pa
         "single_device",
         "tensor_parallel",
         "single_device",
+        "tensor_parallel",
     ]
     distributed = contracts[1]
     assert distributed["execution_form"] == "replicated_input_partitioned_output"
@@ -373,6 +374,9 @@ def test_compiler_emits_local_batch_and_legal_distributed_contracts(tmp_path: Pa
         }
     ]
     assert contracts[2]["phases"] == ["decode", "prefill"]
+    assert contracts[3]["phases"] == ["decode", "prefill"]
+    assert contracts[3]["artifacts"] == contracts[2]["artifacts"]
+    assert contracts[3]["execution_form"] == "replicated_input_partitioned_output"
     assert contracts[0]["artifacts"][0]["sha256"] == artifact_sha256(b"scalar spirv")
     assert all("model_name" not in contract for contract in contracts)
 

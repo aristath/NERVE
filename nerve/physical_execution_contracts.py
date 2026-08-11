@@ -315,11 +315,12 @@ def build_kernel_physical_execution_contracts(
             local_intermediates=[],
         )
     ]
-    distributed = _distributed_scalar_contract(
+    distributed = _distributed_kernel_contract(
         node=node,
         circuit=circuit,
         tensor_index=tensor_index,
         artifacts=scalar_artifacts,
+        phases=["decode"],
         formats=scalar_formats,
         geometry=scalar_geometry,
         workgroup_count_x=int(kernel["workgroup_count_x"]),
@@ -361,6 +362,7 @@ def build_kernel_physical_execution_contracts(
             workgroup_count_x=max(int(stage["workgroup_count_x"]) for stage in stages),
             batch_width=lane_tile_width,
         )
+        batch_formats = _kernel_formats(node, circuit, tensor_index, artifacts)
         contracts.append(
             _build_contract(
                 node=node,
@@ -368,7 +370,7 @@ def build_kernel_physical_execution_contracts(
                 tensor_index=tensor_index,
                 artifacts=artifacts,
                 phases=phases,
-                formats=_kernel_formats(node, circuit, tensor_index, artifacts),
+                formats=batch_formats,
                 geometry=geometry,
                 strategy="single_device",
                 execution_form="local",
@@ -380,6 +382,22 @@ def build_kernel_physical_execution_contracts(
                 local_intermediates=[],
             )
         )
+        if len(stages) == 1:
+            distributed_batch = _distributed_kernel_contract(
+                node=node,
+                circuit=circuit,
+                tensor_index=tensor_index,
+                artifacts=artifacts,
+                phases=phases,
+                formats=batch_formats,
+                geometry=geometry,
+                workgroup_count_x=int(stages[0]["workgroup_count_x"]),
+                local_intermediates=local_output_shard_intermediates_for_node(
+                    circuit, node, tensor_index
+                ),
+            )
+            if distributed_batch is not None:
+                contracts.append(distributed_batch)
 
     by_id = {contract["contract_id"]: contract for contract in contracts}
     if len(by_id) != len(contracts):
@@ -511,12 +529,13 @@ def _physical_implementation_contract(
     )
 
 
-def _distributed_scalar_contract(
+def _distributed_kernel_contract(
     *,
     node: Json,
     circuit: Json,
     tensor_index: Json,
     artifacts: list[ArtifactIdentity],
+    phases: list[ExecutionPhase],
     formats: PhysicalFormats,
     geometry: ExecutionGeometry,
     workgroup_count_x: int,
@@ -565,7 +584,7 @@ def _distributed_scalar_contract(
             circuit=circuit,
             tensor_index=tensor_index,
             artifacts=artifacts,
-            phases=["decode"],
+            phases=phases,
             formats=formats,
             geometry=geometry,
             strategy="tensor_parallel",
@@ -620,7 +639,7 @@ def _distributed_scalar_contract(
             circuit=circuit,
             tensor_index=tensor_index,
             artifacts=artifacts,
-            phases=["decode"],
+            phases=phases,
             formats=formats,
             geometry=geometry,
             strategy="tensor_parallel",
@@ -694,7 +713,7 @@ def _distributed_scalar_contract(
             circuit=circuit,
             tensor_index=tensor_index,
             artifacts=artifacts,
-            phases=["decode"],
+            phases=phases,
             formats=formats,
             geometry=geometry,
             strategy="expert_parallel",
