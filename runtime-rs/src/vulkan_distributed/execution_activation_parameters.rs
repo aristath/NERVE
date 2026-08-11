@@ -75,6 +75,26 @@ impl VulkanDistributedExecutionPlan {
         edge_placements: &[ComponentEdgePlacement],
         storage_buffer_offset_alignment: usize,
     ) -> Result<Self, VulkanDistributedPlanError> {
+        Self::from_prepared_plans_for_phase(
+            prepared_plans,
+            tensor_index,
+            artifact_manifest,
+            component_device_pools,
+            edge_placements,
+            storage_buffer_offset_alignment,
+            ExecutionPhase::Decode,
+        )
+    }
+
+    pub fn from_prepared_plans_for_phase(
+        prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
+        tensor_index: &TensorIndex,
+        artifact_manifest: &VulkanPhysicalKernelArtifactManifest,
+        component_device_pools: &BTreeMap<String, Vec<String>>,
+        edge_placements: &[ComponentEdgePlacement],
+        storage_buffer_offset_alignment: usize,
+        phase: ExecutionPhase,
+    ) -> Result<Self, VulkanDistributedPlanError> {
         if storage_buffer_offset_alignment == 0
             || !storage_buffer_offset_alignment.is_power_of_two()
             || !storage_buffer_offset_alignment.is_multiple_of(BF16_BYTE_COUNT)
@@ -119,7 +139,7 @@ impl VulkanDistributedExecutionPlan {
                     )));
                 }
                 let Some((contract, artifact)) =
-                    select_distributed_contract(dispatch, artifact_manifest)?
+                    select_distributed_contract(dispatch, artifact_manifest, phase)?
                 else {
                     continue;
                 };
@@ -179,8 +199,11 @@ impl VulkanDistributedExecutionPlan {
         }
 
         let shared_activation_route = VulkanSharedResidentBufferRoute::SharedHost;
-        let execution_islands =
-            resolved_physical_execution_islands(&dispatches, shared_activation_route)?;
+        let execution_islands = resolved_physical_execution_islands_for_phase(
+            &dispatches,
+            shared_activation_route,
+            phase,
+        )?;
         Ok(Self {
             device_ids: device_ids.into_iter().collect(),
             storage_buffer_offset_alignment,
@@ -775,6 +798,18 @@ pub(crate) fn resolved_physical_execution_islands(
     dispatches: &[VulkanDistributedDispatchPlan],
     shared_activation_route: VulkanSharedResidentBufferRoute,
 ) -> Result<Vec<VulkanPhysicalExecutionIslandPlan>, VulkanDistributedPlanError> {
+    resolved_physical_execution_islands_for_phase(
+        dispatches,
+        shared_activation_route,
+        ExecutionPhase::Decode,
+    )
+}
+
+pub(crate) fn resolved_physical_execution_islands_for_phase(
+    dispatches: &[VulkanDistributedDispatchPlan],
+    shared_activation_route: VulkanSharedResidentBufferRoute,
+    phase: ExecutionPhase,
+) -> Result<Vec<VulkanPhysicalExecutionIslandPlan>, VulkanDistributedPlanError> {
     let mut groups = Vec::<Vec<VulkanDistributedDispatchPlan>>::new();
     for dispatch in dispatches {
         if let Some(group) = groups.last_mut()
@@ -792,7 +827,12 @@ pub(crate) fn resolved_physical_execution_islands(
         .into_iter()
         .enumerate()
         .map(|(index, dispatches)| {
-            resolved_physical_execution_island(index, dispatches, shared_activation_route)
+            resolved_physical_execution_island(
+                index,
+                dispatches,
+                shared_activation_route,
+                phase,
+            )
         })
         .collect()
 }
@@ -801,6 +841,7 @@ fn resolved_physical_execution_island(
     island_index: usize,
     dispatches: Vec<VulkanDistributedDispatchPlan>,
     shared_activation_route: VulkanSharedResidentBufferRoute,
+    phase: ExecutionPhase,
 ) -> Result<VulkanPhysicalExecutionIslandPlan, VulkanDistributedPlanError> {
     let Some(first) = dispatches.first() else {
         return Err(VulkanDistributedPlanError(
@@ -1131,7 +1172,7 @@ fn resolved_physical_execution_island(
         contract_ids,
         implementation_digests,
         phase_schedules: vec![VulkanPhysicalExecutionPhaseSchedule {
-            phase: nerve_execution_contracts::ExecutionPhase::Decode,
+            phase,
             steps: schedule,
         }],
         entry_device_id,

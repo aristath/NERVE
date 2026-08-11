@@ -49,6 +49,40 @@ mod tests {
     }
 
     #[test]
+    fn distributed_planning_selects_only_contracts_declared_for_its_phase() {
+        let mut prepared_plan = fixture_prepared_plan();
+        prepared_plan.dispatches[0].physical_execution_contracts[0].phases =
+            vec![ExecutionPhase::Prefill];
+        let pools = component_device_pools("component", &["owner", "helper"]);
+        let decode_error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &pools,
+            &[],
+            4,
+        )
+        .unwrap_err();
+        assert!(decode_error.to_string().contains("no compatible distributable dispatch"));
+
+        let prefill = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &pools,
+            &[],
+            4,
+            ExecutionPhase::Prefill,
+        )
+        .unwrap();
+        assert_eq!(prefill.dispatches.len(), 1);
+        assert_eq!(
+            prefill.execution_islands[0].phase_schedules[0].phase,
+            ExecutionPhase::Prefill
+        );
+    }
+
+    #[test]
     fn timeline_dependency_clock_is_monotonic_and_refuses_wraparound() {
         let clock = VulkanDistributedDependencyClock::new();
 

@@ -94,6 +94,7 @@ fn resolved_owner_residency_requirements(
 fn select_distributed_contract<'a, 'b>(
     dispatch: &'a VulkanPreparedDispatch,
     artifact_manifest: &'b VulkanPhysicalKernelArtifactManifest,
+    phase: ExecutionPhase,
 ) -> Result<
     Option<(
         &'a PhysicalExecutionContract,
@@ -104,7 +105,7 @@ fn select_distributed_contract<'a, 'b>(
     let mut candidates = Vec::new();
     for contract in dispatch.physical_execution_contracts.iter().filter(|contract| {
         contract.strategy.is_distributed()
-            && contract.phases.contains(&ExecutionPhase::Decode)
+            && contract.phases.contains(&phase)
             && contract.operation_family == dispatch.op
             && contract.member_node_ids.contains(&dispatch.node_id)
     }) {
@@ -165,7 +166,7 @@ fn select_distributed_contract<'a, 'b>(
         return Err(dispatch_error(
             dispatch,
             format!(
-                "has {} ambiguous decode distribution contracts for reusable artifact family {:?}",
+                "has {} ambiguous {phase:?} distribution contracts for reusable artifact family {:?}",
                 candidates.len(),
                 dispatch.reusable_family_id
             ),
