@@ -14,6 +14,7 @@ pub struct VulkanRuntimeDistributedPlacementCalibrationReport {
     pub state_digest: String,
     pub resident_parameter_bytes_by_device: BTreeMap<String, usize>,
     pub resident_transient_bytes_by_device: BTreeMap<String, usize>,
+    pub resident_host_transient_bytes: usize,
     pub activation_routes: Vec<String>,
     pub dispatch_work: Vec<VulkanRuntimeDistributedPlacementDispatchWork>,
     pub execution_case: VulkanPlacementExecutionCaseIdentity,
@@ -56,7 +57,7 @@ impl VulkanRuntimeDistributedPlacementCalibrationReport {
                 .resident_transient_bytes_by_device
                 .clone(),
             host_resident_bytes: 0,
-            host_transient_peak_bytes: 0,
+            host_transient_peak_bytes: self.resident_host_transient_bytes,
         }
     }
 }
@@ -96,6 +97,7 @@ struct VulkanRuntimeDistributedPlacementSession {
     _parameter_pool: VulkanResidentBufferPool,
     resident_parameter_bytes_by_device: BTreeMap<String, usize>,
     resident_transient_bytes_by_device: BTreeMap<String, usize>,
+    resident_host_transient_bytes: usize,
     activation_routes: Vec<String>,
     dispatch_work: Vec<VulkanRuntimeDistributedPlacementDispatchWork>,
     sampled_workload: bool,
@@ -256,6 +258,7 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
             resident_transient_bytes_by_device: remap_device_bytes(
                 &session.resident_transient_bytes_by_device,
             ),
+            resident_host_transient_bytes: session.resident_host_transient_bytes,
             activation_routes: session.activation_routes.clone(),
             dispatch_work: session.dispatch_work.clone(),
             execution_case: session.execution_case.clone(),
@@ -532,6 +535,45 @@ fn distributed_calibration_distribution_name(
         VulkanDistributedDispatchDistribution::OutputRows => "output_rows",
         VulkanDistributedDispatchDistribution::ExpertRange => "expert_range",
     }
+}
+
+fn distributed_calibration_activation_backing_bytes<'a>(
+    device_ids: &[String],
+    route: VulkanSharedResidentBufferRoute,
+    allocations: impl IntoIterator<Item = (&'a str, usize)>,
+) -> Result<(BTreeMap<String, usize>, usize), VulkanResidentTokenModelPackageError> {
+    let mut device_bytes = device_ids
+        .iter()
+        .map(|device_id| (device_id.clone(), 0usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut host_bytes = 0usize;
+    for (owner_device_id, byte_capacity) in allocations {
+        if byte_capacity == 0 || !device_bytes.contains_key(owner_device_id) {
+            return distributed_calibration_error(format!(
+                "distributed activation allocation has unknown owner {owner_device_id:?} or zero bytes",
+            ));
+        }
+        match route {
+            VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
+                let total = device_bytes
+                    .get_mut(owner_device_id)
+                    .expect("owner presence checked above");
+                *total = total.checked_add(byte_capacity).ok_or_else(|| {
+                    distributed_calibration_error_value(
+                        "distributed device-local activation byte accounting overflowed",
+                    )
+                })?;
+            }
+            VulkanSharedResidentBufferRoute::SharedHost => {
+                host_bytes = host_bytes.checked_add(byte_capacity).ok_or_else(|| {
+                    distributed_calibration_error_value(
+                        "distributed shared-host activation byte accounting overflowed",
+                    )
+                })?;
+            }
+        }
+    }
+    Ok((device_bytes, host_bytes))
 }
 
 fn distributed_calibration_fixture_identity(
@@ -1032,28 +1074,17 @@ impl VulkanRuntimeDistributedPlacementSession {
             .saturating_add(mounted.boundary_io.total_byte_capacity)
             .saturating_add(mounted.edge_io.total_byte_capacity)
             .saturating_add(mounted.stream_control_buffer.byte_capacity());
-        // A distributed activation has one physical backing allocation on its
-        // declared owner. Peer Vulkan buffers import that same allocation and
-        // must not be counted as duplicate capacity on every participant.
-        let mut resident_transient_bytes_by_device = logical_device_ids
-            .iter()
-            .map(|device_id| (device_id.clone(), 0usize))
-            .collect::<BTreeMap<_, _>>();
-        for allocation in &activation_plan.allocations {
-            let total = resident_transient_bytes_by_device
-                .get_mut(&allocation.owner_device_id)
-                .ok_or_else(|| {
-                    distributed_calibration_error_value(format!(
-                        "distributed activation allocation references unknown owner {:?}",
-                        allocation.owner_device_id,
-                    ))
-                })?;
-            *total = total.checked_add(allocation.byte_capacity).ok_or_else(|| {
-                distributed_calibration_error_value(
-                    "distributed activation byte accounting overflowed",
-                )
-            })?;
-        }
+        // A distributed activation has one physical backing allocation. It is
+        // charged to the owner for external device-local memory or to host
+        // memory for shared-host transport; imported peer views are aliases.
+        let (mut resident_transient_bytes_by_device, resident_host_transient_bytes) =
+            distributed_calibration_activation_backing_bytes(
+                &logical_device_ids,
+                activation_plan.route,
+                activation_plan.allocations.iter().map(|allocation| {
+                    (allocation.owner_device_id.as_str(), allocation.byte_capacity)
+                }),
+            )?;
         let owner_total = resident_transient_bytes_by_device
             .get_mut(&owner_device_id)
             .expect("distributed calibration owner was inserted");
@@ -1181,6 +1212,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             _parameter_pool: parameter_pool,
             resident_parameter_bytes_by_device,
             resident_transient_bytes_by_device,
+            resident_host_transient_bytes,
             activation_routes,
             dispatch_work,
             sampled_workload,
@@ -1436,6 +1468,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             _parameter_pool: parameter_pool,
             resident_parameter_bytes_by_device: _,
             resident_transient_bytes_by_device: _,
+            resident_host_transient_bytes: _,
             activation_routes: _,
             dispatch_work: _,
             sampled_workload: _,
@@ -1897,5 +1930,52 @@ mod runtime_distributed_placement_calibration_strategy_tests {
         let no_dispatches =
             distributed_calibration_execution_strategy(1, std::iter::empty()).unwrap_err();
         assert!(no_dispatches.to_string().contains("partitioned dispatch"));
+    }
+
+    #[test]
+    fn accounts_shared_activation_backing_on_its_actual_memory_tier() {
+        let devices = vec!["gpu-a".to_string(), "gpu-b".to_string()];
+        let allocations = [("gpu-a", 64usize), ("gpu-b", 32usize)];
+        let (shared_host_devices, shared_host_bytes) =
+            distributed_calibration_activation_backing_bytes(
+                &devices,
+                VulkanSharedResidentBufferRoute::SharedHost,
+                allocations,
+            )
+            .unwrap();
+        assert_eq!(shared_host_devices["gpu-a"], 0);
+        assert_eq!(shared_host_devices["gpu-b"], 0);
+        assert_eq!(shared_host_bytes, 96);
+
+        let (device_local, host_bytes) = distributed_calibration_activation_backing_bytes(
+            &devices,
+            VulkanSharedResidentBufferRoute::ExternalDeviceLocal,
+            allocations,
+        )
+        .unwrap();
+        assert_eq!(device_local["gpu-a"], 64);
+        assert_eq!(device_local["gpu-b"], 32);
+        assert_eq!(host_bytes, 0);
+    }
+
+    #[test]
+    fn rejects_invalid_activation_backing_accounting() {
+        let devices = vec!["gpu-a".to_string()];
+        assert!(
+            distributed_calibration_activation_backing_bytes(
+                &devices,
+                VulkanSharedResidentBufferRoute::SharedHost,
+                [("gpu-b", 1)],
+            )
+            .is_err(),
+        );
+        assert!(
+            distributed_calibration_activation_backing_bytes(
+                &devices,
+                VulkanSharedResidentBufferRoute::ExternalDeviceLocal,
+                [("gpu-a", 0)],
+            )
+            .is_err(),
+        );
     }
 }
