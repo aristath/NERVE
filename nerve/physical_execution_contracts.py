@@ -382,13 +382,14 @@ def build_kernel_physical_execution_contracts(
                 local_intermediates=[],
             )
         )
-        if len(stages) == 1:
+        distributed_phases = [phase for phase in phases if phase == "prefill"]
+        if len(stages) == 1 and distributed_phases:
             distributed_batch = _distributed_kernel_contract(
                 node=node,
                 circuit=circuit,
                 tensor_index=tensor_index,
                 artifacts=artifacts,
-                phases=phases,
+                phases=distributed_phases,
                 formats=batch_formats,
                 geometry=geometry,
                 workgroup_count_x=int(stages[0]["workgroup_count_x"]),

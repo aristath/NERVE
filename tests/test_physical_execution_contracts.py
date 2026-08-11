@@ -374,7 +374,7 @@ def test_compiler_emits_local_batch_and_legal_distributed_contracts(tmp_path: Pa
         }
     ]
     assert contracts[2]["phases"] == ["decode", "prefill"]
-    assert contracts[3]["phases"] == ["decode", "prefill"]
+    assert contracts[3]["phases"] == ["prefill"]
     assert contracts[3]["artifacts"] == contracts[2]["artifacts"]
     assert contracts[3]["execution_form"] == "replicated_input_partitioned_output"
     assert contracts[0]["artifacts"][0]["sha256"] == artifact_sha256(b"scalar spirv")
