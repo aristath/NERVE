@@ -16,6 +16,25 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
 
 ## Current evidence
 
+- The August 11 workstation failure was an AMD TTM LRU-list corruption reached
+  from kernel swapout during a long, near-capacity NERVE inference run; it was
+  not an application OOM or a Vulkan ring timeout. The runtime no longer lets
+  the 25 ms memory observer or an active allocation retry destroy Vulkan
+  backing. Dynamic expert and representation storage now uses heap-scaled,
+  retained slabs with independent logical allocation cohorts and coalescing
+  free ranges. Pressure recovery is a two-phase transaction: it first blocks
+  new store loads, drains existing loads, retires logical residency and updates
+  address tables while submission is legal; it then excludes submissions from
+  every NERVE logical device on that physical target, drains every registered
+  compute/transfer queue, and releases only fully inactive slabs. Shared
+  host-cache admission cannot reclaim another store's Vulkan allocation on an
+  active path. Exact sequential hardware-neutral tests cover observer
+  non-reclamation and hysteresis, pressure failure/settlement, physical queue
+  exclusion, slab sizing and free-range coalescing, logical-block versus
+  physical-slab eviction, and shared-cache fail-closed behavior. All-target
+  Vulkan/tokenizer compilation and formatting pass. No inference was rerun
+  after the crash; controlled live validation remains intentionally deferred
+  until it is explicitly authorized.
 - The accepted zero-load DeepSeek truth conversation is now 8.6600 decode tok/s
   and 8.7912 prefill tok/s. It followed three discarded complete conversations
   whose residency loads converged from 9,997 to 382 to zero; the measured fourth
@@ -692,6 +711,13 @@ warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
     restore every pre-workload VRAM reservation. Reach 30 decode tok/s, continue
     toward 50, and stop only when the attributed path has no material avoidable host
     round trip, GPU bubble, conversion, or unfused memory pass.
+
+    - Do not resume live inference after the August 11 TTM failure without
+      explicit authorization. The first authorized validation must record every
+      selected target's pre-run reservation, exercise retained-slab reuse and a
+      quiescent pressure boundary separately, stop on the first kernel/driver
+      anomaly, and prove both NERVE-acquired capacity release and preservation of
+      pre-existing allocations before any long benchmark is attempted.
 
 12. Perform a final adversarial review against `CONCEPT.md`. Compiled artifacts
     must remain self-contained and model-specific; compiler discovery, runtime
