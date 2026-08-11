@@ -396,6 +396,7 @@ fn mounted_three_device_fanout_uses_one_physical_source_and_publishes_every_edge
         import_count: 0,
         reference_count: 0,
         total_shared_byte_capacity: 0,
+        route: VulkanSharedResidentBufferRoute::SharedHost,
     };
     let mut distributed = VulkanDistributedActivationBuffers::allocate(&empty_plan, |device_id| {
         devices

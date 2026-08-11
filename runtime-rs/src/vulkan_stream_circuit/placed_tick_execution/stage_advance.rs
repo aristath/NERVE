@@ -157,7 +157,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     }) = slice.cursor.tick_plan.stages.get(
                         slice
                             .execution_plan
-                            .distributed_dispatch_group_at_stage(slice.cursor.next_stage_index)
+                            .physical_execution_island_at_stage(slice.cursor.next_stage_index)
                             .expect("every distributed dispatch belongs to a stage group")
                             .end_stage_index,
                     ) {

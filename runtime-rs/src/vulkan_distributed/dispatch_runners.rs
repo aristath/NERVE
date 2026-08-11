@@ -182,15 +182,15 @@ impl VulkanDistributedDispatchRunners {
         F: FnMut(&str) -> Result<&'a VulkanComputeDevice, E>,
         E: Display,
     {
-        let mut dispatches = Vec::with_capacity(execution_plan.dispatch_groups.len());
+        let mut dispatches = Vec::with_capacity(execution_plan.execution_islands.len());
         let mut shard_count = 0usize;
-        for planned_group in &execution_plan.dispatch_groups {
-            let leader = planned_group.leader();
-            let tail = planned_group.tail();
-            let owner_device = device_for(&planned_group.owner_device_id).map_err(|error| {
+        for planned_island in &execution_plan.execution_islands {
+            let leader = planned_island.leader();
+            let tail = planned_island.tail();
+            let owner_device = device_for(&planned_island.owner_device_id).map_err(|error| {
                 VulkanDistributedDispatchRunnerError(format!(
                     "failed to resolve distributed owner device {:?}: {error}",
-                    planned_group.owner_device_id
+                    planned_island.owner_device_id
                 ))
             })?;
             let mut shards = Vec::with_capacity(leader.shards.len());
@@ -202,13 +202,13 @@ impl VulkanDistributedDispatchRunners {
                         leader_shard.device_id
                     ))
                 })?;
-                let mut resident_dispatches = Vec::with_capacity(planned_group.dispatches.len());
-                let mut planned_shards = Vec::with_capacity(planned_group.dispatches.len());
-                for planned_dispatch in &planned_group.dispatches {
+                let mut resident_dispatches = Vec::with_capacity(planned_island.dispatches.len());
+                let mut planned_shards = Vec::with_capacity(planned_island.dispatches.len());
+                for planned_dispatch in &planned_island.dispatches {
                     let planned_shard =
                         planned_dispatch.shards.get(shard_index).ok_or_else(|| {
                             VulkanDistributedDispatchRunnerError(format!(
-                                "distributed group {}..{} has no shard {shard_index} for {}.{}",
+                                "physical execution island {}..{} has no shard {shard_index} for {}.{}",
                                 leader.dispatch_index,
                                 tail.dispatch_index,
                                 planned_dispatch.component_id,
@@ -217,7 +217,7 @@ impl VulkanDistributedDispatchRunners {
                         })?;
                     if planned_shard.device_id != leader_shard.device_id {
                         return Err(VulkanDistributedDispatchRunnerError(format!(
-                            "distributed group {}..{} changes shard {shard_index} device from {:?} to {:?}",
+                            "physical execution island {}..{} changes shard {shard_index} device from {:?} to {:?}",
                             leader.dispatch_index,
                             tail.dispatch_index,
                             leader_shard.device_id,
@@ -277,7 +277,7 @@ impl VulkanDistributedDispatchRunners {
                     feedback_sequence: None,
                 });
                 shard_count = shard_count
-                    .checked_add(planned_group.dispatches.len())
+                    .checked_add(planned_island.dispatches.len())
                     .ok_or_else(|| {
                         VulkanDistributedDispatchRunnerError(
                             "distributed dispatch shard count overflowed".to_string(),
@@ -288,11 +288,11 @@ impl VulkanDistributedDispatchRunners {
                 leader
                     .shards
                     .iter()
-                    .filter(|shard| shard.device_id != planned_group.owner_device_id)
+                    .filter(|shard| shard.device_id != planned_island.owner_device_id)
                     .count(),
             );
             for planned_shard in &leader.shards {
-                if planned_shard.device_id == planned_group.owner_device_id {
+                if planned_shard.device_id == planned_island.owner_device_id {
                     continue;
                 }
                 let helper_device = device_for(&planned_shard.device_id).map_err(|error| {
@@ -305,7 +305,7 @@ impl VulkanDistributedDispatchRunners {
                     VulkanDistributedQueueSynchronization::new(
                         owner_device,
                         helper_device,
-                        &planned_group.owner_device_id,
+                        &planned_island.owner_device_id,
                         &planned_shard.device_id,
                         &format!(
                             "distributed dispatch {}.{}",
@@ -316,7 +316,7 @@ impl VulkanDistributedDispatchRunners {
                 );
             }
             dispatches.push(VulkanDistributedDispatchRunner {
-                planned: planned_group.clone(),
+                planned: planned_island.clone(),
                 shards,
                 helper_synchronization,
                 dependency_clock: VulkanDistributedDependencyClock::new(),
@@ -341,11 +341,11 @@ impl VulkanDistributedDispatchRunners {
         })
     }
 
-    pub fn dispatch_group(
+    pub fn execution_island(
         &self,
         owner_device_id: &str,
         dispatch_index: usize,
-    ) -> Option<&VulkanDistributedDispatchGroup> {
+    ) -> Option<&VulkanPhysicalExecutionIslandPlan> {
         self.dispatches
             .iter()
             .find(|runner| {
@@ -360,7 +360,7 @@ impl VulkanDistributedDispatchRunners {
         owner_device_id: &str,
         dispatch_index: usize,
     ) -> Option<usize> {
-        self.dispatch_group(owner_device_id, dispatch_index)
+        self.execution_island(owner_device_id, dispatch_index)
             .map(|group| group.leader().dispatch_index)
     }
 
@@ -745,7 +745,7 @@ pub struct VulkanDistributedDispatchRun {
 }
 
 pub struct VulkanDistributedDispatchRunner {
-    pub planned: VulkanDistributedDispatchGroup,
+    pub planned: VulkanPhysicalExecutionIslandPlan,
     pub shards: Vec<VulkanDistributedDispatchShardRunner>,
     helper_synchronization: Vec<VulkanDistributedQueueSynchronization>,
     dependency_clock: VulkanDistributedDependencyClock,

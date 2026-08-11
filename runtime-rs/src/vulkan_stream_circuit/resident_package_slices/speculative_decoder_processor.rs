@@ -37,7 +37,7 @@ fn mount_speculative_decoder_device_slice(
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BoundDispatchPlan)?;
     let tick_plan = VulkanMountedPlacedStreamTickPlan::from_mounted_bound_plan(&mounted_bound);
     let execution_plan = VulkanMountedPlacedResidentStreamTickExecutionPlan::
-        from_tick_plan_with_distributed_dispatch_groups_and_demand(
+        from_tick_plan_with_physical_execution_islands_and_demand(
             device,
             &mounted,
             &mounted_bound,

@@ -108,7 +108,7 @@ impl VulkanComponentBatchExecutionScope {
         filtered
             .dispatches
             .retain(|dispatch| self.includes_component(&dispatch.component_id));
-        filtered.dispatch_groups.retain(|group| {
+        filtered.execution_islands.retain(|group| {
             let included = group
                 .dispatches
                 .iter()
@@ -116,7 +116,7 @@ impl VulkanComponentBatchExecutionScope {
                 .count();
             included == group.dispatches.len()
         });
-        if plan.dispatch_groups.iter().any(|group| {
+        if plan.execution_islands.iter().any(|group| {
             let included = group
                 .dispatches
                 .iter()

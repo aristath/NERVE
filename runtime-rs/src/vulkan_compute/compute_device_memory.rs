@@ -273,6 +273,20 @@ impl VulkanComputeDevice {
         )
     }
 
+    pub fn create_shared_resident_buffers_for_route(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+        route: VulkanSharedResidentBufferRoute,
+    ) -> Result<VulkanSharedResidentBufferSet, VulkanError> {
+        self.create_shared_resident_buffers_with_usage_for_route(
+            peer_devices,
+            byte_capacity,
+            resident_buffer_usage(),
+            route,
+        )
+    }
+
     pub fn create_shared_conditional_resident_buffers(
         &self,
         peer_devices: &[&VulkanComputeDevice],
@@ -338,6 +352,51 @@ impl VulkanComputeDevice {
             buffers,
             external_device_local_error: Some(external_device_local_error),
         })
+    }
+
+    fn create_shared_resident_buffers_with_usage_for_route(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+        usage: vk::BufferUsageFlags,
+        route: VulkanSharedResidentBufferRoute,
+    ) -> Result<VulkanSharedResidentBufferSet, VulkanError> {
+        match route {
+            VulkanSharedResidentBufferRoute::ExternalDeviceLocal => Ok(
+                VulkanSharedResidentBufferSet {
+                    route,
+                    buffers: self.create_shared_device_resident_buffers(
+                        peer_devices,
+                        byte_capacity,
+                        usage,
+                    )?,
+                    external_device_local_error: None,
+                },
+            ),
+            VulkanSharedResidentBufferRoute::SharedHost => {
+                let allocation = self.create_shared_host_allocation_with_usage(
+                    peer_devices,
+                    byte_capacity,
+                    usage,
+                )?;
+                let buffers = std::iter::once(self)
+                    .chain(peer_devices.iter().copied())
+                    .map(|device| {
+                        device
+                            .import_shared_host_buffer_with_usage(
+                                Arc::clone(&allocation),
+                                usage,
+                            )
+                            .map(Arc::new)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(VulkanSharedResidentBufferSet {
+                    route,
+                    buffers,
+                    external_device_local_error: None,
+                })
+            }
+        }
     }
 
     fn create_shared_device_resident_buffers(

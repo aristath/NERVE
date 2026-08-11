@@ -338,7 +338,7 @@ fn component_batch_execution_units(
     Ok(execution_units)
 }
 
-fn component_batch_execution_units_for_distributed_groups(
+fn component_batch_execution_units_for_physical_islands(
     dispatch_spans: &[VulkanComponentBatchDispatchSpan],
     distributed_group_leaders: &BTreeSet<usize>,
 ) -> Result<Vec<VulkanComponentBatchExecutionUnit>, VulkanError> {
@@ -1081,12 +1081,12 @@ impl VulkanResidentComponentBatchSliceRunner {
             .mount_commit_batches(device, &slice.mounted.buffers)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let distributed_group_leaders = distributed_execution_plan
-            .dispatch_groups
+            .execution_islands
             .iter()
             .filter(|group| group.owner_device_id == slice.device_id)
             .map(|group| group.leader().dispatch_index)
             .collect::<BTreeSet<_>>();
-        let execution_units = component_batch_execution_units_for_distributed_groups(
+        let execution_units = component_batch_execution_units_for_physical_islands(
             &dispatch_spans,
             &distributed_group_leaders,
         )

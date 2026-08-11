@@ -101,9 +101,16 @@ fn test_command_exists(command: &str) -> bool {
 
 #[cfg(test)]
 fn selected_test_vulkan_device() -> Result<VulkanComputeDevice, VulkanError> {
-    let physical_device_id = std::env::var("NERVE_TEST_VULKAN_DEVICE_UUID").map_err(|error| {
+    selected_test_vulkan_device_from_env("NERVE_TEST_VULKAN_DEVICE_UUID")
+}
+
+#[cfg(test)]
+fn selected_test_vulkan_device_from_env(
+    environment_name: &str,
+) -> Result<VulkanComputeDevice, VulkanError> {
+    let physical_device_id = std::env::var(environment_name).map_err(|error| {
         VulkanError(format!(
-            "NERVE_TEST_VULKAN_DEVICE_UUID must select an approved discrete AMD UUID: {error}"
+            "{environment_name} must select an explicit Vulkan UUID: {error}"
         ))
     })?;
     let encoded = physical_device_id.strip_prefix("vulkan-uuid:").ok_or_else(|| {
@@ -1456,36 +1463,29 @@ mod tests {
             eprintln!("skipping cross-device Vulkan test: no GLSL to SPIR-V compiler found");
             return;
         };
-        let (Some(owner_index), Some(worker_index)) = (
-            std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok()),
-            std::env::var("NERVE_TEST_VULKAN_SECONDARY_DEVICE_INDEX")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok()),
+        let (Ok(owner), Ok(worker)) = (
+            selected_test_vulkan_device_from_env("NERVE_TEST_VULKAN_DEVICE_UUID"),
+            selected_test_vulkan_device_from_env(
+                "NERVE_TEST_VULKAN_SECONDARY_DEVICE_UUID",
+            ),
         ) else {
             eprintln!("skipping cross-device Vulkan test: explicit device pair unset");
             return;
         };
-        assert_ne!(owner_index, worker_index);
-
-        let owner = VulkanComputeDevice::new_for_physical_device_index(owner_index).unwrap();
-        let worker = VulkanComputeDevice::new_for_physical_device_index(worker_index).unwrap();
+        assert_ne!(owner.physical_device_id(), worker.physical_device_id());
         assert!(owner.supports_opaque_fd_timeline_semaphores());
         assert!(worker.supports_opaque_fd_timeline_semaphores());
 
         let shared = owner
-            .create_shared_resident_buffers(&[&worker], 12)
+            .create_shared_resident_buffers_for_route(
+                &[&worker],
+                12,
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
             .unwrap();
         assert_eq!(shared.buffers.len(), 2);
-        match shared.route {
-            VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
-                assert!(shared.external_device_local_error.is_none());
-            }
-            VulkanSharedResidentBufferRoute::SharedHost => {
-                assert!(shared.external_device_local_error.is_some());
-            }
-        }
+        assert_eq!(shared.route, VulkanSharedResidentBufferRoute::SharedHost);
+        assert!(shared.external_device_local_error.is_none());
         let owner_buffer = &shared.buffers[0];
         let worker_buffer = &shared.buffers[1];
         assert!(owner_buffer.shares_storage_with(worker_buffer));

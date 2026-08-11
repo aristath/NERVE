@@ -135,28 +135,6 @@ For every numbered item below:
 
 ## Work queue
 
-### 2. Add a resolved physical execution-island plan
-
-- Keep the logical runtime graph and its standalone layer/node boundaries
-  intact. A physical island implements one node or a compatible connected
-  region without changing observable ports, state, duplication, bypass, or
-  rewiring semantics.
-- Replace the insufficient owner-plus-`component_shard_devices` description
-  with a resolved plan that records, per node instance or region:
-  - implementation contract;
-  - entry and exit targets;
-  - participant devices and roles;
-  - owner/coordinator;
-  - shard ranges or expert ownership;
-  - transport and synchronization routes;
-  - phase-specific execution schedule; and
-  - exact residency and transient-memory requirements.
-- TP participants are physical implementation roles, not new logical graph
-  nodes. Expert resources remain internal independently selectable groups, not
-  hundreds of peer layer components in the public graph.
-- Permit a decode and prefill schedule to differ while sharing parameter
-  residency when doing so does not remount tensors or invalidate stream state.
-
 ### 3. Make placement calibration safe for runtime consumption
 
 - Keep the existing placement artifact as evidence only until its schema

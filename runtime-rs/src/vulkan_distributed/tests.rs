@@ -38,7 +38,7 @@ mod tests {
 
         assert!(plan.device_ids.is_empty());
         assert!(plan.dispatches.is_empty());
-        assert!(plan.dispatch_groups.is_empty());
+        assert!(plan.execution_islands.is_empty());
         assert_eq!(plan.shared_input_byte_capacity, 0);
         assert_eq!(plan.shared_output_byte_capacity, 0);
         assert_eq!(plan.distributed_parameter_byte_count, 0);
@@ -69,6 +69,11 @@ mod tests {
         assert_eq!(plan.shared_output_byte_capacity, 24);
         assert_eq!(plan.storage_buffer_offset_alignment, 4);
         assert_eq!(plan.distributed_parameter_byte_count, 192);
+        assert_eq!(
+            plan.shared_activation_route,
+            VulkanSharedResidentBufferRoute::SharedHost,
+        );
+        assert_eq!(plan.execution_islands.len(), 1);
         let dispatch = &plan.dispatches[0];
         assert_eq!(dispatch.owner_device_id, "owner");
         assert_eq!(dispatch.row_alignment, 2);
@@ -111,6 +116,133 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(2, "gate", 32, 32), (3, "up", 32, 32)]
         );
+        let island = &plan.execution_islands[0];
+        assert_eq!(island.component_id, "component");
+        assert_eq!(island.phase_schedules.len(), 1);
+        assert_eq!(island.phase_schedules[0].phase, ExecutionPhase::Decode);
+        assert_eq!(island.entry_device_id, "owner");
+        assert_eq!(island.exit_device_id, "owner");
+        assert_eq!(island.owner_device_id, "owner");
+        assert_eq!(island.member_node_ids, ["ffn"]);
+        assert_eq!(island.contract_ids, [dispatch.physical_execution_contract_id.clone()]);
+        assert_eq!(island.implementation_digests, [dispatch.implementation_digest.clone()]);
+        assert_eq!(island.participants.len(), 4);
+        assert!(island.participants.iter().any(|participant| {
+            participant.device_id == "owner"
+                && participant
+                    .roles
+                    .contains(&VulkanPhysicalExecutionParticipantRole::Coordinator)
+                && participant
+                    .roles
+                    .contains(&VulkanPhysicalExecutionParticipantRole::ShardWorker)
+        }));
+        assert_eq!(island.shard_assignments.len(), 4);
+        assert_eq!(
+            island
+                .shard_assignments
+                .iter()
+                .map(|shard| shard.parameter_bytes)
+                .sum::<usize>(),
+            192,
+        );
+        assert!(island.transient_memory.iter().all(|requirement| {
+            requirement.fixed_byte_capacity == 0
+                && requirement.per_lane_byte_capacity > 0
+        }));
+        assert_eq!(island.transport_routes.len(), 6);
+        assert!(island.transport_routes.iter().all(|route| {
+            route.kind == VulkanPhysicalExecutionTransportKind::SharedHost
+        }));
+        assert_eq!(island.synchronization_routes.len(), 6);
+        assert!(island.synchronization_routes.iter().all(|route| {
+            route.kind == VulkanPhysicalExecutionSynchronizationKind::TimelineSemaphore
+        }));
+        assert_eq!(
+            island
+                .phase_schedules[0]
+                .steps
+                .iter()
+                .map(|step| step.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                VulkanPhysicalExecutionScheduleKind::PublishInputs,
+                VulkanPhysicalExecutionScheduleKind::ExecuteShards,
+                VulkanPhysicalExecutionScheduleKind::CollectOutputs,
+            ],
+        );
+        assert_eq!(
+            island
+                .residency
+                .iter()
+                .filter(|requirement| {
+                    requirement.kind
+                        == VulkanPhysicalExecutionResidencyKind::PermanentParameterShard
+                })
+                .map(|requirement| requirement.byte_capacity)
+                .sum::<usize>(),
+            192,
+        );
+    }
+
+    #[test]
+    fn resolved_island_rejects_unplanned_lazy_resource_residency() {
+        let mut dispatch = fixture_plan("row_major").dispatches.remove(0);
+        dispatch.has_lazy_resource_requirements = true;
+
+        let error = resolved_physical_execution_islands(
+            &[dispatch],
+            VulkanSharedResidentBufferRoute::SharedHost,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("without a resolved atomic residency plan"));
+    }
+
+    #[test]
+    fn resolved_island_preserves_edge_endpoints_and_owner_state() {
+        let mut dispatch = fixture_plan("row_major").dispatches.remove(0);
+        dispatch.input_activation.storage = VulkanDistributedActivationStorage::Edge {
+            edge_index: 3,
+            owner_device_id: "upstream".to_string(),
+        };
+        dispatch.output_activation.storage = VulkanDistributedActivationStorage::Edge {
+            edge_index: 4,
+            owner_device_id: "downstream".to_string(),
+        };
+        dispatch.owner_residency_requirements = vec![
+            VulkanPhysicalExecutionResidencyRequirement {
+                device_id: "owner".to_string(),
+                kind: VulkanPhysicalExecutionResidencyKind::OwnerState,
+                resource_id: "state:component:kv".to_string(),
+                byte_capacity: 4096,
+            },
+        ];
+
+        let islands = resolved_physical_execution_islands(
+            &[dispatch],
+            VulkanSharedResidentBufferRoute::ExternalDeviceLocal,
+        )
+        .unwrap();
+        let island = &islands[0];
+
+        assert_eq!(island.entry_device_id, "upstream");
+        assert_eq!(island.exit_device_id, "downstream");
+        assert!(island.transport_routes.iter().any(|route| {
+            route.source_device_id == "upstream"
+                && route.destination_device_id == "owner"
+        }));
+        assert!(island.transport_routes.iter().any(|route| {
+            route.source_device_id == "owner"
+                && route.destination_device_id == "downstream"
+        }));
+        assert!(island.residency.iter().any(|requirement| {
+            requirement.kind == VulkanPhysicalExecutionResidencyKind::OwnerState
+                && requirement.resource_id == "state:component:kv"
+                && requirement.byte_capacity == 4096
+        }));
+        assert!(island.transport_routes.iter().all(|route| {
+            route.kind == VulkanPhysicalExecutionTransportKind::ExternalDeviceLocal
+        }));
     }
 
     #[test]
@@ -467,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_only_adjacent_dataflow_compatible_expert_dispatches() {
+    fn islands_contain_only_adjacent_dataflow_compatible_expert_dispatches() {
         let mut producer = fixture_plan("row_major").dispatches.remove(0);
         producer.dispatch_index = 7;
         producer.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
@@ -479,35 +611,70 @@ mod tests {
         consumer.input_activation = producer.output_activation.clone();
         consumer.input_activation.binding = 0;
 
-        let groups = distributed_dispatch_groups(&[producer.clone(), consumer.clone()]);
+        let groups = resolved_physical_execution_islands(
+            &[producer.clone(), consumer.clone()],
+            VulkanSharedResidentBufferRoute::SharedHost,
+        )
+        .unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].dispatch_indices(), vec![7, 8]);
+        assert_eq!(
+            groups[0]
+                .transient_memory
+                .iter()
+                .filter(|requirement| {
+                    requirement.kind
+                        == VulkanPhysicalExecutionTransientMemoryKind::PrivateShardIntermediate
+                })
+                .count(),
+            producer.shards.len(),
+        );
 
         let mut non_adjacent = consumer.clone();
         non_adjacent.dispatch_index = 9;
         assert_eq!(
-            distributed_dispatch_groups(&[producer.clone(), non_adjacent]).len(),
+            resolved_physical_execution_islands(
+                &[producer.clone(), non_adjacent],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+                .unwrap()
+                .len(),
             2
         );
 
         let mut different_dataflow = consumer.clone();
         different_dataflow.input_activation.signal_id = "another-signal".to_string();
         assert_eq!(
-            distributed_dispatch_groups(&[producer.clone(), different_dataflow]).len(),
+            resolved_physical_execution_islands(
+                &[producer.clone(), different_dataflow],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+                .unwrap()
+                .len(),
             2
         );
 
         let mut different_shards = consumer.clone();
         different_shards.shards[1].row_start += 1;
         assert_eq!(
-            distributed_dispatch_groups(&[producer.clone(), different_shards]).len(),
+            resolved_physical_execution_islands(
+                &[producer.clone(), different_shards],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+                .unwrap()
+                .len(),
             2
         );
 
         let mut row_distributed = consumer;
         row_distributed.distribution = VulkanDistributedDispatchDistribution::OutputRows;
         assert_eq!(
-            distributed_dispatch_groups(&[producer, row_distributed]).len(),
+            resolved_physical_execution_islands(
+                &[producer, row_distributed],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+                .unwrap()
+                .len(),
             2
         );
     }

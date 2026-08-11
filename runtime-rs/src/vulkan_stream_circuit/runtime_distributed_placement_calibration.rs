@@ -556,12 +556,12 @@ impl VulkanRuntimeDistributedPlacementSession {
             .and_then(|_| mounted.buffers.apply_clone_state_policies())
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
-        let distributed_groups = distributed_execution_plan
-            .dispatch_groups
+        let physical_execution_islands = distributed_execution_plan
+            .execution_islands
             .iter()
-            .map(VulkanDistributedDispatchGroup::dispatch_indices)
+            .map(VulkanPhysicalExecutionIslandPlan::dispatch_indices)
             .collect::<Vec<_>>();
-        let replaced_parameter_dispatches = distributed_groups
+        let replaced_parameter_dispatches = physical_execution_islands
             .iter()
             .flatten()
             .copied()
@@ -584,13 +584,13 @@ impl VulkanRuntimeDistributedPlacementSession {
         let tick_plan = distributed_calibration_dispatch_tick_plan(&mounted_bound);
         let execution_plan =
             VulkanMountedPlacedResidentStreamTickExecutionPlan::
-                from_tick_plan_with_distributed_dispatch_groups_and_demand(
+                from_tick_plan_with_physical_execution_islands_and_demand(
                     owner_device,
                     &mounted,
                     &mounted_bound,
                     targeted.slice.loaded_manifest(),
                     tick_plan,
-                    &distributed_groups,
+                    &physical_execution_islands,
                     targeted.demand_context.as_ref().map(|_| {
                         targeted.slice.physical_residency_schedule()
                     }),

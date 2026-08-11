@@ -10,6 +10,86 @@ struct ContractParameterSlice<'a> {
     logical_elements_per_index: usize,
 }
 
+fn resolved_owner_residency_requirements(
+    owner_device_id: &str,
+    dispatch: &VulkanPreparedDispatch,
+) -> Result<Vec<VulkanPhysicalExecutionResidencyRequirement>, VulkanDistributedPlanError> {
+    let mut requirements = BTreeMap::<
+        (VulkanPhysicalExecutionResidencyKind, String),
+        usize,
+    >::new();
+    for descriptor in &dispatch.descriptors {
+        let resolved = match &descriptor.resource {
+            VulkanDescriptorResourceAddress::RuntimeControl {
+                runtime_source,
+                byte_capacity,
+            } => Some((
+                VulkanPhysicalExecutionResidencyKind::OwnerControl,
+                format!("runtime:{runtime_source}"),
+                *byte_capacity,
+            )),
+            VulkanDescriptorResourceAddress::StateBuffer {
+                component_id,
+                state_id,
+                byte_capacity,
+                ..
+            }
+            | VulkanDescriptorResourceAddress::StateView {
+                component_id,
+                state_id,
+                byte_capacity,
+                ..
+            } => Some((
+                VulkanPhysicalExecutionResidencyKind::OwnerState,
+                format!("state:{component_id}:{state_id}"),
+                *byte_capacity,
+            )),
+            VulkanDescriptorResourceAddress::SelectionTelemetry {
+                component_id,
+                node_id,
+                domain_id,
+                byte_capacity,
+                ..
+            } => Some((
+                VulkanPhysicalExecutionResidencyKind::OwnerSelectionTelemetry,
+                format!("selection:{component_id}:{node_id}:{domain_id}"),
+                *byte_capacity,
+            )),
+            VulkanDescriptorResourceAddress::BoundaryInput { .. }
+            | VulkanDescriptorResourceAddress::BoundaryOutput { .. }
+            | VulkanDescriptorResourceAddress::PermanentParameter { .. }
+            | VulkanDescriptorResourceAddress::DynamicResourceAddressTable { .. }
+            | VulkanDescriptorResourceAddress::DynamicResourceParameterSlots { .. }
+            | VulkanDescriptorResourceAddress::ActivationSlot { .. } => None,
+        };
+        let Some((kind, resource_id, byte_capacity)) = resolved else {
+            continue;
+        };
+        let key = (kind, resource_id.clone());
+        if let Some(existing) = requirements.insert(key, byte_capacity)
+            && existing != byte_capacity
+        {
+            return Err(dispatch_error(
+                dispatch,
+                format!(
+                    "resource {resource_id:?} has conflicting capacities {existing} and {byte_capacity}"
+                ),
+            ));
+        }
+    }
+    Ok(requirements
+        .into_iter()
+        .map(|((kind, resource_id), byte_capacity)| {
+            VulkanPhysicalExecutionResidencyRequirement {
+                device_id: owner_device_id.to_string(),
+                kind,
+                resource_id,
+                byte_capacity,
+            }
+        })
+        .collect())
+}
+
 fn select_distributed_contract<'a>(
     dispatch: &'a VulkanPreparedDispatch,
     artifact: &crate::vulkan_stream_circuit::VulkanReusableKernelArtifact,
@@ -348,6 +428,16 @@ fn plan_contract_dispatch(
         component_id: dispatch.component_id.clone(),
         node_id: dispatch.node_id.clone(),
         reusable_family_id: dispatch.reusable_family_id.clone(),
+        physical_execution_contract_id: contract.contract_id.clone(),
+        implementation_digest: contract.implementation_digest.clone(),
+        contract_member_node_ids: contract.member_node_ids.clone(),
+        has_lazy_resource_requirements: contract.resources.iter().any(|resource| {
+            resource.kind == nerve_execution_contracts::ResourceKind::LazyResource
+        }),
+        owner_residency_requirements: resolved_owner_residency_requirements(
+            owner_device_id,
+            dispatch,
+        )?,
         input_byte_capacity,
         output_byte_capacity: output_activation.signal_byte_capacity,
         output_rows: logical_extent,

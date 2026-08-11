@@ -97,7 +97,7 @@ fn distributed_component_batch_private_activation_specs(
     VulkanDistributedComponentBatchPrivateActivationSpec,
 > {
     let mut specs = BTreeMap::new();
-    for group in &execution_plan.dispatch_groups {
+    for group in &execution_plan.execution_islands {
         for pair in group.dispatches.windows(2) {
             let producer = &pair[0];
             let consumer = &pair[1];
@@ -139,7 +139,7 @@ fn distributed_component_batch_private_activation_specs(
 }
 
 struct VulkanDistributedComponentBatchDispatchRunner {
-    planned: VulkanDistributedDispatchGroup,
+    planned: VulkanPhysicalExecutionIslandPlan,
     shards: Vec<VulkanDistributedComponentBatchShardRunner>,
     helper_synchronization: Vec<VulkanDistributedQueueSynchronization>,
 }
@@ -657,11 +657,20 @@ impl VulkanDistributedComponentBatchRunners {
                     sequence_catalog: RefCell::new(BTreeMap::new()),
                 });
             }
+            let planned_island =
+                resolved_physical_execution_islands(
+                    std::slice::from_ref(planned),
+                    execution_plan.shared_activation_route,
+                )
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            error.to_string(),
+                        ))
+                    })?
+                    .pop()
+                    .expect("one distributed dispatch resolves to one physical island");
             dispatches.push(VulkanDistributedComponentBatchDispatchRunner {
-                planned: VulkanDistributedDispatchGroup {
-                    owner_device_id: planned.owner_device_id.clone(),
-                    dispatches: vec![planned.clone()],
-                },
+                planned: planned_island,
                 shards,
                 helper_synchronization: Vec::new(),
             });
@@ -676,9 +685,9 @@ impl VulkanDistributedComponentBatchRunners {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let mut grouped_dispatches = Vec::with_capacity(execution_plan.dispatch_groups.len());
-        for planned_group in &execution_plan.dispatch_groups {
-            let mut members = planned_group
+        let mut island_dispatches = Vec::with_capacity(execution_plan.execution_islands.len());
+        for planned_island in &execution_plan.execution_islands {
+            let mut members = planned_island
                 .dispatches
                 .iter()
                 .map(|planned| {
@@ -700,8 +709,8 @@ impl VulkanDistributedComponentBatchRunners {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                         VulkanError(format!(
                             "distributed component batch group {}..{} changes shard count",
-                            planned_group.leader().dispatch_index,
-                            planned_group.tail().dispatch_index
+                            planned_island.leader().dispatch_index,
+                            planned_island.tail().dispatch_index
                         )),
                     ));
                 }
@@ -713,18 +722,18 @@ impl VulkanDistributedComponentBatchRunners {
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 }
             }
-            leader_runner.planned = planned_group.clone();
+            leader_runner.planned = planned_island.clone();
             let owner = devices
-                .get(&planned_group.owner_device_id)
+                .get(&planned_island.owner_device_id)
                 .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                        device_id: planned_group.owner_device_id.clone(),
+                        device_id: planned_island.owner_device_id.clone(),
                     }
                 })?;
             leader_runner.helper_synchronization = leader_runner
                 .shards
                 .iter()
-                .filter(|shard| shard.device_id != planned_group.owner_device_id)
+                .filter(|shard| shard.device_id != planned_island.owner_device_id)
                 .map(|shard| {
                     let helper = devices.get(&shard.device_id).ok_or_else(|| {
                         VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
@@ -734,18 +743,18 @@ impl VulkanDistributedComponentBatchRunners {
                     VulkanDistributedQueueSynchronization::new(
                         owner,
                         helper,
-                        &planned_group.owner_device_id,
+                        &planned_island.owner_device_id,
                         &shard.device_id,
                         &format!(
                             "distributed component batch {}.{}",
-                            planned_group.leader().component_id,
-                            planned_group.leader().node_id
+                            planned_island.leader().component_id,
+                            planned_island.leader().node_id
                         ),
                     )
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            grouped_dispatches.push(leader_runner);
+            island_dispatches.push(leader_runner);
         }
         if !dispatches_by_key.is_empty() {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
@@ -755,7 +764,7 @@ impl VulkanDistributedComponentBatchRunners {
             ));
         }
         Ok(Self {
-            dispatches: grouped_dispatches,
+            dispatches: island_dispatches,
             dependency_clock: VulkanDistributedDependencyClock::new(),
             _private_activation_buffers: private_activation_buffers,
         })

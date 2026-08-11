@@ -45,7 +45,7 @@ fn run_fixture_layer_00_causal_batch(
         VulkanMountedPlacedStreamTickPlan::from_mounted_bound_plan(&mounted_bound);
     let resident_execution_plan =
         VulkanMountedPlacedResidentStreamTickExecutionPlan::
-            from_tick_plan_with_distributed_dispatch_groups(
+            from_tick_plan_with_physical_execution_islands(
                 &device,
                 &mounted,
                 &mounted_bound,
@@ -75,7 +75,8 @@ fn run_fixture_layer_00_causal_batch(
         device_ids: Vec::new(),
         storage_buffer_offset_alignment: 256,
         dispatches: Vec::new(),
-        dispatch_groups: Vec::new(),
+        execution_islands: Vec::new(),
+        shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
         shared_input_byte_capacity: 0,
         shared_output_byte_capacity: 0,
         distributed_parameter_byte_count: 0,

@@ -34,7 +34,8 @@ pub struct VulkanDistributedExecutionPlan {
     pub device_ids: Vec<String>,
     pub storage_buffer_offset_alignment: usize,
     pub dispatches: Vec<VulkanDistributedDispatchPlan>,
-    pub dispatch_groups: Vec<VulkanDistributedDispatchGroup>,
+    pub execution_islands: Vec<VulkanPhysicalExecutionIslandPlan>,
+    pub shared_activation_route: VulkanSharedResidentBufferRoute,
     pub shared_input_byte_capacity: usize,
     pub shared_output_byte_capacity: usize,
     pub distributed_parameter_byte_count: usize,
@@ -169,12 +170,15 @@ impl VulkanDistributedExecutionPlan {
             )));
         }
 
-        let dispatch_groups = distributed_dispatch_groups(&dispatches);
+        let shared_activation_route = VulkanSharedResidentBufferRoute::SharedHost;
+        let execution_islands =
+            resolved_physical_execution_islands(&dispatches, shared_activation_route)?;
         Ok(Self {
             device_ids: device_ids.into_iter().collect(),
             storage_buffer_offset_alignment,
             dispatches,
-            dispatch_groups,
+            execution_islands,
+            shared_activation_route,
             shared_input_byte_capacity,
             shared_output_byte_capacity,
             distributed_parameter_byte_count,
@@ -310,12 +314,14 @@ fn sampled_distributed_execution_plan(
                 })
         },
     )?;
-    let dispatch_groups = distributed_dispatch_groups(&dispatches);
+    let execution_islands =
+        resolved_physical_execution_islands(&dispatches, source.shared_activation_route)?;
     Ok(VulkanDistributedExecutionPlan {
         device_ids: participant_device_ids.to_vec(),
         storage_buffer_offset_alignment: source.storage_buffer_offset_alignment,
         dispatches,
-        dispatch_groups,
+        execution_islands,
+        shared_activation_route: source.shared_activation_route,
         shared_input_byte_capacity: source.shared_input_byte_capacity,
         shared_output_byte_capacity: source.shared_output_byte_capacity,
         distributed_parameter_byte_count,
@@ -582,12 +588,127 @@ fn sampled_distributed_dispatch_shard(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VulkanDistributedDispatchGroup {
+pub struct VulkanPhysicalExecutionIslandPlan {
+    pub island_id: String,
+    pub component_id: String,
+    pub member_node_ids: Vec<String>,
+    pub contract_ids: Vec<String>,
+    pub implementation_digests: Vec<String>,
+    pub phase_schedules: Vec<VulkanPhysicalExecutionPhaseSchedule>,
+    pub entry_device_id: String,
+    pub exit_device_id: String,
     pub owner_device_id: String,
+    pub participants: Vec<VulkanPhysicalExecutionParticipant>,
+    pub shard_assignments: Vec<VulkanPhysicalExecutionShardAssignment>,
+    pub transport_routes: Vec<VulkanPhysicalExecutionTransportRoute>,
+    pub synchronization_routes: Vec<VulkanPhysicalExecutionSynchronizationRoute>,
+    pub residency: Vec<VulkanPhysicalExecutionResidencyRequirement>,
+    pub transient_memory: Vec<VulkanPhysicalExecutionTransientMemoryRequirement>,
     pub dispatches: Vec<VulkanDistributedDispatchPlan>,
 }
 
-impl VulkanDistributedDispatchGroup {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VulkanPhysicalExecutionParticipantRole {
+    Coordinator,
+    ShardWorker,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanPhysicalExecutionParticipant {
+    pub device_id: String,
+    pub roles: BTreeSet<VulkanPhysicalExecutionParticipantRole>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanPhysicalExecutionShardAssignment {
+    pub dispatch_index: usize,
+    pub node_id: String,
+    pub device_id: String,
+    pub distribution: VulkanDistributedDispatchDistribution,
+    pub logical_start: usize,
+    pub logical_count: usize,
+    pub parameter_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VulkanPhysicalExecutionTransportKind {
+    ExternalDeviceLocal,
+    SharedHost,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VulkanPhysicalExecutionTransportRoute {
+    pub source_device_id: String,
+    pub destination_device_id: String,
+    pub byte_capacity: usize,
+    pub kind: VulkanPhysicalExecutionTransportKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VulkanPhysicalExecutionSynchronizationKind {
+    TimelineSemaphore,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VulkanPhysicalExecutionSynchronizationRoute {
+    pub source_device_id: String,
+    pub destination_device_id: String,
+    pub kind: VulkanPhysicalExecutionSynchronizationKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VulkanPhysicalExecutionScheduleKind {
+    PublishInputs,
+    ExecuteShards,
+    CollectOutputs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanPhysicalExecutionScheduleStep {
+    pub ordinal: usize,
+    pub dispatch_index: usize,
+    pub kind: VulkanPhysicalExecutionScheduleKind,
+    pub device_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanPhysicalExecutionPhaseSchedule {
+    pub phase: nerve_execution_contracts::ExecutionPhase,
+    pub steps: Vec<VulkanPhysicalExecutionScheduleStep>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VulkanPhysicalExecutionResidencyKind {
+    PermanentParameterShard,
+    OwnerState,
+    OwnerControl,
+    OwnerSelectionTelemetry,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanPhysicalExecutionResidencyRequirement {
+    pub device_id: String,
+    pub kind: VulkanPhysicalExecutionResidencyKind,
+    pub resource_id: String,
+    pub byte_capacity: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VulkanPhysicalExecutionTransientMemoryKind {
+    SharedActivationAllocation,
+    PrivateShardIntermediate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanPhysicalExecutionTransientMemoryRequirement {
+    pub allocation_device_id: String,
+    pub kind: VulkanPhysicalExecutionTransientMemoryKind,
+    pub resource_id: String,
+    pub fixed_byte_capacity: usize,
+    pub per_lane_byte_capacity: usize,
+}
+
+impl VulkanPhysicalExecutionIslandPlan {
     pub fn leader(&self) -> &VulkanDistributedDispatchPlan {
         self.dispatches
             .first()
@@ -614,23 +735,379 @@ impl VulkanDistributedDispatchGroup {
     }
 }
 
-fn distributed_dispatch_groups(
+pub(crate) fn resolved_physical_execution_islands(
     dispatches: &[VulkanDistributedDispatchPlan],
-) -> Vec<VulkanDistributedDispatchGroup> {
-    let mut groups = Vec::<VulkanDistributedDispatchGroup>::new();
+    shared_activation_route: VulkanSharedResidentBufferRoute,
+) -> Result<Vec<VulkanPhysicalExecutionIslandPlan>, VulkanDistributedPlanError> {
+    let mut groups = Vec::<Vec<VulkanDistributedDispatchPlan>>::new();
     for dispatch in dispatches {
         if let Some(group) = groups.last_mut()
-            && distributed_dispatches_can_share_sequence(group.tail(), dispatch)
+            && distributed_dispatches_can_share_sequence(
+                group.last().expect("physical execution islands are never empty"),
+                dispatch,
+            )
         {
-            group.dispatches.push(dispatch.clone());
+            group.push(dispatch.clone());
         } else {
-            groups.push(VulkanDistributedDispatchGroup {
-                owner_device_id: dispatch.owner_device_id.clone(),
-                dispatches: vec![dispatch.clone()],
-            });
+            groups.push(vec![dispatch.clone()]);
         }
     }
     groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, dispatches)| {
+            resolved_physical_execution_island(index, dispatches, shared_activation_route)
+        })
+        .collect()
+}
+
+fn resolved_physical_execution_island(
+    island_index: usize,
+    dispatches: Vec<VulkanDistributedDispatchPlan>,
+    shared_activation_route: VulkanSharedResidentBufferRoute,
+) -> Result<VulkanPhysicalExecutionIslandPlan, VulkanDistributedPlanError> {
+    let Some(first) = dispatches.first() else {
+        return Err(VulkanDistributedPlanError(
+            "physical execution island must not be empty".to_string(),
+        ));
+    };
+    let owner_device_id = first.owner_device_id.clone();
+    let component_id = first.component_id.clone();
+    if dispatches.iter().any(|dispatch| {
+        dispatch.owner_device_id != owner_device_id || dispatch.component_id != component_id
+    }) {
+        return Err(VulkanDistributedPlanError(
+            "physical execution island crosses an owner or logical component boundary".to_string(),
+        ));
+    }
+    if dispatches.iter().any(|dispatch| {
+        dispatch.has_lazy_resource_requirements
+    }) {
+        return Err(VulkanDistributedPlanError(format!(
+            "physical execution island for component {component_id:?} contains lazy resources without a resolved atomic residency plan",
+        )));
+    }
+
+    let mut participant_roles = BTreeMap::<
+        String,
+        BTreeSet<VulkanPhysicalExecutionParticipantRole>,
+    >::new();
+    participant_roles
+        .entry(owner_device_id.clone())
+        .or_default()
+        .insert(VulkanPhysicalExecutionParticipantRole::Coordinator);
+    let mut shard_assignments = Vec::new();
+    let mut parameter_bytes_by_device = BTreeMap::<String, usize>::new();
+    let mut transport_routes = BTreeSet::new();
+    let mut synchronization_routes = BTreeSet::new();
+    let mut schedule = Vec::new();
+    let mut member_node_ids = Vec::new();
+    let mut contract_ids = Vec::new();
+    let mut implementation_digests = Vec::new();
+    let mut shared_activation_allocations = BTreeMap::<
+        (String, VulkanDistributedActivationStorage, String, usize),
+        usize,
+    >::new();
+    let mut private_intermediate_allocations =
+        BTreeMap::<(String, String, usize), usize>::new();
+    let mut owner_residency = BTreeMap::<
+        (String, VulkanPhysicalExecutionResidencyKind, String),
+        usize,
+    >::new();
+
+    for (dispatch_offset, dispatch) in dispatches.iter().enumerate() {
+        for node_id in &dispatch.contract_member_node_ids {
+            if !member_node_ids.contains(node_id) {
+                member_node_ids.push(node_id.clone());
+            }
+        }
+        let contract_id = &dispatch.physical_execution_contract_id;
+        if !contract_ids.contains(contract_id) {
+            contract_ids.push(contract_id.clone());
+        }
+        let implementation_digest = &dispatch.implementation_digest;
+        if !implementation_digests.contains(implementation_digest) {
+            implementation_digests.push(implementation_digest.clone());
+        }
+        for requirement in &dispatch.owner_residency_requirements {
+            let key = (
+                requirement.device_id.clone(),
+                requirement.kind,
+                requirement.resource_id.clone(),
+            );
+            if let Some(existing) = owner_residency.insert(key, requirement.byte_capacity)
+                && existing != requirement.byte_capacity
+            {
+                return Err(VulkanDistributedPlanError(format!(
+                    "physical execution island resource {:?} has conflicting capacities {existing} and {}",
+                    requirement.resource_id,
+                    requirement.byte_capacity,
+                )));
+            }
+        }
+        for activation in std::iter::once(&dispatch.input_activation)
+            .chain(&dispatch.auxiliary_input_activations)
+            .chain(std::iter::once(&dispatch.output_activation))
+        {
+            let allocation_device_id = distributed_activation_owner_device_id(
+                &dispatch.owner_device_id,
+                activation,
+            );
+            let key = (
+                allocation_device_id,
+                activation.storage.clone(),
+                activation.component_id.clone(),
+                activation.slot,
+            );
+            if let Some(existing) = shared_activation_allocations.insert(
+                key,
+                activation.byte_capacity,
+            ) && existing != activation.byte_capacity
+            {
+                return Err(VulkanDistributedPlanError(format!(
+                    "physical execution island activation {}.slot_{} has conflicting capacities {existing} and {}",
+                    activation.component_id,
+                    activation.slot,
+                    activation.byte_capacity,
+                )));
+            }
+        }
+
+        let mut worker_device_ids = Vec::new();
+        for shard in &dispatch.shards {
+            participant_roles
+                .entry(shard.device_id.clone())
+                .or_default()
+                .insert(VulkanPhysicalExecutionParticipantRole::ShardWorker);
+            if !worker_device_ids.contains(&shard.device_id) {
+                worker_device_ids.push(shard.device_id.clone());
+            }
+            let parameter_bytes = shard.parameters.iter().try_fold(
+                0usize,
+                |total, parameter| {
+                    total.checked_add(parameter.byte_count).ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "physical execution shard parameter bytes overflowed".to_string(),
+                        )
+                    })
+                },
+            )?;
+            let entry = parameter_bytes_by_device
+                .entry(shard.device_id.clone())
+                .or_default();
+            *entry = entry.checked_add(parameter_bytes).ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "physical execution participant parameter bytes overflowed".to_string(),
+                )
+            })?;
+            shard_assignments.push(VulkanPhysicalExecutionShardAssignment {
+                dispatch_index: dispatch.dispatch_index,
+                node_id: dispatch.node_id.clone(),
+                device_id: shard.device_id.clone(),
+                distribution: dispatch.distribution,
+                logical_start: shard.row_start,
+                logical_count: shard.row_count,
+                parameter_bytes,
+            });
+            if shard.device_id != owner_device_id {
+                synchronization_routes.insert(VulkanPhysicalExecutionSynchronizationRoute {
+                    source_device_id: owner_device_id.clone(),
+                    destination_device_id: shard.device_id.clone(),
+                    kind: VulkanPhysicalExecutionSynchronizationKind::TimelineSemaphore,
+                });
+                synchronization_routes.insert(VulkanPhysicalExecutionSynchronizationRoute {
+                    source_device_id: shard.device_id.clone(),
+                    destination_device_id: owner_device_id.clone(),
+                    kind: VulkanPhysicalExecutionSynchronizationKind::TimelineSemaphore,
+                });
+            }
+        }
+        if dispatch_offset == 0 {
+            schedule.push(VulkanPhysicalExecutionScheduleStep {
+                ordinal: schedule.len(),
+                dispatch_index: dispatch.dispatch_index,
+                kind: VulkanPhysicalExecutionScheduleKind::PublishInputs,
+                device_ids: worker_device_ids.clone(),
+            });
+        }
+        schedule.push(VulkanPhysicalExecutionScheduleStep {
+            ordinal: schedule.len(),
+            dispatch_index: dispatch.dispatch_index,
+            kind: VulkanPhysicalExecutionScheduleKind::ExecuteShards,
+            device_ids: worker_device_ids.clone(),
+        });
+        if dispatch_offset + 1 == dispatches.len() {
+            schedule.push(VulkanPhysicalExecutionScheduleStep {
+                ordinal: schedule.len(),
+                dispatch_index: dispatch.dispatch_index,
+                kind: VulkanPhysicalExecutionScheduleKind::CollectOutputs,
+                device_ids: vec![owner_device_id.clone()],
+            });
+        }
+    }
+
+    let participants = participant_roles
+        .into_iter()
+        .map(|(device_id, roles)| VulkanPhysicalExecutionParticipant { device_id, roles })
+        .collect::<Vec<_>>();
+    let entry_device_id = distributed_activation_owner_device_id(
+        &owner_device_id,
+        &first.input_activation,
+    );
+    let tail = dispatches
+        .last()
+        .expect("physical execution island was checked above");
+    let exit_device_id =
+        distributed_activation_owner_device_id(&owner_device_id, &tail.output_activation);
+    if let Some(collect) = schedule.iter_mut().rev().find(|step| {
+        step.kind == VulkanPhysicalExecutionScheduleKind::CollectOutputs
+    }) {
+        collect.device_ids = vec![exit_device_id.clone()];
+    }
+    for participant in &participants {
+        if participant.device_id != entry_device_id {
+            transport_routes.insert(VulkanPhysicalExecutionTransportRoute {
+                source_device_id: entry_device_id.clone(),
+                destination_device_id: participant.device_id.clone(),
+                byte_capacity: first.input_byte_capacity,
+                kind: physical_execution_transport_kind(shared_activation_route),
+            });
+        }
+        if participant.device_id != exit_device_id {
+            transport_routes.insert(VulkanPhysicalExecutionTransportRoute {
+                source_device_id: participant.device_id.clone(),
+                destination_device_id: exit_device_id.clone(),
+                byte_capacity: tail.output_byte_capacity,
+                kind: physical_execution_transport_kind(shared_activation_route),
+            });
+        }
+    }
+    let mut residency = parameter_bytes_by_device
+        .into_iter()
+        .map(|(device_id, byte_capacity)| VulkanPhysicalExecutionResidencyRequirement {
+            device_id,
+            kind: VulkanPhysicalExecutionResidencyKind::PermanentParameterShard,
+            resource_id: "parameter_shards".to_string(),
+            byte_capacity,
+        })
+        .collect::<Vec<_>>();
+    residency.extend(owner_residency.into_iter().map(
+        |((device_id, kind, resource_id), byte_capacity)| {
+            VulkanPhysicalExecutionResidencyRequirement {
+                device_id,
+                kind,
+                resource_id,
+                byte_capacity,
+            }
+        },
+    ));
+    for pair in dispatches.windows(2) {
+        let producer = &pair[0];
+        let consumer = &pair[1];
+        if producer.output_activation.component_id == consumer.input_activation.component_id
+            && producer.output_activation.slot == consumer.input_activation.slot
+            && producer.output_activation.signal_id == consumer.input_activation.signal_id
+        {
+            for shard in &producer.shards {
+                let key = (
+                    shard.device_id.clone(),
+                    producer.output_activation.component_id.clone(),
+                    producer.output_activation.slot,
+                );
+                if let Some(existing) = private_intermediate_allocations.insert(
+                    key,
+                    producer.output_activation.signal_byte_capacity,
+                ) && existing != producer.output_activation.signal_byte_capacity
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "physical execution private intermediate {}.slot_{} has conflicting capacities {existing} and {}",
+                        producer.output_activation.component_id,
+                        producer.output_activation.slot,
+                        producer.output_activation.signal_byte_capacity,
+                    )));
+                }
+            }
+        }
+    }
+    let mut transient_memory = shared_activation_allocations
+        .into_iter()
+        .map(
+            |((allocation_device_id, storage, component_id, slot), per_lane_byte_capacity)| {
+                VulkanPhysicalExecutionTransientMemoryRequirement {
+                    allocation_device_id,
+                    kind: VulkanPhysicalExecutionTransientMemoryKind::SharedActivationAllocation,
+                    resource_id: format!("activation:{storage:?}:{component_id}:slot_{slot}"),
+                    fixed_byte_capacity: 0,
+                    per_lane_byte_capacity,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    transient_memory.extend(private_intermediate_allocations.into_iter().map(
+        |((allocation_device_id, component_id, slot), per_lane_byte_capacity)| {
+            VulkanPhysicalExecutionTransientMemoryRequirement {
+                allocation_device_id,
+                kind: VulkanPhysicalExecutionTransientMemoryKind::PrivateShardIntermediate,
+                resource_id: format!("private_activation:{component_id}:slot_{slot}"),
+                fixed_byte_capacity: 0,
+                per_lane_byte_capacity,
+            }
+        },
+    ));
+    let tail_dispatch_index = tail.dispatch_index;
+    Ok(VulkanPhysicalExecutionIslandPlan {
+        island_id: format!(
+            "{component_id}:{}-{tail_dispatch_index}:island_{island_index}",
+            first.dispatch_index,
+        ),
+        component_id,
+        member_node_ids,
+        contract_ids,
+        implementation_digests,
+        phase_schedules: vec![VulkanPhysicalExecutionPhaseSchedule {
+            phase: nerve_execution_contracts::ExecutionPhase::Decode,
+            steps: schedule,
+        }],
+        entry_device_id,
+        exit_device_id,
+        owner_device_id,
+        participants,
+        shard_assignments,
+        transport_routes: transport_routes.into_iter().collect(),
+        synchronization_routes: synchronization_routes.into_iter().collect(),
+        residency,
+        transient_memory,
+        dispatches,
+    })
+}
+
+fn physical_execution_transport_kind(
+    route: VulkanSharedResidentBufferRoute,
+) -> VulkanPhysicalExecutionTransportKind {
+    match route {
+        VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
+            VulkanPhysicalExecutionTransportKind::ExternalDeviceLocal
+        }
+        VulkanSharedResidentBufferRoute::SharedHost => {
+            VulkanPhysicalExecutionTransportKind::SharedHost
+        }
+    }
+}
+
+fn distributed_activation_owner_device_id(
+    default_owner_device_id: &str,
+    activation: &VulkanDistributedActivationSlot,
+) -> String {
+    match &activation.storage {
+        VulkanDistributedActivationStorage::Edge {
+            owner_device_id, ..
+        } => owner_device_id.clone(),
+        VulkanDistributedActivationStorage::ActivationSlot
+        | VulkanDistributedActivationStorage::BoundaryInput
+        | VulkanDistributedActivationStorage::BoundaryOutput => {
+            default_owner_device_id.to_string()
+        }
+    }
 }
 
 fn distributed_dispatches_can_share_sequence(
@@ -675,6 +1152,11 @@ pub struct VulkanDistributedDispatchPlan {
     pub component_id: String,
     pub node_id: String,
     pub reusable_family_id: String,
+    pub physical_execution_contract_id: String,
+    pub implementation_digest: String,
+    pub contract_member_node_ids: Vec<String>,
+    pub has_lazy_resource_requirements: bool,
+    pub owner_residency_requirements: Vec<VulkanPhysicalExecutionResidencyRequirement>,
     pub input_byte_capacity: usize,
     pub output_byte_capacity: usize,
     pub output_rows: usize,
@@ -723,6 +1205,7 @@ pub struct VulkanDistributedActivationBufferPlan {
     pub import_count: usize,
     pub reference_count: usize,
     pub total_shared_byte_capacity: usize,
+    pub route: VulkanSharedResidentBufferRoute,
 }
 
 impl VulkanDistributedActivationBufferPlan {
@@ -827,6 +1310,7 @@ impl VulkanDistributedActivationBufferPlan {
             import_count,
             reference_count,
             total_shared_byte_capacity,
+            route: execution_plan.shared_activation_route,
         })
     }
 
@@ -940,7 +1424,11 @@ impl VulkanDistributedActivationBuffers {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let shared = owner
-                .create_shared_resident_buffers(&peers, byte_capacity)
+                .create_shared_resident_buffers_for_route(
+                    &peers,
+                    byte_capacity,
+                    plan.route,
+                )
                 .map_err(|error| {
                     VulkanDistributedActivationBufferError(format!(
                         "failed to allocate {} shared activation bytes for {}.slot_{}: {error}",

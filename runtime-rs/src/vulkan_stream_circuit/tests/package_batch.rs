@@ -546,7 +546,7 @@ fn component_batch_execution_does_not_create_empty_local_submissions() {
 }
 
 #[test]
-fn component_batch_execution_submits_only_distributed_group_leaders() {
+fn component_batch_execution_submits_only_physical_island_leaders() {
     let spans = (0..3)
         .map(|dispatch_index| VulkanComponentBatchDispatchSpan {
             component_id: "layer_00".to_string(),
@@ -558,7 +558,7 @@ fn component_batch_execution_submits_only_distributed_group_leaders() {
         .collect::<Vec<_>>();
 
     assert_eq!(
-        component_batch_execution_units_for_distributed_groups(&spans, &BTreeSet::from([0, 2]),)
+        component_batch_execution_units_for_physical_islands(&spans, &BTreeSet::from([0, 2]),)
             .unwrap(),
         vec![
             VulkanComponentBatchExecutionUnit::DistributedDispatch { dispatch_index: 0 },
@@ -1848,7 +1848,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
 }
 
 #[test]
-fn distributed_batch_group_retains_every_members_control_buffer_set() {
+fn distributed_batch_island_retains_every_members_control_buffer_set() {
     let shard = |expert_start| VulkanDistributedComponentBatchShardRunner {
         device_id: "gpu0".to_string(),
         dispatches: Vec::new(),
@@ -1867,7 +1867,7 @@ fn distributed_batch_group_retains_every_members_control_buffer_set() {
 }
 
 #[test]
-fn distributed_batch_keeps_group_internal_activations_private_to_each_shard() {
+fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
     use crate::vulkan_distributed::{
         VulkanDistributedActivationRange, VulkanDistributedDispatchPlan,
         VulkanDistributedDispatchShard,
@@ -1925,6 +1925,11 @@ fn distributed_batch_keeps_group_internal_activations_private_to_each_shard() {
         component_id: "layer".to_string(),
         node_id: node_id.to_string(),
         reusable_family_id: node_id.to_string(),
+        physical_execution_contract_id: format!("sha256:{}", "a".repeat(64)),
+        implementation_digest: format!("sha256:{}", "b".repeat(64)),
+        contract_member_node_ids: vec![node_id.to_string()],
+        has_lazy_resource_requirements: false,
+        owner_residency_requirements: Vec::new(),
         input_byte_capacity: 8_224,
         output_byte_capacity: 8_224,
         output_rows: 256,
@@ -1949,15 +1954,18 @@ fn distributed_batch_keeps_group_internal_activations_private_to_each_shard() {
         activation(0, "expert_intermediates", 1),
         activation(2, "expert_outputs", 2),
     );
-    let group = VulkanDistributedDispatchGroup {
-        owner_device_id: "gpu0".to_string(),
-        dispatches: vec![gate.clone(), down.clone()],
-    };
+    let execution_islands =
+        resolved_physical_execution_islands(
+            &[gate.clone(), down.clone()],
+            VulkanSharedResidentBufferRoute::SharedHost,
+        )
+        .unwrap();
     let plan = VulkanDistributedExecutionPlan {
         device_ids: vec!["gpu0".to_string(), "gpu1".to_string()],
         storage_buffer_offset_alignment: 256,
         dispatches: vec![gate, down],
-        dispatch_groups: vec![group],
+        execution_islands,
+        shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
         shared_input_byte_capacity: 8_224,
         shared_output_byte_capacity: 8_224,
         distributed_parameter_byte_count: 0,

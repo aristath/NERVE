@@ -1408,7 +1408,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &device_for,
         )?;
         let mut distributed_dispatch_indices = BTreeMap::<&str, BTreeSet<usize>>::new();
-        for group in &self.distributed_execution_plan.dispatch_groups {
+        for group in &self.distributed_execution_plan.execution_islands {
             distributed_dispatch_indices
                 .entry(group.owner_device_id.as_str())
                 .or_default()
@@ -1445,7 +1445,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         )?;
         let distributed_shard_count = self
             .distributed_execution_plan
-            .dispatch_groups
+            .execution_islands
             .iter()
             .try_fold(0usize, |total, group| {
                 total
@@ -1583,14 +1583,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )
                 })?;
             let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
-            let distributed_dispatch_groups = self
+            let physical_execution_islands = self
                 .distributed_execution_plan
-                .dispatch_groups
+                .execution_islands
                 .iter()
                 .filter(|group| group.owner_device_id == package_slice.device_id)
                 .map(|group| group.dispatch_indices())
                 .collect::<Vec<_>>();
-            let replaced_parameter_dispatches = distributed_dispatch_groups
+            let replaced_parameter_dispatches = physical_execution_islands
                 .iter()
                 .flatten()
                 .copied()
@@ -1638,13 +1638,13 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 None
             };
             let resident_execution_plan =
-                VulkanMountedPlacedResidentStreamTickExecutionPlan::from_tick_plan_with_distributed_dispatch_groups_and_demand(
+                VulkanMountedPlacedResidentStreamTickExecutionPlan::from_tick_plan_with_physical_execution_islands_and_demand(
                     device,
                     &mounted,
                     &mounted_bound,
                     package_slice.loaded_manifest(),
                     tick_plan,
-                    &distributed_dispatch_groups,
+                    &physical_execution_islands,
                     demand_context
                         .as_ref()
                         .map(|_| package_slice.physical_residency_schedule()),

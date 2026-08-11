@@ -199,7 +199,7 @@ impl VulkanMountedPlacedResidentStreamTickCursor {
         dispatch_index: usize,
     ) -> Result<usize, VulkanMountedPlacedResidentStreamTickError> {
         let group = execution_plan
-            .distributed_dispatch_group_at_stage(self.next_stage_index)
+            .physical_execution_island_at_stage(self.next_stage_index)
             .ok_or_else(|| {
                 VulkanMountedPlacedResidentStreamTickError::Dispatch(
                     VulkanMountedPlacedResidentKernelDispatchError::MissingDispatchSegment {

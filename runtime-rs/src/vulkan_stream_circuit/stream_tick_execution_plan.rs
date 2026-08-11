@@ -8,18 +8,18 @@ pub struct VulkanMountedPlacedResidentStreamTickExecutionPlan {
     pub distributed_dispatch_count: usize,
     dispatch_segments: Vec<VulkanMountedPlacedResidentDispatchSegmentRunner>,
     distributed_dispatch_stages: BTreeMap<usize, VulkanMountedPlacedStreamTickDispatch>,
-    distributed_dispatch_groups: BTreeMap<usize, VulkanMountedPlacedDistributedDispatchStageGroup>,
+    physical_execution_islands: BTreeMap<usize, VulkanMountedPhysicalExecutionIslandStage>,
     distributed_dispatch_dependencies:
         BTreeMap<usize, VulkanMountedPlacedDistributedDispatchDependencies>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct VulkanMountedPlacedDistributedDispatchStageGroup {
+struct VulkanMountedPhysicalExecutionIslandStage {
     dispatches: Vec<VulkanMountedPlacedStreamTickDispatch>,
     end_stage_index: usize,
 }
 
-impl VulkanMountedPlacedDistributedDispatchStageGroup {
+impl VulkanMountedPhysicalExecutionIslandStage {
     fn leader(&self) -> &VulkanMountedPlacedStreamTickDispatch {
         self.dispatches
             .first()
@@ -119,35 +119,35 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         tick_plan: VulkanMountedPlacedStreamTickPlan,
         distributed_dispatch_indices: &BTreeSet<usize>,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
-        let distributed_dispatch_groups = distributed_dispatch_indices
+        let physical_execution_islands = distributed_dispatch_indices
             .iter()
             .map(|dispatch_index| vec![*dispatch_index])
             .collect::<Vec<_>>();
-        Self::from_tick_plan_with_distributed_dispatch_groups(
+        Self::from_tick_plan_with_physical_execution_islands(
             device,
             mounted,
             mounted_bound_plan,
             loaded_manifest,
             tick_plan,
-            &distributed_dispatch_groups,
+            &physical_execution_islands,
         )
     }
 
-    pub fn from_tick_plan_with_distributed_dispatch_groups(
+    pub fn from_tick_plan_with_physical_execution_islands(
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
         tick_plan: VulkanMountedPlacedStreamTickPlan,
-        distributed_dispatch_groups: &[Vec<usize>],
+        physical_execution_islands: &[Vec<usize>],
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
-        Self::from_tick_plan_with_distributed_dispatch_groups_and_demand(
+        Self::from_tick_plan_with_physical_execution_islands_and_demand(
             device,
             mounted,
             mounted_bound_plan,
             loaded_manifest,
             tick_plan,
-            distributed_dispatch_groups,
+            physical_execution_islands,
             None,
             None,
             None,
@@ -155,13 +155,13 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn from_tick_plan_with_distributed_dispatch_groups_and_demand(
+    fn from_tick_plan_with_physical_execution_islands_and_demand(
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
         tick_plan: VulkanMountedPlacedStreamTickPlan,
-        distributed_dispatch_groups: &[Vec<usize>],
+        physical_execution_islands: &[Vec<usize>],
         physical_residency_schedule: Option<&VulkanPhysicalResidencySchedule>,
         demand_context: Option<&VulkanDemandResidencyExecutionContext>,
         demand_pipeline_predicate: Option<Arc<VulkanResidentBuffer>>,
@@ -183,16 +183,16 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
             );
         }
 
-        let distributed_dispatch_indices = distributed_dispatch_groups
+        let distributed_dispatch_indices = physical_execution_islands
             .iter()
             .flatten()
             .copied()
             .collect::<BTreeSet<_>>();
         let distributed_dispatch_stages =
             distributed_dispatch_stages(&tick_plan, &distributed_dispatch_indices)?;
-        let distributed_dispatch_groups = distributed_dispatch_stage_groups(
+        let physical_execution_islands = physical_execution_island_stage_groups(
             &distributed_dispatch_stages,
-            distributed_dispatch_groups,
+            physical_execution_islands,
         )?;
 
         let dispatch_segment_stage_ranges =
@@ -201,7 +201,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
                 &distributed_dispatch_indices,
             );
         let distributed_dispatch_dependencies = distributed_dispatch_dependency_topologies(
-            &distributed_dispatch_groups,
+            &physical_execution_islands,
             &dispatch_segment_stage_ranges,
         );
         let mut dispatch_segments = Vec::new();
@@ -239,7 +239,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
             distributed_dispatch_count,
             dispatch_segments,
             distributed_dispatch_stages,
-            distributed_dispatch_groups,
+            physical_execution_islands,
             distributed_dispatch_dependencies,
         })
     }
@@ -315,16 +315,16 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         &self,
         stage_index: usize,
     ) -> Option<&VulkanMountedPlacedStreamTickDispatch> {
-        self.distributed_dispatch_groups
+        self.physical_execution_islands
             .get(&stage_index)
-            .map(VulkanMountedPlacedDistributedDispatchStageGroup::leader)
+            .map(VulkanMountedPhysicalExecutionIslandStage::leader)
     }
 
-    fn distributed_dispatch_group_at_stage(
+    fn physical_execution_island_at_stage(
         &self,
         stage_index: usize,
-    ) -> Option<&VulkanMountedPlacedDistributedDispatchStageGroup> {
-        self.distributed_dispatch_groups.get(&stage_index)
+    ) -> Option<&VulkanMountedPhysicalExecutionIslandStage> {
+        self.physical_execution_islands.get(&stage_index)
     }
 
     fn distributed_dispatch_dependencies_at_stage(
@@ -360,10 +360,10 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
 }
 
 fn distributed_dispatch_dependency_topologies(
-    distributed_dispatch_groups: &BTreeMap<usize, VulkanMountedPlacedDistributedDispatchStageGroup>,
+    physical_execution_islands: &BTreeMap<usize, VulkanMountedPhysicalExecutionIslandStage>,
     dispatch_segment_stage_ranges: &[(usize, usize)],
 ) -> BTreeMap<usize, VulkanMountedPlacedDistributedDispatchDependencies> {
-    distributed_dispatch_groups
+    physical_execution_islands
         .iter()
         .map(|(stage_index, group)| {
             (
@@ -382,20 +382,20 @@ fn distributed_dispatch_dependency_topologies(
         .collect()
 }
 
-fn distributed_dispatch_stage_groups(
+fn physical_execution_island_stage_groups(
     distributed_dispatch_stages: &BTreeMap<usize, VulkanMountedPlacedStreamTickDispatch>,
-    dispatch_groups: &[Vec<usize>],
+    physical_execution_islands: &[Vec<usize>],
 ) -> Result<
-    BTreeMap<usize, VulkanMountedPlacedDistributedDispatchStageGroup>,
+    BTreeMap<usize, VulkanMountedPhysicalExecutionIslandStage>,
     VulkanMountedPlacedResidentKernelDispatchError,
 > {
     let stages_by_dispatch = distributed_dispatch_stages
         .iter()
         .map(|(stage_index, dispatch)| (dispatch.dispatch_index, (*stage_index, dispatch)))
         .collect::<BTreeMap<_, _>>();
-    let mut groups = BTreeMap::new();
+    let mut islands = BTreeMap::new();
     let mut claimed_dispatches = BTreeSet::new();
-    for dispatch_indices in dispatch_groups {
+    for dispatch_indices in physical_execution_islands {
         let Some(leader_dispatch_index) = dispatch_indices.first().copied() else {
             continue;
         };
@@ -442,15 +442,15 @@ fn distributed_dispatch_stage_groups(
             }
             dispatches.push(dispatch.clone());
         }
-        groups.insert(
+        islands.insert(
             leader_stage_index,
-            VulkanMountedPlacedDistributedDispatchStageGroup {
+            VulkanMountedPhysicalExecutionIslandStage {
                 dispatches,
                 end_stage_index: leader_stage_index + dispatch_indices.len(),
             },
         );
     }
-    Ok(groups)
+    Ok(islands)
 }
 
 #[cfg(test)]

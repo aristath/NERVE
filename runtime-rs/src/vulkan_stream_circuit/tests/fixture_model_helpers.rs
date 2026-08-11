@@ -402,7 +402,7 @@ fn distributed_dependency_topology_covers_edges_and_adjacent_dispatches() {
     .unwrap();
     let ranges =
         resident_dispatch_segment_stage_ranges_excluding_dispatches(&stages, &distributed_indices);
-    let distributed_groups = distributed_dispatch_stage_groups(
+    let physical_execution_islands = physical_execution_island_stage_groups(
         &distributed_stages,
         &[vec![0], vec![2], vec![3], vec![5]],
     )
@@ -410,7 +410,7 @@ fn distributed_dependency_topology_covers_edges_and_adjacent_dispatches() {
 
     assert_eq!(ranges, vec![(1, 2), (4, 5)]);
     assert_eq!(
-        distributed_dispatch_dependency_topologies(&distributed_groups, &ranges),
+        distributed_dispatch_dependency_topologies(&physical_execution_islands, &ranges),
         BTreeMap::from([
             (
                 0,
@@ -469,14 +469,14 @@ fn distributed_dependency_topology_uses_composed_group_boundaries() {
         can_execute: false,
     };
     let distributed_stages = distributed_dispatch_stages(&tick_plan, &distributed_indices).unwrap();
-    let distributed_groups =
-        distributed_dispatch_stage_groups(&distributed_stages, &[vec![2, 3]]).unwrap();
+    let physical_execution_islands =
+        physical_execution_island_stage_groups(&distributed_stages, &[vec![2, 3]]).unwrap();
     let ranges =
         resident_dispatch_segment_stage_ranges_excluding_dispatches(&stages, &distributed_indices);
 
     assert_eq!(ranges, vec![(0, 2), (4, 6)]);
     assert_eq!(
-        distributed_dispatch_dependency_topologies(&distributed_groups, &ranges),
+        distributed_dispatch_dependency_topologies(&physical_execution_islands, &ranges),
         BTreeMap::from([(
             2,
             VulkanMountedPlacedDistributedDispatchDependencies {
@@ -534,9 +534,9 @@ fn cursor_completes_an_entire_matching_distributed_group() {
             (0, distributed_dispatch),
             (1, second_distributed_dispatch),
         ]),
-        distributed_dispatch_groups: BTreeMap::from([(
+        physical_execution_islands: BTreeMap::from([(
             0,
-            VulkanMountedPlacedDistributedDispatchStageGroup {
+            VulkanMountedPhysicalExecutionIslandStage {
                 dispatches: vec![grouped_dispatch, second_grouped_dispatch],
                 end_stage_index: 2,
             },
