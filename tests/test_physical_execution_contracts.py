@@ -71,6 +71,12 @@ def partial_output_contract() -> dict[str, object]:
         "collection": "reduced",
         "reduction": "sum_f32",
     }
+    contract["partition_launch"] = {
+        "workgroup_x": "repeated",
+        "origin": "push_constant_u32",
+        "origin_push_constant": "input_start",
+        "count_push_constant": "input_count",
+    }
     return contract
 
 
@@ -105,6 +111,17 @@ def test_reduced_output_and_partial_output_form_are_bidirectional() -> None:
     }
     with pytest.raises(PhysicalExecutionContractError, match="requires a sharded input"):
         validate_physical_execution_contract(partial_without_sharded_input)
+
+
+def test_repeated_partition_requires_distinct_declared_range_controls() -> None:
+    contract = partial_output_contract()
+    del contract["partition_launch"]["count_push_constant"]
+    with pytest.raises(PhysicalExecutionContractError, match="push constants"):
+        validate_physical_execution_contract(contract)
+
+    contract["partition_launch"]["count_push_constant"] = "input_start"
+    with pytest.raises(PhysicalExecutionContractError, match="must differ"):
+        validate_physical_execution_contract(contract)
 
 
 def test_lazy_resources_cannot_be_declared_permanent() -> None:
@@ -283,6 +300,70 @@ def test_compiler_does_not_guess_distribution_for_unsupported_storage(tmp_path: 
         package_dir=tmp_path,
     )
     assert {contract["strategy"] for contract in contracts} == {"single_device"}
+
+
+def test_compiler_declares_the_exact_sparse_expert_range_abi(tmp_path: Path) -> None:
+    shader = tmp_path / "shaders" / "sparse_moe_down.spv"
+    shader.parent.mkdir()
+    shader.write_bytes(b"sparse scalar spirv")
+    node = {
+        "id": "expert_down",
+        "op": "sparse_moe_down",
+        "inputs": ["intermediates", "routes"],
+        "outputs": ["expert_outputs"],
+        "params": ["expert_weight", "expert_scale"],
+    }
+    circuit = {
+        "parameters": {
+            "refs": {
+                "expert_weight": {"tensor": "experts.down.weight"},
+                "expert_scale": {"tensor": "experts.down.scale"},
+            }
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "experts.down.weight": {
+                "dtype": "F8_E4M3",
+                "shape": [32, 1024, 512],
+                "layout": "row_major",
+            },
+            "experts.down.scale": {
+                "dtype": "BF16",
+                "shape": [32, 8, 4],
+                "layout": "row_major",
+            },
+        }
+    }
+    kernel = {
+        "source_node_ids": ["expert_down_projection"],
+        "semantic_module_ids": ["layer.feature_transform.routed_experts"],
+        "shader_path": "shaders/sparse_moe_down.spv",
+        "local_size_x": 64,
+        "workgroup_count_x": 8192,
+        "batch_implementations": [],
+    }
+
+    contracts = build_kernel_physical_execution_contracts(
+        node=node,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        kernel=kernel,
+        package_dir=tmp_path,
+    )
+
+    expert = next(
+        contract
+        for contract in contracts
+        if contract["execution_form"] == "whole_expert_ownership"
+    )
+    assert expert["partition_launch"] == {
+        "workgroup_x": "repeated",
+        "origin": "push_constant_u32",
+        "origin_push_constant": "expert_start",
+        "count_push_constant": "expert_count",
+    }
+    validate_physical_execution_contract(expert)
 
 
 def test_compiler_maps_block_scaled_parameter_indices_to_logical_rows(

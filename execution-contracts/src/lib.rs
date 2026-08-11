@@ -178,6 +178,8 @@ pub struct PartitionLaunch {
     pub origin: PartitionOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_push_constant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_push_constant: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,14 +340,38 @@ impl PhysicalExecutionContract {
             }
         }
         if let Some(launch) = &self.partition_launch {
-            match (launch.origin, launch.origin_push_constant.as_deref()) {
-                (PartitionOrigin::LocalZero, None) => {}
-                (PartitionOrigin::PushConstantU32, Some(name)) => {
+            match (
+                launch.origin,
+                launch.workgroup_x,
+                launch.origin_push_constant.as_deref(),
+                launch.count_push_constant.as_deref(),
+            ) {
+                (PartitionOrigin::LocalZero, _, None, None) => {}
+                (
+                    PartitionOrigin::PushConstantU32,
+                    WorkgroupXMapping::Proportional,
+                    Some(name),
+                    None,
+                ) => {
                     require_non_empty(name, "partition_launch.origin_push_constant")?;
+                }
+                (
+                    PartitionOrigin::PushConstantU32,
+                    WorkgroupXMapping::Repeated,
+                    Some(origin),
+                    Some(count),
+                ) => {
+                    require_non_empty(origin, "partition_launch.origin_push_constant")?;
+                    require_non_empty(count, "partition_launch.count_push_constant")?;
+                    if origin == count {
+                        return invalid(
+                            "partition launch origin and count push constants must differ",
+                        );
+                    }
                 }
                 _ => {
                     return invalid(
-                        "partition launch push constant must exactly match its origin source",
+                        "partition launch push constants must exactly match its origin and workgroup mapping",
                     );
                 }
             }
@@ -479,6 +505,66 @@ fn validate_strategy(contract: &PhysicalExecutionContract) -> Result<(), Contrac
     }
     if contract.partition_launch.is_none() {
         return invalid("distributed contracts require an explicit partition launch");
+    }
+    let workgroup_x = contract
+        .partition_launch
+        .as_ref()
+        .expect("distributed launch was checked above")
+        .workgroup_x;
+    let mapping_matches_form = match contract.execution_form {
+        ExecutionForm::ReplicatedInputPartitionedOutput => {
+            workgroup_x == WorkgroupXMapping::Proportional
+        }
+        ExecutionForm::PartitionedInputPartialOutput | ExecutionForm::WholeExpertOwnership => {
+            workgroup_x == WorkgroupXMapping::Repeated
+        }
+        ExecutionForm::Local => unreachable!("local distributed form was rejected above"),
+    };
+    if !mapping_matches_form {
+        return invalid("partition workgroup mapping disagrees with the execution form");
+    }
+    let strategy_matches_form = match contract.strategy {
+        ExecutionStrategy::TensorParallel | ExecutionStrategy::TensorParallelExpert => matches!(
+            contract.execution_form,
+            ExecutionForm::ReplicatedInputPartitionedOutput
+                | ExecutionForm::PartitionedInputPartialOutput
+        ),
+        ExecutionStrategy::ExpertParallel => {
+            contract.execution_form == ExecutionForm::WholeExpertOwnership
+        }
+        ExecutionStrategy::SingleDevice => unreachable!("single-device strategy returned above"),
+    };
+    if !strategy_matches_form {
+        return invalid("distributed execution strategy disagrees with its execution form");
+    }
+    match contract.execution_form {
+        ExecutionForm::ReplicatedInputPartitionedOutput
+            if !contract
+                .outputs
+                .iter()
+                .any(|output| output.collection == OutputCollection::Concatenated) =>
+        {
+            return invalid("partitioned-output execution requires a concatenated output");
+        }
+        ExecutionForm::WholeExpertOwnership
+            if !contract
+                .parameter_partitions
+                .iter()
+                .any(|partition| partition.kind == ParameterPartitionKind::ExpertRange)
+                || !contract
+                    .inputs
+                    .iter()
+                    .any(|input| input.distribution == InputDistribution::Routed)
+                || !contract
+                    .outputs
+                    .iter()
+                    .any(|output| output.collection == OutputCollection::Routed) =>
+        {
+            return invalid(
+                "whole-expert execution requires expert-range parameters and routed input and output",
+            );
+        }
+        _ => {}
     }
     if contract.parameter_partitions.is_empty() {
         return invalid("distributed contracts require an explicit parameter partition");
@@ -649,6 +735,7 @@ mod tests {
                 workgroup_x: WorkgroupXMapping::Proportional,
                 origin: PartitionOrigin::LocalZero,
                 origin_push_constant: None,
+                count_push_constant: None,
             }),
             parameter_partitions: vec![ParameterPartition {
                 binding: 2,
@@ -728,6 +815,12 @@ mod tests {
             alignment_elements: None,
             reduction: Some(ReductionOperation::SumF32),
         };
+        contract.partition_launch = Some(PartitionLaunch {
+            workgroup_x: WorkgroupXMapping::Repeated,
+            origin: PartitionOrigin::PushConstantU32,
+            origin_push_constant: Some("input_start".to_string()),
+            count_push_constant: Some("input_count".to_string()),
+        });
         contract.validate().unwrap();
 
         contract.inputs[0] = InputContract {
@@ -757,6 +850,48 @@ mod tests {
                 .to_string()
                 .contains("reduced outputs require that execution form")
         );
+    }
+
+    #[test]
+    fn repeated_partition_requires_distinct_declared_range_controls() {
+        let mut contract = valid_contract();
+        contract.strategy = ExecutionStrategy::ExpertParallel;
+        contract.execution_form = ExecutionForm::WholeExpertOwnership;
+        contract.parameter_partitions[0].kind = ParameterPartitionKind::ExpertRange;
+        contract.inputs[0] = InputContract {
+            binding: 0,
+            distribution: InputDistribution::Routed,
+            dimension: Some(0),
+            alignment_elements: Some(128),
+        };
+        contract.outputs[0] = OutputContract {
+            binding: 1,
+            collection: OutputCollection::Routed,
+            dimension: Some(0),
+            alignment_elements: Some(128),
+            reduction: None,
+        };
+        contract.partition_launch = Some(PartitionLaunch {
+            workgroup_x: WorkgroupXMapping::Repeated,
+            origin: PartitionOrigin::PushConstantU32,
+            origin_push_constant: Some("expert_start".to_string()),
+            count_push_constant: None,
+        });
+        assert!(contract.validate().is_err());
+
+        contract
+            .partition_launch
+            .as_mut()
+            .unwrap()
+            .count_push_constant = Some("expert_start".to_string());
+        assert!(contract.validate().is_err());
+
+        contract
+            .partition_launch
+            .as_mut()
+            .unwrap()
+            .count_push_constant = Some("expert_count".to_string());
+        contract.validate().unwrap();
     }
 
     #[test]

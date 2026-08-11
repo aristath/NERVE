@@ -420,6 +420,7 @@ mod tests {
                     WorkgroupXMapping::Repeated,
                     PartitionOrigin::PushConstantU32,
                     Some("expert_start"),
+                    Some("expert_count"),
                     vec![
                         test_partition(3, ParameterPartitionKind::ExpertRange, 1, 1),
                         test_partition(4, ParameterPartitionKind::ExpertRange, 1, 1),
@@ -578,6 +579,7 @@ mod tests {
                 WorkgroupXMapping::Repeated,
                 PartitionOrigin::PushConstantU32,
                 Some("expert_start"),
+                Some("expert_count"),
                 vec![
                     test_partition(4, ParameterPartitionKind::ExpertRange, 1, 1),
                     test_partition(5, ParameterPartitionKind::ExpertRange, 1, 1),
@@ -618,6 +620,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![4, 5]
         );
+
+        let mut custom_range_abi = prepared.clone();
+        custom_range_abi.dispatches[0].push_constants[1].name =
+            "owned_expert_count".to_string();
+        custom_range_abi.dispatches[0].physical_execution_contracts[0]
+            .partition_launch
+            .as_mut()
+            .unwrap()
+            .count_push_constant = Some("owned_expert_count".to_string());
+        let mut custom_range_artifacts = artifacts.clone();
+        custom_range_artifacts.artifacts[0].push_constants[1].name =
+            "owned_expert_count".to_string();
+        VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &custom_range_abi)],
+            &tensor_index,
+            &custom_range_artifacts,
+            &component_device_pools("moe", &["owner", "helper"]),
+            &[],
+            256,
+        )
+        .unwrap();
 
         prepared.dispatches[0].push_constants.truncate(1);
         let stale_abi_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
@@ -1123,6 +1146,7 @@ mod tests {
                 WorkgroupXMapping::Proportional,
                 PartitionOrigin::LocalZero,
                 None,
+                None,
                 vec![
                     test_partition(3, ParameterPartitionKind::Contiguous, 4, 1),
                     test_partition(4, ParameterPartitionKind::Contiguous, 1, 4),
@@ -1307,6 +1331,7 @@ mod tests {
                     6,
                     WorkgroupXMapping::Proportional,
                     PartitionOrigin::LocalZero,
+                    None,
                     None,
                     vec![
                         test_partition(4, ParameterPartitionKind::Contiguous, 4, 1),
@@ -1627,6 +1652,7 @@ mod tests {
                     WorkgroupXMapping::Proportional,
                     PartitionOrigin::LocalZero,
                     None,
+                    None,
                     vec![
                         test_partition(2, ParameterPartitionKind::Contiguous, 2, 1),
                         test_partition(3, ParameterPartitionKind::Contiguous, 2, 1),
@@ -1680,6 +1706,7 @@ mod tests {
         workgroup_x: WorkgroupXMapping,
         origin: PartitionOrigin,
         origin_push_constant: Option<&str>,
+        count_push_constant: Option<&str>,
         parameter_partitions: Vec<ParameterPartition>,
         inputs: Vec<InputContract>,
         output: OutputContract,
@@ -1721,6 +1748,7 @@ mod tests {
                 workgroup_x,
                 origin,
                 origin_push_constant: origin_push_constant.map(str::to_string),
+                count_push_constant: count_push_constant.map(str::to_string),
             }),
             parameter_partitions,
             inputs,

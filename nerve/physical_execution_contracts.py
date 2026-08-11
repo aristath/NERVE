@@ -81,6 +81,7 @@ class PartitionLaunch(TypedDict, total=False):
     workgroup_x: WorkgroupXMapping
     origin: PartitionOrigin
     origin_push_constant: str
+    count_push_constant: str
 
 
 class InputContract(TypedDict, total=False):
@@ -441,11 +442,13 @@ def _distributed_scalar_contract(
         return None
     output_binding = input_count
     output_rows = int(parameter_metadata[0][1].get("shape", [0])[0])
-    if output_rows <= 0 or workgroup_count_x <= 0 or output_rows % workgroup_count_x:
+    if output_rows <= 0 or workgroup_count_x <= 0:
         return None
-    artifact_alignment = output_rows // workgroup_count_x
 
     if op == "parallel_linear_silu_multiply":
+        if output_rows % workgroup_count_x:
+            return None
+        artifact_alignment = output_rows // workgroup_count_x
         dtypes = [metadata.get("dtype") for _, metadata in parameter_metadata]
         if dtypes == ["BF16", "BF16"]:
             partition_layouts = [
@@ -510,6 +513,9 @@ def _distributed_scalar_contract(
         )
 
     if op == "linear_residual":
+        if output_rows % workgroup_count_x:
+            return None
+        artifact_alignment = output_rows // workgroup_count_x
         dtypes = [metadata.get("dtype") for _, metadata in parameter_metadata]
         if dtypes != ["F8_E4M3", "BF16"] or input_count != 3:
             return None
@@ -605,6 +611,7 @@ def _distributed_scalar_contract(
                 "workgroup_x": "repeated",
                 "origin": "push_constant_u32",
                 "origin_push_constant": "expert_start",
+                "count_push_constant": "expert_count",
             },
             parameter_partitions=[
                 {
@@ -916,10 +923,15 @@ def validate_physical_execution_contract(value: object) -> None:
         _keys(
             launch,
             {"workgroup_x", "origin"},
-            {"workgroup_x", "origin", "origin_push_constant"},
+            {
+                "workgroup_x",
+                "origin",
+                "origin_push_constant",
+                "count_push_constant",
+            },
             "contract.partition_launch",
         )
-        _enum(
+        workgroup_x = _enum(
             launch["workgroup_x"],
             _WORKGROUP_X_MAPPINGS,
             "contract.partition_launch.workgroup_x",
@@ -930,15 +942,30 @@ def validate_physical_execution_contract(value: object) -> None:
             "contract.partition_launch.origin",
         )
         has_origin_push_constant = "origin_push_constant" in launch
-        if (origin == "push_constant_u32") != has_origin_push_constant:
+        has_count_push_constant = "count_push_constant" in launch
+        expected_count_push_constant = (
+            origin == "push_constant_u32" and workgroup_x == "repeated"
+        )
+        if (origin == "push_constant_u32") != has_origin_push_constant or (
+            expected_count_push_constant != has_count_push_constant
+        ):
             _invalid(
-                "partition launch push constant must exactly match its origin source"
+                "partition launch push constants must exactly match its origin and workgroup mapping"
             )
         if has_origin_push_constant:
-            _non_empty_string(
+            origin_name = _non_empty_string(
                 launch["origin_push_constant"],
                 "contract.partition_launch.origin_push_constant",
             )
+        else:
+            origin_name = None
+        if has_count_push_constant:
+            count_name = _non_empty_string(
+                launch["count_push_constant"],
+                "contract.partition_launch.count_push_constant",
+            )
+            if count_name == origin_name:
+                _invalid("partition launch origin and count push constants must differ")
     partitions = _list(
         contract["parameter_partitions"], "contract.parameter_partitions"
     )
@@ -1142,6 +1169,54 @@ def _validate_strategy(
         _invalid("distributed contracts require an explicit partition extent")
     if partition_launch is None:
         _invalid("distributed contracts require an explicit partition launch")
+    workgroup_x = _mapping(
+        partition_launch, "contract.partition_launch"
+    )["workgroup_x"]
+    mapping_matches_form = (
+        execution_form == "replicated_input_partitioned_output"
+        and workgroup_x == "proportional"
+    ) or (
+        execution_form
+        in {"partitioned_input_partial_output", "whole_expert_ownership"}
+        and workgroup_x == "repeated"
+    )
+    if not mapping_matches_form:
+        _invalid("partition workgroup mapping disagrees with the execution form")
+    strategy_matches_form = (
+        strategy in {"tensor_parallel", "tensor_parallel_expert"}
+        and execution_form
+        in {
+            "replicated_input_partitioned_output",
+            "partitioned_input_partial_output",
+        }
+    ) or (
+        strategy == "expert_parallel"
+        and execution_form == "whole_expert_ownership"
+    )
+    if not strategy_matches_form:
+        _invalid("distributed execution strategy disagrees with its execution form")
+    if execution_form == "replicated_input_partitioned_output" and not any(
+        _mapping(item, "output")["collection"] == "concatenated"
+        for item in outputs
+    ):
+        _invalid("partitioned-output execution requires a concatenated output")
+    if execution_form == "whole_expert_ownership" and (
+        not any(
+            _mapping(item, "parameter partition")["kind"] == "expert_range"
+            for item in partitions
+        )
+        or not any(
+            _mapping(item, "input")["distribution"] == "routed"
+            for item in inputs
+        )
+        or not any(
+            _mapping(item, "output")["collection"] == "routed"
+            for item in outputs
+        )
+    ):
+        _invalid(
+            "whole-expert execution requires expert-range parameters and routed input and output"
+        )
     if not partitions:
         _invalid("distributed contracts require an explicit parameter partition")
     extent = _mapping(partition_extent, "contract.partition_extent")

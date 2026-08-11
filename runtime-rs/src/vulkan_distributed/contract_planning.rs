@@ -530,10 +530,16 @@ fn validate_partition_origin(
                     name: name.to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
-                }];
+            }];
             if launch.workgroup_x == WorkgroupXMapping::Repeated {
+                let count_name = launch.count_push_constant.as_deref().ok_or_else(|| {
+                    dispatch_error(
+                        dispatch,
+                        "repeated partition count push constant is unnamed".to_string(),
+                    )
+                })?;
                 expected.push(VulkanKernelScalarBinding {
-                    name: "expert_count".to_string(),
+                    name: count_name.to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
                 });
