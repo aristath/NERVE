@@ -771,8 +771,44 @@ impl VulkanComputeDeviceCatalog {
                     )
                 };
 
+            let compute_queue_progress =
+                match create_vulkan_queue_progress_timeline(&device) {
+                    Ok(progress) => progress,
+                    Err(error) => {
+                        if let Some(lease) = &mut activity_lease {
+                            let _ = lease.stop();
+                        }
+                        device.destroy_device(None);
+                        return Err(VulkanError(format!(
+                            "failed to create compute queue progress timeline: {error:?}"
+                        )));
+                    }
+                };
+            let transfer_queue_progress = if transfer_queue_is_distinct {
+                match create_vulkan_queue_progress_timeline(&device) {
+                    Ok(progress) => Some(progress),
+                    Err(error) => {
+                        device.destroy_semaphore(compute_queue_progress.semaphore, None);
+                        if let Some(lease) = &mut activity_lease {
+                            let _ = lease.stop();
+                        }
+                        device.destroy_device(None);
+                        return Err(VulkanError(format!(
+                            "failed to create transfer queue progress timeline: {error:?}"
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
             let (compute_queue_submission, transfer_queue_submission) =
-                VulkanQueueSubmissionGate::paired(queue, transfer_queue, memory_lifecycle);
+                VulkanQueueSubmissionGate::paired(
+                    queue,
+                    transfer_queue,
+                    memory_lifecycle,
+                    Some(compute_queue_progress.clone()),
+                    transfer_queue_progress.clone(),
+                );
             let physical_queue_quiescer = Arc::new(VulkanPhysicalQueueQuiescer {
                 physical_device_id: permitted_device.physical_device_id.clone(),
                 device: device.clone(),
@@ -785,6 +821,10 @@ impl VulkanComputeDeviceCatalog {
                 &device_local_memory_budget_tracker,
                 &physical_queue_quiescer,
             ) {
+                if let Some(progress) = &transfer_queue_progress {
+                    device.destroy_semaphore(progress.semaphore, None);
+                }
+                device.destroy_semaphore(compute_queue_progress.semaphore, None);
                 if let Some(lease) = &mut activity_lease {
                     let _ = lease.stop();
                 }
@@ -799,6 +839,9 @@ impl VulkanComputeDeviceCatalog {
                 transfer_queue_is_distinct,
                 compute_queue_submission,
                 transfer_queue_submission,
+                compute_queue_progress_semaphore: compute_queue_progress.semaphore,
+                transfer_queue_progress_semaphore: transfer_queue_progress
+                    .map(|progress| progress.semaphore),
                 physical_queue_quiescer: Some(physical_queue_quiescer),
                 activity_lease: RefCell::new(activity_lease),
                 device_health,

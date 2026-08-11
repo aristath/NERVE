@@ -708,13 +708,21 @@ impl VulkanResidentQueueSubmitter {
 
     fn wait_for_batch_completion(&self, value: u64) -> Result<(), VulkanError> {
         let _wait = runtime_critical_path_span(RuntimeCriticalPathPhase::HostSynchronization);
-        wait_for_vulkan_timeline_points_with_progress_watchdog(
+        let mut progress_points = vec![(self.completion.semaphore(), value)];
+        if let Some(progress) = self.queue_submission.latest_progress_point() {
+            progress_points.push(progress);
+        }
+        wait_for_vulkan_timeline_points_with_progress_sources(
             &self.device,
             &[self.completion.semaphore()],
             &[value],
             false,
             &self.device_health,
             "resident execution quantum",
+            VulkanQueueProgressSources {
+                timeline_points: &progress_points,
+                timestamp_query_pool: None,
+            },
             |error| {
                 self.vulkan_operation_error(
                     "failed to wait for resident execution quantum",
@@ -742,6 +750,9 @@ impl VulkanComputeDevice {
         let mut progress_points = Vec::with_capacity(wait_points.len() + 1);
         progress_points.push((sequence.completion.semaphore(), value));
         progress_points.extend(wait_points.iter().copied());
+        if let Some(progress) = self.compute_queue_submission.latest_progress_point() {
+            progress_points.push(progress);
+        }
         wait_for_vulkan_timeline_points_with_progress_sources(
             &self.device,
             &[sequence.completion.semaphore()],

@@ -6,6 +6,8 @@ pub struct VulkanComputeDevice {
     transfer_queue_is_distinct: bool,
     compute_queue_submission: VulkanQueueSubmissionGate,
     transfer_queue_submission: VulkanQueueSubmissionGate,
+    compute_queue_progress_semaphore: vk::Semaphore,
+    transfer_queue_progress_semaphore: Option<vk::Semaphore>,
     physical_queue_quiescer: Option<Arc<VulkanPhysicalQueueQuiescer>>,
     activity_lease: RefCell<Option<VulkanDeviceActivityLease>>,
     device_health: VulkanDeviceHealth,

@@ -1722,7 +1722,10 @@ impl VulkanComputeDevice {
         let completion_value = binding
             .completion
             .pending("resident buffer copy batch")?;
-        let progress_points = [(binding.completion.semaphore(), completion_value)];
+        let mut progress_points = vec![(binding.completion.semaphore(), completion_value)];
+        if let Some(progress) = self.compute_queue_submission.latest_progress_point() {
+            progress_points.push(progress);
+        }
         wait_for_vulkan_timeline_points_with_progress_sources(
             &self.device,
             &[binding.completion.semaphore()],

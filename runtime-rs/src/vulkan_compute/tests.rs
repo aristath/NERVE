@@ -1281,9 +1281,28 @@ mod tests {
         assert!(sequence.completion.state.pending_value.get().is_none());
 
         for expected in [vec![2, 3, 42], vec![3, 4, 43]] {
+            let previous_progress = device
+                .compute_queue_submission
+                .latest_progress_point()
+                .map(|(_, value)| value)
+                .unwrap_or_default();
             template.submit_with_timeline_value_offset(0).unwrap();
+            let (progress_semaphore, progress_value) = device
+                .compute_queue_submission
+                .latest_progress_point()
+                .expect("resident queue submission must publish queue progress");
+            assert!(progress_value > previous_progress);
             assert!(sequence.completion.state.pending_value.get().is_some());
             device.wait_resident_kernel_sequence(&sequence).unwrap();
+            assert!(
+                unsafe {
+                    device
+                        .device
+                        .get_semaphore_counter_value(progress_semaphore)
+                }
+                .unwrap()
+                    >= progress_value
+            );
             assert!(sequence.completion.state.pending_value.get().is_none());
             assert_eq!(bytes_to_u32(&buffer.read_bytes(12).unwrap()), expected);
         }

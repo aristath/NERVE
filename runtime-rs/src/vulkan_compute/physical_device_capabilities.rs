@@ -121,6 +121,11 @@ impl Drop for VulkanComputeDevice {
             if let Some(mut activity_lease) = self.activity_lease.get_mut().take() {
                 let _ = activity_lease.stop();
             }
+            if let Some(semaphore) = self.transfer_queue_progress_semaphore.take() {
+                self.device.destroy_semaphore(semaphore, None);
+            }
+            self.device
+                .destroy_semaphore(self.compute_queue_progress_semaphore, None);
             self.device.destroy_device(None);
         }
     }

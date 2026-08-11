@@ -473,13 +473,24 @@ impl VulkanResidentTransferStream {
                     false,
                 ));
             }
-            let wait_result = wait_for_vulkan_timeline_points_with_progress_watchdog(
+            let mut progress_points = vec![(
+                self.consumer_completion.semaphore(),
+                completion_value,
+            )];
+            if let Some(progress) = self.consumer_queue_submission.latest_progress_point() {
+                progress_points.push(progress);
+            }
+            let wait_result = wait_for_vulkan_timeline_points_with_progress_sources(
                 &self.device,
                 &[self.consumer_completion.semaphore()],
                 &[completion_value],
                 false,
                 &self.device_health,
                 "consumer-serialized resident transfer",
+                VulkanQueueProgressSources {
+                    timeline_points: &progress_points,
+                    timestamp_query_pool: None,
+                },
                 |error| {
                     vulkan_operation_error_with_device_fault(
                         "failed waiting for consumer-serialized resident transfer",
@@ -569,13 +580,21 @@ impl VulkanResidentTransferStream {
 
     fn wait_timeline_value(&self, value: u64) -> Result<(), VulkanError> {
         let _wait = runtime_critical_path_span(RuntimeCriticalPathPhase::HostSynchronization);
-        wait_for_vulkan_timeline_points_with_progress_watchdog(
+        let mut progress_points = vec![(self.timeline.semaphore, value)];
+        if let Some(progress) = self.queue_submission.latest_progress_point() {
+            progress_points.push(progress);
+        }
+        wait_for_vulkan_timeline_points_with_progress_sources(
             &self.device,
             &[self.timeline.semaphore],
             &[value],
             false,
             &self.device_health,
             "resident transfer timeline",
+            VulkanQueueProgressSources {
+                timeline_points: &progress_points,
+                timestamp_query_pool: None,
+            },
             |error| {
                 vulkan_operation_error_with_device_fault(
                     &format!("failed waiting for resident transfer timeline value {value}"),
@@ -628,13 +647,24 @@ impl VulkanResidentTransferStream {
                     mapped,
                 ));
             }
-            wait_for_vulkan_timeline_points_with_progress_watchdog(
+            let mut progress_points = vec![(
+                self.consumer_completion.semaphore(),
+                completion_value,
+            )];
+            if let Some(progress) = self.consumer_queue_submission.latest_progress_point() {
+                progress_points.push(progress);
+            }
+            wait_for_vulkan_timeline_points_with_progress_sources(
                 &self.device,
                 &[self.consumer_completion.semaphore()],
                 &[completion_value],
                 false,
                 &self.device_health,
                 "resident transfer compute-queue bridge",
+                VulkanQueueProgressSources {
+                    timeline_points: &progress_points,
+                    timestamp_query_pool: None,
+                },
                 |error| {
                     vulkan_operation_error_with_device_fault(
                         &format!("failed waiting for resident transfer timeline value {value} on the compute queue"),

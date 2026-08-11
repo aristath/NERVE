@@ -527,13 +527,21 @@ impl VulkanTextureCalibration {
 impl Drop for VulkanTextureCalibration {
     fn drop(&mut self) {
         if let Some(completion_value) = self.completion.pending_value() {
-            let wait_result = wait_for_vulkan_timeline_points_with_progress_watchdog(
+            let mut progress_points = vec![(self.completion.semaphore(), completion_value)];
+            if let Some(progress) = self.queue_submission.latest_progress_point() {
+                progress_points.push(progress);
+            }
+            let wait_result = wait_for_vulkan_timeline_points_with_progress_sources(
                 &self.device,
                 &[self.completion.semaphore()],
                 &[completion_value],
                 false,
                 &self.device_health,
                 "texture calibration teardown",
+                VulkanQueueProgressSources {
+                    timeline_points: &progress_points,
+                    timestamp_query_pool: Some(self.timestamp_query_pool),
+                },
                 |error| {
                     VulkanError(format!(
                         "failed waiting for texture calibration teardown: {error:?}"

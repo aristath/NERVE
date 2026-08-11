@@ -317,7 +317,10 @@ impl VulkanResidentBufferCopy {
                 ));
             }
             RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
-            let progress_points = [(self.completion.semaphore(), completion_value)];
+            let mut progress_points = vec![(self.completion.semaphore(), completion_value)];
+            if let Some(progress) = self.queue_submission.latest_progress_point() {
+                progress_points.push(progress);
+            }
             wait_for_vulkan_timeline_points_with_progress_sources(
                 &self.device,
                 &[self.completion.semaphore()],
@@ -419,7 +422,10 @@ impl VulkanResidentBufferCopyBatch {
                 ));
             }
             RESIDENT_COPY_QUEUE_SUBMITS.fetch_add(1, Ordering::Relaxed);
-            let progress_points = [(self.completion.semaphore(), completion_value)];
+            let mut progress_points = vec![(self.completion.semaphore(), completion_value)];
+            if let Some(progress) = self.queue_submission.latest_progress_point() {
+                progress_points.push(progress);
+            }
             wait_for_vulkan_timeline_points_with_progress_sources(
                 &self.device,
                 &[self.completion.semaphore()],
