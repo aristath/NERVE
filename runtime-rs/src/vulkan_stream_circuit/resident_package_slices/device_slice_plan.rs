@@ -83,7 +83,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             )));
         }
         let reusable_manifest = resident_package_reusable_kernel_manifest(&placed_plan);
-        let prepared_plan = placed_plan
+        let mut prepared_plan = placed_plan
             .prepared_dispatch_plan(&reusable_manifest, capacity)
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
@@ -111,6 +111,10 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
                 &runtime_model.component_executions,
                 &prepared_plan,
             );
+        attach_resident_package_physical_execution_contracts(
+            &mut prepared_plan,
+            &component_kernel_shaders,
+        )?;
         let loaded_manifest = loaded_kernel_pack_from_package_shader_refs(
             manifest_dir,
             &placed_plan,

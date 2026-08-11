@@ -11,10 +11,10 @@ struct ContractParameterSlice<'a> {
 }
 
 fn select_distributed_contract<'a>(
-    dispatch: &VulkanPreparedDispatch,
-    artifact: &'a crate::vulkan_stream_circuit::VulkanReusableKernelArtifact,
+    dispatch: &'a VulkanPreparedDispatch,
+    artifact: &crate::vulkan_stream_circuit::VulkanReusableKernelArtifact,
 ) -> Result<Option<&'a PhysicalExecutionContract>, VulkanDistributedPlanError> {
-    let candidates = artifact
+    let candidates = dispatch
         .physical_execution_contracts
         .iter()
         .filter(|contract| {
@@ -34,9 +34,9 @@ fn select_distributed_contract<'a>(
         return Err(dispatch_error(
             dispatch,
             format!(
-                "artifact family {:?} has {} ambiguous decode distribution contracts",
-                artifact.family_id,
-                candidates.len()
+                "has {} ambiguous decode distribution contracts for reusable artifact family {:?}",
+                candidates.len(),
+                artifact.family_id
             ),
         ));
     };

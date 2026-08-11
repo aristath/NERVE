@@ -108,6 +108,137 @@ fn prepared_dispatch_plan_links_artifacts_to_descriptor_resources() {
     }
 }
 
+fn contract_attachment_test_dispatch(
+    dispatch_index: usize,
+    component_id: &str,
+) -> VulkanPreparedDispatch {
+    VulkanPreparedDispatch {
+        dispatch_index,
+        kernel_id: format!("{component_id}.operator_norm"),
+        component_id: component_id.to_string(),
+        circuit_id: component_id.to_string(),
+        node_index: 0,
+        node_id: "operator_norm".to_string(),
+        op: "rms_norm".to_string(),
+        reusable_family_id: "shared-rms-norm-family".to_string(),
+        artifact_path: "shaders/shared-rms-norm.spv".to_string(),
+        entry_point: DEFAULT_SPIRV_ENTRY_POINT.to_string(),
+        local_size_x: DEFAULT_COMPUTE_LOCAL_SIZE_X,
+        descriptors: Vec::new(),
+        push_constants: Vec::new(),
+        stream_control_binding: None,
+        physical_execution_contracts: Vec::new(),
+    }
+}
+
+fn contract_attachment_test_plan() -> VulkanPreparedDispatchPlan {
+    VulkanPreparedDispatchPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        reusable_family_count: 1,
+        dispatches: vec![
+            contract_attachment_test_dispatch(0, "layer_00"),
+            contract_attachment_test_dispatch(1, "layer_01"),
+        ],
+        total_descriptor_count: 0,
+    }
+}
+
+fn contract_attachment_test_shader(
+    component_id: &str,
+    contract_suffix: char,
+) -> VulkanResidentComponentKernelShaderRef {
+    let mut contract = fixture_model_package_manifest()
+        .component_executions
+        .into_iter()
+        .flat_map(|component| component.kernels)
+        .find(|kernel| kernel.node_id == "operator_norm")
+        .unwrap()
+        .physical_execution_contracts
+        .into_iter()
+        .next()
+        .unwrap();
+    contract.contract_id = format!("sha256:{}", contract_suffix.to_string().repeat(64));
+    VulkanResidentComponentKernelShaderRef {
+        component_id: component_id.to_string(),
+        node_id: "operator_norm".to_string(),
+        shader_path: "shaders/shared-rms-norm.spv".to_string(),
+        local_size_x: DEFAULT_COMPUTE_LOCAL_SIZE_X,
+        workgroup_count_x: 1,
+        physical_execution_contracts: vec![contract],
+    }
+}
+
+#[test]
+fn prepared_dispatches_share_code_without_sharing_instance_contracts() {
+    let mut plan = contract_attachment_test_plan();
+    let shaders = vec![
+        contract_attachment_test_shader("layer_00", 'a'),
+        contract_attachment_test_shader("layer_01", 'b'),
+    ];
+
+    attach_resident_package_physical_execution_contracts(&mut plan, &shaders).unwrap();
+
+    assert_eq!(
+        plan.dispatches[0].reusable_family_id,
+        plan.dispatches[1].reusable_family_id
+    );
+    assert_eq!(
+        plan.dispatches[0].physical_execution_contracts[0].contract_id,
+        format!("sha256:{}", "a".repeat(64))
+    );
+    assert_eq!(
+        plan.dispatches[1].physical_execution_contracts[0].contract_id,
+        format!("sha256:{}", "b".repeat(64))
+    );
+}
+
+#[test]
+fn prepared_dispatch_contract_attachment_rejects_a_missing_instance() {
+    let mut plan = contract_attachment_test_plan();
+    let error = attach_resident_package_physical_execution_contracts(
+        &mut plan,
+        &[contract_attachment_test_shader("layer_00", 'a')],
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("no physical contracts for prepared dispatch layer_01.operator_norm"));
+}
+
+#[test]
+fn prepared_dispatch_contract_attachment_rejects_a_duplicate_instance() {
+    let mut plan = contract_attachment_test_plan();
+    let duplicate = contract_attachment_test_shader("layer_00", 'b');
+    let error = attach_resident_package_physical_execution_contracts(
+        &mut plan,
+        &[
+            contract_attachment_test_shader("layer_00", 'a'),
+            duplicate,
+        ],
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("repeats kernel contract source layer_00.operator_norm"));
+}
+
+#[test]
+fn prepared_dispatch_contract_attachment_rejects_an_empty_contract_set() {
+    let mut plan = contract_attachment_test_plan();
+    let mut empty = contract_attachment_test_shader("layer_00", 'a');
+    empty.physical_execution_contracts.clear();
+    let error = attach_resident_package_physical_execution_contracts(
+        &mut plan,
+        &[empty, contract_attachment_test_shader("layer_01", 'b')],
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains(
+        "empty physical contract set for prepared dispatch layer_00.operator_norm"
+    ));
+}
+
 #[test]
 fn prepared_dispatch_plan_rejects_a_compiled_stream_control_binding_mismatch() {
     let error = validate_stream_control_binding(19, Some(6), 5).unwrap_err();

@@ -226,8 +226,6 @@ pub struct VulkanReusableKernelArtifact {
     pub descriptor_signature: Vec<VulkanKernelDescriptorSlotSignature>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
     pub stream_control_binding: Option<u32>,
-    pub physical_execution_contracts:
-        Vec<nerve_execution_contracts::PhysicalExecutionContract>,
 }
 
 impl VulkanReusableKernelArtifact {
@@ -242,7 +240,6 @@ impl VulkanReusableKernelArtifact {
             descriptor_signature: family.descriptor_signature.clone(),
             push_constants: family.push_constants.clone(),
             stream_control_binding: family.stream_control_binding,
-            physical_execution_contracts: Vec::new(),
         }
     }
 
@@ -258,14 +255,6 @@ impl VulkanReusableKernelArtifact {
 
     pub fn with_workgroup_count_x(mut self, workgroup_count_x: u32) -> Self {
         self.workgroup_count_x = workgroup_count_x;
-        self
-    }
-
-    pub fn with_physical_execution_contracts(
-        mut self,
-        contracts: Vec<nerve_execution_contracts::PhysicalExecutionContract>,
-    ) -> Self {
-        self.physical_execution_contracts = contracts;
         self
     }
 }

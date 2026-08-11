@@ -89,6 +89,43 @@ fn resident_package_component_kernel_shader_refs_for_prepared_dispatches(
         .collect()
 }
 
+fn attach_resident_package_physical_execution_contracts(
+    prepared_plan: &mut VulkanPreparedDispatchPlan,
+    dispatch_shaders: &[VulkanResidentComponentKernelShaderRef],
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    let mut contracts_by_dispatch = BTreeMap::new();
+    for shader in dispatch_shaders {
+        let key = (shader.component_id.as_str(), shader.node_id.as_str());
+        if contracts_by_dispatch
+            .insert(key, shader.physical_execution_contracts.as_slice())
+            .is_some()
+        {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "resident package repeats kernel contract source {}.{}",
+                shader.component_id, shader.node_id,
+            )));
+        }
+    }
+    for dispatch in &mut prepared_plan.dispatches {
+        let contracts = contracts_by_dispatch
+            .get(&(dispatch.component_id.as_str(), dispatch.node_id.as_str()))
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "resident package has no physical contracts for prepared dispatch {}.{}",
+                    dispatch.component_id, dispatch.node_id,
+                ))
+            })?;
+        if contracts.is_empty() {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "resident package has an empty physical contract set for prepared dispatch {}.{}",
+                dispatch.component_id, dispatch.node_id,
+            )));
+        }
+        dispatch.physical_execution_contracts = contracts.to_vec();
+    }
+    Ok(())
+}
+
 fn loaded_kernel_pack_from_package_shader_refs(
     manifest_dir: &Path,
     placed_plan: &VulkanPlacedStreamCircuitPlan,
@@ -132,10 +169,7 @@ fn loaded_kernel_pack_from_package_shader_refs(
         loaded_artifacts.push(VulkanLoadedReusableKernelArtifact {
             artifact: VulkanReusableKernelArtifact::from_family(family, shader.shader_path.clone())
                 .with_local_size_x(shader.local_size_x)
-                .with_workgroup_count_x(shader.workgroup_count_x)
-                .with_physical_execution_contracts(
-                    shader.physical_execution_contracts.clone(),
-                ),
+                .with_workgroup_count_x(shader.workgroup_count_x),
             resolved_path: resolve_resident_model_package_path(manifest_dir, &shader.shader_path),
             words: spirv_words,
         });

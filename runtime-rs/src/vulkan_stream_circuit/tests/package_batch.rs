@@ -59,7 +59,6 @@ fn loaded_artifact_manifest_preserves_compiled_launch_geometry() {
                 descriptor_signature: Vec::new(),
                 push_constants: Vec::new(),
                 stream_control_binding: None,
-                physical_execution_contracts: Vec::new(),
             },
             resolved_path: PathBuf::from("kernels/sparse-moe-gate-up.spv"),
             words: vec![0x0723_0203],

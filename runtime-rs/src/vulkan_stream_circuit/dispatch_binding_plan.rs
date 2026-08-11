@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VulkanPreparedDispatchPlan {
     pub backend_id: String,
     pub reusable_family_count: usize,
@@ -74,6 +74,7 @@ impl VulkanPreparedDispatchPlan {
                 descriptors: descriptor_dispatch.descriptors.clone(),
                 push_constants: command.push_constants.clone(),
                 stream_control_binding: command.stream_control_binding,
+                physical_execution_contracts: Vec::new(),
             });
         }
         let total_descriptor_count = dispatches
@@ -113,7 +114,7 @@ fn validate_stream_control_binding(
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VulkanPreparedDispatch {
     pub dispatch_index: usize,
     pub kernel_id: String,
@@ -129,6 +130,8 @@ pub struct VulkanPreparedDispatch {
     pub descriptors: Vec<VulkanResolvedDescriptorBinding>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
     pub stream_control_binding: Option<u32>,
+    pub physical_execution_contracts:
+        Vec<nerve_execution_contracts::PhysicalExecutionContract>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
