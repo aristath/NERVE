@@ -5661,7 +5661,7 @@ fn open_compute_device(target: &Target) -> Result<OpenVulkanComputeDevice, Strin
         .application_version(1)
         .engine_name(&engine_name)
         .engine_version(1)
-        .api_version(vk::make_api_version(0, 1, 3, 0));
+        .api_version(vk::make_api_version(0, 1, 4, 0));
     let instance = unsafe {
         entry.create_instance(
             &vk::InstanceCreateInfo::default().application_info(&app_info),

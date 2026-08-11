@@ -29,7 +29,7 @@ fn try_discover_vulkan_targets() -> Result<Vec<Target>, String> {
         .application_version(1)
         .engine_name(&engine_name)
         .engine_version(1)
-        .api_version(vk::make_api_version(0, 1, 3, 0));
+        .api_version(vk::make_api_version(0, 1, 4, 0));
     let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
     let instance = unsafe { entry.create_instance(&instance_info, None) }
         .map_err(|error| format!("could not create Vulkan instance: {error:?}"))?;
