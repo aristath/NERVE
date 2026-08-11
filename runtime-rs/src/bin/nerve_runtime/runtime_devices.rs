@@ -71,10 +71,6 @@ fn runtime_uses_explicit_placement(args: &Args) -> bool {
         || args.vulkan_device_index.is_some()
 }
 
-fn runtime_auto_placement_device_is_eligible(device: &VulkanComputeDeviceInfo) -> bool {
-    device.device_type != "integrated_gpu"
-}
-
 fn rank_runtime_auto_placement_candidates_across_capability_classes(
     mut measured: Vec<(u128, bool, usize, String, VulkanRuntimePlacementCandidate)>,
     primary_capability_class: Option<&str>,
@@ -142,13 +138,6 @@ fn runtime_capacity_packed_model(
     let mut eligible_devices = Vec::new();
     let mut profiles_by_physical_device = BTreeMap::new();
     for device in available_devices {
-        // Integrated display devices are not automatic inference targets. They
-        // commonly own scanout/compositor allocations and probing them would
-        // itself create a runtime context. A user can still target one through
-        // explicit placement controls when that trade-off is intentional.
-        if !runtime_auto_placement_device_is_eligible(device) {
-            continue;
-        }
         let profile = profiles
             .iter()
             .find(|profile| profile.hardware_identity.stable_device_id == device.physical_device_id)
@@ -167,7 +156,7 @@ fn runtime_capacity_packed_model(
     if eligible_devices.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "automatic placement found no non-integrated Vulkan compute devices",
+            "automatic placement found no Vulkan compute devices",
         )
         .into());
     }

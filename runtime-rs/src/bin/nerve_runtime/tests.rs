@@ -26,8 +26,8 @@ mod tests {
         parse_vulkan_device_uuid_ref,
         rank_runtime_auto_placement_candidates_across_capability_classes,
         resolve_runtime_context_size, resolve_runtime_vulkan_physical_device_ref_in,
-        resolve_speculative_draft_tokens, runtime_auto_placement_device_is_eligible,
-        runtime_chat_repl_control, runtime_critical_path_lines, runtime_device_bindings_report,
+        resolve_speculative_draft_tokens, runtime_chat_repl_control, runtime_critical_path_lines,
+        runtime_device_bindings_report,
         runtime_physical_device_bindings_in, runtime_uses_explicit_placement, submit_chat_turn,
         usage, validate_explicit_logical_device_bindings,
     };
@@ -41,33 +41,6 @@ mod tests {
                 .with_ymd_and_hms(2026, 7, 18, 12, 0, 0)
                 .unwrap(),
             compiled_codec: None,
-        }
-    }
-
-    fn test_compute_device(
-        physical_device_index: usize,
-        device_uuid: [u8; 16],
-    ) -> VulkanComputeDeviceInfo {
-        VulkanComputeDeviceInfo {
-            physical_device_index,
-            physical_device_id: format!(
-                "vulkan-uuid:{}",
-                device_uuid
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>(),
-            ),
-            device_uuid,
-            device_name: format!("device {physical_device_index}"),
-            pci_address: None,
-            device_type: "discrete_gpu".to_string(),
-            vendor_id: 1,
-            device_id: physical_device_index as u32,
-            api_version: 1,
-            driver_version: 1,
-            compute_queue_family_indices: vec![0],
-            memory_heaps: Vec::new(),
-            selected_by_default: false,
         }
     }
 
@@ -129,21 +102,6 @@ mod tests {
             .node_devices
             .insert("block_0".to_string(), "gpu1".to_string());
         assert!(runtime_uses_explicit_placement(&custom));
-    }
-
-    #[test]
-    fn automatic_capacity_packing_excludes_integrated_display_gpus() {
-        let mut integrated = test_compute_device(4, [4; 16]);
-        integrated.device_type = "integrated_gpu".to_string();
-        assert!(!runtime_auto_placement_device_is_eligible(&integrated));
-
-        let mut discrete = test_compute_device(5, [5; 16]);
-        discrete.device_type = "discrete_gpu".to_string();
-        assert!(runtime_auto_placement_device_is_eligible(&discrete));
-
-        let mut cpu = test_compute_device(6, [6; 16]);
-        cpu.device_type = "cpu".to_string();
-        assert!(runtime_auto_placement_device_is_eligible(&cpu));
     }
 
     #[test]
