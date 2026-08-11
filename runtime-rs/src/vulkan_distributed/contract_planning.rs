@@ -352,6 +352,13 @@ fn plan_contract_dispatch(
                     VulkanDistributedReductionFinalizationPlan::StoreF32
                 }
                 ReductionFinalization::AddBf16ResidualToBf16 { residual_binding } => {
+                    if !element_count.is_multiple_of(2) {
+                        return Err(dispatch_error(
+                            dispatch,
+                            "BF16 reduction finalization requires an even element count"
+                                .to_string(),
+                        ));
+                    }
                     let residual_input_index = contract
                         .inputs
                         .iter()

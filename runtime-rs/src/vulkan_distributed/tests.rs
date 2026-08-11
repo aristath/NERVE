@@ -774,6 +774,17 @@ mod tests {
         assert!(distributed_reduction_buffer_capacities(&reduction, 0, 1).is_err());
         assert!(distributed_reduction_buffer_capacities(&reduction, 1, 0).is_err());
         assert!(distributed_reduction_buffer_capacities(&reduction, 2, 1).is_err());
+
+        let odd_bf16 = VulkanDistributedReductionPlan {
+            operation: ReductionOperation::SumF32,
+            element_count: 3,
+            partial_byte_capacity: 3 * 4,
+            finalization:
+                VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
+                    residual_input_index: 1,
+                },
+        };
+        assert!(distributed_reduction_buffer_capacities(&odd_bf16, 2, 1).is_err());
     }
 
     #[test]
@@ -1004,6 +1015,42 @@ mod tests {
             residual_plan.dispatches[0].auxiliary_input_activations[0].signal_id,
             "residual"
         );
+
+        let mut odd_residual = residual_finalized.clone();
+        odd_residual.dispatches[0].physical_execution_contracts[0]
+            .geometry
+            .dimensions
+            .insert("output_elements".to_string(), 3);
+        for descriptor in odd_residual.dispatches[0]
+            .descriptors
+            .iter_mut()
+            .filter(|descriptor| {
+                descriptor.usage == VulkanKernelDescriptorUsage::InputSignal
+                    && descriptor.name == "residual"
+                    || descriptor.usage == VulkanKernelDescriptorUsage::OutputSignal
+            })
+        {
+            let VulkanDescriptorResourceAddress::ActivationSlot {
+                byte_capacity,
+                signal_byte_capacity,
+                ..
+            } = &mut descriptor.resource
+            else {
+                panic!("fixture residual and output are activation slots");
+            };
+            *byte_capacity = 6;
+            *signal_byte_capacity = 6;
+        }
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &odd_residual)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("even element count"));
 
         let buffer_plan =
             VulkanDistributedActivationBufferPlan::from_execution_plan(&plan).unwrap();

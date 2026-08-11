@@ -88,6 +88,15 @@ fn distributed_reduction_buffer_capacities(
             "distributed reduction requires at least one participant and lane".to_string(),
         ));
     }
+    if matches!(
+        reduction.finalization,
+        VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. }
+    ) && !reduction.element_count.is_multiple_of(2)
+    {
+        return Err(VulkanDistributedDispatchRunnerError(
+            "distributed BF16 residual reduction requires an even element count".to_string(),
+        ));
+    }
     let partial_byte_capacity = reduction
         .partial_byte_capacity
         .checked_mul(participant_count)
