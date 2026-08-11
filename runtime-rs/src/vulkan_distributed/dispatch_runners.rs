@@ -46,7 +46,7 @@ fn physical_island_reduction_dispatch(
     }
 }
 
-fn distributed_shard_push_constants(
+pub(crate) fn distributed_shard_push_constants(
     planned_dispatch: &VulkanDistributedDispatchPlan,
     planned_shard: &VulkanDistributedDispatchShard,
 ) -> Result<Vec<u8>, VulkanDistributedDispatchRunnerError> {

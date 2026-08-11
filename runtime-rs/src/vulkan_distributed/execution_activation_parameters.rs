@@ -2117,13 +2117,13 @@ impl Display for VulkanDistributedActivationBufferError {
 
 impl Error for VulkanDistributedActivationBufferError {}
 
-struct VulkanDistributedSharedBufferAllocation {
-    route: VulkanSharedResidentBufferRoute,
-    external_device_local_error: Option<String>,
-    device_buffers: BTreeMap<String, Arc<VulkanResidentBuffer>>,
+pub(crate) struct VulkanDistributedSharedBufferAllocation {
+    pub(crate) route: VulkanSharedResidentBufferRoute,
+    pub(crate) external_device_local_error: Option<String>,
+    pub(crate) device_buffers: BTreeMap<String, Arc<VulkanResidentBuffer>>,
 }
 
-fn allocate_distributed_shared_buffer<'a, F, E>(
+pub(crate) fn allocate_distributed_shared_buffer<'a, F, E>(
     owner_device_id: &str,
     device_ids: &[String],
     byte_capacity: usize,

@@ -1,9 +1,9 @@
 const DISTRIBUTED_SUM_F32_LOCAL_SIZE_X: usize = 64;
 const DISTRIBUTED_SUM_F32_PUSH_CONSTANT_BYTE_COUNT: u32 = 12;
 
-struct VulkanDistributedReductionRunner {
+pub(crate) struct VulkanDistributedReductionRunner {
     _resident_dispatch: VulkanResidentKernelDispatch,
-    sequence: VulkanResidentKernelSequence,
+    pub(crate) sequence: VulkanResidentKernelSequence,
 }
 
 fn embedded_distributed_reduction_spirv_words(
@@ -124,18 +124,6 @@ fn create_distributed_reduction_runner(
     planned_dispatch: &VulkanDistributedDispatchPlan,
     activation_buffers: &VulkanDistributedActivationBuffers,
 ) -> Result<VulkanDistributedReductionRunner, VulkanDistributedDispatchRunnerError> {
-    let reduction = planned_dispatch.reduction.as_ref().ok_or_else(|| {
-        VulkanDistributedDispatchRunnerError(format!(
-            "distributed dispatch {}.{} has no reduction plan",
-            planned_dispatch.component_id, planned_dispatch.node_id
-        ))
-    })?;
-    if reduction.operation != ReductionOperation::SumF32 {
-        return Err(VulkanDistributedDispatchRunnerError(format!(
-            "distributed dispatch {}.{} has unsupported reduction {:?}",
-            planned_dispatch.component_id, planned_dispatch.node_id, reduction.operation
-        )));
-    }
     let lane_count = activation_buffers.lane_capacity;
     let partials = activation_buffers
         .reduction_partial_buffer(
@@ -161,6 +149,72 @@ fn create_distributed_reduction_runner(
                 planned_dispatch.component_id, planned_dispatch.node_id
             ))
         })?;
+    let residual = match planned_dispatch.reduction.as_ref().map(|plan| &plan.finalization) {
+        Some(VulkanDistributedReductionFinalizationPlan::StoreF32) => None,
+        Some(VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
+            residual_input_index,
+        }) => {
+            let residual_activation = distributed_reduction_input_activation(
+                planned_dispatch,
+                *residual_input_index,
+            )
+            .ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "distributed dispatch {}.{} has no residual input {}",
+                    planned_dispatch.component_id,
+                    planned_dispatch.node_id,
+                    residual_input_index
+                ))
+            })?;
+            Some(
+                activation_buffers
+                    .activation_buffer(
+                        &planned_dispatch.owner_device_id,
+                        residual_activation,
+                        &planned_dispatch.owner_device_id,
+                    )
+                    .ok_or_else(|| {
+                        VulkanDistributedDispatchRunnerError(format!(
+                            "distributed dispatch {}.{} has no owner residual input {}",
+                            planned_dispatch.component_id,
+                            planned_dispatch.node_id,
+                            residual_activation.signal_id
+                        ))
+                    })?,
+            )
+        }
+        None => None,
+    };
+    create_distributed_reduction_runner_for_buffers(
+        device,
+        planned_dispatch,
+        lane_count,
+        partials,
+        output,
+        residual,
+    )
+}
+
+pub(crate) fn create_distributed_reduction_runner_for_buffers(
+    device: &VulkanComputeDevice,
+    planned_dispatch: &VulkanDistributedDispatchPlan,
+    lane_count: usize,
+    partials: &Arc<VulkanResidentBuffer>,
+    output: &Arc<VulkanResidentBuffer>,
+    residual: Option<&Arc<VulkanResidentBuffer>>,
+) -> Result<VulkanDistributedReductionRunner, VulkanDistributedDispatchRunnerError> {
+    let reduction = planned_dispatch.reduction.as_ref().ok_or_else(|| {
+        VulkanDistributedDispatchRunnerError(format!(
+            "distributed dispatch {}.{} has no reduction plan",
+            planned_dispatch.component_id, planned_dispatch.node_id
+        ))
+    })?;
+    if reduction.operation != ReductionOperation::SumF32 {
+        return Err(VulkanDistributedDispatchRunnerError(format!(
+            "distributed dispatch {}.{} has unsupported reduction {:?}",
+            planned_dispatch.component_id, planned_dispatch.node_id, reduction.operation
+        )));
+    }
     let (partial_byte_capacity, output_byte_capacity) =
         distributed_reduction_buffer_capacities(
             reduction,
@@ -183,34 +237,14 @@ fn create_distributed_reduction_runner(
             ],
         ),
         VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
-            residual_input_index,
+            residual_input_index: _,
         } => {
-            let residual_activation = distributed_reduction_input_activation(
-                planned_dispatch,
-                *residual_input_index,
-            )
-            .ok_or_else(|| {
+            let residual = residual.ok_or_else(|| {
                 VulkanDistributedDispatchRunnerError(format!(
-                    "distributed dispatch {}.{} has no residual input {}",
-                    planned_dispatch.component_id,
-                    planned_dispatch.node_id,
-                    residual_input_index
+                    "distributed dispatch {}.{} has no owner residual buffer",
+                    planned_dispatch.component_id, planned_dispatch.node_id,
                 ))
             })?;
-            let residual = activation_buffers
-                .activation_buffer(
-                    &planned_dispatch.owner_device_id,
-                    residual_activation,
-                    &planned_dispatch.owner_device_id,
-                )
-                .ok_or_else(|| {
-                    VulkanDistributedDispatchRunnerError(format!(
-                        "distributed dispatch {}.{} has no owner residual input {}",
-                        planned_dispatch.component_id,
-                        planned_dispatch.node_id,
-                        residual_activation.signal_id
-                    ))
-                })?;
             (
                 distributed_sum_f32_add_bf16_residual_spirv_words()?,
                 reduction.element_count / 2,
