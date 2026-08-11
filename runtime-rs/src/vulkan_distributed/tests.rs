@@ -1153,6 +1153,113 @@ mod tests {
     }
 
     #[test]
+    fn contract_declared_output_rows_flow_into_local_input_column_shards() {
+        let mut producer = fixture_plan("row_major").dispatches.remove(0);
+        producer.dispatch_index = 7;
+        producer.local_intermediates = vec![
+            nerve_execution_contracts::LocalIntermediateContract {
+                signal: producer.output_activation.signal_id.clone(),
+                producer_binding: u32::try_from(producer.output_activation.binding).unwrap(),
+                consumer_binding: 0,
+                format: "bf16".to_string(),
+            },
+        ];
+        let mut consumer = producer.clone();
+        consumer.dispatch_index = 8;
+        consumer.node_id = "down".to_string();
+        consumer.distribution = VulkanDistributedDispatchDistribution::InputColumns;
+        consumer.input_distribution = InputDistribution::Sharded;
+        consumer.input_activation = producer.output_activation.clone();
+        consumer.input_activation.binding = 0;
+        for (producer_shard, consumer_shard) in
+            producer.shards.iter().zip(&mut consumer.shards)
+        {
+            consumer_shard.input_range.byte_offset = producer_shard.output_byte_offset;
+            consumer_shard.input_range.byte_count = producer_shard.output_byte_count;
+            consumer_shard.base_workgroup_z =
+                u32::try_from(consumer_shard.row_start).unwrap();
+        }
+
+        let mut islands = resolved_physical_execution_islands(
+            &[producer.clone(), consumer.clone()],
+            VulkanSharedResidentBufferRoute::SharedHost,
+        )
+        .unwrap();
+        assert_eq!(islands.len(), 1);
+        assert_eq!(islands[0].dispatch_indices(), [7, 8]);
+        assert_eq!(
+            islands[0]
+                .phase_schedules[0]
+                .steps
+                .iter()
+                .map(|step| step.kind)
+                .collect::<Vec<_>>(),
+            [
+                VulkanPhysicalExecutionScheduleKind::PublishInputs,
+                VulkanPhysicalExecutionScheduleKind::ExecuteShards,
+                VulkanPhysicalExecutionScheduleKind::ExecuteShards,
+                VulkanPhysicalExecutionScheduleKind::CollectOutputs,
+            ]
+        );
+        islands[0].dispatches[1].reduction = Some(VulkanDistributedReductionPlan {
+            operation: ReductionOperation::SumF32,
+            element_count: 12,
+            partial_byte_capacity: 48,
+            finalization: VulkanDistributedReductionFinalizationPlan::StoreF32,
+        });
+        assert_eq!(
+            physical_island_reduction_dispatch(&islands[0])
+                .unwrap()
+                .unwrap()
+                .dispatch_index,
+            8
+        );
+        islands[0].dispatches[0].reduction = islands[0].dispatches[1].reduction.clone();
+        assert!(
+            physical_island_reduction_dispatch(&islands[0])
+                .unwrap_err()
+                .to_string()
+                .contains("only one tail reduction is legal")
+        );
+
+        let mut undeclared = producer.clone();
+        undeclared.local_intermediates.clear();
+        assert_eq!(
+            resolved_physical_execution_islands(
+                &[undeclared, consumer.clone()],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+
+        let mut format_mismatch = consumer.clone();
+        format_mismatch.local_intermediates[0].format = "f32".to_string();
+        assert_eq!(
+            resolved_physical_execution_islands(
+                &[producer.clone(), format_mismatch],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+
+        let mut mismatched_range = consumer;
+        mismatched_range.shards[1].input_range.byte_offset += 2;
+        assert_eq!(
+            resolved_physical_execution_islands(
+                &[producer, mismatched_range],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+    }
+
+    #[test]
     fn distributed_shards_always_start_with_the_dispatch_owner() {
         let tensor_index = fixture_tensor_index("row_major");
         let prepared_plan = fixture_prepared_plan();

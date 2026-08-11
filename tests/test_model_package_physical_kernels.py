@@ -16,6 +16,7 @@ from nerve.model_package_derived_tensors import (
     transposed_tensor_name,
 )
 from nerve.model_package_physical_kernels import (
+    local_output_shard_intermediates_for_node,
     physical_kernel_implementations_for_node,
 )
 from nerve.model_package_shader_compiler import compile_shader_artifacts
@@ -177,6 +178,58 @@ def test_contract_owns_the_input_column_shader_and_physical_weight(
         "residual_binding": 1,
     }
     assert distributed["equivalence"]["output"] == "absolute_relative_tolerance"
+    assert distributed["local_intermediates"] == []
+
+
+def test_compiler_declares_only_an_executable_local_shard_handoff(
+    tmp_path: Path,
+) -> None:
+    down, circuit, tensor_index, _ = bf16_down_fixture(tmp_path)
+    gate_up = {
+        "id": "gate_up",
+        "op": "parallel_linear_silu_multiply",
+        "inputs": ["normalized"],
+        "outputs": ["activated"],
+        "params": ["gate", "up"],
+    }
+    circuit["nodes"].insert(0, gate_up)
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
+    derive_tensor_parallel_linear_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered_dir,
+        tensor_index,
+        target=NativeTarget(),  # type: ignore[arg-type]
+    )
+
+    compiled_gate_up = {**gate_up, "_physical_contract_member_node_ids": ["gate_up"]}
+    assert local_output_shard_intermediates_for_node(
+        circuit, compiled_gate_up, tensor_index
+    ) == [
+        {
+            "signal": "activated",
+            "producer_binding": 1,
+            "consumer_binding": 0,
+            "format": "bf16",
+        }
+    ]
+    assert physical_kernel_implementations_for_node(
+        circuit, down, tensor_index
+    )[0]["local_intermediates"] == [
+        {
+            "signal": "activated",
+            "producer_binding": 1,
+            "consumer_binding": 0,
+            "format": "bf16",
+        }
+    ]
+
+    down["inputs"][0] = "another-signal"
+    assert (
+        local_output_shard_intermediates_for_node(circuit, gate_up, tensor_index)
+        == []
+    )
 
 
 def test_compiler_derives_fp8_weight_and_scale_physical_resources(

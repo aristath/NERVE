@@ -4,6 +4,30 @@ pub struct VulkanDistributedDispatchRunners {
     pub shard_count: usize,
 }
 
+fn physical_island_reduction_dispatch(
+    island: &VulkanPhysicalExecutionIslandPlan,
+) -> Result<Option<&VulkanDistributedDispatchPlan>, VulkanDistributedDispatchRunnerError> {
+    let tail = island.tail();
+    let reduced_dispatches = island
+        .dispatches
+        .iter()
+        .filter(|dispatch| dispatch.reduction.is_some())
+        .collect::<Vec<_>>();
+    match reduced_dispatches.as_slice() {
+        [] => Ok(None),
+        [planned_dispatch] if planned_dispatch.dispatch_index == tail.dispatch_index => {
+            Ok(Some(*planned_dispatch))
+        }
+        _ => Err(VulkanDistributedDispatchRunnerError(format!(
+            "physical execution island {}..{} has {} reductions across {} dispatches; only one tail reduction is legal",
+            island.leader().dispatch_index,
+            tail.dispatch_index,
+            reduced_dispatches.len(),
+            island.dispatches.len()
+        ))),
+    }
+}
+
 fn distributed_shard_push_constants(
     planned_dispatch: &VulkanDistributedDispatchPlan,
     planned_shard: &VulkanDistributedDispatchShard,
@@ -376,31 +400,14 @@ impl VulkanDistributedDispatchRunners {
                     .map_err(VulkanDistributedDispatchRunnerError::from)?,
                 );
             }
-            let reduced_dispatches = planned_island
-                .dispatches
-                .iter()
-                .filter(|dispatch| dispatch.reduction.is_some())
-                .collect::<Vec<_>>();
-            let reduction = match reduced_dispatches.as_slice() {
-                [] => None,
-                [planned_dispatch]
-                    if planned_island.dispatches.len() == 1
-                        && planned_dispatch.dispatch_index == tail.dispatch_index =>
-                {
+            let reduction = match physical_island_reduction_dispatch(planned_island)? {
+                None => None,
+                Some(planned_dispatch) => {
                     Some(create_distributed_reduction_runner(
                         owner_device,
                         planned_dispatch,
                         activation_buffers,
                     )?)
-                }
-                _ => {
-                    return Err(VulkanDistributedDispatchRunnerError(format!(
-                        "physical execution island {}..{} has {} reductions across {} dispatches",
-                        leader.dispatch_index,
-                        tail.dispatch_index,
-                        reduced_dispatches.len(),
-                        planned_island.dispatches.len()
-                    )));
                 }
             };
             dispatches.push(VulkanDistributedDispatchRunner {

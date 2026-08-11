@@ -6,6 +6,10 @@ import json
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+from nerve.model_package_physical_kernels import (
+    local_output_shard_intermediates_for_node,
+)
+
 
 Json = dict[str, Any]
 
@@ -319,6 +323,9 @@ def build_kernel_physical_execution_contracts(
         formats=scalar_formats,
         geometry=scalar_geometry,
         workgroup_count_x=int(kernel["workgroup_count_x"]),
+        local_intermediates=local_output_shard_intermediates_for_node(
+            circuit, node, tensor_index
+        ),
     )
     if distributed is not None:
         contracts.append(distributed)
@@ -513,6 +520,7 @@ def _distributed_scalar_contract(
     formats: PhysicalFormats,
     geometry: ExecutionGeometry,
     workgroup_count_x: int,
+    local_intermediates: list[LocalIntermediateContract],
 ) -> PhysicalExecutionContract | None:
     op = node.get("op")
     parameter_metadata = _node_parameter_metadata(node, circuit, tensor_index)
@@ -596,7 +604,7 @@ def _distributed_scalar_contract(
                     "alignment_elements": artifact_alignment,
                 }
             ],
-            local_intermediates=[],
+            local_intermediates=local_intermediates,
         )
 
     if op == "linear_residual":

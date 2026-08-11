@@ -7,6 +7,79 @@ from nerve.model_package_derived_tensors import (
 from nerve.model_package_tensors import tensor_dtype, tensor_shape
 
 
+def local_output_shard_intermediates_for_node(
+    circuit: Json,
+    node: Json,
+    tensor_index: Json,
+) -> list[Json]:
+    """Describe a legal device-local handoff to the next physical kernel."""
+
+    if node.get("op") != "parallel_linear_silu_multiply":
+        return []
+    outputs = node.get("outputs", [])
+    nodes = circuit.get("nodes", [])
+    node_id = node.get("id")
+    producer_indices = [
+        index
+        for index, candidate in enumerate(nodes)
+        if isinstance(candidate, dict) and candidate.get("id") == node_id
+    ]
+    if len(outputs) != 1 or len(producer_indices) != 1:
+        return []
+    producer_index = producer_indices[0]
+    if producer_index + 1 >= len(nodes):
+        return []
+    consumer = nodes[producer_index + 1]
+    if (
+        consumer.get("op") != "linear_residual"
+        or not consumer.get("inputs")
+        or consumer["inputs"][0] != outputs[0]
+        or not physical_kernel_implementations_for_node(
+            circuit, consumer, tensor_index
+        )
+    ):
+        return []
+    return [
+        {
+            "signal": outputs[0],
+            "producer_binding": len(node.get("inputs", [])),
+            "consumer_binding": 0,
+            "format": "bf16",
+        }
+    ]
+
+
+def _local_input_shard_intermediates_for_node(
+    circuit: Json,
+    node: Json,
+) -> list[Json]:
+    inputs = node.get("inputs", [])
+    nodes = circuit.get("nodes", [])
+    node_id = node.get("id")
+    consumer_indices = [
+        index
+        for index, candidate in enumerate(nodes)
+        if isinstance(candidate, dict) and candidate.get("id") == node_id
+    ]
+    if len(inputs) != 2 or len(consumer_indices) != 1 or consumer_indices[0] == 0:
+        return []
+    producer = nodes[consumer_indices[0] - 1]
+    if (
+        not isinstance(producer, dict)
+        or producer.get("op") != "parallel_linear_silu_multiply"
+        or producer.get("outputs") != [inputs[0]]
+    ):
+        return []
+    return [
+        {
+            "signal": inputs[0],
+            "producer_binding": len(producer.get("inputs", [])),
+            "consumer_binding": 0,
+            "format": "bf16",
+        }
+    ]
+
+
 def physical_kernel_implementations_for_node(
     circuit: Json,
     node: Json,
@@ -177,7 +250,9 @@ def physical_kernel_implementations_for_node(
                     },
                 }
             ],
-            "local_intermediates": [],
+            "local_intermediates": _local_input_shard_intermediates_for_node(
+                circuit, node
+            ),
             "resources": resources,
             "equivalence": {
                 "output": "absolute_relative_tolerance",

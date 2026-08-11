@@ -577,6 +577,7 @@ fn plan_contract_dispatch(
         physical_execution_contract_id: contract.contract_id.clone(),
         implementation_digest: contract.implementation_digest.clone(),
         contract_member_node_ids: contract.member_node_ids.clone(),
+        local_intermediates: contract.local_intermediates.clone(),
         has_lazy_resource_requirements: contract.resources.iter().any(|resource| {
             resource.kind == nerve_execution_contracts::ResourceKind::LazyResource
         }),

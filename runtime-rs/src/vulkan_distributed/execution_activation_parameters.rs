@@ -1134,23 +1134,60 @@ fn distributed_dispatches_can_share_sequence(
     producer: &VulkanDistributedDispatchPlan,
     consumer: &VulkanDistributedDispatchPlan,
 ) -> bool {
-    producer.owner_device_id == consumer.owner_device_id
-        && producer.component_id == consumer.component_id
-        && producer.dispatch_index.checked_add(1) == Some(consumer.dispatch_index)
-        && producer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
+    if producer.owner_device_id != consumer.owner_device_id
+        || producer.component_id != consumer.component_id
+        || producer.dispatch_index.checked_add(1) != Some(consumer.dispatch_index)
+        || !same_distributed_activation(
+            &producer.output_activation,
+            &consumer.input_activation,
+        )
+        || producer.shards.len() != consumer.shards.len()
+    {
+        return false;
+    }
+    let shards_match = producer
+        .shards
+        .iter()
+        .zip(&consumer.shards)
+        .all(|(producer, consumer)| {
+            producer.device_id == consumer.device_id
+                && producer.row_start == consumer.row_start
+                && producer.row_count == consumer.row_count
+        });
+    if !shards_match {
+        return false;
+    }
+    if producer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
         && consumer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
-        && same_distributed_activation(&producer.output_activation, &consumer.input_activation)
-        && producer.shards.len() == consumer.shards.len()
-        && producer
+    {
+        return producer
             .shards
             .iter()
             .zip(&consumer.shards)
             .all(|(producer, consumer)| {
-                producer.device_id == consumer.device_id
-                    && producer.row_start == consumer.row_start
-                    && producer.row_count == consumer.row_count
-                    && producer.base_workgroup_z == consumer.base_workgroup_z
-            })
+                producer.base_workgroup_z == consumer.base_workgroup_z
+            });
+    }
+    producer.distribution == VulkanDistributedDispatchDistribution::OutputRows
+        && producer.output_collection == OutputCollection::Concatenated
+        && consumer.distribution == VulkanDistributedDispatchDistribution::InputColumns
+        && consumer.input_distribution == InputDistribution::Sharded
+        && producer.shards.iter().zip(&consumer.shards).all(
+            |(producer_shard, consumer_shard)| {
+                producer_shard.output_byte_offset
+                    == consumer_shard.input_range.byte_offset
+                    && producer_shard.output_byte_count
+                        == consumer_shard.input_range.byte_count
+            },
+        )
+        && producer.local_intermediates.iter().any(|intermediate| {
+            intermediate.signal == producer.output_activation.signal_id
+                && usize::try_from(intermediate.producer_binding).ok()
+                    == Some(producer.output_activation.binding)
+                && usize::try_from(intermediate.consumer_binding).ok()
+                    == Some(consumer.input_activation.binding)
+                && consumer.local_intermediates.contains(intermediate)
+        })
 }
 
 fn same_distributed_activation(
@@ -1175,6 +1212,7 @@ pub struct VulkanDistributedDispatchPlan {
     pub physical_execution_contract_id: String,
     pub implementation_digest: String,
     pub contract_member_node_ids: Vec<String>,
+    pub local_intermediates: Vec<nerve_execution_contracts::LocalIntermediateContract>,
     pub has_lazy_resource_requirements: bool,
     pub owner_residency_requirements: Vec<VulkanPhysicalExecutionResidencyRequirement>,
     pub input_byte_capacity: usize,
