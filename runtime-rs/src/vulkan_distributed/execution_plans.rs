@@ -19,6 +19,8 @@ use crate::vulkan_compute::{
     VulkanTimelineSemaphoreReplayState,
 };
 use crate::vulkan_stream_circuit::{
+    CompiledResourceBindingMapping, CompiledResourceLifetime,
+    CompiledResourceResidencyContract, CompiledResourceSelectorMapping,
     VulkanActivationSlotBufferOverride, VulkanDescriptorResourceAddress,
     VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
     VulkanLoadedPhysicalKernelArtifact, VulkanLoadedKernelArtifactCatalog,
@@ -117,6 +119,31 @@ impl VulkanDistributedExecutionPlan {
         phase: ExecutionPhase,
         execution_shape: ExecutionShape,
     ) -> Result<Self, VulkanDistributedPlanError> {
+        Self::from_prepared_plans_for_phase_and_resources(
+            prepared_plans,
+            tensor_index,
+            artifact_manifest,
+            component_device_pools,
+            edge_placements,
+            storage_buffer_offset_alignment,
+            phase,
+            execution_shape,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_prepared_plans_for_phase_and_resources(
+        prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
+        tensor_index: &TensorIndex,
+        artifact_manifest: &VulkanPhysicalKernelArtifactManifest,
+        component_device_pools: &BTreeMap<String, Vec<String>>,
+        edge_placements: &[ComponentEdgePlacement],
+        storage_buffer_offset_alignment: usize,
+        phase: ExecutionPhase,
+        execution_shape: ExecutionShape,
+        resource_context: Option<(&str, &CompiledResourceResidencyContract)>,
+    ) -> Result<Self, VulkanDistributedPlanError> {
         if storage_buffer_offset_alignment == 0
             || !storage_buffer_offset_alignment.is_power_of_two()
             || !storage_buffer_offset_alignment.is_multiple_of(BF16_BYTE_COUNT)
@@ -179,6 +206,7 @@ impl VulkanDistributedExecutionPlan {
                     artifact,
                     contract,
                     storage_buffer_offset_alignment,
+                    resource_context,
                 )?
                 else {
                     continue;
@@ -344,6 +372,67 @@ impl VulkanDistributedExecutionPlanSet {
             storage_buffer_offset_alignment,
             ExecutionPhase::Prefill,
             ExecutionShape::MultiLane,
+        )?;
+        if !decode.replaces_same_logical_dispatches(&decode_batch)
+            || !decode.replaces_same_logical_dispatches(&prefill)
+        {
+            return Err(VulkanDistributedPlanError(
+                "single-lane decode, multi-lane decode, and multi-lane prefill replace different logical dispatches"
+                    .to_string(),
+            ));
+        }
+        Ok(Self {
+            decode,
+            decode_batch,
+            prefill,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_prepared_plans_with_resource_contract(
+        prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
+        tensor_index: &TensorIndex,
+        artifact_manifest: &VulkanPhysicalKernelArtifactManifest,
+        component_device_pools: &BTreeMap<String, Vec<String>>,
+        edge_placements: &[ComponentEdgePlacement],
+        storage_buffer_offset_alignment: usize,
+        execution_scope: &str,
+        resource_contract: &CompiledResourceResidencyContract,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        let resource_context = Some((execution_scope, resource_contract));
+        let decode = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
+            prepared_plans,
+            tensor_index,
+            artifact_manifest,
+            component_device_pools,
+            edge_placements,
+            storage_buffer_offset_alignment,
+            ExecutionPhase::Decode,
+            ExecutionShape::SingleLane,
+            resource_context,
+        )?;
+        let decode_batch =
+            VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
+                prepared_plans,
+                tensor_index,
+                artifact_manifest,
+                component_device_pools,
+                edge_placements,
+                storage_buffer_offset_alignment,
+                ExecutionPhase::Decode,
+                ExecutionShape::MultiLane,
+                resource_context,
+            )?;
+        let prefill = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
+            prepared_plans,
+            tensor_index,
+            artifact_manifest,
+            component_device_pools,
+            edge_placements,
+            storage_buffer_offset_alignment,
+            ExecutionPhase::Prefill,
+            ExecutionShape::MultiLane,
+            resource_context,
         )?;
         if !decode.replaces_same_logical_dispatches(&decode_batch)
             || !decode.replaces_same_logical_dispatches(&prefill)
@@ -950,6 +1039,7 @@ fn resolved_physical_execution_island(
     }
     if dispatches.iter().any(|dispatch| {
         dispatch.has_lazy_resource_requirements
+            && dispatch.selected_resource_partitions.is_empty()
     }) {
         return Err(VulkanDistributedPlanError(format!(
             "physical execution island for component {component_id:?} contains lazy resources without a resolved atomic residency plan",
@@ -1411,6 +1501,7 @@ pub struct VulkanDistributedDispatchPlan {
     pub contract_member_node_ids: Vec<String>,
     pub local_intermediates: Vec<nerve_execution_contracts::LocalIntermediateContract>,
     pub has_lazy_resource_requirements: bool,
+    pub selected_resource_partitions: Vec<VulkanDistributedSelectedResourcePartitionPlan>,
     pub owner_residency_requirements: Vec<VulkanPhysicalExecutionResidencyRequirement>,
     pub input_byte_capacity: usize,
     pub output_byte_capacity: usize,
@@ -1427,6 +1518,19 @@ pub struct VulkanDistributedDispatchPlan {
     pub distribution: VulkanDistributedDispatchDistribution,
     pub distributed_parameter_byte_count: usize,
     pub shards: Vec<VulkanDistributedDispatchShard>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedSelectedResourcePartitionPlan {
+    pub execution_scope: String,
+    pub selector_id: String,
+    pub selection_signal: String,
+    pub address_table_binding: usize,
+    pub parameter_slots_binding: usize,
+    pub resource_count: usize,
+    pub parameters_per_resource: usize,
+    pub atomic_group_ids: Vec<String>,
+    pub atomic_group_byte_counts: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

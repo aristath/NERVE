@@ -1699,6 +1699,74 @@ fn component_batch_dispatch_control_preserves_compiled_indirect_execution() {
 }
 
 #[test]
+fn distributed_expert_batch_accepts_partition_preserving_preparation_stages() {
+    let stage = |path: &str, access, indirect_dispatch_byte_offset| {
+        VulkanResidentComponentBatchStageArtifact {
+            shader_path: path.to_string(),
+            spirv_words: Vec::new(),
+            local_size_x: 64,
+            workgroup_count_x: 384,
+            descriptor_bindings: Vec::new(),
+            state_snapshot_binding: None,
+            state_snapshot_source_binding: None,
+            control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
+                byte_count: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
+                    .byte_count(),
+                binding: 31,
+                payload: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
+                access,
+            },
+            indirect_dispatch_byte_offset,
+            dispatch_y_from_batch_width: false,
+        }
+    };
+    let mut artifact = VulkanResidentComponentBatchKernelArtifact {
+        component_id: "layer".to_string(),
+        node_id: "routed_experts".to_string(),
+        execution_domain: VulkanResidentComponentKernelExecutionDomain::DecodeAndPrefill,
+        batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
+        lane_tile_width: 16,
+        selection_priority: 0,
+        independent_candidate_compatible: true,
+        causal_sequence_compatible: true,
+        parallel_block_compatible: false,
+        device_requirements: VulkanResidentVulkanDeviceRequirements::default(),
+        stages: vec![
+            stage(
+                "shaders/compact_routes.spv",
+                VulkanResidentComponentBatchControlAccess::ReadWrite,
+                None,
+            ),
+            stage(
+                "shaders/routed_experts.spv",
+                VulkanResidentComponentBatchControlAccess::Read,
+                Some(16),
+            ),
+        ],
+    };
+
+    assert!(expert_range_batch_artifact_preserves_partition(&artifact));
+
+    artifact.stages[0].control = VulkanResidentComponentBatchControlSpec::StorageBuffer {
+        byte_count: VulkanResidentComponentBatchControlPayload::Width.byte_count(),
+        binding: 31,
+        payload: VulkanResidentComponentBatchControlPayload::Width,
+        access: VulkanResidentComponentBatchControlAccess::ReadWrite,
+    };
+    assert!(!expert_range_batch_artifact_preserves_partition(&artifact));
+
+    artifact.stages[0].control = VulkanResidentComponentBatchControlSpec::StorageBuffer {
+        byte_count: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
+            .byte_count(),
+        binding: 31,
+        payload: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
+        access: VulkanResidentComponentBatchControlAccess::ReadWrite,
+    };
+    artifact.stages[1].indirect_dispatch_byte_offset = None;
+    assert!(!expert_range_batch_artifact_preserves_partition(&artifact));
+}
+
+#[test]
 fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
     let width_only = VulkanResidentComponentBatchStageArtifact {
         shader_path: "shaders/linear_batch2_fp8_e4m3_b128x128_5120x5120.spv".to_string(),
@@ -1951,6 +2019,7 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
         contract_member_node_ids: vec![node_id.to_string()],
         local_intermediates: Vec::new(),
         has_lazy_resource_requirements: false,
+        selected_resource_partitions: Vec::new(),
         owner_residency_requirements: Vec::new(),
         input_byte_capacity: 8_224,
         output_byte_capacity: 8_224,

@@ -474,13 +474,16 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .into_iter()
             .max()
             .unwrap_or(1);
-        let distributed_execution_plans = VulkanDistributedExecutionPlanSet::from_prepared_plans(
+        let distributed_execution_plans =
+            VulkanDistributedExecutionPlanSet::from_prepared_plans_with_resource_contract(
             &prepared_plans,
             &tensor_index,
             &distributed_artifact_manifest,
             &signal_processor_placement.component_shard_devices,
             &placement_plan.edges,
             storage_buffer_offset_alignment,
+            &execution_scope,
+            &compiled_resource_contract,
         )
         .map_err(|error| {
             VulkanResidentInProcessPlacedRuntimeError::Package(

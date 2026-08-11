@@ -433,10 +433,152 @@ def test_physical_shader_is_part_of_the_required_shader_set() -> None:
         norm_batch_shader_file="norm_batch.comp",
         sampler_shader_files={"sampler.comp"},
     )
-
     assert "canonical.comp" in required
     assert "input_columns.comp" in required
 
+
+def test_independent_experts_compile_selector_partition_contracts(
+    tmp_path: Path,
+) -> None:
+    shader = tmp_path / "shaders" / "independent_sparse_moe_down_mxfp4.spv"
+    shader.parent.mkdir()
+    shader.write_bytes(b"independent expert shader")
+    preparation_shader = tmp_path / "shaders" / "compact_routes.spv"
+    preparation_shader.write_bytes(b"route compaction shader")
+    batch_shader = tmp_path / "shaders" / "independent_sparse_moe_down_mxfp4_batch.spv"
+    batch_shader.write_bytes(b"independent expert batch shader")
+    mapping = [
+        {
+            "selector": expert,
+            "parameter_ids": [f"expert_{expert}_weight", f"expert_{expert}_scale"],
+        }
+        for expert in range(4)
+    ]
+    node = {
+        "id": "expert_down",
+        "op": "independent_sparse_moe_down",
+        "inputs": ["expert_intermediates", "routes"],
+        "outputs": ["expert_outputs"],
+        "params": [
+            parameter
+            for entry in mapping
+            for parameter in entry["parameter_ids"]
+        ],
+        "attrs": {
+            "hidden_size": 128,
+            "intermediate_size": 128,
+            "experts_per_token": 2,
+            "selected_parameter_accesses": [
+                {"selection_signal": "routes", "mapping": mapping}
+            ],
+        },
+    }
+    refs = {
+        parameter: {"tensor": f"tensor.{parameter}"}
+        for parameter in node["params"]
+    }
+    tensor_index = {
+        "tensors": {
+            ref["tensor"]: {
+                "dtype": "F8_E8M0" if parameter.endswith("scale") else "I8",
+                "shape": [128, 4] if parameter.endswith("scale") else [128, 64],
+                "layout": "row_major",
+            }
+            for parameter, ref in refs.items()
+        }
+    }
+    contracts = build_kernel_physical_execution_contracts(
+        node=node,
+        circuit={"nodes": [node], "parameters": {"refs": refs}},
+        tensor_index=tensor_index,
+        kernel={
+            "source_node_ids": ["expert_down"],
+            "semantic_module_ids": ["layer.feed_forward.routed_experts"],
+            "shader_path": "shaders/independent_sparse_moe_down_mxfp4.spv",
+            "local_size_x": 64,
+            "workgroup_count_x": 2,
+            "batch_implementations": [
+                {
+                    "execution_domain": "decode_and_prefill",
+                    "lane_tile_width": 16,
+                    "stages": [
+                        {
+                            "shader_path": "shaders/compact_routes.spv",
+                            "local_size_x": 32,
+                            "workgroup_count_x": 1,
+                        },
+                        {
+                            "shader_path": "shaders/independent_sparse_moe_down_mxfp4_batch.spv",
+                            "local_size_x": 64,
+                            "workgroup_count_x": 2,
+                        },
+                    ],
+                }
+            ],
+            "physical_implementations": [],
+        },
+        package_dir=tmp_path,
+    )
+
+    distributed = next(
+        contract
+        for contract in contracts
+        if contract["strategy"] == "expert_parallel"
+    )
+    assert distributed["execution_form"] == "whole_expert_ownership"
+    assert distributed["partition_extent"] == {
+        "dimension_name": "selected_resource_count",
+        "elements": 4,
+        "alignment_elements": 1,
+    }
+    assert distributed["parameter_partitions"] == []
+    assert distributed["selected_resource_partitions"] == [
+        {
+            "selection_signal": "routes",
+            "address_table_binding": 3,
+            "parameter_slots_binding": 4,
+            "kind": "expert_range",
+            "resource_count": 4,
+            "parameters_per_resource": 2,
+            "alignment_elements": 1,
+        }
+    ]
+    assert distributed["inputs"] == [
+        {"binding": 0, "distribution": "replicated"},
+        {
+            "binding": 1,
+            "distribution": "routed",
+            "dimension": 0,
+            "alignment_elements": 1,
+        },
+    ]
+    assert distributed["outputs"] == [
+        {
+            "binding": 2,
+            "collection": "routed",
+            "dimension": 0,
+            "alignment_elements": 1,
+        }
+    ]
+    distributed_batches = [
+        contract
+        for contract in contracts
+        if contract["strategy"] == "expert_parallel"
+        and contract["execution_shape"] == "multi_lane"
+    ]
+    assert {tuple(contract["phases"]) for contract in distributed_batches} == {
+        ("decode",),
+        ("prefill",),
+    }
+    assert all(
+        [artifact["role"] for artifact in contract["artifacts"]]
+        == ["preparation", "primary"]
+        for contract in distributed_batches
+    )
+    assert all(
+        contract["geometry"]["dimensions"]["workgroup_count_x"] == 2
+        for contract in distributed_batches
+    )
 
 def test_input_column_physical_shaders_render_and_compile(tmp_path: Path) -> None:
     source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"

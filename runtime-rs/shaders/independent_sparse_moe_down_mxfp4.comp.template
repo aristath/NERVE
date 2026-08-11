@@ -31,6 +31,11 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Dyn
     uint words[];
 };
 
+layout(push_constant) uniform ExpertRange {
+    uint expert_start;
+    uint expert_count;
+} expert_range;
+
 const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
 const uint INTERMEDIATE_SIZE = {{INTERMEDIATE_SIZE}}u;
 const uint NUM_EXPERTS = {{NUM_EXPERTS}}u;
@@ -304,7 +309,12 @@ void main() {
     if (route >= EXPERTS_PER_TOKEN) return;
     uint packed_route = expert_routes.words[route];
     uint expert = packed_route & 0xffffu;
-    if (expert >= NUM_EXPERTS || !dynamic_expert_is_valid(expert)) return;
+    if (
+        expert >= NUM_EXPERTS
+        || expert < expert_range.expert_start
+        || expert - expert_range.expert_start >= expert_range.expert_count
+        || !dynamic_expert_is_valid(expert)
+    ) return;
     DynamicU32Buffer down_weight = dynamic_parameter(expert, 0u);
     DynamicU32Buffer down_scale = dynamic_parameter(expert, 1u);
     bool down_preexpanded = dynamic_weight_is_preexpanded(expert, 0u);

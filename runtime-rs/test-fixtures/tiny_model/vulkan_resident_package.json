@@ -2039,7 +2039,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2072,6 +2072,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -2103,7 +2104,7 @@
               "contract_id": "sha256:45cc724749172da610a9df1d6fb6bba35b01b25d5a9e4ccc7abce3c66fbbe711"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2140,6 +2141,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -2171,7 +2173,7 @@
               "contract_id": "sha256:9d427633be15be963dad5b20630f1669455c3e9e0d911e0d906757fed362df06"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2208,6 +2210,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -2239,7 +2242,7 @@
               "contract_id": "sha256:0503e7cdf93e46f9fe35299628e972b0fab19ae57c85f58e62116997799c3f54"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2276,6 +2279,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -2307,7 +2311,7 @@
               "contract_id": "sha256:43fe5e3cb0fd9095cdb971ca95985b986028c3fddcf2987b9a258f013c19a0e5"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2344,6 +2348,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -2375,7 +2380,7 @@
               "contract_id": "sha256:29ea9612d7dd19b094c722a86b73681464a32773926618c2f0ebfa13c33977dd"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2412,6 +2417,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -2626,7 +2632,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -2667,6 +2673,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -2720,7 +2727,7 @@
               "contract_id": "sha256:6320c89038cee122cacfcd90018d8eb4d7e46458d7d755d4db16d5b04f828d19"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -2764,6 +2771,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -2817,7 +2825,7 @@
               "contract_id": "sha256:527e3d1a88a09795cf055d022bad38dc8fd61947ad5549e0f674abd073fb0a87"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -2862,6 +2870,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -2915,7 +2924,7 @@
               "contract_id": "sha256:24c23b2710194e304593743a0b8c5bdbd0f6da598adfef7dcc1c62c968536ee7"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -2960,6 +2969,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3013,7 +3023,7 @@
               "contract_id": "sha256:a769ca18e9da100083dc2c2c4d916f45040f206250ce230247d51333a57f45fd"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -3058,6 +3068,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3111,7 +3122,7 @@
               "contract_id": "sha256:0485a9967ad0497f924a4a8a5f023d4de08acd0abdc4b6de548b558fb3157316"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -3156,6 +3167,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3256,7 +3268,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rotary_position_embedding",
               "member_node_ids": [
                 "q_rope"
@@ -3288,6 +3300,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3311,7 +3324,7 @@
               "contract_id": "sha256:b520d19554546793621d89f270e018e1f4254a62d9dba2cb8feebe8b05fcb20f"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rotary_position_embedding",
               "member_node_ids": [
                 "q_rope"
@@ -3346,6 +3359,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3416,7 +3430,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rotary_position_embedding",
               "member_node_ids": [
                 "k_rope"
@@ -3448,6 +3462,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3471,7 +3486,7 @@
               "contract_id": "sha256:85c9461b9e0c0671cab746e5bf0f38afa77e5521424df179594b1a3144cefa9a"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rotary_position_embedding",
               "member_node_ids": [
                 "k_rope"
@@ -3506,6 +3521,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3581,7 +3597,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "attention_partition_partials",
               "member_node_ids": [
                 "kv_memory_append__attention_read__partition_partials",
@@ -3615,6 +3631,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3657,7 +3674,7 @@
               "contract_id": "sha256:49867ddb54357e40b218088c5b1a967293988d1eb818bb1e36b364ba17e4c1ee"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "attention_partition_partials",
               "member_node_ids": [
                 "kv_memory_append__attention_read__partition_partials",
@@ -3694,6 +3711,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3796,7 +3814,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "append_scaled_dot_product_attention",
               "member_node_ids": [
                 "kv_memory_append__attention_read",
@@ -3830,6 +3848,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -3872,7 +3891,7 @@
               "contract_id": "sha256:c96bf556e6018295b351d60593c42fb2c2f6a646c66846a2eae878fa162cc1b4"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "append_scaled_dot_product_attention",
               "member_node_ids": [
                 "kv_memory_append__attention_read",
@@ -3914,6 +3933,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4139,7 +4159,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4175,6 +4195,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4210,7 +4231,7 @@
               "contract_id": "sha256:9c76c7faa66927115d2027ded1787847920cb7cb4496b09276b7ec5a76fa6ae5"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4249,6 +4270,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4284,7 +4306,7 @@
               "contract_id": "sha256:34de91ed135e6012fc4969e33f1e8610afb191c8affda5413e82aa72035286dd"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4324,6 +4346,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4359,7 +4382,7 @@
               "contract_id": "sha256:6028a777c055f464826a6d0d640b37b2f6aa6b0b4dcad8d75d0d941ac7d23eb9"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4399,6 +4422,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4434,7 +4458,7 @@
               "contract_id": "sha256:7e321a0ebe29e6cdfa8eac412f73acdbd3ec72f811ccb5aafb175573f44b78fe"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4474,6 +4498,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4509,7 +4534,7 @@
               "contract_id": "sha256:68829afb55023c06374758c777cc0174ed88757b4e716c061c3c43809af289c0"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4549,6 +4574,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4752,7 +4778,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -4785,6 +4811,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4816,7 +4843,7 @@
               "contract_id": "sha256:8e4536a0ec10f5b80f87246cf7553bc93c865c3c2f8c755e0cfc414c86017399"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -4853,6 +4880,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4884,7 +4912,7 @@
               "contract_id": "sha256:9e6247fb6db3e5de16a4e7ddeb39fb8ae12140af086833a5eeae10bee9aa4b5b"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -4921,6 +4949,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -4952,7 +4981,7 @@
               "contract_id": "sha256:7cb4e73e79e3fb2d73d43ac611460ae6ebf22a6536643cd0c01543aca146601b"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -4989,6 +5018,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5020,7 +5050,7 @@
               "contract_id": "sha256:22062936fc2b4edc2e631f745d547da7497cf3c28b2900283e3b41101c9a5590"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -5057,6 +5087,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5088,7 +5119,7 @@
               "contract_id": "sha256:f092dfab5514a4eeadf89fa79f7c8373011a0581e401097976f07dafc69d49b6"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -5125,6 +5156,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5342,7 +5374,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5383,6 +5415,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5420,7 +5453,7 @@
               "contract_id": "sha256:c0f035dc13cad4a444b16c259c5290101089e39af7d60a2aa5689fbb5f9d7f0e"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5478,6 +5511,7 @@
                   "logical_elements_per_index": 1
                 }
               ],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5526,7 +5560,7 @@
               "contract_id": "sha256:b01b207037fc77011d35dc288eb0d3946237e751f4649938ab26abf479d4aa7d"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5570,6 +5604,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5607,7 +5642,7 @@
               "contract_id": "sha256:5017079d8e3bcd9f271f728f8760eea62c6b154fcdb7cdd0951e5320a6134b11"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5652,6 +5687,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5689,7 +5725,7 @@
               "contract_id": "sha256:32a06fff9548e4debd83502dc533976a10195d36d11156bec4255546106df04b"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5734,6 +5770,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5771,7 +5808,7 @@
               "contract_id": "sha256:78e5c47295281f9283f5fe395edd640b2840c1412cf5168daed513b569d49aae"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5816,6 +5853,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5853,7 +5891,7 @@
               "contract_id": "sha256:c3dd4255ab6354d89cc83577e338963db28163ae00e32f38c66f4c2eb2fdcf1e"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5898,6 +5936,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -5935,7 +5974,7 @@
               "contract_id": "sha256:b2f0f0fcc50d682ec8fcd929fdc7a9eee524a926f2bf385c23cbf288f97de435"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5996,6 +6035,7 @@
                   "logical_elements_per_index": 1
                 }
               ],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -6044,7 +6084,7 @@
               "contract_id": "sha256:7d6b9f5dcba19ed84ce17d53b70955aeb72ef1d2b2f1ab6e432f98cd32d573dd"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -6105,6 +6145,7 @@
                   "logical_elements_per_index": 1
                 }
               ],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -6336,7 +6377,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6372,6 +6413,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -6407,7 +6449,7 @@
               "contract_id": "sha256:963d9e598f6ae05f2b7fea3e89d70e7584762a816fe9a70ab8f07e1b82c2b720"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6446,6 +6488,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -6481,7 +6524,7 @@
               "contract_id": "sha256:2e84594c980c90a84c6bc7e2f3076b7b28f8e8ddc4a9df6401fe35377df64dee"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6521,6 +6564,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -6556,7 +6600,7 @@
               "contract_id": "sha256:940923cbc3040d3dc65aa02bfa475025162582e5498f1670986dc452f71e4746"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6596,6 +6640,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -6631,7 +6676,7 @@
               "contract_id": "sha256:9bc290f31ce06b8eedc2670f5d459c30ee5ca2668d15a59b2a27284afb7eb8b4"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6671,6 +6716,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,
@@ -6706,7 +6752,7 @@
               "contract_id": "sha256:9a573dd407510768517c5e285438bd4886621e4c5c2654d70a9f9bab813c9b38"
             },
             {
-              "schema": "nerve.physical_execution_contract.v2",
+              "schema": "nerve.physical_execution_contract.v3",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6746,6 +6792,7 @@
               "strategy": "single_device",
               "execution_form": "local",
               "parameter_partitions": [],
+              "selected_resource_partitions": [],
               "inputs": [
                 {
                   "binding": 0,

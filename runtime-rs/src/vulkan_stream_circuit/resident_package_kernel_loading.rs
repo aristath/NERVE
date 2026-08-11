@@ -218,6 +218,9 @@ fn loaded_kernel_pack_from_package_shader_refs(
             .filter(|contract| contract.strategy.is_distributed())
         {
             for (artifact_index, identity) in contract.artifacts.iter().enumerate() {
+                if identity.role != nerve_execution_contracts::ArtifactRole::Primary {
+                    continue;
+                }
                 let artifact = physical_contract_kernel_artifact(
                     family,
                     contract,
@@ -336,6 +339,16 @@ fn physical_contract_descriptor_signature(
     }
     for parameter in &contract.parameter_partitions {
         insert(parameter.binding, VulkanKernelDescriptorUsage::Parameter)?;
+    }
+    for selected in &contract.selected_resource_partitions {
+        insert(
+            selected.address_table_binding,
+            VulkanKernelDescriptorUsage::DynamicResourceAddressTable,
+        )?;
+        insert(
+            selected.parameter_slots_binding,
+            VulkanKernelDescriptorUsage::DynamicResourceParameterSlots,
+        )?;
     }
 
     let mut signature = Vec::with_capacity(required.len());

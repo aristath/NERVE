@@ -8,19 +8,25 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use nerve_execution_contracts::{
-        ArtifactIdentity, EquivalenceKind, EquivalenceRequirement, ExecutionForm,
+        ArtifactIdentity, ArtifactRole, EquivalenceKind, EquivalenceRequirement, ExecutionForm,
         ExecutionGeometry, ExecutionPhase, ExecutionShape, ExecutionStrategy, InputContract,
         InputDistribution, OutputCollection, OutputContract, ParameterPartition,
         ParameterPartitionKind, PartitionExtent, PartitionLaunch, PartitionOrigin,
         PhysicalExecutionContract, PhysicalFormats, ReductionContract,
         ReductionFinalization, ReductionOperation, ResourceAccess, ResourceKind,
-        ResourceRequirement, ResidencyRequirement, WorkgroupXMapping,
+        ResourceRequirement, ResidencyRequirement, SelectedResourcePartition, WorkgroupXMapping,
         PHYSICAL_EXECUTION_CONTRACT_SCHEMA,
     };
 
     use super::*;
     use crate::stream_plan::TensorMetadata;
     use crate::vulkan_stream_circuit::{
+        CompiledAtomicResidencyGroup, CompiledImmutableResource,
+        CompiledResourceBinding, CompiledResourceBindingMapping, CompiledResourceByteRange,
+        CompiledResourceCompatibility, CompiledResourceLifetime,
+        CompiledResourceRangeIntegrity, CompiledResourceResidencyContract,
+        CompiledResourceSelectionElementType, CompiledResourceSelectionEncoding,
+        CompiledResourceSelector, CompiledResourceSelectorMapping, ResourceResidencyPolicy,
         VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
         VulkanPhysicalKernelArtifact, VulkanResolvedDescriptorBinding,
         VulkanReusableKernelArtifact,
@@ -1527,6 +1533,275 @@ mod tests {
     }
 
     #[test]
+    fn plans_independently_selected_expert_ranges_without_eager_parameter_fragments() {
+        let activation = |binding, signal: &str, slot, bytes| VulkanResolvedDescriptorBinding {
+            binding,
+            usage: if binding == 2 {
+                VulkanKernelDescriptorUsage::OutputSignal
+            } else {
+                VulkanKernelDescriptorUsage::InputSignal
+            },
+            name: signal.to_string(),
+            resource: VulkanDescriptorResourceAddress::ActivationSlot {
+                component_id: "moe".to_string(),
+                signal_id: signal.to_string(),
+                slot,
+                byte_capacity: bytes,
+                signal_byte_capacity: bytes,
+            },
+        };
+        let dynamic_address = VulkanResolvedDescriptorBinding {
+            binding: 3,
+            usage: VulkanKernelDescriptorUsage::DynamicResourceAddressTable,
+            name: "routes.resource_addresses".to_string(),
+            resource: VulkanDescriptorResourceAddress::DynamicResourceAddressTable {
+                component_id: "moe".to_string(),
+                node_id: "independent-down".to_string(),
+                selection_signal: "routes".to_string(),
+            },
+        };
+        let dynamic_slots = VulkanResolvedDescriptorBinding {
+            binding: 4,
+            usage: VulkanKernelDescriptorUsage::DynamicResourceParameterSlots,
+            name: "routes.parameter_slots".to_string(),
+            resource: VulkanDescriptorResourceAddress::DynamicResourceParameterSlots {
+                component_id: "moe".to_string(),
+                node_id: "independent-down".to_string(),
+                selection_signal: "routes".to_string(),
+                parameter_ids: (0..8)
+                    .flat_map(|expert| {
+                        [format!("expert-{expert}-weight"), format!("expert-{expert}-scale")]
+                    })
+                    .collect(),
+            },
+        };
+        let mut contract = test_physical_contract(
+            "independent_sparse_moe_down",
+            "independent-down",
+            "independent.spv",
+            ExecutionStrategy::ExpertParallel,
+            ExecutionForm::WholeExpertOwnership,
+            8,
+            1,
+            4,
+            WorkgroupXMapping::Repeated,
+            PartitionOrigin::PushConstantU32,
+            Some("expert_start"),
+            Some("expert_count"),
+            Vec::new(),
+            vec![
+                test_input(0, InputDistribution::Replicated, None),
+                test_input(1, InputDistribution::Routed, Some(1)),
+            ],
+            test_output(2, OutputCollection::Routed, Some(1)),
+        );
+        contract.selected_resource_partitions = vec![SelectedResourcePartition {
+            selection_signal: "routes".to_string(),
+            address_table_binding: 3,
+            parameter_slots_binding: 4,
+            kind: ParameterPartitionKind::ExpertRange,
+            resource_count: 8,
+            parameters_per_resource: 2,
+            alignment_elements: 1,
+        }];
+        contract.resources = vec![ResourceRequirement {
+            resource: "routed-expert-bank".to_string(),
+            kind: ResourceKind::LazyResource,
+            residency: ResidencyRequirement::Demand,
+            access: ResourceAccess::Read,
+            binding: None,
+            atomic_group: Some("selector-owned".to_string()),
+        }];
+        contract.phases = vec![ExecutionPhase::Decode, ExecutionPhase::Prefill];
+        contract.execution_shape = ExecutionShape::SingleAndMultiLane;
+        let prepared = VulkanPreparedDispatchPlan {
+            backend_id: "vulkan_stream_circuit".to_string(),
+            reusable_family_count: 1,
+            dispatches: vec![VulkanPreparedDispatch {
+                dispatch_index: 9,
+                kernel_id: "moe.independent-down".to_string(),
+                component_id: "moe".to_string(),
+                circuit_id: "moe-circuit".to_string(),
+                node_index: 4,
+                node_id: "independent-down".to_string(),
+                op: "independent_sparse_moe_down".to_string(),
+                reusable_family_id: "independent-family".to_string(),
+                artifact_path: "independent.spv".to_string(),
+                entry_point: "main".to_string(),
+                local_size_x: 64,
+                descriptors: vec![
+                    activation(0, "intermediates", 0, 8192),
+                    activation(1, "routes", 1, 32),
+                    activation(2, "outputs", 2, 32768),
+                    dynamic_address,
+                    dynamic_slots,
+                ],
+                push_constants: vec![
+                    VulkanKernelScalarBinding {
+                        name: "expert_start".to_string(),
+                        scalar_type: "u32".to_string(),
+                        source: VulkanKernelScalarSource::PushConstant,
+                    },
+                    VulkanKernelScalarBinding {
+                        name: "expert_count".to_string(),
+                        scalar_type: "u32".to_string(),
+                        source: VulkanKernelScalarSource::PushConstant,
+                    },
+                ],
+                stream_control_binding: None,
+                physical_execution_contracts: vec![contract],
+            }],
+            total_descriptor_count: 5,
+        };
+        let artifacts = test_artifact_manifest_with_physical(VulkanReusableKernelArtifact {
+            family_id: "independent-family".to_string(),
+            op: "independent_sparse_moe_down".to_string(),
+            path: "independent.spv".to_string(),
+            entry_point: "main".to_string(),
+            local_size_x: 64,
+            workgroup_count_x: 4,
+            descriptor_signature: Vec::new(),
+            push_constants: prepared.dispatches[0].push_constants.clone(),
+            stream_control_binding: None,
+        });
+        let tensor_index = TensorIndex {
+            schema: "nerve.tensor_index.v1".to_string(),
+            tensors: BTreeMap::new(),
+        };
+        let mut resources = Vec::new();
+        let mut atomic_groups = Vec::new();
+        let mut bindings = Vec::new();
+        let mut atomic_group_ids = Vec::new();
+        for expert in 0..8 {
+            let group_id = format!("group-{expert}");
+            let resource_ids = (0..2)
+                .map(|slot| format!("resource-{expert}-{slot}"))
+                .collect::<Vec<_>>();
+            atomic_group_ids.push(group_id.clone());
+            for (slot, resource_id) in resource_ids.iter().enumerate() {
+                resources.push(CompiledImmutableResource {
+                    id: resource_id.clone(),
+                    lifetime: CompiledResourceLifetime::Dynamic,
+                    ranges: vec![CompiledResourceByteRange {
+                        artifact_path: "weights/experts.bin".to_string(),
+                        byte_offset: (expert * 2 + slot) * 4,
+                        byte_count: 4,
+                        alignment_bytes: 4,
+                        integrity: CompiledResourceRangeIntegrity {
+                            algorithm: "sha256".to_string(),
+                            digest: format!("{:064x}", expert * 2 + slot + 1),
+                        },
+                    }],
+                    dependencies: Vec::new(),
+                    compatibility: CompiledResourceCompatibility {
+                        device_api: "vulkan".to_string(),
+                        storage_class: "storage_buffer".to_string(),
+                        read_only: true,
+                        required_features: Vec::new(),
+                    },
+                    resident_derivation: None,
+                });
+                bindings.push(CompiledResourceBinding {
+                    execution_scope: "target".to_string(),
+                    component_id: "moe".to_string(),
+                    node_id: "independent-down".to_string(),
+                    parameter_id: format!("expert-{expert}-parameter-{slot}"),
+                    mapping: CompiledResourceBindingMapping::SelectedAtomicGroup {
+                        atomic_group_id: group_id.clone(),
+                        resource_id: resource_id.clone(),
+                        selection_signal: "routes".to_string(),
+                        selector_index: expert,
+                        parameter_slot: slot,
+                    },
+                });
+            }
+            atomic_groups.push(CompiledAtomicResidencyGroup {
+                id: group_id,
+                lifetime: CompiledResourceLifetime::Dynamic,
+                resource_ids,
+                dependencies: Vec::new(),
+            });
+        }
+        let residency = CompiledResourceResidencyContract {
+            schema: "nerve.compiled_resource_residency.v4".to_string(),
+            identity_algorithm: "nerve.resource_identity_sha256.v1".to_string(),
+            state_machine_schema: "nerve.resource_residency_state_machine.v1".to_string(),
+            supported_policies: vec![ResourceResidencyPolicy::DemandRetained],
+            resources,
+            atomic_groups,
+            partition_templates: Vec::new(),
+            bindings,
+            selectors: vec![CompiledResourceSelector {
+                id: "routed-experts".to_string(),
+                execution_scope: "target".to_string(),
+                component_id: "moe".to_string(),
+                node_id: "router".to_string(),
+                domain_id: "experts".to_string(),
+                resource_count: 8,
+                selection_signal: "routes".to_string(),
+                encoding: CompiledResourceSelectionEncoding {
+                    element_type: CompiledResourceSelectionElementType::U32,
+                    selection_count_per_activation: 2,
+                    index_shift: 0,
+                    index_mask: 7,
+                },
+                mapping: CompiledResourceSelectorMapping::GroupTable {
+                    atomic_group_ids,
+                },
+            }],
+            checkpoints: Vec::new(),
+        };
+        let plans = VulkanDistributedExecutionPlanSet::from_prepared_plans_with_resource_contract(
+            &[("owner", &prepared)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("moe", &["owner", "helper"]),
+            &[],
+            256,
+            "target",
+            &residency,
+        )
+        .unwrap();
+        let plan = &plans.decode;
+
+        let dispatch = &plan.dispatches[0];
+        assert!(dispatch.has_lazy_resource_requirements);
+        assert_eq!(dispatch.distributed_parameter_byte_count, 0);
+        assert_eq!(dispatch.selected_resource_partitions.len(), 1);
+        assert_eq!(
+            dispatch.selected_resource_partitions[0].atomic_group_byte_counts,
+            vec![8; 8]
+        );
+        assert_eq!(dispatch.shards.len(), 2);
+        assert!(dispatch.shards.iter().all(|shard| shard.parameters.is_empty()));
+        assert_eq!(dispatch.shards[0].row_start, 0);
+        assert_eq!(dispatch.shards[0].row_count, 4);
+        assert_eq!(dispatch.shards[1].row_start, 4);
+        assert_eq!(dispatch.shards[1].row_count, 4);
+
+        let mut wrong_abi = prepared;
+        let VulkanDescriptorResourceAddress::DynamicResourceParameterSlots {
+            parameter_ids, ..
+        } = &mut wrong_abi.dispatches[0].descriptors[4].resource
+        else {
+            panic!("fixture descriptor is the dynamic parameter-slot table");
+        };
+        parameter_ids.pop();
+        let error = VulkanDistributedExecutionPlanSet::from_prepared_plans_with_resource_contract(
+            &[("owner", &wrong_abi)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("moe", &["owner", "helper"]),
+            &[],
+            256,
+            "target",
+            &residency,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("dynamic_slots"));
+    }
+
+    #[test]
     fn islands_contain_only_adjacent_dataflow_compatible_expert_dispatches() {
         let mut producer = fixture_plan("row_major").dispatches.remove(0);
         producer.dispatch_index = 7;
@@ -2938,6 +3213,7 @@ mod tests {
                 path: path.to_string(),
                 sha256: format!("sha256:{}", "b".repeat(64)),
                 entry_point: "main".to_string(),
+                role: ArtifactRole::Primary,
             }],
             implementation_digest: format!("sha256:{}", "c".repeat(64)),
             phases: vec![ExecutionPhase::Decode],
@@ -2970,6 +3246,7 @@ mod tests {
                 count_push_constant: count_push_constant.map(str::to_string),
             }),
             parameter_partitions,
+            selected_resource_partitions: Vec::new(),
             inputs,
             outputs: vec![output],
             local_intermediates: Vec::new(),

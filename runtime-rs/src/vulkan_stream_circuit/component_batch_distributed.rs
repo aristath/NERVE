@@ -1236,11 +1236,11 @@ fn distributed_component_batch_artifact_preserves_partition(
     planned: &VulkanDistributedDispatchPlan,
     artifact: &VulkanResidentComponentBatchKernelArtifact,
 ) -> bool {
-    let [stage] = artifact.stages.as_slice() else {
-        return false;
-    };
     match planned.distribution {
         VulkanDistributedDispatchDistribution::OutputRows => {
+            let [stage] = artifact.stages.as_slice() else {
+                return false;
+            };
             distributed_batch_output_partition_is_compatible(
                 planned.output_rows,
                 planned.row_alignment,
@@ -1251,9 +1251,23 @@ fn distributed_component_batch_artifact_preserves_partition(
                 stage.workgroup_count_x,
             )
         }
-        VulkanDistributedDispatchDistribution::ExpertRange => true,
+        VulkanDistributedDispatchDistribution::ExpertRange => {
+            expert_range_batch_artifact_preserves_partition(artifact)
+        }
         VulkanDistributedDispatchDistribution::InputColumns => false,
     }
+}
+
+fn expert_range_batch_artifact_preserves_partition(
+    artifact: &VulkanResidentComponentBatchKernelArtifact,
+) -> bool {
+    let Some(primary) = artifact.stages.last() else {
+        return false;
+    };
+    artifact.stages.iter().all(|stage| {
+        stage.control.storage_buffer().2
+            == VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
+    }) && primary.indirect_dispatch_byte_offset == Some(16)
 }
 
 fn distributed_batch_output_partition_is_compatible(

@@ -13,7 +13,7 @@ from nerve.model_package_physical_kernels import (
 
 Json = dict[str, Any]
 
-PHYSICAL_EXECUTION_CONTRACT_SCHEMA = "nerve.physical_execution_contract.v2"
+PHYSICAL_EXECUTION_CONTRACT_SCHEMA = "nerve.physical_execution_contract.v3"
 
 ExecutionPhase = Literal["decode", "prefill"]
 ExecutionShape = Literal["single_lane", "multi_lane", "single_and_multi_lane"]
@@ -48,12 +48,14 @@ ResourceKind = Literal[
 ResidencyRequirement = Literal["permanent", "transaction", "demand"]
 ResourceAccess = Literal["read", "write", "read_write"]
 EquivalenceKind = Literal["bit_exact", "absolute_relative_tolerance"]
+ArtifactRole = Literal["preparation", "primary"]
 
 
 class ArtifactIdentity(TypedDict):
     path: str
     sha256: str
     entry_point: str
+    role: ArtifactRole
 
 
 class PhysicalFormats(TypedDict):
@@ -75,6 +77,16 @@ class ParameterPartition(TypedDict):
     kind: ParameterPartitionKind
     alignment_elements: int
     logical_elements_per_index: int
+
+
+class SelectedResourcePartition(TypedDict):
+    selection_signal: str
+    address_table_binding: int
+    parameter_slots_binding: int
+    kind: ParameterPartitionKind
+    resource_count: int
+    parameters_per_resource: int
+    alignment_elements: int
 
 
 class PartitionExtent(TypedDict):
@@ -156,6 +168,7 @@ class PhysicalExecutionContract(TypedDict, total=False):
     partition_extent: PartitionExtent
     partition_launch: PartitionLaunch
     parameter_partitions: list[ParameterPartition]
+    selected_resource_partitions: list[SelectedResourcePartition]
     inputs: list[InputContract]
     outputs: list[OutputContract]
     local_intermediates: list[LocalIntermediateContract]
@@ -194,6 +207,7 @@ _RESOURCE_KINDS = {
 _RESIDENCY_REQUIREMENTS = {"permanent", "transaction", "demand"}
 _RESOURCE_ACCESSES = {"read", "write", "read_write"}
 _EQUIVALENCE_KINDS = {"bit_exact", "absolute_relative_tolerance"}
+_ARTIFACT_ROLES = {"preparation", "primary"}
 
 _TOP_LEVEL_KEYS = {
     "schema",
@@ -212,6 +226,7 @@ _TOP_LEVEL_KEYS = {
     "partition_extent",
     "partition_launch",
     "parameter_partitions",
+    "selected_resource_partitions",
     "inputs",
     "outputs",
     "local_intermediates",
@@ -246,6 +261,7 @@ def implementation_digest(
     partition_extent: PartitionExtent | None,
     partition_launch: PartitionLaunch | None,
     parameter_partitions: list[ParameterPartition],
+    selected_resource_partitions: list[SelectedResourcePartition] | None = None,
     inputs: list[InputContract],
     outputs: list[OutputContract],
     local_intermediates: list[LocalIntermediateContract],
@@ -263,6 +279,7 @@ def implementation_digest(
                 "partition_extent": partition_extent,
                 "partition_launch": partition_launch,
                 "parameter_partitions": parameter_partitions,
+                "selected_resource_partitions": selected_resource_partitions or [],
                 "inputs": inputs,
                 "outputs": outputs,
                 "local_intermediates": local_intermediates,
@@ -359,7 +376,12 @@ def build_kernel_physical_execution_contracts(
                 f"batch implementation for {node.get('id')!r} has no artifact stages"
             )
         artifacts = [
-            _artifact_identity(package_dir, stage["shader_path"]) for stage in stages
+            _artifact_identity(
+                package_dir,
+                stage["shader_path"],
+                role="primary" if index == len(stages) - 1 else "preparation",
+            )
+            for index, stage in enumerate(stages)
         ]
         phases = _execution_domain_phases(implementation["execution_domain"])
         lane_tile_width = _positive_int(
@@ -394,24 +416,32 @@ def build_kernel_physical_execution_contracts(
                 local_intermediates=[],
             )
         )
-        if len(stages) == 1:
-            for phase in phases:
-                distributed_batch = _distributed_kernel_contract(
-                    node=node,
-                    circuit=circuit,
-                    tensor_index=tensor_index,
-                    artifacts=artifacts,
-                    phases=[phase],
-                    execution_shape="multi_lane",
-                    formats=batch_formats,
-                    geometry=geometry,
-                    workgroup_count_x=int(stages[0]["workgroup_count_x"]),
-                    local_intermediates=local_output_shard_intermediates_for_node(
-                        circuit, node, tensor_index
-                    ),
-                )
-                if distributed_batch is not None:
-                    distributed_batch_candidates[phase].append(distributed_batch)
+        primary_stage = stages[-1]
+        distributed_geometry = _kernel_geometry(
+            node,
+            circuit,
+            tensor_index,
+            local_size_x=int(primary_stage["local_size_x"]),
+            workgroup_count_x=int(primary_stage["workgroup_count_x"]),
+            batch_width=lane_tile_width,
+        )
+        for phase in phases:
+            distributed_batch = _distributed_kernel_contract(
+                node=node,
+                circuit=circuit,
+                tensor_index=tensor_index,
+                artifacts=artifacts,
+                phases=[phase],
+                execution_shape="multi_lane",
+                formats=batch_formats,
+                geometry=distributed_geometry,
+                workgroup_count_x=int(primary_stage["workgroup_count_x"]),
+                local_intermediates=local_output_shard_intermediates_for_node(
+                    circuit, node, tensor_index
+                ),
+            )
+            if distributed_batch is not None:
+                distributed_batch_candidates[phase].append(distributed_batch)
 
     for phase in ("decode", "prefill"):
         candidates = distributed_batch_candidates[phase]
@@ -447,6 +477,7 @@ def _build_contract(
     partition_extent: PartitionExtent | None,
     partition_launch: PartitionLaunch | None,
     parameter_partitions: list[ParameterPartition],
+    selected_resource_partitions: list[SelectedResourcePartition] | None = None,
     inputs: list[InputContract],
     outputs: list[OutputContract],
     local_intermediates: list[LocalIntermediateContract],
@@ -474,6 +505,7 @@ def _build_contract(
             partition_extent=partition_extent,
             partition_launch=partition_launch,
             parameter_partitions=parameter_partitions,
+            selected_resource_partitions=selected_resource_partitions,
             inputs=inputs,
             outputs=outputs,
             local_intermediates=local_intermediates,
@@ -485,6 +517,7 @@ def _build_contract(
         "strategy": strategy,
         "execution_form": execution_form,
         "parameter_partitions": parameter_partitions,
+        "selected_resource_partitions": selected_resource_partitions or [],
         "inputs": inputs,
         "outputs": outputs,
         "local_intermediates": local_intermediates,
@@ -586,6 +619,102 @@ def _distributed_kernel_contract(
     output_count = len(node.get("outputs", []))
     if output_count != 1:
         return None
+    if op in {
+        "independent_sparse_moe_gate_up",
+        "independent_sparse_moe_down",
+    }:
+        accesses = node.get("attrs", {}).get("selected_parameter_accesses", [])
+        if not isinstance(accesses, list) or len(accesses) != 1:
+            return None
+        access = accesses[0]
+        mapping = access.get("mapping") if isinstance(access, dict) else None
+        if not isinstance(mapping, list) or len(mapping) < 2:
+            return None
+        resource_count = len(mapping)
+        parameters_per_resource: int | None = None
+        parameter_ids: list[str] = []
+        for selector, entry in enumerate(mapping):
+            selected = entry.get("parameter_ids") if isinstance(entry, dict) else None
+            if (
+                not isinstance(entry, dict)
+                or entry.get("selector") != selector
+                or not isinstance(selected, list)
+                or not selected
+                or any(not isinstance(value, str) or not value for value in selected)
+            ):
+                return None
+            if parameters_per_resource is None:
+                parameters_per_resource = len(selected)
+            elif parameters_per_resource != len(selected):
+                return None
+            parameter_ids.extend(selected)
+        selection_signal = access.get("selection_signal")
+        if (
+            not isinstance(selection_signal, str)
+            or selection_signal not in node.get("inputs", [])
+            or parameter_ids != node.get("params", [])
+            or parameters_per_resource is None
+        ):
+            return None
+        dynamic_binding_base = input_count + output_count
+        selected_geometry = deepcopy(geometry)
+        selected_geometry["dimensions"]["selected_resource_count"] = resource_count
+        return _build_contract(
+            node=node,
+            circuit=circuit,
+            tensor_index=tensor_index,
+            artifacts=artifacts,
+            phases=phases,
+            execution_shape=execution_shape,
+            formats=formats,
+            geometry=selected_geometry,
+            strategy="expert_parallel",
+            execution_form="whole_expert_ownership",
+            partition_extent={
+                "dimension_name": "selected_resource_count",
+                "elements": resource_count,
+                "alignment_elements": 1,
+            },
+            partition_launch={
+                "workgroup_x": "repeated",
+                "origin": "push_constant_u32",
+                "origin_push_constant": "expert_start",
+                "count_push_constant": "expert_count",
+            },
+            parameter_partitions=[],
+            selected_resource_partitions=[
+                {
+                    "selection_signal": selection_signal,
+                    "address_table_binding": dynamic_binding_base,
+                    "parameter_slots_binding": dynamic_binding_base + 1,
+                    "kind": "expert_range",
+                    "resource_count": resource_count,
+                    "parameters_per_resource": parameters_per_resource,
+                    "alignment_elements": 1,
+                }
+            ],
+            inputs=[
+                {"binding": 0, "distribution": "replicated"},
+                *[
+                    {
+                        "binding": binding,
+                        "distribution": "routed",
+                        "dimension": 0,
+                        "alignment_elements": 1,
+                    }
+                    for binding in range(1, input_count)
+                ],
+            ],
+            outputs=[
+                {
+                    "binding": input_count,
+                    "collection": "routed",
+                    "dimension": 0,
+                    "alignment_elements": 1,
+                }
+            ],
+            local_intermediates=[],
+        )
     output_binding = input_count
     output_rows = int(parameter_metadata[0][1].get("shape", [0])[0])
     if output_rows <= 0 or workgroup_count_x <= 0:
@@ -795,14 +924,24 @@ def _distributed_kernel_contract(
     return None
 
 
-def _artifact_identity(package_dir: Path, relative_path: object) -> ArtifactIdentity:
+def _artifact_identity(
+    package_dir: Path,
+    relative_path: object,
+    *,
+    role: ArtifactRole = "primary",
+) -> ArtifactIdentity:
     path = _non_empty_string(relative_path, "artifact path")
     artifact_path = package_dir / path
     try:
         payload = artifact_path.read_bytes()
     except OSError as error:
         _invalid(f"could not read compiled artifact {path!r}: {error}")
-    return {"path": path, "sha256": artifact_sha256(payload), "entry_point": "main"}
+    return {
+        "path": path,
+        "sha256": artifact_sha256(payload),
+        "entry_point": "main",
+        "role": role,
+    }
 
 
 def _kernel_geometry(
@@ -1001,7 +1140,7 @@ def validate_physical_execution_contract(value: object) -> None:
         _keys(
             artifact,
             {"path", "sha256", "entry_point"},
-            {"path", "sha256", "entry_point"},
+            {"path", "sha256", "entry_point", "role"},
             path,
         )
         artifact_path = _non_empty_string(artifact["path"], f"{path}.path")
@@ -1010,6 +1149,7 @@ def validate_physical_execution_contract(value: object) -> None:
         artifact_paths.add(artifact_path)
         _digest(artifact["sha256"], f"{path}.sha256")
         _non_empty_string(artifact["entry_point"], f"{path}.entry_point")
+        _enum(artifact.get("role", "primary"), _ARTIFACT_ROLES, f"{path}.role")
     _digest(contract["implementation_digest"], "contract.implementation_digest")
 
     phases = _list(contract["phases"], "contract.phases")
@@ -1054,6 +1194,11 @@ def validate_physical_execution_contract(value: object) -> None:
         _invalid("dynamic dimensions must name declared geometry dimensions")
 
     strategy = _enum(contract["strategy"], _STRATEGIES, "contract.strategy")
+    if strategy != "single_device" and sum(
+        _mapping(artifact, "contract artifact").get("role", "primary") == "primary"
+        for artifact in artifacts
+    ) != 1:
+        _invalid("distributed contracts require exactly one primary artifact")
     execution_form = _enum(
         contract["execution_form"], _EXECUTION_FORMS, "contract.execution_form"
     )
@@ -1135,6 +1280,13 @@ def validate_physical_execution_contract(value: object) -> None:
         contract["parameter_partitions"], "contract.parameter_partitions"
     )
     _validate_parameter_partitions(partitions, partition_extent, resources)
+    selected_partitions = _list(
+        contract["selected_resource_partitions"],
+        "contract.selected_resource_partitions",
+    )
+    _validate_selected_resource_partitions(
+        selected_partitions, partition_extent, resources
+    )
     inputs = _list(contract["inputs"], "contract.inputs")
     outputs = _list(contract["outputs"], "contract.outputs")
     _validate_inputs(inputs)
@@ -1149,6 +1301,7 @@ def validate_physical_execution_contract(value: object) -> None:
         partition_extent,
         partition_launch,
         partitions,
+        selected_partitions,
         inputs,
         outputs,
         intermediates,
@@ -1229,6 +1382,75 @@ def _validate_parameter_partitions(
                 _invalid(
                     "parameter partitions must divide the logical extent and its alignment"
                 )
+
+
+def _validate_selected_resource_partitions(
+    values: list[object],
+    partition_extent: object | None,
+    resources: list[object],
+) -> None:
+    extent = (
+        _mapping(partition_extent, "contract.partition_extent")
+        if partition_extent is not None
+        else None
+    )
+    bindings: set[int] = set()
+    selection_signals: set[str] = set()
+    for index, value in enumerate(values):
+        path = f"contract.selected_resource_partitions[{index}]"
+        item = _mapping(value, path)
+        fields = {
+            "selection_signal",
+            "address_table_binding",
+            "parameter_slots_binding",
+            "kind",
+            "resource_count",
+            "parameters_per_resource",
+            "alignment_elements",
+        }
+        _keys(item, fields, fields, path)
+        selection_signal = _non_empty_string(
+            item["selection_signal"], f"{path}.selection_signal"
+        )
+        if selection_signal in selection_signals:
+            _invalid("selected resource partition signals must be unique")
+        selection_signals.add(selection_signal)
+        address_binding = _non_negative_int(
+            item["address_table_binding"], f"{path}.address_table_binding"
+        )
+        slots_binding = _non_negative_int(
+            item["parameter_slots_binding"], f"{path}.parameter_slots_binding"
+        )
+        if address_binding == slots_binding or {
+            address_binding,
+            slots_binding,
+        } & bindings:
+            _invalid("selected resource partition bindings must be unique")
+        bindings.update((address_binding, slots_binding))
+        if _enum(item["kind"], _PARTITION_KINDS, f"{path}.kind") != "expert_range":
+            _invalid("selected resource partitions currently require expert ranges")
+        resource_count = _positive_int(
+            item["resource_count"], f"{path}.resource_count"
+        )
+        _positive_int(
+            item["parameters_per_resource"], f"{path}.parameters_per_resource"
+        )
+        alignment = _positive_int(
+            item["alignment_elements"], f"{path}.alignment_elements"
+        )
+        if extent is None or (
+            extent["elements"] != resource_count
+            or extent["alignment_elements"] % alignment
+        ):
+            _invalid(
+                "selected resource partitions must match the logical partition extent"
+            )
+    if values and not any(
+        _mapping(resource, "contract resource").get("kind") == "lazy_resource"
+        and _mapping(resource, "contract resource").get("residency") == "demand"
+        for resource in resources
+    ):
+        _invalid("selected resource partitions require demand-resident lazy resources")
 
 
 def _validate_inputs(values: list[object]) -> None:
@@ -1379,6 +1601,7 @@ def _validate_strategy(
     partition_extent: object | None,
     partition_launch: object | None,
     partitions: list[object],
+    selected_partitions: list[object],
     inputs: list[object],
     outputs: list[object],
     intermediates: list[object],
@@ -1389,6 +1612,7 @@ def _validate_strategy(
             or partition_extent is not None
             or partition_launch is not None
             or partitions
+            or selected_partitions
             or intermediates
         ):
             _invalid("single-device contracts cannot declare distributed flow")
@@ -1450,9 +1674,16 @@ def _validate_strategy(
     ):
         _invalid("partitioned-output execution requires a concatenated output")
     if execution_form == "whole_expert_ownership" and (
-        not any(
-            _mapping(item, "parameter partition")["kind"] == "expert_range"
-            for item in partitions
+        not (
+            any(
+                _mapping(item, "parameter partition")["kind"] == "expert_range"
+                for item in partitions
+            )
+            or any(
+                _mapping(item, "selected resource partition")["kind"]
+                == "expert_range"
+                for item in selected_partitions
+            )
         )
         or not any(
             _mapping(item, "input")["distribution"] == "routed"
@@ -1466,7 +1697,7 @@ def _validate_strategy(
         _invalid(
             "whole-expert execution requires expert-range parameters and routed input and output"
         )
-    if not partitions:
+    if not partitions and not selected_partitions:
         _invalid("distributed contracts require an explicit parameter partition")
     extent = _mapping(partition_extent, "contract.partition_extent")
     for flow_kind, flows in (("input", inputs), ("output", outputs)):

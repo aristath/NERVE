@@ -228,6 +228,82 @@ def test_parameter_partition_names_its_exact_physical_resource() -> None:
         validate_physical_execution_contract(contract)
 
 
+def selected_resource_expert_contract() -> dict[str, object]:
+    contract = fixture_contract()
+    contract["strategy"] = "expert_parallel"
+    contract["execution_form"] = "whole_expert_ownership"
+    contract["geometry"]["dimensions"]["selected_resource_count"] = 4
+    contract["partition_extent"] = {
+        "dimension_name": "selected_resource_count",
+        "elements": 4,
+        "alignment_elements": 1,
+    }
+    contract["partition_launch"] = {
+        "workgroup_x": "repeated",
+        "origin": "push_constant_u32",
+        "origin_push_constant": "expert_start",
+        "count_push_constant": "expert_count",
+    }
+    contract["parameter_partitions"] = []
+    contract["selected_resource_partitions"] = [
+        {
+            "selection_signal": "routes",
+            "address_table_binding": 3,
+            "parameter_slots_binding": 4,
+            "kind": "expert_range",
+            "resource_count": 4,
+            "parameters_per_resource": 2,
+            "alignment_elements": 1,
+        }
+    ]
+    contract["inputs"] = [
+        {"binding": 0, "distribution": "replicated"},
+        {
+            "binding": 1,
+            "distribution": "routed",
+            "dimension": 0,
+            "alignment_elements": 1,
+        },
+    ]
+    contract["outputs"] = [
+        {
+            "binding": 2,
+            "collection": "routed",
+            "dimension": 0,
+            "alignment_elements": 1,
+        }
+    ]
+    contract["resources"] = [
+        {
+            "resource": "expert-bank",
+            "kind": "lazy_resource",
+            "residency": "demand",
+            "access": "read",
+        }
+    ]
+    return contract
+
+
+def test_selected_resource_partition_is_typed_and_matches_atomic_extent() -> None:
+    contract = selected_resource_expert_contract()
+    validate_physical_execution_contract(contract)
+
+    contract["selected_resource_partitions"][0]["resource_count"] = 3
+    with pytest.raises(PhysicalExecutionContractError, match="logical partition extent"):
+        validate_physical_execution_contract(contract)
+
+    contract = selected_resource_expert_contract()
+    contract["selected_resource_partitions"][0]["parameter_slots_binding"] = 3
+    with pytest.raises(PhysicalExecutionContractError, match="bindings must be unique"):
+        validate_physical_execution_contract(contract)
+
+    contract = selected_resource_expert_contract()
+    contract["resources"][0]["kind"] = "persistent_parameter"
+    contract["resources"][0]["residency"] = "permanent"
+    with pytest.raises(PhysicalExecutionContractError, match="demand-resident lazy"):
+        validate_physical_execution_contract(contract)
+
+
 def test_contract_sealing_is_deterministic_and_covers_semantics() -> None:
     contract = fixture_contract()
     contract.pop("contract_id")
@@ -386,6 +462,29 @@ def test_compiler_emits_local_batch_and_legal_distributed_contracts(tmp_path: Pa
     assert contracts[3]["execution_form"] == "replicated_input_partitioned_output"
     assert contracts[0]["artifacts"][0]["sha256"] == artifact_sha256(b"scalar spirv")
     assert all("model_name" not in contract for contract in contracts)
+
+
+def test_distributed_contract_rejects_ambiguous_primary_artifacts(tmp_path: Path) -> None:
+    node, circuit, tensor_index, kernel = projection_compiler_fixture(tmp_path)
+    contracts = build_kernel_physical_execution_contracts(
+        node=node,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        kernel=kernel,
+        package_dir=tmp_path,
+    )
+    distributed = next(
+        contract for contract in contracts if contract["strategy"] == "tensor_parallel"
+    )
+    distributed["artifacts"].append(
+        {**distributed["artifacts"][0], "path": "shaders/another.spv"}
+    )
+
+    with pytest.raises(
+        PhysicalExecutionContractError,
+        match="exactly one primary artifact",
+    ):
+        validate_physical_execution_contract(distributed)
 
 
 def test_compiler_does_not_guess_distribution_for_unsupported_storage(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 use nerve_execution_contracts::{
-    ExecutionForm, ExecutionPhase, ExecutionShape, InputDistribution, OutputCollection,
-    ParameterPartitionKind, PartitionOrigin, PhysicalExecutionContract,
+    ArtifactRole, ExecutionForm, ExecutionPhase, ExecutionShape, InputDistribution,
+    OutputCollection, ParameterPartitionKind, PartitionOrigin, PhysicalExecutionContract,
     ReductionFinalization, ReductionOperation, WorkgroupXMapping,
 };
 
@@ -114,19 +114,24 @@ fn select_distributed_contract<'a, 'b>(
         contract
             .validate()
             .map_err(|error| dispatch_error(dispatch, format!("has an invalid contract: {error}")))?;
-        let [identity] = contract.artifacts.as_slice() else {
+        let primary_artifacts = contract
+            .artifacts
+            .iter()
+            .enumerate()
+            .filter(|(_, artifact)| artifact.role == ArtifactRole::Primary)
+            .collect::<Vec<_>>();
+        let [(artifact_index, identity)] = primary_artifacts.as_slice() else {
             return Err(dispatch_error(
                 dispatch,
                 format!(
-                    "physical contract {:?} requires exactly one scalar artifact, found {}",
-                    contract.contract_id,
-                    contract.artifacts.len()
+                    "physical contract {:?} requires exactly one primary artifact, found {}",
+                    contract.contract_id, primary_artifacts.len()
                 ),
             ));
         };
         let artifact_id = crate::vulkan_stream_circuit::physical_execution_artifact_id(
             &contract.contract_id,
-            0,
+            *artifact_index,
         );
         let artifact = artifact_manifest
             .artifact(&artifact_id)
@@ -187,6 +192,7 @@ fn plan_contract_dispatch(
     artifact: &crate::vulkan_stream_circuit::VulkanPhysicalKernelArtifact,
     contract: &PhysicalExecutionContract,
     storage_buffer_offset_alignment: usize,
+    resource_context: Option<(&str, &CompiledResourceResidencyContract)>,
 ) -> Result<Option<VulkanDistributedDispatchPlan>, VulkanDistributedPlanError> {
     let extent = contract.partition_extent.as_ref().ok_or_else(|| {
         dispatch_error(
@@ -201,6 +207,11 @@ fn plan_contract_dispatch(
         )
     })?;
     validate_contract_descriptor_coverage(dispatch, contract)?;
+    let selected_resource_partitions = resolve_selected_resource_partitions(
+        dispatch,
+        contract,
+        resource_context,
+    )?;
     let logical_extent = usize::try_from(extent.elements)
         .map_err(|_| dispatch_error(dispatch, "partition extent exceeds usize".to_string()))?;
     let mut logical_alignment = usize::try_from(extent.alignment_elements)
@@ -591,6 +602,7 @@ fn plan_contract_dispatch(
         has_lazy_resource_requirements: contract.resources.iter().any(|resource| {
             resource.kind == nerve_execution_contracts::ResourceKind::LazyResource
         }),
+        selected_resource_partitions,
         owner_residency_requirements: resolved_owner_residency_requirements(
             owner_device_id,
             dispatch,
@@ -620,6 +632,218 @@ fn plan_contract_dispatch(
         distributed_parameter_byte_count,
         shards,
     }))
+}
+
+fn resolve_selected_resource_partitions(
+    dispatch: &VulkanPreparedDispatch,
+    contract: &PhysicalExecutionContract,
+    resource_context: Option<(&str, &CompiledResourceResidencyContract)>,
+) -> Result<Vec<VulkanDistributedSelectedResourcePartitionPlan>, VulkanDistributedPlanError> {
+    if contract.selected_resource_partitions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some((execution_scope, residency)) = resource_context else {
+        return Err(dispatch_error(
+            dispatch,
+            "contains selected resources without a compiled atomic residency contract"
+                .to_string(),
+        ));
+    };
+    let groups = residency
+        .atomic_groups
+        .iter()
+        .map(|group| (group.id.as_str(), group))
+        .collect::<BTreeMap<_, _>>();
+    let resources = residency
+        .resources
+        .iter()
+        .map(|resource| (resource.id.as_str(), resource))
+        .collect::<BTreeMap<_, _>>();
+    contract
+        .selected_resource_partitions
+        .iter()
+        .map(|partition| {
+            let matching_selectors = residency
+                .selectors
+                .iter()
+                .filter(|selector| {
+                    selector.execution_scope == execution_scope
+                        && selector.component_id == dispatch.component_id
+                        && selector.selection_signal == partition.selection_signal
+                })
+                .collect::<Vec<_>>();
+            let [selector] = matching_selectors.as_slice() else {
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "selected resource partition {:?} resolves {} residency selectors",
+                        partition.selection_signal,
+                        matching_selectors.len(),
+                    ),
+                ));
+            };
+            if selector.resource_count != usize::try_from(partition.resource_count).unwrap_or(usize::MAX)
+            {
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "selected resource partition {:?} declares {} resources but selector {:?} declares {}",
+                        partition.selection_signal,
+                        partition.resource_count,
+                        selector.id,
+                        selector.resource_count,
+                    ),
+                ));
+            }
+            let CompiledResourceSelectorMapping::GroupTable { atomic_group_ids } =
+                &selector.mapping
+            else {
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "selected resource partition {:?} requires an atomic group table",
+                        partition.selection_signal,
+                    ),
+                ));
+            };
+            if atomic_group_ids.len() != selector.resource_count {
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "selector {:?} has {} atomic groups for {} resources",
+                        selector.id,
+                        atomic_group_ids.len(),
+                        selector.resource_count,
+                    ),
+                ));
+            }
+            let parameters_per_resource = usize::try_from(partition.parameters_per_resource)
+                .map_err(|_| {
+                    dispatch_error(
+                        dispatch,
+                        "selected parameter count exceeds usize".to_string(),
+                    )
+                })?;
+            let mut bindings = BTreeMap::<(usize, usize), (&str, &str)>::new();
+            for binding in &residency.bindings {
+                let CompiledResourceBindingMapping::SelectedAtomicGroup {
+                    atomic_group_id,
+                    resource_id,
+                    selection_signal,
+                    selector_index,
+                    parameter_slot,
+                } = &binding.mapping
+                else {
+                    continue;
+                };
+                if binding.execution_scope != execution_scope
+                    || binding.component_id != dispatch.component_id
+                    || binding.node_id != dispatch.node_id
+                    || selection_signal != &partition.selection_signal
+                {
+                    continue;
+                }
+                if bindings
+                    .insert(
+                        (*selector_index, *parameter_slot),
+                        (atomic_group_id.as_str(), resource_id.as_str()),
+                    )
+                    .is_some()
+                {
+                    return Err(dispatch_error(
+                        dispatch,
+                        "selected residency repeats a selector parameter slot".to_string(),
+                    ));
+                }
+            }
+            let expected_binding_count = selector
+                .resource_count
+                .checked_mul(parameters_per_resource)
+                .ok_or_else(|| {
+                    dispatch_error(
+                        dispatch,
+                        "selected residency binding count overflowed".to_string(),
+                    )
+                })?;
+            if bindings.len() != expected_binding_count {
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "selected resource partition {:?} resolves {} parameter slots, expected {expected_binding_count}",
+                        partition.selection_signal,
+                        bindings.len(),
+                    ),
+                ));
+            }
+            let mut atomic_group_byte_counts = Vec::with_capacity(atomic_group_ids.len());
+            for (selector_index, group_id) in atomic_group_ids.iter().enumerate() {
+                let group = groups.get(group_id.as_str()).ok_or_else(|| {
+                    dispatch_error(
+                        dispatch,
+                        format!("selector {:?} references missing atomic group {group_id:?}", selector.id),
+                    )
+                })?;
+                if group.lifetime != CompiledResourceLifetime::Dynamic {
+                    return Err(dispatch_error(
+                        dispatch,
+                        format!("selected atomic group {group_id:?} is not dynamic"),
+                    ));
+                }
+                let group_resources = group.resource_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+                for parameter_slot in 0..parameters_per_resource {
+                    let Some((binding_group_id, resource_id)) =
+                        bindings.get(&(selector_index, parameter_slot))
+                    else {
+                        return Err(dispatch_error(
+                            dispatch,
+                            "selected residency parameter slots are incomplete".to_string(),
+                        ));
+                    };
+                    if *binding_group_id != group_id
+                        || !group_resources.contains(resource_id)
+                    {
+                        return Err(dispatch_error(
+                            dispatch,
+                            format!(
+                                "selected residency slot {selector_index}:{parameter_slot} escapes atomic group {group_id:?}",
+                            ),
+                        ));
+                    }
+                }
+                let group_bytes = group.resource_ids.iter().try_fold(0usize, |total, resource_id| {
+                    let resource = resources.get(resource_id.as_str()).ok_or_else(|| {
+                        dispatch_error(
+                            dispatch,
+                            format!("selected atomic group references missing resource {resource_id:?}"),
+                        )
+                    })?;
+                    let bytes = resource.source_byte_count().map_err(|error| {
+                        dispatch_error(dispatch, error.to_string())
+                    })?;
+                    total.checked_add(bytes).ok_or_else(|| {
+                        dispatch_error(
+                            dispatch,
+                            "selected atomic group byte count overflowed".to_string(),
+                        )
+                    })
+                })?;
+                atomic_group_byte_counts.push(group_bytes);
+            }
+            Ok(VulkanDistributedSelectedResourcePartitionPlan {
+                execution_scope: execution_scope.to_string(),
+                selector_id: selector.id.clone(),
+                selection_signal: partition.selection_signal.clone(),
+                address_table_binding: usize::try_from(partition.address_table_binding)
+                    .map_err(|_| dispatch_error(dispatch, "dynamic binding exceeds usize".to_string()))?,
+                parameter_slots_binding: usize::try_from(partition.parameter_slots_binding)
+                    .map_err(|_| dispatch_error(dispatch, "dynamic binding exceeds usize".to_string()))?,
+                resource_count: selector.resource_count,
+                parameters_per_resource,
+                atomic_group_ids: atomic_group_ids.clone(),
+                atomic_group_byte_counts,
+            })
+        })
+        .collect()
 }
 
 fn validate_contract_descriptor_coverage(
@@ -652,6 +876,24 @@ fn validate_contract_descriptor_coverage(
         .map(|partition| usize::try_from(partition.binding))
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|_| dispatch_error(dispatch, "parameter binding exceeds usize".to_string()))?;
+    let mut contract_dynamic_addresses = BTreeMap::new();
+    let mut contract_dynamic_slots = BTreeMap::new();
+    for partition in &contract.selected_resource_partitions {
+        let address_binding = usize::try_from(partition.address_table_binding).map_err(|_| {
+            dispatch_error(
+                dispatch,
+                "dynamic address-table binding exceeds usize".to_string(),
+            )
+        })?;
+        let slots_binding = usize::try_from(partition.parameter_slots_binding).map_err(|_| {
+            dispatch_error(
+                dispatch,
+                "dynamic parameter-slot binding exceeds usize".to_string(),
+            )
+        })?;
+        contract_dynamic_addresses.insert(address_binding, partition);
+        contract_dynamic_slots.insert(slots_binding, partition);
+    }
     let descriptor_parameters = dispatch
         .descriptors
         .iter()
@@ -663,16 +905,80 @@ fn validate_contract_descriptor_coverage(
             .then_some(descriptor.binding)
         })
         .collect::<BTreeSet<_>>();
+    let descriptor_dynamic_addresses = dispatch
+        .descriptors
+        .iter()
+        .filter_map(|descriptor| match &descriptor.resource {
+            VulkanDescriptorResourceAddress::DynamicResourceAddressTable {
+                component_id,
+                node_id,
+                selection_signal,
+            } => Some((
+                descriptor.binding,
+                (component_id.as_str(), node_id.as_str(), selection_signal.as_str()),
+            )),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let descriptor_dynamic_slots = dispatch
+        .descriptors
+        .iter()
+        .filter_map(|descriptor| match &descriptor.resource {
+            VulkanDescriptorResourceAddress::DynamicResourceParameterSlots {
+                component_id,
+                node_id,
+                selection_signal,
+                parameter_ids,
+            } => Some((
+                descriptor.binding,
+                (
+                    component_id.as_str(),
+                    node_id.as_str(),
+                    selection_signal.as_str(),
+                    parameter_ids.len(),
+                ),
+            )),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
     let descriptor_inputs = descriptor_bindings(VulkanKernelDescriptorUsage::InputSignal);
     let descriptor_outputs = descriptor_bindings(VulkanKernelDescriptorUsage::OutputSignal);
+    let dynamic_resources_match = contract_dynamic_addresses.iter().all(
+        |(binding, partition)| {
+            descriptor_dynamic_addresses.get(binding).is_some_and(
+                |(component_id, node_id, selection_signal)| {
+                    *component_id == dispatch.component_id
+                        && *node_id == dispatch.node_id
+                        && *selection_signal == partition.selection_signal
+                },
+            )
+        },
+    ) && contract_dynamic_slots.iter().all(|(binding, partition)| {
+        let expected_parameter_count = partition
+            .resource_count
+            .checked_mul(partition.parameters_per_resource)
+            .and_then(|count| usize::try_from(count).ok());
+        descriptor_dynamic_slots.get(binding).is_some_and(
+            |(component_id, node_id, selection_signal, parameter_count)| {
+                *component_id == dispatch.component_id
+                    && *node_id == dispatch.node_id
+                    && *selection_signal == partition.selection_signal
+                    && Some(*parameter_count) == expected_parameter_count
+            },
+        )
+    }) && contract_dynamic_addresses.len() == descriptor_dynamic_addresses.len()
+        && contract_dynamic_slots.len() == descriptor_dynamic_slots.len();
     if contract_inputs != descriptor_inputs
         || contract_outputs != descriptor_outputs
         || contract_parameters != descriptor_parameters
+        || !dynamic_resources_match
     {
         return Err(dispatch_error(
             dispatch,
             format!(
-                "contract bindings inputs={contract_inputs:?} outputs={contract_outputs:?} parameters={contract_parameters:?} disagree with artifact ABI inputs={descriptor_inputs:?} outputs={descriptor_outputs:?} parameters={descriptor_parameters:?}"
+                "contract bindings inputs={contract_inputs:?} outputs={contract_outputs:?} parameters={contract_parameters:?} dynamic_addresses={:?} dynamic_slots={:?} disagree with artifact ABI inputs={descriptor_inputs:?} outputs={descriptor_outputs:?} parameters={descriptor_parameters:?} dynamic_addresses={descriptor_dynamic_addresses:?} dynamic_slots={descriptor_dynamic_slots:?}",
+                contract_dynamic_addresses.keys().collect::<Vec<_>>(),
+                contract_dynamic_slots.keys().collect::<Vec<_>>(),
             ),
         ));
     }

@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.physical_execution_contract.v2",
+  "schema": "nerve.physical_execution_contract.v3",
   "contract_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "operation_family": "parallel_projection",
   "region_family": "ffn_gate_up",
@@ -10,7 +10,8 @@
     {
       "path": "shaders/gate_up.spv",
       "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "entry_point": "main"
+      "entry_point": "main",
+      "role": "primary"
     }
   ],
   "implementation_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -53,6 +54,7 @@
       "logical_elements_per_index": 1
     }
   ],
+  "selected_resource_partitions": [],
   "inputs": [
     {
       "binding": 0,
