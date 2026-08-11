@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -5,8 +6,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use nerve_runtime::{
-    VulkanComputeDevice, VulkanDeviceLocalMemoryAccounting, VulkanDeviceLocalMemoryBudget,
-    VulkanDeviceLocalMemoryPressure,
+    VulkanComputeDevice, VulkanComputeDeviceCatalog, VulkanDeviceLocalMemoryAccounting,
+    VulkanDeviceLocalMemoryBudget, VulkanDeviceLocalMemoryPressure,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +25,49 @@ pub struct DeviceCalibrationSnapshot {
 struct DeviceActivityObservation {
     gpu_busy_percent: Option<u64>,
     runtime_power_status: Option<String>,
+}
+
+pub fn open_calibration_devices(
+    ordered_target_ids: &[String],
+) -> Result<Vec<(String, Rc<VulkanComputeDevice>)>, Box<dyn Error>> {
+    let allowed_target_ids = ordered_target_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if allowed_target_ids.len() != ordered_target_ids.len() || allowed_target_ids.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "calibration requires distinct ordered target identities",
+        )
+        .into());
+    }
+    let device_catalog =
+        VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(&allowed_target_ids)?;
+    let available_by_id = device_catalog
+        .available_compute_devices()
+        .iter()
+        .map(|device| (device.physical_device_id.clone(), device.clone()))
+        .collect::<BTreeMap<_, _>>();
+    ordered_target_ids
+        .iter()
+        .map(|physical_device_id| {
+            let info = available_by_id.get(physical_device_id).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("selected target {physical_device_id:?} is unavailable"),
+                )
+            })?;
+            let device = Rc::new(device_catalog.open_device_uuid(info.device_uuid)?);
+            if device.physical_device_id() != physical_device_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "opened target {:?} instead of requested target {physical_device_id:?}",
+                        device.physical_device_id()
+                    ),
+                )
+                .into());
+            }
+            Ok((physical_device_id.clone(), device))
+        })
+        .collect()
 }
 
 pub fn capture_device_snapshots(
@@ -159,6 +203,26 @@ pub fn verify_device_snapshots_restored(
         }
     }
     Ok(())
+}
+
+pub fn quiesce_and_verify_device_snapshots(
+    devices: &[(String, Rc<VulkanComputeDevice>)],
+    before: &[DeviceCalibrationSnapshot],
+) -> Result<(), String> {
+    let quiesce_result = devices.iter().try_for_each(|(_, device)| device.quiesce());
+    let after_result = capture_device_snapshots(devices);
+    match (quiesce_result, after_result) {
+        (Ok(()), Ok(after)) => {
+            print_device_snapshots("after", &after);
+            verify_device_snapshots_restored(before, &after)
+        }
+        (Err(error), _) => Err(format!(
+            "calibration could not quiesce selected targets before teardown proof: {error}"
+        )),
+        (Ok(()), Err(error)) => Err(format!(
+            "calibration could not capture post-workload target state: {error}"
+        )),
+    }
 }
 
 #[cfg(test)]

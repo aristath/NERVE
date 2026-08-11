@@ -1,4 +1,5 @@
 mod benchmark;
+mod boundary_calibration;
 mod calibration_device_state;
 mod catalog_merge;
 mod cli;
@@ -68,6 +69,17 @@ fn run() -> Result<(), Box<dyn Error>> {
                 phase,
                 &target_ids,
                 &output,
+            )?;
+        }
+        Command::CalibrateBoundaries {
+            package,
+            phase,
+            source_id,
+            target_id,
+            output,
+        } => {
+            boundary_calibration::run_boundary_calibration(
+                &package, phase, &source_id, &target_id, &output,
             )?;
         }
         Command::MergeCatalogs { inputs, output } => {

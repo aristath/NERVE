@@ -9,6 +9,9 @@ pub struct VulkanRuntimePlacementTransferCalibrationReport {
     pub target_device_id: String,
     pub target_api_version: u32,
     pub target_driver_version: u32,
+    pub phase: nerve_execution_contracts::ExecutionPhase,
+    pub activation_batch_width: usize,
+    pub frame_byte_count: usize,
     pub byte_count: usize,
     pub route: VulkanSharedResidentBufferRoute,
     pub warmup_ns: u64,
@@ -20,19 +23,19 @@ pub struct VulkanRuntimePlacementTransferCalibrationReport {
 impl VulkanRuntimePlacementTransferCalibrationReport {
     pub fn canonical_reference(
         &self,
-        phase: nerve_execution_contracts::ExecutionPhase,
-    ) -> VulkanPlacementCanonicalReference {
-        VulkanPlacementCanonicalReference {
-            behavior: self.behavior_identity(phase),
+    ) -> Result<VulkanPlacementCanonicalReference, VulkanPlacementCalibrationCatalogError> {
+        self.validate_geometry()?;
+        Ok(VulkanPlacementCanonicalReference {
+            behavior: self.behavior_identity(),
             output_digest: self.fixture_digest.clone(),
             state_digest: runtime_transfer_calibration_state_digest(),
-        }
+        })
     }
 
     pub fn calibration_observation(
         &self,
-        phase: nerve_execution_contracts::ExecutionPhase,
     ) -> Result<VulkanPlacementCalibrationObservation, VulkanPlacementCalibrationCatalogError> {
+        self.validate_geometry()?;
         let mut devices = vec![
             VulkanPlacementDeviceExecutionIdentity {
                 physical_device_id: self.source_device_id.clone(),
@@ -59,7 +62,7 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
             })?;
         Ok(VulkanPlacementCalibrationObservation {
             execution_case: VulkanPlacementExecutionCaseIdentity {
-                behavior: self.behavior_identity(phase),
+                behavior: self.behavior_identity(),
                 strategy: VulkanPlacementExecutionStrategy::DirectedBoundary,
                 devices,
                 shards: Vec::new(),
@@ -96,10 +99,7 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
         })
     }
 
-    fn behavior_identity(
-        &self,
-        phase: nerve_execution_contracts::ExecutionPhase,
-    ) -> VulkanPlacementBehaviorIdentity {
+    fn behavior_identity(&self) -> VulkanPlacementBehaviorIdentity {
         let implementation_digest = runtime_transfer_calibration_digest(
             b"nerve.directed_transfer.implementation.v1",
             &[crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.as_bytes()],
@@ -125,9 +125,9 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
             execution_graph_digest,
             runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
                 .to_string(),
-            phase,
+            phase: self.phase,
             shape: VulkanPlacementShapeClass {
-                activation_batch_width: 1,
+                activation_batch_width: self.activation_batch_width,
                 input_byte_capacity: self.byte_count,
                 output_byte_capacity: self.byte_count,
                 operations: vec![VulkanPlacementOperationGeometry::DirectedTransfer {
@@ -138,15 +138,42 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
             input_fixture_digest: self.fixture_digest.clone(),
         }
     }
+
+    fn validate_geometry(&self) -> Result<(), VulkanPlacementCalibrationCatalogError> {
+        let expected_byte_count = self
+            .frame_byte_count
+            .checked_mul(self.activation_batch_width)
+            .ok_or_else(|| {
+                VulkanPlacementCalibrationCatalogError(
+                    "directed transfer batch geometry overflows".to_string(),
+                )
+            })?;
+        if self.frame_byte_count == 0
+            || self.activation_batch_width == 0
+            || self.byte_count != expected_byte_count
+            || (self.phase == nerve_execution_contracts::ExecutionPhase::Decode
+                && self.activation_batch_width != 1)
+        {
+            return Err(VulkanPlacementCalibrationCatalogError(
+                "directed transfer report has inconsistent phase, frame, batch, or payload geometry"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub fn record_vulkan_runtime_transfer_calibration_report(
     catalog: &mut VulkanPlacementCalibrationCatalog,
     report: &VulkanRuntimePlacementTransferCalibrationReport,
-    phase: nerve_execution_contracts::ExecutionPhase,
 ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
-    catalog.record_reference(report.canonical_reference(phase))?;
-    catalog.record_observation(report.calibration_observation(phase)?)
+    let reference = report.canonical_reference()?;
+    let observation = report.calibration_observation()?;
+    let mut updated = catalog.clone();
+    updated.record_reference(reference)?;
+    updated.record_observation(observation)?;
+    *catalog = updated;
+    Ok(())
 }
 
 pub fn vulkan_runtime_placement_transfer_byte_counts(
@@ -168,6 +195,30 @@ pub fn calibrate_vulkan_runtime_placement_transfers(
     target: &VulkanComputeDevice,
     byte_counts: &[usize],
 ) -> Result<Vec<VulkanRuntimePlacementTransferCalibrationReport>, VulkanError> {
+    calibrate_vulkan_runtime_placement_phase_transfers(
+        source_device_id,
+        source,
+        target_device_id,
+        target,
+        nerve_execution_contracts::ExecutionPhase::Decode,
+        1,
+        byte_counts,
+    )
+}
+
+/// Measures the contiguous activation batch used by the real phase-specific
+/// cross-device edge. `frame_byte_counts` are compiler-emitted per-activation
+/// capacities; the transfer transaction scales them exactly once by the
+/// mounted batch width.
+pub fn calibrate_vulkan_runtime_placement_phase_transfers(
+    source_device_id: &str,
+    source: &VulkanComputeDevice,
+    target_device_id: &str,
+    target: &VulkanComputeDevice,
+    phase: nerve_execution_contracts::ExecutionPhase,
+    activation_batch_width: usize,
+    frame_byte_counts: &[usize],
+) -> Result<Vec<VulkanRuntimePlacementTransferCalibrationReport>, VulkanError> {
     if source_device_id.is_empty()
         || target_device_id.is_empty()
         || source_device_id == target_device_id
@@ -178,22 +229,44 @@ pub fn calibrate_vulkan_runtime_placement_transfers(
                 .to_string(),
         ));
     }
-    let unique_byte_counts = byte_counts.iter().copied().collect::<BTreeSet<_>>();
-    if unique_byte_counts.len() != byte_counts.len()
-        || unique_byte_counts.iter().any(|byte_count| *byte_count == 0)
+    if activation_batch_width == 0
+        || (phase == nerve_execution_contracts::ExecutionPhase::Decode
+            && activation_batch_width != 1)
     {
         return Err(VulkanError(
-            "runtime transfer calibration requires unique positive payload sizes".to_string(),
+            "runtime transfer calibration requires decode width one or a positive prefill width"
+                .to_string(),
         ));
     }
-    unique_byte_counts
+    let unique_frame_byte_counts = frame_byte_counts.iter().copied().collect::<BTreeSet<_>>();
+    if unique_frame_byte_counts.len() != frame_byte_counts.len()
+        || unique_frame_byte_counts
+            .iter()
+            .any(|byte_count| *byte_count == 0)
+    {
+        return Err(VulkanError(
+            "runtime transfer calibration requires unique positive frame payload sizes"
+                .to_string(),
+        ));
+    }
+    unique_frame_byte_counts
         .into_iter()
-        .map(|byte_count| {
+        .map(|frame_byte_count| {
+            let byte_count = frame_byte_count
+                .checked_mul(activation_batch_width)
+                .ok_or_else(|| {
+                    VulkanError(
+                        "runtime transfer calibration batch payload size overflowed".to_string(),
+                    )
+                })?;
             calibrate_vulkan_runtime_placement_transfer(
                 source_device_id,
                 source,
                 target_device_id,
                 target,
+                phase,
+                activation_batch_width,
+                frame_byte_count,
                 byte_count,
             )
         })
@@ -205,6 +278,9 @@ fn calibrate_vulkan_runtime_placement_transfer(
     source: &VulkanComputeDevice,
     target_device_id: &str,
     target: &VulkanComputeDevice,
+    phase: nerve_execution_contracts::ExecutionPhase,
+    activation_batch_width: usize,
+    frame_byte_count: usize,
     byte_count: usize,
 ) -> Result<VulkanRuntimePlacementTransferCalibrationReport, VulkanError> {
     let fixture = runtime_transfer_calibration_fixture(byte_count);
@@ -265,6 +341,9 @@ fn calibrate_vulkan_runtime_placement_transfer(
         target_device_id: target_device_id.to_string(),
         target_api_version: target.api_version(),
         target_driver_version: target.driver_version(),
+        phase,
+        activation_batch_width,
+        frame_byte_count,
         byte_count,
         route: shared.route,
         warmup_ns,
@@ -355,6 +434,9 @@ mod runtime_transfer_calibration_validation_tests {
             target_device_id: "gpu-b".to_string(),
             target_api_version: 3,
             target_driver_version: 4,
+            phase: nerve_execution_contracts::ExecutionPhase::Decode,
+            activation_batch_width: 1,
+            frame_byte_count: fixture.len(),
             byte_count: fixture.len(),
             route,
             warmup_ns: 11,
@@ -371,12 +453,9 @@ mod runtime_transfer_calibration_validation_tests {
         record_vulkan_runtime_transfer_calibration_report(
             &mut catalog,
             &report,
-            nerve_execution_contracts::ExecutionPhase::Decode,
         )
         .unwrap();
-        let observation = report
-            .calibration_observation(nerve_execution_contracts::ExecutionPhase::Decode)
-            .unwrap();
+        let observation = report.calibration_observation().unwrap();
         assert_eq!(
             catalog.exact_observation(&observation.execution_case),
             Some(&observation),
@@ -394,14 +473,61 @@ mod runtime_transfer_calibration_validation_tests {
     #[test]
     fn route_or_driver_change_creates_a_distinct_boundary_case() {
         let shared = report(VulkanSharedResidentBufferRoute::SharedHost)
-            .calibration_observation(nerve_execution_contracts::ExecutionPhase::Prefill)
+            .calibration_observation()
             .unwrap();
         let mut external_report = report(VulkanSharedResidentBufferRoute::ExternalDeviceLocal);
         external_report.target_driver_version += 1;
         let external = external_report
-            .calibration_observation(nerve_execution_contracts::ExecutionPhase::Prefill)
+            .calibration_observation()
             .unwrap();
         assert_eq!(shared.execution_case.behavior, external.execution_case.behavior);
         assert_ne!(shared.execution_case, external.execution_case);
+    }
+
+    #[test]
+    fn prefill_boundary_identity_preserves_batch_geometry() {
+        let mut report = report(VulkanSharedResidentBufferRoute::SharedHost);
+        report.phase = nerve_execution_contracts::ExecutionPhase::Prefill;
+        report.activation_batch_width = 64;
+        report.frame_byte_count = 257;
+        report.byte_count = 257 * 64;
+        let observation = report.calibration_observation().unwrap();
+        assert_eq!(
+            observation
+                .execution_case
+                .behavior
+                .shape
+                .activation_batch_width,
+            64,
+        );
+        assert_eq!(
+            observation.execution_case.behavior.shape.input_byte_capacity,
+            257 * 64,
+        );
+        assert!(matches!(
+            observation.execution_case.behavior.shape.operations.as_slice(),
+            [VulkanPlacementOperationGeometry::DirectedTransfer { byte_count, .. }]
+                if *byte_count == 257 * 64
+        ));
+    }
+
+    #[test]
+    fn inconsistent_boundary_geometry_is_rejected_transactionally() {
+        let mut report = report(VulkanSharedResidentBufferRoute::SharedHost);
+        report.phase = nerve_execution_contracts::ExecutionPhase::Prefill;
+        report.activation_batch_width = 64;
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let before = catalog.clone();
+        assert!(
+            record_vulkan_runtime_transfer_calibration_report(&mut catalog, &report)
+                .unwrap_err()
+                .to_string()
+                .contains("inconsistent")
+        );
+        assert_eq!(catalog, before);
+
+        report.byte_count = report.frame_byte_count * 64;
+        record_vulkan_runtime_transfer_calibration_report(&mut catalog, &report).unwrap();
+        assert_eq!(catalog.observation_count(), 1);
     }
 }

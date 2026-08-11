@@ -31,6 +31,13 @@ pub enum Command {
         target_ids: Vec<String>,
         output: PathBuf,
     },
+    CalibrateBoundaries {
+        package: PathBuf,
+        phase: PackageCalibrationPhase,
+        source_id: String,
+        target_id: String,
+        output: PathBuf,
+    },
     MergeCatalogs {
         inputs: Vec<PathBuf>,
         output: PathBuf,
@@ -83,6 +90,7 @@ where
         "summarize" => parse_input_file_command("summarize", args.collect()),
         "validate" => parse_validate(args.collect()),
         "calibrate-package" => parse_calibrate_package(args.collect()),
+        "calibrate-boundaries" => parse_calibrate_boundaries(args.collect()),
         "merge-catalogs" => parse_merge_catalogs(args.collect()),
         "run" => parse_run(args.collect()),
         other => Err(CliError(format!(
@@ -90,6 +98,98 @@ where
             usage()
         ))),
     }
+}
+
+fn parse_calibrate_boundaries(arguments: Vec<String>) -> Result<Command, CliError> {
+    let mut package = None;
+    let mut phase = None;
+    let mut activation_batch_width = None;
+    let mut source_id = None;
+    let mut target_id = None;
+    let mut output = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--package" => set_once_path(&mut package, &arguments, &mut index, "--package")?,
+            "--phase" => set_once_string(&mut phase, &arguments, &mut index, "--phase")?,
+            "--batch-width" => {
+                let value = parse_usize(
+                    &required_value(&arguments, &mut index, "--batch-width")?,
+                    "--batch-width",
+                )?;
+                if activation_batch_width.replace(value).is_some() {
+                    return Err(CliError(
+                        "--batch-width may only be specified once".to_string(),
+                    ));
+                }
+            }
+            "--source" => set_once_string(&mut source_id, &arguments, &mut index, "--source")?,
+            "--target" => set_once_string(&mut target_id, &arguments, &mut index, "--target")?,
+            "--output" => set_once_path(&mut output, &arguments, &mut index, "--output")?,
+            other => {
+                return Err(CliError(format!(
+                    "unknown calibrate-boundaries argument {other:?}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+        index += 1;
+    }
+    let package = package
+        .ok_or_else(|| CliError("calibrate-boundaries requires --package PATH".to_string()))?;
+    let phase =
+        parse_package_calibration_phase(phase, activation_batch_width, "calibrate-boundaries")?;
+    let source_id = source_id
+        .filter(|id| is_canonical_vulkan_target_id(id))
+        .ok_or_else(|| {
+            CliError("calibrate-boundaries requires canonical --source vulkan-uuid:ID".to_string())
+        })?;
+    let target_id = target_id
+        .filter(|id| is_canonical_vulkan_target_id(id))
+        .ok_or_else(|| {
+            CliError("calibrate-boundaries requires canonical --target vulkan-uuid:ID".to_string())
+        })?;
+    if source_id == target_id {
+        return Err(CliError(
+            "calibrate-boundaries requires distinct source and target identities".to_string(),
+        ));
+    }
+    let output = output
+        .ok_or_else(|| CliError("calibrate-boundaries requires --output PATH".to_string()))?;
+    Ok(Command::CalibrateBoundaries {
+        package,
+        phase,
+        source_id,
+        target_id,
+        output,
+    })
+}
+
+fn set_once_path(
+    slot: &mut Option<PathBuf>,
+    arguments: &[String],
+    index: &mut usize,
+    option: &str,
+) -> Result<(), CliError> {
+    let value = PathBuf::from(required_value(arguments, index, option)?);
+    if slot.replace(value).is_some() {
+        return Err(CliError(format!("{option} may only be specified once")));
+    }
+    Ok(())
+}
+
+fn set_once_string(
+    slot: &mut Option<String>,
+    arguments: &[String],
+    index: &mut usize,
+    option: &str,
+) -> Result<(), CliError> {
+    let value = required_value(arguments, index, option)?;
+    if slot.replace(value).is_some() {
+        return Err(CliError(format!("{option} may only be specified once")));
+    }
+    Ok(())
 }
 
 fn parse_merge_catalogs(arguments: Vec<String>) -> Result<Command, CliError> {
@@ -200,32 +300,8 @@ fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> 
     let component = component
         .filter(|component| !component.is_empty())
         .ok_or_else(|| CliError("calibrate-package requires --component ID".to_string()))?;
-    let phase_name = phase
-        .filter(|phase| !phase.is_empty())
-        .ok_or_else(|| CliError("calibrate-package requires --phase decode|prefill".to_string()))?;
-    let phase = match (phase_name.as_str(), activation_batch_width) {
-        ("decode", None) => PackageCalibrationPhase::Decode,
-        ("decode", Some(_)) => {
-            return Err(CliError(
-                "decode package calibration must not specify --batch-width".to_string(),
-            ));
-        }
-        ("prefill", Some(activation_batch_width)) if activation_batch_width > 0 => {
-            PackageCalibrationPhase::Prefill {
-                activation_batch_width,
-            }
-        }
-        ("prefill", _) => {
-            return Err(CliError(
-                "prefill package calibration requires a positive --batch-width".to_string(),
-            ));
-        }
-        _ => {
-            return Err(CliError(
-                "calibrate-package --phase must be decode or prefill".to_string(),
-            ));
-        }
-    };
+    let phase =
+        parse_package_calibration_phase(phase, activation_batch_width, "calibrate-package")?;
     if target_ids.is_empty() {
         return Err(CliError(
             "calibrate-package requires at least one ordered --target vulkan-uuid:ID".to_string(),
@@ -256,6 +332,39 @@ fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> 
         target_ids,
         output,
     })
+}
+
+fn parse_package_calibration_phase(
+    phase: Option<String>,
+    activation_batch_width: Option<usize>,
+    command: &str,
+) -> Result<PackageCalibrationPhase, CliError> {
+    let phase_name = phase
+        .filter(|phase| !phase.is_empty())
+        .ok_or_else(|| CliError(format!("{command} requires --phase decode|prefill")))?;
+    match (phase_name.as_str(), activation_batch_width) {
+        ("decode", None) => Ok(PackageCalibrationPhase::Decode),
+        ("decode", Some(_)) => {
+            return Err(CliError(
+                "decode calibration must not specify --batch-width".to_string(),
+            ));
+        }
+        ("prefill", Some(activation_batch_width)) if activation_batch_width > 0 => {
+            Ok(PackageCalibrationPhase::Prefill {
+                activation_batch_width,
+            })
+        }
+        ("prefill", _) => {
+            return Err(CliError(
+                "prefill calibration requires a positive --batch-width".to_string(),
+            ));
+        }
+        _ => {
+            return Err(CliError(format!(
+                "{command} --phase must be decode or prefill"
+            )));
+        }
+    }
 }
 
 fn is_canonical_vulkan_target_id(target_id: &str) -> bool {
@@ -453,7 +562,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -712,6 +821,134 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_exact_prefill_boundary_calibration_shape() {
+        let source = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let target = "vulkan-uuid:ffeeddccbbaa99887766554433221100";
+        assert_eq!(
+            parse_args(
+                [
+                    "calibrate-boundaries",
+                    "--package",
+                    "compiled/vulkan_resident_package.json",
+                    "--phase",
+                    "prefill",
+                    "--batch-width",
+                    "64",
+                    "--source",
+                    source,
+                    "--target",
+                    target,
+                    "--output",
+                    "boundaries.json",
+                ]
+                .map(str::to_string)
+            )
+            .unwrap(),
+            Command::CalibrateBoundaries {
+                package: PathBuf::from("compiled/vulkan_resident_package.json"),
+                phase: PackageCalibrationPhase::Prefill {
+                    activation_batch_width: 64,
+                },
+                source_id: source.to_string(),
+                target_id: target.to_string(),
+                output: PathBuf::from("boundaries.json"),
+            },
+        );
+    }
+
+    #[test]
+    fn boundary_calibration_rejects_ambiguous_endpoints_and_phase() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let base = [
+            "calibrate-boundaries",
+            "--package",
+            "package.json",
+            "--phase",
+            "decode",
+            "--source",
+            target,
+            "--target",
+            target,
+            "--output",
+            "boundaries.json",
+        ];
+        assert!(
+            parse_args(base.map(str::to_string))
+                .unwrap_err()
+                .to_string()
+                .contains("distinct source and target")
+        );
+
+        let prefill_without_width = base
+            .iter()
+            .copied()
+            .map(|argument| {
+                if argument == "decode" {
+                    "prefill"
+                } else {
+                    argument
+                }
+            })
+            .map(str::to_string);
+        assert!(
+            parse_args(prefill_without_width)
+                .unwrap_err()
+                .to_string()
+                .contains("positive --batch-width")
+        );
+
+        let noncanonical = base
+            .iter()
+            .copied()
+            .map(|argument| if argument == target { "gpu0" } else { argument })
+            .map(str::to_string);
+        assert!(
+            parse_args(noncanonical)
+                .unwrap_err()
+                .to_string()
+                .contains("canonical --source")
+        );
+    }
+
+    #[test]
+    fn boundary_calibration_rejects_repeated_scalar_options() {
+        let source = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let target = "vulkan-uuid:ffeeddccbbaa99887766554433221100";
+        for (option, second) in [
+            ("--package", "other.json"),
+            ("--phase", "decode"),
+            ("--batch-width", "32"),
+            ("--source", target),
+            ("--target", source),
+            ("--output", "other.json"),
+        ] {
+            let mut arguments = [
+                "calibrate-boundaries",
+                "--package",
+                "package.json",
+                "--phase",
+                "prefill",
+                "--batch-width",
+                "64",
+                "--source",
+                source,
+                "--target",
+                target,
+                "--output",
+                "boundaries.json",
+            ]
+            .map(str::to_string)
+            .to_vec();
+            arguments.extend([option.to_string(), second.to_string()]);
+            let error = parse_args(arguments).unwrap_err();
+            assert!(
+                error.to_string().contains("may only be specified once"),
+                "{option} produced {error}"
+            );
+        }
     }
 
     #[test]

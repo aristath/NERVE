@@ -371,16 +371,10 @@ fn runtime_capacity_packed_model(
                     &transfer_byte_counts,
                 )?;
                 for report in reports {
-                    for phase in [
-                        nerve_runtime::execution_contracts::ExecutionPhase::Decode,
-                        nerve_runtime::execution_contracts::ExecutionPhase::Prefill,
-                    ] {
-                        record_vulkan_runtime_transfer_calibration_report(
-                            &mut exact_calibration_catalog,
-                            &report,
-                            phase,
-                        )?;
-                    }
+                    record_vulkan_runtime_transfer_calibration_report(
+                        &mut exact_calibration_catalog,
+                        &report,
+                    )?;
                     placement_costs.record_boundary_transfer_cost(
                         &report.source_device_id,
                         &report.target_device_id,

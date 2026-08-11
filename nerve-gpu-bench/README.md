@@ -146,7 +146,42 @@ cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
   --output /path/to/prefill-placement-catalog.json
 ```
 
-This path executes the compiler-emitted component artifacts and physical
+Measure one exact directed activation boundary separately from component
+compute. This is intentionally pair-specific and directional; reverse traffic
+is a different candidate and must be measured independently:
+
+```sh
+cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
+  calibrate-boundaries \
+  --package /path/to/compiled/vulkan_resident_package.json \
+  --phase decode \
+  --source vulkan-uuid:00112233445566778899aabbccddeeff \
+  --target vulkan-uuid:ffeeddccbbaa99887766554433221100 \
+  --output /path/to/decode-boundary-catalog.json
+```
+
+For prefill, pass its exact batch width. The benchmark transfers the same
+contiguous `frame_bytes * batch_width` payload as the mounted component-batch
+edge instead of relabeling a decode-sized copy as prefill evidence:
+
+```sh
+cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
+  calibrate-boundaries \
+  --package /path/to/compiled/vulkan_resident_package.json \
+  --phase prefill \
+  --batch-width 64 \
+  --source vulkan-uuid:00112233445566778899aabbccddeeff \
+  --target vulkan-uuid:ffeeddccbbaa99887766554433221100 \
+  --output /path/to/prefill-boundary-catalog.json
+```
+
+Boundary sizes come from the compiled graph. The measured transaction includes
+both queue-side copies, synchronization, the selected physical route, and
+destination output validation. It uses the same before/after VRAM reservation,
+pressure, activity, quiescence, and exact NERVE-owned teardown proof as
+component calibration. A failed or unrestored route publishes no catalog.
+
+The component-calibration path executes the compiler-emitted component artifacts and physical
 execution contracts used by inference. It measures every singleton reference
 and then each prefix of the requested owner/worker order, with one warmup and
 one measured call under a one-minute transaction bound. All stages use the
