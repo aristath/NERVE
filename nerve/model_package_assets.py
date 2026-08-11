@@ -115,6 +115,11 @@ def referenced_tensor_index(
         runtime_referenced.update(
             ref["tensor"] for ref in circuit["parameters"]["refs"].values()
         )
+    runtime_referenced.update(
+        tensor_name
+        for tensor_name, info in tensor_index["tensors"].items()
+        if isinstance(info, dict) and info.get("physical_execution_only") is True
+    )
 
     compile_dependencies: set[str] = set()
     for tensor_name in runtime_referenced:
@@ -268,6 +273,36 @@ def copy_tensor_package(
         partition_count = partition_counts.get(tensor_name)
         quantization = info.get("quantization")
         partition_digests: list[bytes] = []
+        if (
+            isinstance(derivation, dict)
+            and derivation.get("kind")
+            in {"matrix_to_input_block_major", "transpose_2d"}
+        ):
+            if partition_count is not None:
+                raise ModelCompileError(
+                    f"selected tensor {tensor_name!r} requires a matrix reorder "
+                    "that does not preserve independently verifiable partitions"
+                )
+            header_bytes, data_sha256 = write_compiled_derived_matrix_reorder(
+                tensor_name=tensor_name,
+                info=info,
+                destination=destination,
+                layout=layout,
+            )
+            relative_destination = relative_json_path(package_dir, destination)
+            info["source_file"] = relative_destination
+            info["data_offsets"] = [0, int(info["byte_count"])]
+            info["data_sha256"] = data_sha256
+            info["layout"] = layout
+            info.pop("derived", None)
+            compiled_sources.append(
+                {
+                    "path": relative_destination,
+                    "safetensors_header_bytes": header_bytes,
+                    "metadata": {"format": "nerve", "layout": layout},
+                }
+            )
+            continue
         if partition_count is not None and (
             isinstance(derivation, dict)
             or (

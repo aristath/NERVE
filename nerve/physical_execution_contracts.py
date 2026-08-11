@@ -322,6 +322,16 @@ def build_kernel_physical_execution_contracts(
     )
     if distributed is not None:
         contracts.append(distributed)
+    contracts.extend(
+        _physical_implementation_contract(
+            node=node,
+            circuit=circuit,
+            tensor_index=tensor_index,
+            implementation=implementation,
+            package_dir=package_dir,
+        )
+        for implementation in kernel.get("physical_implementations", [])
+    )
 
     for implementation in kernel.get("batch_implementations", []):
         stages = implementation.get("stages", [])
@@ -387,8 +397,14 @@ def _build_contract(
     inputs: list[InputContract],
     outputs: list[OutputContract],
     local_intermediates: list[LocalIntermediateContract],
+    resources: list[ResourceRequirement] | None = None,
+    equivalence: EquivalenceRequirement | None = None,
 ) -> PhysicalExecutionContract:
-    resources = _kernel_resources(node, circuit, tensor_index)
+    resources = (
+        _kernel_resources(node, circuit, tensor_index)
+        if resources is None
+        else deepcopy(resources)
+    )
     contract: Json = {
         "schema": PHYSICAL_EXECUTION_CONTRACT_SCHEMA,
         "operation_family": _non_empty_string(node.get("op"), "node.op"),
@@ -418,10 +434,9 @@ def _build_contract(
         "outputs": outputs,
         "local_intermediates": local_intermediates,
         "resources": resources,
-        "equivalence": {
-            "output": "bit_exact",
-            "state": "bit_exact",
-        },
+        "equivalence": deepcopy(equivalence)
+        if equivalence is not None
+        else {"output": "bit_exact", "state": "bit_exact"},
     }
     if partition_extent is not None:
         contract["partition_extent"] = partition_extent
@@ -431,6 +446,62 @@ def _build_contract(
     if isinstance(semantic_modules, list) and semantic_modules:
         contract["region_family"] = "+".join(map(str, semantic_modules))
     return seal_physical_execution_contract(contract)
+
+
+def _physical_implementation_contract(
+    *,
+    node: Json,
+    circuit: Json,
+    tensor_index: Json,
+    implementation: Json,
+    package_dir: Path,
+) -> PhysicalExecutionContract:
+    local_size_x = _positive_int(
+        implementation.get("local_size_x"), "physical implementation local_size_x"
+    )
+    workgroup_count_x = _positive_int(
+        implementation.get("workgroup_count_x"),
+        "physical implementation workgroup_count_x",
+    )
+    dimensions = {
+        "local_size_x": local_size_x,
+        "workgroup_count_x": workgroup_count_x,
+        **{
+            _non_empty_string(name, "physical implementation dimension name"): _positive_int(
+                value, f"physical implementation dimension {name}"
+            )
+            for name, value in _mapping(
+                implementation.get("geometry_dimensions"),
+                "physical implementation geometry_dimensions",
+            ).items()
+        },
+    }
+    geometry: ExecutionGeometry = {
+        "shape_class": (
+            f"shape:{sha256(_canonical_json_bytes(dimensions)).hexdigest()[:24]}"
+        ),
+        "dimensions": dimensions,
+        "dynamic_dimensions": [],
+    }
+    return _build_contract(
+        node=node,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        artifacts=[_artifact_identity(package_dir, implementation["shader_path"])],
+        phases=list(implementation["phases"]),
+        formats=deepcopy(implementation["formats"]),
+        geometry=geometry,
+        strategy=implementation["strategy"],
+        execution_form=implementation["execution_form"],
+        partition_extent=deepcopy(implementation.get("partition_extent")),
+        partition_launch=deepcopy(implementation.get("partition_launch")),
+        parameter_partitions=deepcopy(implementation["parameter_partitions"]),
+        inputs=deepcopy(implementation["inputs"]),
+        outputs=deepcopy(implementation["outputs"]),
+        local_intermediates=deepcopy(implementation.get("local_intermediates", [])),
+        resources=deepcopy(implementation["resources"]),
+        equivalence=deepcopy(implementation["equivalence"]),
+    )
 
 
 def _distributed_scalar_contract(

@@ -207,9 +207,22 @@ fn physical_artifact_metadata_is_owned_by_its_contract() {
         origin_push_constant: Some("input_start".to_string()),
         count_push_constant: Some("input_count".to_string()),
     });
-    let family = &fixture_model_reusable_kernel_plan().families[0];
+    let mut family = fixture_model_reusable_kernel_plan()
+        .families
+        .into_iter()
+        .find(|family| family.op == contract.operation_family)
+        .unwrap();
+    let unused_slot = VulkanKernelDescriptorSlotSignature {
+        binding: 99,
+        usage: VulkanKernelDescriptorUsage::StateRead,
+        resource_class: VulkanKernelDescriptorResourceClass::StateBuffer,
+        byte_capacity: Some(16),
+        shape: None,
+    };
+    family.descriptor_signature.push(unused_slot.clone());
+    family.stream_control_binding = Some(99);
     let artifact = physical_contract_kernel_artifact(
-        family,
+        &family,
         &contract,
         0,
         &contract.artifacts[0],
@@ -238,6 +251,35 @@ fn physical_artifact_metadata_is_owned_by_its_contract() {
             .collect::<Vec<_>>(),
         ["input_start", "input_count"]
     );
+    assert!(!artifact.descriptor_signature.contains(&unused_slot));
+    assert_eq!(artifact.stream_control_binding, None);
+}
+
+#[test]
+fn physical_artifact_rejects_a_contract_binding_absent_from_the_canonical_abi() {
+    let mut contract = fixture_model_package_manifest()
+        .component_executions
+        .into_iter()
+        .flat_map(|execution| execution.kernels)
+        .flat_map(|kernel| kernel.physical_execution_contracts)
+        .find(|contract| contract.strategy.is_distributed())
+        .unwrap();
+    contract.inputs[0].binding = 99;
+    let family = fixture_model_reusable_kernel_plan()
+        .families
+        .into_iter()
+        .find(|family| family.op == contract.operation_family)
+        .unwrap();
+    let error = physical_contract_kernel_artifact(
+        &family,
+        &contract,
+        0,
+        &contract.artifacts[0],
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("binding 99 does not identify exactly one canonical descriptor slot"));
 }
 
 #[test]

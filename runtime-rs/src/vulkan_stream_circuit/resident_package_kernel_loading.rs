@@ -302,10 +302,64 @@ fn physical_contract_kernel_artifact(
         entry_point: identity.entry_point.clone(),
         local_size_x: physical_contract_geometry_u32(contract, "local_size_x")?,
         workgroup_count_x: physical_contract_geometry_u32(contract, "workgroup_count_x")?,
-        descriptor_signature: family.descriptor_signature.clone(),
+        descriptor_signature: physical_contract_descriptor_signature(family, contract)?,
         push_constants: physical_contract_push_constants(contract)?,
-        stream_control_binding: family.stream_control_binding,
+        stream_control_binding: None,
     })
+}
+
+fn physical_contract_descriptor_signature(
+    family: &VulkanReusableKernelFamily,
+    contract: &nerve_execution_contracts::PhysicalExecutionContract,
+) -> Result<Vec<VulkanKernelDescriptorSlotSignature>, VulkanResidentTokenModelPackageError> {
+    let mut required = BTreeMap::<usize, VulkanKernelDescriptorUsage>::new();
+    let mut insert = |binding: u32, usage: VulkanKernelDescriptorUsage| {
+        let binding = usize::try_from(binding).map_err(|_| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "physical contract {:?} descriptor binding exceeds usize",
+                contract.contract_id
+            ))
+        })?;
+        if required.insert(binding, usage).is_some() {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "physical contract {:?} reuses descriptor binding {binding}",
+                contract.contract_id
+            )));
+        }
+        Ok(())
+    };
+    for input in &contract.inputs {
+        insert(input.binding, VulkanKernelDescriptorUsage::InputSignal)?;
+    }
+    for output in &contract.outputs {
+        insert(output.binding, VulkanKernelDescriptorUsage::OutputSignal)?;
+    }
+    for parameter in &contract.parameter_partitions {
+        insert(parameter.binding, VulkanKernelDescriptorUsage::Parameter)?;
+    }
+
+    let mut signature = Vec::with_capacity(required.len());
+    for (binding, usage) in required {
+        let candidates = family
+            .descriptor_signature
+            .iter()
+            .filter(|slot| slot.binding == binding)
+            .collect::<Vec<_>>();
+        let [slot] = candidates.as_slice() else {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "physical contract {:?} binding {binding} does not identify exactly one canonical descriptor slot",
+                contract.contract_id
+            )));
+        };
+        if slot.usage != usage {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "physical contract {:?} binding {binding} requires {usage:?}, canonical slot declares {:?}",
+                contract.contract_id, slot.usage
+            )));
+        }
+        signature.push((*slot).clone());
+    }
+    Ok(signature)
 }
 
 fn physical_contract_geometry_u32(

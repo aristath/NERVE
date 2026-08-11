@@ -2,6 +2,177 @@ from nerve.model_package_common import *
 from nerve.model_package_tensors import dtype_byte_count, tensor_dtype, tensor_shape
 from nerve.compiler_target import CompilerTarget
 
+TP_INPUT_BLOCK_COLUMNS = 128
+
+
+def derive_tensor_parallel_linear_tensors(
+    lowered_index: Json,
+    lowered_dir: Path,
+    tensor_index: Json,
+    *,
+    target: CompilerTarget,
+) -> None:
+    """Materialize contiguous input-column representations for legal linears.
+
+    Logical weights remain untouched.  Physical execution contracts can name
+    these compiler-owned resources without changing the canonical graph or its
+    single-device implementation.
+    """
+
+    for circuit_ref in lowered_circuit_refs(lowered_index):
+        circuit = read_json(lowered_dir / circuit_ref["circuit"])
+        refs = circuit.get("parameters", {}).get("refs", {})
+        for node in circuit.get("nodes", []):
+            if (
+                node.get("op") != "linear_residual"
+                or len(node.get("inputs", [])) != 2
+                or len(node.get("outputs", [])) != 1
+            ):
+                continue
+            params = node.get("params", [])
+            if not params:
+                continue
+            weight_ref = refs.get(params[0])
+            weight_tensor = (
+                weight_ref.get("tensor") if isinstance(weight_ref, dict) else None
+            )
+            if not isinstance(weight_tensor, str):
+                continue
+            weight_dtype = tensor_dtype(tensor_index, weight_tensor)
+            if not target.supports_native_dtype(weight_dtype):
+                continue
+            shape = tensor_shape(tensor_index, weight_tensor)
+            if (
+                len(shape) != 2
+                or any(dimension <= 0 for dimension in shape)
+                or shape[1] % TP_INPUT_BLOCK_COLUMNS
+                or shape[0] % 2
+            ):
+                continue
+            if weight_dtype == "BF16" and len(params) == 1:
+                ensure_input_block_major_tensor(
+                    tensor_index,
+                    source_tensor=weight_tensor,
+                    block_columns=TP_INPUT_BLOCK_COLUMNS,
+                )
+                continue
+            if weight_dtype != "F8_E4M3" or len(params) != 2:
+                continue
+            scale_ref = refs.get(params[1])
+            scale_tensor = (
+                scale_ref.get("tensor") if isinstance(scale_ref, dict) else None
+            )
+            if (
+                not isinstance(scale_tensor, str)
+                or tensor_dtype(tensor_index, scale_tensor) != "BF16"
+            ):
+                continue
+            scale_shape = tensor_shape(tensor_index, scale_tensor)
+            if (
+                len(scale_shape) != 2
+                or any(dimension <= 0 for dimension in scale_shape)
+                or scale_shape[0] % 2
+                or scale_shape[1] != shape[1] // TP_INPUT_BLOCK_COLUMNS
+                or shape[0] % scale_shape[0]
+            ):
+                continue
+            ensure_input_block_major_tensor(
+                tensor_index,
+                source_tensor=weight_tensor,
+                block_columns=TP_INPUT_BLOCK_COLUMNS,
+            )
+            ensure_transposed_matrix_tensor(
+                tensor_index,
+                source_tensor=scale_tensor,
+            )
+
+
+def input_block_major_tensor_name(source_tensor: str, block_columns: int) -> str:
+    return f"{source_tensor}.__nerve_input_block_major_b{block_columns}"
+
+
+def transposed_tensor_name(source_tensor: str) -> str:
+    return f"{source_tensor}.__nerve_transpose_2d"
+
+
+def ensure_input_block_major_tensor(
+    tensor_index: Json,
+    *,
+    source_tensor: str,
+    block_columns: int,
+) -> str:
+    derived_tensor = input_block_major_tensor_name(source_tensor, block_columns)
+    source_info = tensor_index["tensors"][source_tensor]
+    shape = tensor_shape(tensor_index, source_tensor)
+    if len(shape) != 2 or shape[1] % block_columns:
+        raise ModelCompileError(
+            f"tensor {source_tensor!r} cannot use {block_columns}-column input blocks"
+        )
+    output_rows, input_columns = shape
+    byte_count = int(source_info["byte_count"])
+    derived_info = {
+        "dtype": source_info["dtype"],
+        "shape": [input_columns // block_columns, output_rows, block_columns],
+        "logical_shape": shape,
+        "parameter_count": output_rows * input_columns,
+        "byte_count": byte_count,
+        "layout": ROW_MAJOR_LAYOUT,
+        "physical_execution_only": True,
+        "derived": {
+            "kind": "matrix_to_input_block_major",
+            "source_tensor": source_tensor,
+            "source_file": source_info["source_file"],
+            "source_header_bytes": int(source_info["source_header_bytes"]),
+            "data_offsets": list(source_info["data_offsets"]),
+            "source_shape": shape,
+            "block_columns": block_columns,
+        },
+    }
+    existing = tensor_index["tensors"].get(derived_tensor)
+    if existing is not None and existing != derived_info:
+        raise ModelCompileError(
+            f"compiler-owned tensor name {derived_tensor!r} collides with incompatible metadata"
+        )
+    tensor_index["tensors"][derived_tensor] = derived_info
+    return derived_tensor
+
+
+def ensure_transposed_matrix_tensor(
+    tensor_index: Json,
+    *,
+    source_tensor: str,
+) -> str:
+    derived_tensor = transposed_tensor_name(source_tensor)
+    source_info = tensor_index["tensors"][source_tensor]
+    shape = tensor_shape(tensor_index, source_tensor)
+    if len(shape) != 2:
+        raise ModelCompileError(f"tensor {source_tensor!r} is not a matrix")
+    rows, columns = shape
+    derived_info = {
+        "dtype": source_info["dtype"],
+        "shape": [columns, rows],
+        "logical_shape": shape,
+        "parameter_count": rows * columns,
+        "byte_count": int(source_info["byte_count"]),
+        "layout": ROW_MAJOR_LAYOUT,
+        "physical_execution_only": True,
+        "derived": {
+            "kind": "transpose_2d",
+            "source_tensor": source_tensor,
+            "source_file": source_info["source_file"],
+            "source_header_bytes": int(source_info["source_header_bytes"]),
+            "data_offsets": list(source_info["data_offsets"]),
+            "source_shape": shape,
+        },
+    }
+    existing = tensor_index["tensors"].get(derived_tensor)
+    if existing is not None and existing != derived_info:
+        raise ModelCompileError(
+            f"compiler-owned tensor name {derived_tensor!r} collides with incompatible metadata"
+        )
+    tensor_index["tensors"][derived_tensor] = derived_info
+    return derived_tensor
+
 
 def derive_output_projection_tensors(
     model_graph: Json,

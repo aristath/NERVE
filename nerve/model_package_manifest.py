@@ -25,6 +25,9 @@ from nerve.physical_representations import (
 from nerve.physical_execution_contracts import (
     build_kernel_physical_execution_contracts,
 )
+from nerve.model_package_physical_kernels import (
+    physical_kernel_implementations_for_node,
+)
 from nerve.resource_residency_planning import (
     build_planned_resource_residency_contract,
 )
@@ -786,6 +789,10 @@ def build_vulkan_resident_package_manifest(
     for execution in all_component_executions:
         for kernel in execution["kernels"]:
             kernel["shader_path"] = compiled_shader_path(kernel["shader_path"])
+            for implementation in kernel.get("physical_implementations", []):
+                implementation["shader_path"] = compiled_shader_path(
+                    implementation["shader_path"]
+                )
             for implementation in kernel["batch_implementations"]:
                 implementation_spirv_files = {
                     Path(compiled_shader_path(stage["shader_path"])).name
@@ -820,6 +827,7 @@ def build_vulkan_resident_package_manifest(
                     package_dir=package_dir,
                 )
             )
+            kernel.pop("physical_implementations", None)
     manifest = {
         "schema": PACKAGE_SCHEMA,
         "package_id": package_id,
@@ -1000,6 +1008,7 @@ def component_execution_specs(
                     execution_index=index,
                     node=node,
                     circuit=circuit,
+                    tensor_index=tensor_index,
                     shader_file=shader_file,
                     local_size_x=local_size_x_for_shader_file(shader_file, node),
                     workgroup_count_x=workgroup_count_x_for_node(
@@ -1194,6 +1203,7 @@ def component_execution_spec(
                 execution_index=index,
                 node=node,
                 circuit=circuit,
+                tensor_index=tensor_index,
                 shader_file=shader_file,
                 local_size_x=local_size_x_for_shader_file(shader_file, node),
                 workgroup_count_x=workgroup_count_x_for_node(
@@ -1222,9 +1232,15 @@ def component_kernel_spec(
     local_size_x: int,
     workgroup_count_x: int,
     cooperative_float8_e4m3_shapes: tuple[tuple[int, int, int], ...] = (),
+    tensor_index: Json | None = None,
 ) -> Json:
     source_node_ids = normalized_source_node_ids(node)
     stream_control_binding = stream_control_binding_from_artifact_path(shader_file)
+    physical_implementations = (
+        physical_kernel_implementations_for_node(circuit, node, tensor_index)
+        if tensor_index is not None
+        else []
+    )
     hyper_rms_batch_implementations = hyper_connection_rms_norm_batch_implementations(
         shader_file
     )
@@ -1350,6 +1366,8 @@ def component_kernel_spec(
         ),
         "batch_implementations": [],
     }
+    if physical_implementations:
+        spec["physical_implementations"] = physical_implementations
     if node["op"] in {
         "independent_sparse_moe_gate_up",
         "independent_sparse_moe_down",

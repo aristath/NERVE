@@ -217,6 +217,128 @@ def write_compiled_composite_tensor(
     return len(header_payload), data_digest.hexdigest(), partition_digests
 
 
+def write_compiled_derived_matrix_reorder(
+    *,
+    tensor_name: str,
+    info: Json,
+    destination: Path,
+    layout: str,
+) -> tuple[int, str]:
+    if layout != ROW_MAJOR_LAYOUT:
+        raise ModelCompileError("derived matrix reorders require row-major storage")
+    derivation = info.get("derived")
+    if not isinstance(derivation, dict) or derivation.get("kind") not in {
+        "matrix_to_input_block_major",
+        "transpose_2d",
+    }:
+        raise ModelCompileError(f"tensor {tensor_name!r} is not a matrix reorder")
+    source_shape = [int(value) for value in derivation.get("source_shape", [])]
+    if len(source_shape) != 2:
+        raise ModelCompileError(
+            f"derived matrix reorder {tensor_name!r} has invalid source shape"
+        )
+    dtype = str(info["dtype"])
+    numpy_dtype = {
+        "F8_E4M3": np.dtype("u1"),
+        "BF16": np.dtype("<u2"),
+    }.get(dtype)
+    if numpy_dtype is None:
+        raise ModelCompileError(
+            f"derived matrix reorder {tensor_name!r} has unsupported dtype {dtype!r}"
+        )
+    source = Path(derivation["source_file"])
+    if not source.is_file():
+        raise ModelCompileError(f"derived matrix source does not exist: {source}")
+    source_header_bytes = int(derivation["source_header_bytes"])
+    data_offsets = [int(value) for value in derivation["data_offsets"]]
+    byte_count = int(info["byte_count"])
+    if (
+        data_offsets[1] - data_offsets[0] != byte_count
+        or math.prod(source_shape) * numpy_dtype.itemsize != byte_count
+    ):
+        raise ModelCompileError(
+            f"derived matrix reorder {tensor_name!r} has inconsistent source storage"
+        )
+    output_shape = [int(value) for value in info["shape"]]
+    header_payload = compiled_safetensors_header(
+        tensor_name,
+        dtype=dtype,
+        shape=output_shape,
+        byte_count=byte_count,
+        layout=layout,
+    )
+    data_start = 8 + len(header_payload)
+    with destination.open("wb") as destination_handle:
+        destination_handle.write(struct.pack("<Q", len(header_payload)))
+        destination_handle.write(header_payload)
+        destination_handle.truncate(data_start + byte_count)
+
+    source_matrix = np.memmap(
+        source,
+        dtype=numpy_dtype,
+        mode="r",
+        offset=8 + source_header_bytes + data_offsets[0],
+        shape=tuple(source_shape),
+        order="C",
+    )
+    destination_matrix = np.memmap(
+        destination,
+        dtype=numpy_dtype,
+        mode="r+",
+        offset=data_start,
+        shape=tuple(output_shape),
+        order="C",
+    )
+    if derivation["kind"] == "transpose_2d":
+        if output_shape != [source_shape[1], source_shape[0]]:
+            raise ModelCompileError(
+                f"derived transpose {tensor_name!r} has incompatible output shape"
+            )
+        row_tile = max(1, (8 * 1024 * 1024) // (source_shape[1] * numpy_dtype.itemsize))
+        for row_start in range(0, source_shape[0], row_tile):
+            row_end = min(source_shape[0], row_start + row_tile)
+            destination_matrix[:, row_start:row_end] = source_matrix[
+                row_start:row_end, :
+            ].T
+    else:
+        block_columns = int(derivation["block_columns"])
+        expected_shape = [
+            source_shape[1] // block_columns,
+            source_shape[0],
+            block_columns,
+        ]
+        if source_shape[1] % block_columns or output_shape != expected_shape:
+            raise ModelCompileError(
+                f"derived input-block-major tensor {tensor_name!r} has incompatible geometry"
+            )
+        source_blocks = source_matrix.reshape(
+            source_shape[0], source_shape[1] // block_columns, block_columns
+        )
+        row_tile = max(1, (8 * 1024 * 1024) // (block_columns * numpy_dtype.itemsize))
+        for block in range(output_shape[0]):
+            for row_start in range(0, source_shape[0], row_tile):
+                row_end = min(source_shape[0], row_start + row_tile)
+                destination_matrix[block, row_start:row_end, :] = source_blocks[
+                    row_start:row_end, block, :
+                ]
+    destination_matrix.flush()
+    del destination_matrix
+    del source_matrix
+    digest = sha256()
+    with destination.open("rb") as destination_handle:
+        destination_handle.seek(data_start)
+        remaining = byte_count
+        while remaining:
+            payload = destination_handle.read(min(remaining, 8 * 1024 * 1024))
+            if not payload:
+                raise ModelCompileError(
+                    f"derived matrix reorder {tensor_name!r} ended unexpectedly"
+                )
+            digest.update(payload)
+            remaining -= len(payload)
+    return len(header_payload), digest.hexdigest()
+
+
 def write_compiled_derived_fp8_e4m3_output_projection(
     *,
     weight_tensor_name: str,

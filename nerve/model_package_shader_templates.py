@@ -2761,6 +2761,66 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             },
         )
 
+    input_column_bf16 = re.fullmatch(
+        r"linear_residual_input_columns_bf16_b(\d+)_(\d+)x(\d+)\.comp",
+        shader_file,
+    )
+    if input_column_bf16 is not None:
+        block_columns, input_size, output_size = map(
+            int, input_column_bf16.groups()
+        )
+        if (
+            block_columns <= 0
+            or block_columns % 2
+            or input_size <= 0
+            or input_size % block_columns
+            or output_size <= 0
+            or output_size % 2
+        ):
+            raise ModelCompileError(
+                f"invalid BF16 input-column shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            "linear_residual_input_columns_bf16.comp.template",
+            {
+                "BLOCK_COLUMNS": str(block_columns),
+                "OUTPUT_SIZE": str(output_size),
+            },
+        )
+
+    input_column_fp8 = re.fullmatch(
+        r"linear_residual_input_columns_fp8_e4m3_b(\d+)x(\d+)_(\d+)x(\d+)\.comp",
+        shader_file,
+    )
+    if input_column_fp8 is not None:
+        block_rows, block_columns, input_size, output_size = map(
+            int, input_column_fp8.groups()
+        )
+        if (
+            block_rows <= 0
+            or block_columns != 128
+            or input_size <= 0
+            or input_size % block_columns
+            or output_size <= 0
+            or output_size % block_rows
+            or (output_size // block_rows) % 2
+        ):
+            raise ModelCompileError(
+                f"invalid FP8 input-column shader shape {shader_file!r}"
+            )
+        return render_shader_template(
+            source_dir,
+            "linear_residual_input_columns_fp8_e4m3.comp.template",
+            {
+                "BLOCK_ROWS": str(block_rows),
+                "BLOCK_COLUMNS": str(block_columns),
+                "INPUT_SIZE": str(input_size),
+                "OUTPUT_SIZE": str(output_size),
+                "OUTPUT_TILE_ROWS": str(FP8_LINEAR_TILE_ROWS[-1]),
+            },
+        )
+
     native_fp8_linear = re.fullmatch(
         r"(linear|linear_bias|linear_residual)_fp8_e4m3_"
         r"(?:(se8m0)_)?b(\d+)x(\d+)_(\d+)x(\d+)\.comp",

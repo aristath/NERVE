@@ -32,6 +32,12 @@ def required_shader_files(
             for implementation in kernel["batch_implementations"]
             for stage in implementation["stages"]
         ),
+        *(
+            implementation["shader_path"].removeprefix("shaders/")
+            for component in component_executions
+            for kernel in component["kernels"]
+            for implementation in kernel.get("physical_implementations", [])
+        ),
     }
 
 
@@ -157,5 +163,4 @@ def spirv_vulkan_requirements(
         }
     )
     return features, subgroup_operations
-
 
