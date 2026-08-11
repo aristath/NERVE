@@ -1,4 +1,4 @@
-const VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT: u32 = 12;
+const VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT: u32 = 16;
 const VULKAN_GPU_RESIDENCY_GATE_GROUP_RECORD_WORD_COUNT: usize = 2;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT: usize = 8;
@@ -63,6 +63,7 @@ pub struct VulkanGpuResidencyGate {
     resolved_addresses: Arc<VulkanResidentBuffer>,
     missing_queue: VulkanGpuResidencyMissQueue,
     continuation_predicate: Arc<VulkanResidentBuffer>,
+    transaction_predicate: Arc<VulkanResidentBuffer>,
     dispatch: VulkanResidentKernelDispatch,
 }
 
@@ -365,6 +366,7 @@ impl VulkanGpuResidencyGate {
         address_table_slot_count: usize,
         missing_queue: VulkanGpuResidencyMissQueue,
         continuation_predicate: Arc<VulkanResidentBuffer>,
+        transaction_predicate: Option<Arc<VulkanResidentBuffer>>,
         config: VulkanGpuResidencyGateConfig,
     ) -> Result<Self, VulkanError> {
         config.validate(
@@ -379,9 +381,19 @@ impl VulkanGpuResidencyGate {
                 size_of::<u32>()
             )));
         }
+        let transaction_predicate =
+            transaction_predicate.unwrap_or_else(|| Arc::clone(&continuation_predicate));
+        if transaction_predicate.byte_capacity() < size_of::<u32>() {
+            return Err(VulkanError(format!(
+                "GPU residency transaction predicate has {} bytes; expected at least {}",
+                transaction_predicate.byte_capacity(),
+                size_of::<u32>()
+            )));
+        }
         if !device.owns_resident_buffer(&address_table_buffer)
             || !device.owns_resident_buffer(missing_queue.buffer())
             || !device.owns_resident_buffer(&continuation_predicate)
+            || !device.owns_resident_buffer(&transaction_predicate)
         {
             return Err(VulkanError(
                 "GPU residency gate buffers belong to another logical device".to_string(),
@@ -537,6 +549,13 @@ impl VulkanGpuResidencyGate {
                 byte_len: configuration.byte_capacity(),
                 access: VulkanResidentKernelBufferAccess::Read,
             },
+            VulkanResidentKernelBufferBinding {
+                binding: 8,
+                buffer: &transaction_predicate,
+                byte_offset: 0,
+                byte_len: size_of::<u32>(),
+                access: VulkanResidentKernelBufferAccess::ReadWrite,
+            },
         ];
         let dispatch = device.create_resident_kernel_dispatch_labeled(
             spirv_words,
@@ -557,6 +576,7 @@ impl VulkanGpuResidencyGate {
             resolved_addresses,
             missing_queue,
             continuation_predicate,
+            transaction_predicate,
             dispatch,
         })
     }
@@ -653,26 +673,16 @@ impl VulkanGpuResidencyGate {
         selection_count: usize,
         checkpoint_tag: u32,
         restore_downstream: bool,
+        restore_transaction: bool,
     ) -> Result<[u8; VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT as usize], VulkanError>
     {
-        if selection_count == 0
-            || selection_count > self.maximum_selection_count
-        {
-            return Err(VulkanError(format!(
-                "GPU residency gate selection count {selection_count} is outside 1..={}",
-                self.maximum_selection_count
-            )));
-        }
-        let mut bytes =
-            [0; VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT as usize];
-        bytes[..4].copy_from_slice(
-            &u32::try_from(selection_count)
-                .map_err(|_| VulkanError("GPU residency selection count exceeds u32".to_string()))?
-                .to_le_bytes(),
-        );
-        bytes[4..8].copy_from_slice(&checkpoint_tag.to_le_bytes());
-        bytes[8..12].copy_from_slice(&u32::from(restore_downstream).to_le_bytes());
-        Ok(bytes)
+        vulkan_gpu_residency_gate_push_constants(
+            self.maximum_selection_count,
+            selection_count,
+            checkpoint_tag,
+            restore_downstream,
+            restore_transaction,
+        )
     }
 
     pub fn resolved_addresses_buffer(&self) -> &VulkanResidentBuffer {
@@ -681,6 +691,10 @@ impl VulkanGpuResidencyGate {
 
     pub fn continuation_predicate(&self) -> &VulkanResidentBuffer {
         &self.continuation_predicate
+    }
+
+    pub fn transaction_predicate(&self) -> &VulkanResidentBuffer {
+        &self.transaction_predicate
     }
 
     pub fn notification_epoch(&self) -> Result<u32, VulkanError> {
@@ -694,6 +708,30 @@ impl VulkanGpuResidencyGate {
     pub fn acknowledge_missing_through(&self, published_count: u32) -> Result<(), VulkanError> {
         self.missing_queue.acknowledge_through(published_count)
     }
+}
+
+fn vulkan_gpu_residency_gate_push_constants(
+    maximum_selection_count: usize,
+    selection_count: usize,
+    checkpoint_tag: u32,
+    restore_downstream: bool,
+    restore_transaction: bool,
+) -> Result<[u8; VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT as usize], VulkanError> {
+    if selection_count == 0 || selection_count > maximum_selection_count {
+        return Err(VulkanError(format!(
+            "GPU residency gate selection count {selection_count} is outside 1..={maximum_selection_count}"
+        )));
+    }
+    let mut bytes = [0; VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT as usize];
+    bytes[..4].copy_from_slice(
+        &u32::try_from(selection_count)
+            .map_err(|_| VulkanError("GPU residency selection count exceeds u32".to_string()))?
+            .to_le_bytes(),
+    );
+    bytes[4..8].copy_from_slice(&checkpoint_tag.to_le_bytes());
+    bytes[8..12].copy_from_slice(&u32::from(restore_downstream).to_le_bytes());
+    bytes[12..16].copy_from_slice(&u32::from(restore_transaction).to_le_bytes());
+    Ok(bytes)
 }
 
 impl VulkanGpuResidencyMissQueue {

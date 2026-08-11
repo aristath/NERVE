@@ -34,10 +34,15 @@ layout(set = 0, binding = 7) readonly buffer GateConfiguration {
     uint words[];
 } configuration;
 
+layout(set = 0, binding = 8) buffer TransactionPredicate {
+    uint enabled;
+} transaction;
+
 layout(push_constant) uniform GateControl {
     uint selection_count;
     uint checkpoint_tag;
     uint restore_downstream;
+    uint restore_transaction;
 } control;
 
 const uint ADDRESS_RECORD_WORDS = 8u;
@@ -255,8 +260,12 @@ void main() {
     resolved_addresses.words[7] = 0u;
     if (!all_resident) {
         continuation.enabled = 0u;
+        transaction.enabled = 0u;
     } else if (control.restore_downstream != 0u) {
         continuation.enabled = 1u;
+    }
+    if (all_resident && control.restore_transaction != 0u) {
+        transaction.enabled = 1u;
     }
 
     memoryBarrierBuffer();

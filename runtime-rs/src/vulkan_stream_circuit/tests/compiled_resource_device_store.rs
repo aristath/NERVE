@@ -2204,6 +2204,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
         buffers.address_table_slot_count(),
         VulkanGpuResidencyMissQueue::new(&device, 1).unwrap(),
         continuation,
+        None,
         VulkanGpuResidencyGateConfig {
             maximum_selection_count: 1,
             selection_count_per_lane: 1,
@@ -2218,7 +2219,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
         },
     )
     .unwrap();
-    let first_control = gate.push_constants(1, 17, true).unwrap();
+    let first_control = gate.push_constants(1, 17, true, true).unwrap();
     device
         .run_resident_kernel_dispatch(gate.dispatch(), &first_control)
         .unwrap();
@@ -2243,7 +2244,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
         .unwrap();
     gate.acknowledge_missing_through(missing.published_count)
         .unwrap();
-    let second_control = gate.push_constants(1, 18, true).unwrap();
+    let second_control = gate.push_constants(1, 18, true, true).unwrap();
     device
         .run_resident_kernel_dispatch(gate.dispatch(), &second_control)
         .unwrap();

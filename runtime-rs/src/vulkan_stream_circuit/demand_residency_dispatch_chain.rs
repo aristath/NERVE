@@ -803,6 +803,7 @@ impl VulkanDemandResidencyDispatchChain {
                 address_table_slot_count,
                 missing_queue.clone(),
                 Arc::clone(&continuation_predicate),
+                None,
                 VulkanGpuResidencyGateConfig {
                     maximum_selection_count: spec.selection_count,
                     selection_count_per_lane: spec.selection_count,
@@ -1367,6 +1368,7 @@ impl VulkanDemandResidencyDispatchChain {
                 gate.gate.push_constants(
                     gate.selection_count,
                     gate.checkpoint_tag,
+                    gate.command_index == direct_gate_command_index,
                     gate.command_index == direct_gate_command_index,
                 )
             })
