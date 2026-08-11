@@ -52,21 +52,36 @@ fn create_distributed_resident_dispatch(
     parameter_buffers: &VulkanDistributedParameterBuffers,
     activation_buffers: &VulkanDistributedActivationBuffers,
     artifact: &VulkanLoadedPhysicalKernelArtifact,
+    private_input: Option<&Arc<VulkanResidentBuffer>>,
+    private_output: Option<&Arc<VulkanResidentBuffer>>,
 ) -> Result<VulkanResidentKernelDispatch, VulkanDistributedDispatchRunnerError> {
-    let input = activation_buffers
-        .activation_buffer(
-            &planned_dispatch.owner_device_id,
-            &planned_dispatch.input_activation,
-            &planned_shard.device_id,
-        )
-        .ok_or_else(|| {
-            VulkanDistributedDispatchRunnerError(format!(
-                "distributed dispatch {}.{} has no input activation on {:?}",
-                planned_dispatch.component_id, planned_dispatch.node_id, planned_shard.device_id
-            ))
-        })?;
+    let (input, input_byte_offset) = if let Some(input) = private_input {
+        (input, 0)
+    } else {
+        let input = activation_buffers
+            .activation_buffer(
+                &planned_dispatch.owner_device_id,
+                &planned_dispatch.input_activation,
+                &planned_shard.device_id,
+            )
+            .ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "distributed dispatch {}.{} has no input activation on {:?}",
+                    planned_dispatch.component_id,
+                    planned_dispatch.node_id,
+                    planned_shard.device_id
+                ))
+            })?;
+        (input, planned_shard.input_range.byte_offset)
+    };
     let (output, output_byte_offset, output_byte_count) =
         if let Some(reduction) = &planned_dispatch.reduction {
+            if private_output.is_some() {
+                return Err(VulkanDistributedDispatchRunnerError(format!(
+                    "distributed reduction {}.{} cannot publish a private intermediate",
+                    planned_dispatch.component_id, planned_dispatch.node_id
+                )));
+            }
             let output = activation_buffers
                 .reduction_partial_buffer(
                     &planned_dispatch.owner_device_id,
@@ -97,6 +112,8 @@ fn create_distributed_resident_dispatch(
                     )
                 })?;
             (output, output_byte_offset, reduction.partial_byte_capacity)
+        } else if let Some(output) = private_output {
+            (output, 0, planned_shard.output_byte_count)
         } else {
             let output = activation_buffers
                 .activation_buffer(
@@ -131,7 +148,7 @@ fn create_distributed_resident_dispatch(
             input,
             planned_shard.input_range.byte_count,
         )
-        .with_byte_offset(planned_shard.input_range.byte_offset)
+        .with_byte_offset(input_byte_offset)
         .with_access(VulkanResidentKernelBufferAccess::Read),
     );
     if planned_shard.auxiliary_input_ranges.len()
@@ -287,7 +304,9 @@ impl VulkanDistributedDispatchRunners {
                 })?;
                 let mut resident_dispatches = Vec::with_capacity(planned_island.dispatches.len());
                 let mut planned_shards = Vec::with_capacity(planned_island.dispatches.len());
-                for planned_dispatch in &planned_island.dispatches {
+                for (dispatch_offset, planned_dispatch) in
+                    planned_island.dispatches.iter().enumerate()
+                {
                     let planned_shard =
                         planned_dispatch.shards.get(shard_index).ok_or_else(|| {
                             VulkanDistributedDispatchRunnerError(format!(
@@ -317,6 +336,63 @@ impl VulkanDistributedDispatchRunners {
                                 planned_dispatch.physical_artifact_id
                             ))
                         })?;
+                    let private_input = if dispatch_offset > 0
+                        && dense_local_shard_handoff(
+                            &planned_island.dispatches[dispatch_offset - 1],
+                            planned_dispatch,
+                        )
+                    {
+                        Some(
+                            activation_buffers
+                                .private_intermediate_buffer(
+                                    planned_island.dispatches[dispatch_offset - 1]
+                                        .dispatch_index,
+                                    planned_dispatch.dispatch_index,
+                                    &planned_shard.device_id,
+                                )
+                                .ok_or_else(|| {
+                                    VulkanDistributedDispatchRunnerError(format!(
+                                        "physical execution island {}..{} has no private input for {}.{} on {:?}",
+                                        leader.dispatch_index,
+                                        tail.dispatch_index,
+                                        planned_dispatch.component_id,
+                                        planned_dispatch.node_id,
+                                        planned_shard.device_id,
+                                    ))
+                                })?,
+                        )
+                    } else {
+                        None
+                    };
+                    let private_output = if dispatch_offset + 1
+                        < planned_island.dispatches.len()
+                        && dense_local_shard_handoff(
+                            planned_dispatch,
+                            &planned_island.dispatches[dispatch_offset + 1],
+                        )
+                    {
+                        Some(
+                            activation_buffers
+                                .private_intermediate_buffer(
+                                    planned_dispatch.dispatch_index,
+                                    planned_island.dispatches[dispatch_offset + 1]
+                                        .dispatch_index,
+                                    &planned_shard.device_id,
+                                )
+                                .ok_or_else(|| {
+                                    VulkanDistributedDispatchRunnerError(format!(
+                                        "physical execution island {}..{} has no private output for {}.{} on {:?}",
+                                        leader.dispatch_index,
+                                        tail.dispatch_index,
+                                        planned_dispatch.component_id,
+                                        planned_dispatch.node_id,
+                                        planned_shard.device_id,
+                                    ))
+                                })?,
+                        )
+                    } else {
+                        None
+                    };
                     resident_dispatches.push(create_distributed_resident_dispatch(
                         device,
                         planned_dispatch,
@@ -325,6 +401,8 @@ impl VulkanDistributedDispatchRunners {
                         parameter_buffers,
                         activation_buffers,
                         artifact,
+                        private_input,
+                        private_output,
                     )?);
                     planned_shards.push(planned_shard.clone());
                 }

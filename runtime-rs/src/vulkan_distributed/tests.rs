@@ -1091,17 +1091,10 @@ mod tests {
         .unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].dispatch_indices(), vec![7, 8]);
-        assert_eq!(
-            groups[0]
-                .transient_memory
-                .iter()
-                .filter(|requirement| {
-                    requirement.kind
-                        == VulkanPhysicalExecutionTransientMemoryKind::PrivateShardIntermediate
-                })
-                .count(),
-            producer.shards.len(),
-        );
+        assert!(groups[0].transient_memory.iter().all(|requirement| {
+            requirement.kind
+                == VulkanPhysicalExecutionTransientMemoryKind::SharedActivationAllocation
+        }));
 
         let mut non_adjacent = consumer.clone();
         non_adjacent.dispatch_index = 9;
@@ -1156,6 +1149,7 @@ mod tests {
     fn contract_declared_output_rows_flow_into_local_input_column_shards() {
         let mut producer = fixture_plan("row_major").dispatches.remove(0);
         producer.dispatch_index = 7;
+        producer.output_activation.signal_id = "activated".to_string();
         producer.local_intermediates = vec![
             nerve_execution_contracts::LocalIntermediateContract {
                 signal: producer.output_activation.signal_id.clone(),
@@ -1171,6 +1165,8 @@ mod tests {
         consumer.input_distribution = InputDistribution::Sharded;
         consumer.input_activation = producer.output_activation.clone();
         consumer.input_activation.binding = 0;
+        consumer.output_activation.signal_id = "hidden".to_string();
+        consumer.output_activation.slot += 1;
         for (producer_shard, consumer_shard) in
             producer.shards.iter().zip(&mut consumer.shards)
         {
@@ -1187,6 +1183,33 @@ mod tests {
         .unwrap();
         assert_eq!(islands.len(), 1);
         assert_eq!(islands[0].dispatch_indices(), [7, 8]);
+        let private_requirements = islands[0]
+            .transient_memory
+            .iter()
+            .filter(|requirement| {
+                requirement.kind
+                    == VulkanPhysicalExecutionTransientMemoryKind::PrivateShardIntermediate
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(private_requirements.len(), producer.shards.len());
+        assert_eq!(
+            private_requirements
+                .iter()
+                .map(|requirement| requirement.per_lane_byte_capacity)
+                .sum::<usize>(),
+            producer
+                .shards
+                .iter()
+                .map(|shard| shard.output_byte_count)
+                .sum::<usize>()
+        );
+        assert!(islands[0].transient_memory.iter().all(|requirement| {
+            requirement.kind
+                != VulkanPhysicalExecutionTransientMemoryKind::SharedActivationAllocation
+                || !requirement
+                    .resource_id
+                    .contains(&format!("slot_{}", producer.output_activation.slot))
+        }));
         assert_eq!(
             islands[0]
                 .phase_schedules[0]
@@ -1201,6 +1224,44 @@ mod tests {
                 VulkanPhysicalExecutionScheduleKind::CollectOutputs,
             ]
         );
+        let execution_plan = VulkanDistributedExecutionPlan {
+            device_ids: producer
+                .shards
+                .iter()
+                .map(|shard| shard.device_id.clone())
+                .collect(),
+            storage_buffer_offset_alignment: 4,
+            dispatches: vec![producer.clone(), consumer.clone()],
+            execution_islands: islands.clone(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: producer.input_byte_capacity,
+            shared_output_byte_capacity: consumer.output_byte_capacity,
+            distributed_parameter_byte_count: producer
+                .distributed_parameter_byte_count
+                + consumer.distributed_parameter_byte_count,
+        };
+        let activation_plan =
+            VulkanDistributedActivationBufferPlan::from_execution_plan(&execution_plan)
+                .unwrap();
+        assert_eq!(activation_plan.private_intermediate_allocations.len(), 1);
+        let private = &activation_plan.private_intermediate_allocations[0];
+        assert_eq!(private.producer_dispatch_index, 7);
+        assert_eq!(private.consumer_dispatch_index, 8);
+        assert_eq!(private.signal_id, producer.output_activation.signal_id);
+        assert_eq!(private.devices.len(), producer.shards.len());
+        assert_eq!(
+            activation_plan.total_private_byte_capacity,
+            producer
+                .shards
+                .iter()
+                .map(|shard| shard.output_byte_count)
+                .sum::<usize>()
+        );
+        assert!(activation_plan.allocations.iter().all(|allocation| {
+            !allocation
+                .signal_ids
+                .contains(&producer.output_activation.signal_id)
+        }), "shared allocations retained private signal: {:?}", activation_plan.allocations);
         islands[0].dispatches[1].reduction = Some(VulkanDistributedReductionPlan {
             operation: ReductionOperation::SumF32,
             element_count: 12,

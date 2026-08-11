@@ -26,6 +26,12 @@ def local_output_shard_intermediates_for_node(
     ]
     if len(outputs) != 1 or len(producer_indices) != 1:
         return []
+    if sum(
+        candidate.get("inputs", []).count(outputs[0])
+        for candidate in nodes
+        if isinstance(candidate, dict)
+    ) != 1:
+        return []
     producer_index = producer_indices[0]
     if producer_index + 1 >= len(nodes):
         return []

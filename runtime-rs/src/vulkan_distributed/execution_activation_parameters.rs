@@ -829,11 +829,21 @@ fn resolved_physical_execution_island(
         usize,
     >::new();
     let mut private_intermediate_allocations =
-        BTreeMap::<(String, String, usize), usize>::new();
+        BTreeMap::<(String, String, usize, usize, usize), usize>::new();
     let mut owner_residency = BTreeMap::<
         (String, VulkanPhysicalExecutionResidencyKind, String),
         usize,
     >::new();
+    let dense_private_producers = dispatches
+        .windows(2)
+        .filter(|pair| dense_local_shard_handoff(&pair[0], &pair[1]))
+        .map(|pair| pair[0].dispatch_index)
+        .collect::<BTreeSet<_>>();
+    let dense_private_consumers = dispatches
+        .windows(2)
+        .filter(|pair| dense_local_shard_handoff(&pair[0], &pair[1]))
+        .map(|pair| pair[1].dispatch_index)
+        .collect::<BTreeSet<_>>();
 
     for (dispatch_offset, dispatch) in dispatches.iter().enumerate() {
         for node_id in &dispatch.contract_member_node_ids {
@@ -865,10 +875,14 @@ fn resolved_physical_execution_island(
                 )));
             }
         }
-        for activation in std::iter::once(&dispatch.input_activation)
+        let activations = std::iter::once(&dispatch.input_activation)
+            .filter(|_| !dense_private_consumers.contains(&dispatch.dispatch_index))
             .chain(&dispatch.auxiliary_input_activations)
-            .chain(std::iter::once(&dispatch.output_activation))
-        {
+            .chain(
+                std::iter::once(&dispatch.output_activation)
+                    .filter(|_| !dense_private_producers.contains(&dispatch.dispatch_index)),
+            );
+        for activation in activations {
             let allocation_device_id = distributed_activation_owner_device_id(
                 &dispatch.owner_device_id,
                 activation,
@@ -1024,28 +1038,33 @@ fn resolved_physical_execution_island(
     for pair in dispatches.windows(2) {
         let producer = &pair[0];
         let consumer = &pair[1];
-        if producer.output_activation.component_id == consumer.input_activation.component_id
-            && producer.output_activation.slot == consumer.input_activation.slot
-            && producer.output_activation.signal_id == consumer.input_activation.signal_id
-        {
-            for shard in &producer.shards {
+        if dense_local_shard_handoff(producer, consumer) {
+            for (producer_shard, consumer_shard) in
+                producer.shards.iter().zip(&consumer.shards)
+            {
                 let key = (
-                    shard.device_id.clone(),
+                    producer_shard.device_id.clone(),
                     producer.output_activation.component_id.clone(),
                     producer.output_activation.slot,
+                    producer.dispatch_index,
+                    consumer.dispatch_index,
                 );
                 if let Some(existing) = private_intermediate_allocations.insert(
                     key,
-                    producer.output_activation.signal_byte_capacity,
-                ) && existing != producer.output_activation.signal_byte_capacity
+                    producer_shard.output_byte_count,
+                ) && existing != producer_shard.output_byte_count
                 {
                     return Err(VulkanDistributedPlanError(format!(
                         "physical execution private intermediate {}.slot_{} has conflicting capacities {existing} and {}",
                         producer.output_activation.component_id,
                         producer.output_activation.slot,
-                        producer.output_activation.signal_byte_capacity,
+                        producer_shard.output_byte_count,
                     )));
                 }
+                debug_assert_eq!(
+                    producer_shard.output_byte_count,
+                    consumer_shard.input_range.byte_count
+                );
             }
         }
     }
@@ -1064,11 +1083,22 @@ fn resolved_physical_execution_island(
         )
         .collect::<Vec<_>>();
     transient_memory.extend(private_intermediate_allocations.into_iter().map(
-        |((allocation_device_id, component_id, slot), per_lane_byte_capacity)| {
+        |(
+            (
+                allocation_device_id,
+                component_id,
+                slot,
+                producer_dispatch_index,
+                consumer_dispatch_index,
+            ),
+            per_lane_byte_capacity,
+        )| {
             VulkanPhysicalExecutionTransientMemoryRequirement {
                 allocation_device_id,
                 kind: VulkanPhysicalExecutionTransientMemoryKind::PrivateShardIntermediate,
-                resource_id: format!("private_activation:{component_id}:slot_{slot}"),
+                resource_id: format!(
+                    "private_activation:{component_id}:slot_{slot}:{producer_dispatch_index}->{consumer_dispatch_index}"
+                ),
                 fixed_byte_capacity: 0,
                 per_lane_byte_capacity,
             }
@@ -1168,13 +1198,32 @@ fn distributed_dispatches_can_share_sequence(
                 producer.base_workgroup_z == consumer.base_workgroup_z
             });
     }
-    producer.distribution == VulkanDistributedDispatchDistribution::OutputRows
+    dense_local_shard_handoff(producer, consumer)
+}
+
+fn dense_local_shard_handoff(
+    producer: &VulkanDistributedDispatchPlan,
+    consumer: &VulkanDistributedDispatchPlan,
+) -> bool {
+    producer.owner_device_id == consumer.owner_device_id
+        && producer.component_id == consumer.component_id
+        && producer.dispatch_index.checked_add(1) == Some(consumer.dispatch_index)
+        && same_distributed_activation(
+            &producer.output_activation,
+            &consumer.input_activation,
+        )
+        && !producer.shards.is_empty()
+        && producer.shards.len() == consumer.shards.len()
+        && producer.distribution == VulkanDistributedDispatchDistribution::OutputRows
         && producer.output_collection == OutputCollection::Concatenated
         && consumer.distribution == VulkanDistributedDispatchDistribution::InputColumns
         && consumer.input_distribution == InputDistribution::Sharded
         && producer.shards.iter().zip(&consumer.shards).all(
             |(producer_shard, consumer_shard)| {
-                producer_shard.output_byte_offset
+                producer_shard.device_id == consumer_shard.device_id
+                    && producer_shard.row_start == consumer_shard.row_start
+                    && producer_shard.row_count == consumer_shard.row_count
+                    && producer_shard.output_byte_offset
                     == consumer_shard.input_range.byte_offset
                     && producer_shard.output_byte_count
                         == consumer_shard.input_range.byte_count
@@ -1279,11 +1328,29 @@ pub enum VulkanDistributedActivationStorage {
 pub struct VulkanDistributedActivationBufferPlan {
     pub allocations: Vec<VulkanDistributedActivationBufferAllocation>,
     pub reduction_allocations: Vec<VulkanDistributedReductionBufferAllocation>,
+    pub private_intermediate_allocations:
+        Vec<VulkanDistributedPrivateIntermediateBufferAllocation>,
     pub allocation_count: usize,
     pub import_count: usize,
     pub reference_count: usize,
     pub total_shared_byte_capacity: usize,
+    pub total_private_byte_capacity: usize,
     pub route: VulkanSharedResidentBufferRoute,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedPrivateIntermediateDeviceAllocation {
+    pub device_id: String,
+    pub byte_capacity: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedPrivateIntermediateBufferAllocation {
+    pub producer_dispatch_index: usize,
+    pub consumer_dispatch_index: usize,
+    pub component_id: String,
+    pub signal_id: String,
+    pub devices: Vec<VulkanDistributedPrivateIntermediateDeviceAllocation>,
 }
 
 impl VulkanDistributedActivationBufferPlan {
@@ -1301,6 +1368,65 @@ impl VulkanDistributedActivationBufferPlan {
         >::new();
         let mut reduction_allocations = Vec::new();
         let mut reduction_keys = BTreeSet::new();
+        let mut private_intermediate_allocations = Vec::new();
+        let mut private_producer_dispatches = BTreeSet::new();
+        let mut private_consumer_dispatches = BTreeSet::new();
+        for island in &execution_plan.execution_islands {
+            for pair in island.dispatches.windows(2) {
+                let producer = &pair[0];
+                let consumer = &pair[1];
+                if !dense_local_shard_handoff(producer, consumer) {
+                    continue;
+                }
+                if !private_producer_dispatches.insert(producer.dispatch_index)
+                    || !private_consumer_dispatches.insert(consumer.dispatch_index)
+                {
+                    return Err(VulkanDistributedPlanError(
+                        "distributed private intermediate dispatch is not one-to-one"
+                            .to_string(),
+                    ));
+                }
+                let devices = producer
+                    .shards
+                    .iter()
+                    .zip(&consumer.shards)
+                    .map(|(producer_shard, consumer_shard)| {
+                        if producer_shard.device_id != consumer_shard.device_id
+                            || producer_shard.output_byte_count
+                                != consumer_shard.input_range.byte_count
+                        {
+                            return Err(VulkanDistributedPlanError(format!(
+                                "private intermediate {} -> {} has incompatible shard storage on {:?}",
+                                producer.node_id,
+                                consumer.node_id,
+                                producer_shard.device_id,
+                            )));
+                        }
+                        Ok(VulkanDistributedPrivateIntermediateDeviceAllocation {
+                            device_id: producer_shard.device_id.clone(),
+                            byte_capacity: producer_shard.output_byte_count,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if devices.iter().map(|device| device.device_id.as_str()).collect::<BTreeSet<_>>().len()
+                    != devices.len()
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "private intermediate {} -> {} repeats a participant device",
+                        producer.node_id, consumer.node_id,
+                    )));
+                }
+                private_intermediate_allocations.push(
+                    VulkanDistributedPrivateIntermediateBufferAllocation {
+                        producer_dispatch_index: producer.dispatch_index,
+                        consumer_dispatch_index: consumer.dispatch_index,
+                        component_id: producer.component_id.clone(),
+                        signal_id: producer.output_activation.signal_id.clone(),
+                        devices,
+                    },
+                );
+            }
+        }
 
         for dispatch in &execution_plan.dispatches {
             let participant_device_ids = dispatch
@@ -1330,13 +1456,15 @@ impl VulkanDistributedActivationBufferPlan {
                 )));
             }
 
-            accumulate_activation_allocation(
-                &mut allocations,
-                &dispatch.owner_device_id,
-                &dispatch.input_activation,
-                &participant_device_ids,
-                VulkanDistributedActivationAccess::Input,
-            )?;
+            if !private_consumer_dispatches.contains(&dispatch.dispatch_index) {
+                accumulate_activation_allocation(
+                    &mut allocations,
+                    &dispatch.owner_device_id,
+                    &dispatch.input_activation,
+                    &participant_device_ids,
+                    VulkanDistributedActivationAccess::Input,
+                )?;
+            }
             for activation in &dispatch.auxiliary_input_activations {
                 accumulate_activation_allocation(
                     &mut allocations,
@@ -1351,13 +1479,15 @@ impl VulkanDistributedActivationBufferPlan {
             } else {
                 participant_device_ids.clone()
             };
-            accumulate_activation_allocation(
-                &mut allocations,
-                &dispatch.owner_device_id,
-                &dispatch.output_activation,
-                &output_participant_device_ids,
-                VulkanDistributedActivationAccess::Output,
-            )?;
+            if !private_producer_dispatches.contains(&dispatch.dispatch_index) {
+                accumulate_activation_allocation(
+                    &mut allocations,
+                    &dispatch.owner_device_id,
+                    &dispatch.output_activation,
+                    &output_participant_device_ids,
+                    VulkanDistributedActivationAccess::Output,
+                )?;
+            }
             if let Some(reduction) = &dispatch.reduction {
                 if !reduction_keys.insert((
                     dispatch.owner_device_id.as_str(),
@@ -1453,6 +1583,17 @@ impl VulkanDistributedActivationBufferPlan {
         )?;
         let reference_count = activation_reference_count
             .checked_add(reduction_reference_count)
+            .and_then(|count| {
+                private_intermediate_allocations
+                    .iter()
+                    .try_fold(count, |total, allocation| {
+                        allocation
+                            .devices
+                            .len()
+                            .checked_mul(2)
+                            .and_then(|references| total.checked_add(references))
+                    })
+            })
             .ok_or_else(|| {
                 VulkanDistributedPlanError(
                     "distributed buffer reference count overflowed".to_string(),
@@ -1483,11 +1624,29 @@ impl VulkanDistributedActivationBufferPlan {
                     "distributed buffer byte capacity overflowed".to_string(),
                 )
             })?;
+        let total_private_byte_capacity = private_intermediate_allocations
+            .iter()
+            .flat_map(|allocation| &allocation.devices)
+            .try_fold(0usize, |total, device| {
+                total.checked_add(device.byte_capacity).ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "distributed private intermediate byte capacity overflowed"
+                            .to_string(),
+                    )
+                })
+            })?;
         let allocations = allocations.into_values().collect::<Vec<_>>();
 
         let allocation_count = allocations
             .len()
             .checked_add(reduction_allocations.len())
+            .and_then(|count| {
+                private_intermediate_allocations
+                    .iter()
+                    .try_fold(count, |total, allocation| {
+                        total.checked_add(allocation.devices.len())
+                    })
+            })
             .ok_or_else(|| {
                 VulkanDistributedPlanError(
                     "distributed buffer allocation count overflowed".to_string(),
@@ -1497,9 +1656,11 @@ impl VulkanDistributedActivationBufferPlan {
             allocation_count,
             allocations,
             reduction_allocations,
+            private_intermediate_allocations,
             import_count,
             reference_count,
             total_shared_byte_capacity,
+            total_private_byte_capacity,
             route: execution_plan.shared_activation_route,
         })
     }
@@ -1543,6 +1704,19 @@ impl VulkanDistributedActivationBufferPlan {
                 && allocation.dispatch_index == dispatch_index
         })
     }
+
+    pub fn private_intermediate_allocation(
+        &self,
+        producer_dispatch_index: usize,
+        consumer_dispatch_index: usize,
+    ) -> Option<&VulkanDistributedPrivateIntermediateBufferAllocation> {
+        self.private_intermediate_allocations
+            .iter()
+            .find(|allocation| {
+                allocation.producer_dispatch_index == producer_dispatch_index
+                    && allocation.consumer_dispatch_index == consumer_dispatch_index
+            })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1574,9 +1748,11 @@ pub struct VulkanDistributedActivationBuffers {
     pub lane_capacity: usize,
     pub allocations: Vec<VulkanDistributedActivationBuffer>,
     pub reduction_allocations: Vec<VulkanDistributedReductionBuffer>,
+    pub private_intermediate_allocations: Vec<VulkanDistributedPrivateIntermediateBuffer>,
     pub allocation_count: usize,
     pub import_count: usize,
     pub total_shared_byte_capacity: usize,
+    pub total_private_byte_capacity: usize,
 }
 
 impl VulkanDistributedActivationBuffers {
@@ -1687,6 +1863,73 @@ impl VulkanDistributedActivationBuffers {
                 device_buffers: shared.device_buffers,
             });
         }
+        let mut private_intermediate_allocations =
+            Vec::with_capacity(plan.private_intermediate_allocations.len());
+        let mut total_private_byte_capacity = 0usize;
+        for planned in &plan.private_intermediate_allocations {
+            let mut device_buffers = BTreeMap::new();
+            for device_allocation in &planned.devices {
+                let byte_capacity = device_allocation
+                    .byte_capacity
+                    .checked_mul(lane_capacity)
+                    .ok_or_else(|| {
+                        VulkanDistributedActivationBufferError(format!(
+                            "distributed private intermediate {} lane capacity overflowed",
+                            planned.signal_id
+                        ))
+                    })?;
+                let device = device_for(&device_allocation.device_id).map_err(|error| {
+                    VulkanDistributedActivationBufferError(format!(
+                        "failed to resolve private intermediate {} device {:?}: {error}",
+                        planned.signal_id, device_allocation.device_id
+                    ))
+                })?;
+                let buffer = Arc::new(device.create_resident_buffer(byte_capacity).map_err(
+                    |error| {
+                        VulkanDistributedActivationBufferError(format!(
+                            "failed to allocate {byte_capacity} private intermediate bytes for {} on {:?}: {error}",
+                            planned.signal_id, device_allocation.device_id
+                        ))
+                    },
+                )?);
+                if device_buffers
+                    .insert(device_allocation.device_id.clone(), buffer)
+                    .is_some()
+                {
+                    return Err(VulkanDistributedActivationBufferError(format!(
+                        "private intermediate {} repeats device {:?}",
+                        planned.signal_id, device_allocation.device_id
+                    )));
+                }
+                total_private_byte_capacity = total_private_byte_capacity
+                    .checked_add(byte_capacity)
+                    .ok_or_else(|| {
+                        VulkanDistributedActivationBufferError(
+                            "distributed private intermediate allocation overflowed"
+                                .to_string(),
+                        )
+                    })?;
+            }
+            private_intermediate_allocations.push(
+                VulkanDistributedPrivateIntermediateBuffer {
+                    planned: planned.clone(),
+                    device_buffers,
+                },
+            );
+        }
+        let expected_private_byte_capacity = plan
+            .total_private_byte_capacity
+            .checked_mul(lane_capacity)
+            .ok_or_else(|| {
+                VulkanDistributedActivationBufferError(
+                    "distributed private intermediate plan capacity overflowed".to_string(),
+                )
+            })?;
+        if total_private_byte_capacity != expected_private_byte_capacity {
+            return Err(VulkanDistributedActivationBufferError(format!(
+                "distributed private intermediate allocation has {total_private_byte_capacity} bytes, expected {expected_private_byte_capacity}"
+            )));
+        }
 
         Ok(Self {
             plan: plan.clone(),
@@ -1694,8 +1937,10 @@ impl VulkanDistributedActivationBuffers {
             allocation_count: plan.allocation_count,
             allocations,
             reduction_allocations,
+            private_intermediate_allocations,
             import_count,
             total_shared_byte_capacity,
+            total_private_byte_capacity,
         })
     }
 
@@ -1794,6 +2039,22 @@ impl VulkanDistributedActivationBuffers {
             .and_then(|allocation| allocation.device_buffers.get(device_id))
     }
 
+    pub fn private_intermediate_buffer(
+        &self,
+        producer_dispatch_index: usize,
+        consumer_dispatch_index: usize,
+        device_id: &str,
+    ) -> Option<&Arc<VulkanResidentBuffer>> {
+        self.private_intermediate_allocations
+            .iter()
+            .find(|allocation| {
+                allocation.planned.producer_dispatch_index == producer_dispatch_index
+                    && allocation.planned.consumer_dispatch_index
+                        == consumer_dispatch_index
+            })
+            .and_then(|allocation| allocation.device_buffers.get(device_id))
+    }
+
     pub(crate) fn edge_allocation(
         &self,
         edge_index: usize,
@@ -1821,6 +2082,11 @@ pub struct VulkanDistributedReductionBuffer {
     pub planned: VulkanDistributedReductionBufferAllocation,
     pub route: VulkanSharedResidentBufferRoute,
     pub external_device_local_error: Option<String>,
+    pub device_buffers: BTreeMap<String, Arc<VulkanResidentBuffer>>,
+}
+
+pub struct VulkanDistributedPrivateIntermediateBuffer {
+    pub planned: VulkanDistributedPrivateIntermediateBufferAllocation,
     pub device_buffers: BTreeMap<String, Arc<VulkanResidentBuffer>>,
 }
 

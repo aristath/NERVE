@@ -225,6 +225,23 @@ def test_compiler_declares_only_an_executable_local_shard_handoff(
         }
     ]
 
+    circuit["nodes"].append(
+        {
+            "id": "side_consumer",
+            "op": "identity",
+            "inputs": ["activated"],
+            "outputs": ["side"],
+            "params": [],
+        }
+    )
+    assert (
+        local_output_shard_intermediates_for_node(
+            circuit, compiled_gate_up, tensor_index
+        )
+        == []
+    )
+    circuit["nodes"].pop()
+
     down["inputs"][0] = "another-signal"
     assert (
         local_output_shard_intermediates_for_node(circuit, gate_up, tensor_index)
