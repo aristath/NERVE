@@ -74,17 +74,43 @@ fn package_rejects_a_stale_physical_artifact_digest() {
 }
 
 #[test]
-fn package_rejects_a_contract_artifact_outside_its_kernel() {
+fn package_rejects_a_contract_artifact_outside_the_package() {
     let mut manifest = fixture_model_package_manifest();
     manifest.component_executions[0].kernels[0].physical_execution_contracts[0]
         .artifacts[0]
-        .path = "shaders/not-owned-by-this-kernel.spv".to_string();
+        .path = "../outside.spv".to_string();
 
     let error = package::validate_physical_execution_contracts(&tiny_model_dir(), &manifest)
         .unwrap_err()
         .to_string();
 
-    assert!(error.contains("outside kernel"));
+    assert!(error.contains("must stay inside the package"));
+}
+
+#[test]
+fn package_accepts_a_self_contained_contract_owned_physical_artifact() {
+    let mut manifest = fixture_model_package_manifest();
+    let physical_path = manifest
+        .component_executions
+        .iter()
+        .flat_map(|execution| &execution.kernels)
+        .map(|kernel| kernel.shader_path.clone())
+        .last()
+        .unwrap();
+    let contract = manifest
+        .component_executions
+        .iter_mut()
+        .flat_map(|execution| &mut execution.kernels)
+        .flat_map(|kernel| &mut kernel.physical_execution_contracts)
+        .find(|contract| contract.strategy.is_distributed())
+        .unwrap();
+    assert_ne!(contract.artifacts[0].path, physical_path);
+    let payload = fs::read(tiny_model_dir().join(&physical_path)).unwrap();
+    contract.artifacts[0].path = physical_path;
+    contract.artifacts[0].sha256 = format!("sha256:{:x}", Sha256::digest(payload));
+    contract.contract_id = format!("sha256:{}", "e".repeat(64));
+
+    package::validate_physical_execution_contracts(&tiny_model_dir(), &manifest).unwrap();
 }
 
 #[test]

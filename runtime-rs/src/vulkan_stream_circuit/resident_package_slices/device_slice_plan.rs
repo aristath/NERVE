@@ -9,7 +9,7 @@ struct VulkanResidentModelPackageDeviceSlicePlan {
     placed_plan: VulkanPlacedStreamCircuitPlan,
     prepared_plan: VulkanPreparedDispatchPlan,
     physical_residency_schedule: VulkanPhysicalResidencySchedule,
-    loaded_manifest: VulkanLoadedReusableKernelArtifactManifest,
+    loaded_manifest: VulkanLoadedKernelArtifactCatalog,
     batch_kernels: Vec<VulkanResidentComponentBatchKernelArtifact>,
     targeted_output: Option<VulkanResidentTargetedOutputTransducerPlan>,
 }
@@ -328,7 +328,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             outgoing_edge_count: self.outgoing_edge_count,
             permanent_parameter_count: parameter_buffers.plan.parameter_count,
             permanent_parameter_bytes: parameter_buffers.total_byte_capacity,
-            reusable_kernel_word_count: self.loaded_manifest.total_word_count,
+            reusable_kernel_word_count: self.loaded_manifest.reusable_word_count,
             physical_residency_schedule: self.physical_residency_schedule,
             placed_plan: self.placed_plan,
             prepared_plan: self.prepared_plan,

@@ -1408,7 +1408,7 @@ impl VulkanTargetedDecodeExecution {
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         dispatches: &[VulkanMountedPlacedBoundDispatch],
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         physical_residency_schedule: &VulkanPhysicalResidencySchedule,
         demand_context: Option<VulkanDemandResidencyExecutionContext>,
         dynamic_state_capacity_activations: u32,
@@ -1632,7 +1632,7 @@ impl VulkanTargetedPrefillExecution {
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         dispatches: &[VulkanMountedPlacedBoundDispatch],
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         batch_kernels: &[VulkanResidentComponentBatchKernelArtifact],
         activation_batch_width: usize,
         dynamic_state_capacity_activations: u32,
@@ -1846,7 +1846,7 @@ impl VulkanTargetedPrefillExecution {
         for (dispatch, artifact) in &selected_dispatches {
             let Some(artifact) = artifact else {
                 let scalar_artifact = loaded_manifest
-                    .artifact(&dispatch.reusable_family_id)
+                    .reusable_artifact(&dispatch.reusable_family_id)
                     .ok_or_else(|| targeted_component_error_value(format!(
                         "targeted prefill scalar fallback {}.{} has no loaded artifact",
                         dispatch.component_id, dispatch.node_id,

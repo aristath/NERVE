@@ -27,7 +27,7 @@ fn create_distributed_resident_dispatch(
     shard_index: usize,
     parameter_buffers: &VulkanDistributedParameterBuffers,
     activation_buffers: &VulkanDistributedActivationBuffers,
-    artifact: &VulkanLoadedReusableKernelArtifact,
+    artifact: &VulkanLoadedPhysicalKernelArtifact,
 ) -> Result<VulkanResidentKernelDispatch, VulkanDistributedDispatchRunnerError> {
     let input = activation_buffers
         .activation_buffer(
@@ -234,7 +234,7 @@ impl VulkanDistributedDispatchRunners {
         execution_plan: &VulkanDistributedExecutionPlan,
         parameter_buffers: &VulkanDistributedParameterBuffers,
         activation_buffers: &VulkanDistributedActivationBuffers,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         mut device_for: F,
     ) -> Result<Self, VulkanDistributedDispatchRunnerError>
     where
@@ -284,13 +284,13 @@ impl VulkanDistributedDispatchRunners {
                         )));
                     }
                     let artifact = loaded_manifest
-                        .artifact(&planned_dispatch.reusable_family_id)
+                        .physical_artifact(&planned_dispatch.physical_artifact_id)
                         .ok_or_else(|| {
                             VulkanDistributedDispatchRunnerError(format!(
-                                "distributed dispatch {}.{} is missing loaded family {:?}",
+                                "distributed dispatch {}.{} is missing physical artifact {:?}",
                                 planned_dispatch.component_id,
                                 planned_dispatch.node_id,
-                                planned_dispatch.reusable_family_id
+                                planned_dispatch.physical_artifact_id
                             ))
                         })?;
                     resident_dispatches.push(create_distributed_resident_dispatch(

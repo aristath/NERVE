@@ -18,7 +18,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         stages: &[VulkanMountedPlacedStreamTickStage],
         physical_residency_schedule: Option<&VulkanPhysicalResidencySchedule>,
         demand_context: Option<&VulkanDemandResidencyExecutionContext>,

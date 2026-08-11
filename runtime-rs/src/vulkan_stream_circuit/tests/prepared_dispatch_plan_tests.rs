@@ -193,6 +193,54 @@ fn prepared_dispatches_share_code_without_sharing_instance_contracts() {
 }
 
 #[test]
+fn physical_artifact_metadata_is_owned_by_its_contract() {
+    let mut contract = fixture_model_package_manifest()
+        .component_executions
+        .into_iter()
+        .flat_map(|execution| execution.kernels)
+        .flat_map(|kernel| kernel.physical_execution_contracts)
+        .find(|contract| contract.strategy.is_distributed())
+        .unwrap();
+    contract.partition_launch = Some(nerve_execution_contracts::PartitionLaunch {
+        workgroup_x: nerve_execution_contracts::WorkgroupXMapping::Repeated,
+        origin: nerve_execution_contracts::PartitionOrigin::PushConstantU32,
+        origin_push_constant: Some("input_start".to_string()),
+        count_push_constant: Some("input_count".to_string()),
+    });
+    let family = &fixture_model_reusable_kernel_plan().families[0];
+    let artifact = physical_contract_kernel_artifact(
+        family,
+        &contract,
+        0,
+        &contract.artifacts[0],
+    )
+    .unwrap();
+
+    assert_eq!(
+        artifact.artifact_id,
+        physical_execution_artifact_id(&contract.contract_id, 0)
+    );
+    assert_ne!(artifact.artifact_id, family.family_id);
+    assert_eq!(artifact.path, contract.artifacts[0].path);
+    assert_eq!(
+        artifact.local_size_x,
+        u32::try_from(contract.geometry.dimensions["local_size_x"]).unwrap()
+    );
+    assert_eq!(
+        artifact.workgroup_count_x,
+        u32::try_from(contract.geometry.dimensions["workgroup_count_x"]).unwrap()
+    );
+    assert_eq!(
+        artifact
+            .push_constants
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect::<Vec<_>>(),
+        ["input_start", "input_count"]
+    );
+}
+
+#[test]
 fn prepared_dispatch_contract_attachment_rejects_a_missing_instance() {
     let mut plan = contract_attachment_test_plan();
     let error = attach_resident_package_physical_execution_contracts(

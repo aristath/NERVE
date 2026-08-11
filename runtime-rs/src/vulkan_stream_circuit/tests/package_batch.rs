@@ -44,13 +44,11 @@ fn package_loader_rejects_unsupported_package_schema_before_package_setup() {
 }
 
 #[test]
-fn loaded_artifact_manifest_preserves_compiled_launch_geometry() {
-    let loaded = VulkanLoadedReusableKernelArtifactManifest {
-        schema: VULKAN_REUSABLE_KERNEL_ARTIFACT_MANIFEST_SCHEMA.to_string(),
-        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
-        artifacts: vec![VulkanLoadedReusableKernelArtifact {
+fn loaded_artifact_catalog_separates_reusable_and_physical_artifacts() {
+    let loaded = VulkanLoadedKernelArtifactCatalog {
+        reusable_artifacts: vec![VulkanLoadedReusableKernelArtifact {
             artifact: VulkanReusableKernelArtifact {
-                family_id: "sparse-moe-gate-up".to_string(),
+                family_id: "shared-name".to_string(),
                 op: "sparse_moe_gate_up".to_string(),
                 path: "kernels/sparse-moe-gate-up.spv".to_string(),
                 entry_point: DEFAULT_SPIRV_ENTRY_POINT.to_string(),
@@ -63,14 +61,37 @@ fn loaded_artifact_manifest_preserves_compiled_launch_geometry() {
             resolved_path: PathBuf::from("kernels/sparse-moe-gate-up.spv"),
             words: vec![0x0723_0203],
         }],
-        total_word_count: 1,
+        physical_artifacts: vec![VulkanLoadedPhysicalKernelArtifact {
+            artifact: VulkanPhysicalKernelArtifact {
+                artifact_id: "shared-name".to_string(),
+                op: "sparse_moe_gate_up".to_string(),
+                path: "kernels/sparse-moe-gate-up-partial.spv".to_string(),
+                entry_point: DEFAULT_SPIRV_ENTRY_POINT.to_string(),
+                local_size_x: 128,
+                workgroup_count_x: 1_024,
+                descriptor_signature: Vec::new(),
+                push_constants: Vec::new(),
+                stream_control_binding: None,
+            },
+            resolved_path: PathBuf::from("kernels/sparse-moe-gate-up-partial.spv"),
+            words: vec![0x0723_0203, 1],
+        }],
+        reusable_word_count: 1,
+        physical_word_count: 2,
     };
 
-    let physical = loaded.artifact_manifest();
+    let reusable = loaded.reusable_artifact("shared-name").unwrap();
+    let physical = loaded.physical_artifact("shared-name").unwrap();
+    let manifest = loaded.reusable_manifest();
 
-    assert_eq!(physical.artifacts.len(), 1);
-    assert_eq!(physical.artifacts[0].workgroup_count_x, 2_048);
-    assert_eq!(physical.artifacts[0].local_size_x, 64);
+    assert_eq!(reusable.artifact.workgroup_count_x, 2_048);
+    assert_eq!(reusable.artifact.local_size_x, 64);
+    assert_eq!(physical.artifact.workgroup_count_x, 1_024);
+    assert_eq!(physical.artifact.local_size_x, 128);
+    assert_eq!(manifest.artifacts.len(), 1);
+    assert_eq!(loaded.reusable_word_count, 1);
+    assert_eq!(loaded.physical_word_count, 2);
+    assert_eq!(loaded.total_word_count(), 3);
 }
 
 #[test]
@@ -1924,7 +1945,7 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
         dispatch_index,
         component_id: "layer".to_string(),
         node_id: node_id.to_string(),
-        reusable_family_id: node_id.to_string(),
+        physical_artifact_id: node_id.to_string(),
         physical_execution_contract_id: format!("sha256:{}", "a".repeat(64)),
         implementation_digest: format!("sha256:{}", "b".repeat(64)),
         contract_member_node_ids: vec![node_id.to_string()],

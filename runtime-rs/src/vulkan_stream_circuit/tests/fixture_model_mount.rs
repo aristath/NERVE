@@ -224,7 +224,7 @@ fn package_device_slice_mounts_only_components_assigned_to_device() {
     assert_eq!(slice.permanent_parameter_count, 9);
     assert!(slice.permanent_parameter_bytes > 0);
     assert!(slice.reusable_kernel_word_count > 0);
-    assert!(!slice.loaded_manifest().artifacts.is_empty());
+    assert!(!slice.loaded_manifest().reusable_artifacts.is_empty());
 
     let mounted = slice.create_mounted_stream_circuit(&device).unwrap();
     let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);

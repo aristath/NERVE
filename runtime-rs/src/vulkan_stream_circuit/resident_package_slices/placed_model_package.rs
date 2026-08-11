@@ -32,7 +32,7 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     distributed_activation_plan: VulkanDistributedActivationBufferPlan,
     distributed_parameter_allocation_plan: VulkanDistributedParameterAllocationPlan,
     distributed_parameter_exclusion_plan: VulkanDistributedParameterExclusionPlan,
-    distributed_loaded_manifest: VulkanLoadedReusableKernelArtifactManifest,
+    distributed_loaded_manifest: VulkanLoadedKernelArtifactCatalog,
     distributed_parameter_buffers: Arc<VulkanDistributedParameterBuffers>,
     compiled_resource_device_stores:
         BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,

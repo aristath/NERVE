@@ -21,10 +21,10 @@ use crate::vulkan_compute::{
 use crate::vulkan_stream_circuit::{
     VulkanActivationSlotBufferOverride, VulkanDescriptorResourceAddress,
     VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
-    VulkanLoadedReusableKernelArtifact, VulkanLoadedReusableKernelArtifactManifest,
+    VulkanLoadedPhysicalKernelArtifact, VulkanLoadedKernelArtifactCatalog,
     VulkanModelBoundaryBufferOverride, VulkanModelBoundaryDirection,
-    VulkanPreparedDispatch, VulkanPreparedDispatchPlan, VulkanResidentFeedbackControlPlane,
-    VulkanReusableKernelArtifactManifest,
+    VulkanPhysicalKernelArtifactManifest, VulkanPreparedDispatch, VulkanPreparedDispatchPlan,
+    VulkanResidentFeedbackControlPlane,
 };
 
 const BF16_BYTE_COUNT: usize = 2;
@@ -54,7 +54,7 @@ impl VulkanDistributedExecutionPlan {
     pub fn from_prepared_plans(
         prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
         tensor_index: &TensorIndex,
-        artifact_manifest: &VulkanReusableKernelArtifactManifest,
+        artifact_manifest: &VulkanPhysicalKernelArtifactManifest,
         component_device_pools: &BTreeMap<String, Vec<String>>,
         edge_placements: &[ComponentEdgePlacement],
         storage_buffer_offset_alignment: usize,
@@ -102,17 +102,9 @@ impl VulkanDistributedExecutionPlan {
                         dispatch.component_id, owner_device_id
                     )));
                 }
-                let artifact = artifact_manifest
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.family_id == dispatch.reusable_family_id)
-                    .ok_or_else(|| {
-                        VulkanDistributedPlanError(format!(
-                            "distributed dispatch {}.{} has no artifact for family {:?}",
-                            dispatch.component_id, dispatch.node_id, dispatch.reusable_family_id
-                        ))
-                    })?;
-                let Some(contract) = select_distributed_contract(dispatch, artifact)? else {
+                let Some((contract, artifact)) =
+                    select_distributed_contract(dispatch, artifact_manifest)?
+                else {
                     continue;
                 };
                 let Some(planned) = plan_contract_dispatch(
@@ -1179,7 +1171,7 @@ pub struct VulkanDistributedDispatchPlan {
     pub dispatch_index: usize,
     pub component_id: String,
     pub node_id: String,
-    pub reusable_family_id: String,
+    pub physical_artifact_id: String,
     pub physical_execution_contract_id: String,
     pub implementation_digest: String,
     pub contract_member_node_ids: Vec<String>,

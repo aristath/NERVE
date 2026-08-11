@@ -315,7 +315,7 @@ impl VulkanMountedPlacedStreamTickPlan {
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         transport: &mut VulkanInProcessPlacedEdgeTransport,
         stream_tick: u64,
     ) -> Result<VulkanMountedPlacedResidentStreamTickRun, VulkanMountedPlacedResidentStreamTickError>

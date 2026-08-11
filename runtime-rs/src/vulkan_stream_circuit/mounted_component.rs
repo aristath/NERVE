@@ -12,7 +12,7 @@ impl VulkanMountedPlacedResidentComponentRunner {
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         component_id: &str,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
         let mut dispatches = Vec::new();
         let mut total_descriptor_count = 0usize;

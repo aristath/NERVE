@@ -690,7 +690,7 @@ impl VulkanMountedPlacedResidentKernelDispatchReadinessPlan {
     fn from_mounted_bound_plan(
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     ) -> Self {
         let mut instantiable_count = 0usize;
         let mut blocked_count = 0usize;

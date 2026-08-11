@@ -170,7 +170,7 @@ impl VulkanResidentModelPackage {
             permanent_parameter_bytes: parameter_buffers.total_byte_capacity,
             transducer_parameter_count: transducer_parameter_buffers.plan.parameter_count,
             transducer_parameter_bytes: transducer_parameter_buffers.total_byte_capacity,
-            reusable_kernel_word_count: loaded_manifest.total_word_count,
+            reusable_kernel_word_count: loaded_manifest.reusable_word_count,
             placed_plan,
             mounted_bound,
             loaded_manifest,

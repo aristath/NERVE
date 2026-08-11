@@ -19,8 +19,8 @@ pub(super) fn validate_physical_execution_contracts(
                     ),
                 ));
             }
-            let mut allowed_artifact_paths = BTreeSet::from([kernel.shader_path.as_str()]);
-            allowed_artifact_paths.extend(
+            let mut required_artifact_paths = BTreeSet::from([kernel.shader_path.as_str()]);
+            required_artifact_paths.extend(
                 kernel
                     .batch_implementations
                     .iter()
@@ -80,18 +80,6 @@ pub(super) fn validate_physical_execution_contracts(
                         "physical execution artifact",
                         &artifact.path,
                     )?;
-                    if !allowed_artifact_paths.contains(artifact.path.as_str()) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "physical contract {:?} references artifact {:?} outside kernel {}.{}",
-                                contract.contract_id,
-                                artifact.path,
-                                execution.component_id,
-                                kernel.node_id,
-                            ),
-                        ));
-                    }
                     let payload = fs::read(package_root.join(&artifact.path))?;
                     let actual = format!("sha256:{:x}", Sha256::digest(payload));
                     if actual != artifact.sha256 {
@@ -124,8 +112,8 @@ pub(super) fn validate_physical_execution_contracts(
                     ),
                 ));
             }
-            if declared_artifact_paths != allowed_artifact_paths {
-                let missing = allowed_artifact_paths
+            if !required_artifact_paths.is_subset(&declared_artifact_paths) {
+                let missing = required_artifact_paths
                     .difference(&declared_artifact_paths)
                     .copied()
                     .collect::<Vec<_>>();

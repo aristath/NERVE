@@ -458,9 +458,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
         let distributed_loaded_manifest =
             resident_package_loaded_kernel_manifest_for_slice_plans(&device_slice_plans)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
-        let distributed_artifact_manifest = VulkanReusableKernelArtifactManifest::new(
+        let distributed_artifact_manifest = VulkanPhysicalKernelArtifactManifest::new(
             distributed_loaded_manifest
-                .artifacts
+                .physical_artifacts
                 .iter()
                 .map(|artifact| artifact.artifact.clone())
                 .collect(),

@@ -630,7 +630,7 @@ fn inspect_device_slice_payload(
     let reusable_manifest = VulkanReusableKernelArtifactManifest::new(
         slice
             .loaded_manifest()
-            .artifacts
+            .reusable_artifacts
             .iter()
             .map(|artifact| artifact.artifact.clone())
             .collect(),
@@ -638,7 +638,7 @@ fn inspect_device_slice_payload(
     let mounted_bound = mounted.mounted_placed_bound_dispatch_plan(&reusable_manifest)?;
     let tick_plan = mounted.stream_tick_plan(&reusable_manifest)?;
     let resident_plan = &mounted.placed_plan.placed_resident_plan;
-    let loaded_kernel_artifact_count = slice.loaded_manifest().artifacts.len();
+    let loaded_kernel_artifact_count = slice.loaded_manifest().reusable_artifacts.len();
 
     Ok(RuntimeDeviceSliceReport {
         ok: true,

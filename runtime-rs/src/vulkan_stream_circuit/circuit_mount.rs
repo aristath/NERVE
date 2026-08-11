@@ -485,7 +485,7 @@ impl VulkanMountedPlacedStreamCircuit {
     pub fn resident_kernel_dispatch_readiness_plan(
         &self,
         manifest: &VulkanReusableKernelArtifactManifest,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     ) -> Result<VulkanMountedPlacedResidentKernelDispatchReadinessPlan, VulkanBoundDispatchPlanError>
     {
         let mounted_bound_plan = self.mounted_placed_bound_dispatch_plan(manifest)?;
@@ -501,9 +501,9 @@ impl VulkanMountedPlacedStreamCircuit {
     pub fn resident_kernel_dispatch_readiness_for_bound_dispatch(
         &self,
         dispatch: &VulkanMountedPlacedBoundDispatch,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     ) -> VulkanMountedPlacedResidentKernelDispatchStatus {
-        let Some(artifact) = loaded_manifest.artifact(&dispatch.reusable_family_id) else {
+        let Some(artifact) = loaded_manifest.reusable_artifact(&dispatch.reusable_family_id) else {
             return VulkanMountedPlacedResidentKernelDispatchStatus::Blocked {
                 error: VulkanMountedPlacedResidentKernelDispatchError::MissingLoadedArtifact {
                     dispatch_index: dispatch.dispatch_index,
@@ -572,10 +572,10 @@ impl VulkanMountedPlacedStreamCircuit {
         &self,
         device: &VulkanComputeDevice,
         dispatch: &VulkanMountedPlacedBoundDispatch,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     ) -> Result<VulkanResidentKernelDispatch, VulkanMountedPlacedResidentKernelDispatchError> {
         let artifact = loaded_manifest
-            .artifact(&dispatch.reusable_family_id)
+            .reusable_artifact(&dispatch.reusable_family_id)
             .ok_or_else(|| {
                 VulkanMountedPlacedResidentKernelDispatchError::MissingLoadedArtifact {
                     dispatch_index: dispatch.dispatch_index,
@@ -600,7 +600,7 @@ impl VulkanMountedPlacedStreamCircuit {
         device: &VulkanComputeDevice,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         component_id: &str,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     ) -> Result<
         VulkanMountedPlacedResidentComponentRunner,
         VulkanMountedPlacedResidentKernelDispatchError,
@@ -619,7 +619,7 @@ impl VulkanMountedPlacedStreamCircuit {
         device: &VulkanComputeDevice,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         component_ids: I,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     ) -> Result<
         VulkanMountedPlacedResidentExecutionGraphRunner,
         VulkanMountedPlacedResidentKernelDispatchError,

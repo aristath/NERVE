@@ -282,7 +282,7 @@ fn distributed_calibration_execution_case(
     devices: &[(String, Rc<VulkanComputeDevice>)],
     logical_device_ids: &[String],
     execution_plan: &VulkanDistributedExecutionPlan,
-    loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     artifact_digest: String,
     execution_graph_digest: String,
     phase: VulkanTargetedComponentExecutionPhase,
@@ -356,11 +356,11 @@ fn distributed_calibration_execution_case(
         .enumerate()
     {
         let artifact = loaded_manifest
-            .artifact(&dispatch.reusable_family_id)
+            .physical_artifact(&dispatch.physical_artifact_id)
             .ok_or_else(|| {
                 distributed_calibration_error_value(format!(
                     "distributed calibration case is missing loaded artifact {:?}",
-                    dispatch.reusable_family_id,
+                    dispatch.physical_artifact_id,
                 ))
             })?;
         let workgroup_count_x = dispatch.shards.iter().try_fold(0u32, |total, shard| {
@@ -595,12 +595,15 @@ fn distributed_calibration_fixture_identity(
 }
 
 fn distributed_calibration_artifact_digest(
-    loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     package_slice: &VulkanResidentModelPackageDeviceSlice,
 ) -> Result<String, VulkanResidentTokenModelPackageError> {
     let mut digest = Sha256::new();
     digest.update(b"nerve.distributed_calibration_artifacts.v1\0");
-    let mut artifacts = loaded_manifest.artifacts.iter().collect::<Vec<_>>();
+    let mut artifacts = loaded_manifest
+        .reusable_artifacts
+        .iter()
+        .collect::<Vec<_>>();
     artifacts.sort_by(|left, right| left.artifact.family_id.cmp(&right.artifact.family_id));
     if artifacts.is_empty() {
         return distributed_calibration_error(
@@ -760,9 +763,9 @@ impl VulkanRuntimeDistributedPlacementSession {
         let loaded_manifest = resident_package_loaded_kernel_manifest_for_slice_plans(
             std::slice::from_ref(&targeted_plan.slice_plan),
         )?;
-        let artifact_manifest = VulkanReusableKernelArtifactManifest::new(
+        let artifact_manifest = VulkanPhysicalKernelArtifactManifest::new(
             loaded_manifest
-                .artifacts
+                .physical_artifacts
                 .iter()
                 .map(|artifact| artifact.artifact.clone())
                 .collect(),

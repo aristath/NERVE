@@ -210,8 +210,8 @@ impl VulkanReusableKernelArtifactManifest {
     pub fn load_artifacts(
         &self,
         artifact_root: impl AsRef<Path>,
-    ) -> io::Result<VulkanLoadedReusableKernelArtifactManifest> {
-        VulkanLoadedReusableKernelArtifactManifest::from_manifest(self, artifact_root)
+    ) -> io::Result<VulkanLoadedKernelArtifactCatalog> {
+        VulkanLoadedKernelArtifactCatalog::from_manifest(self, artifact_root)
     }
 }
 
@@ -260,84 +260,10 @@ impl VulkanReusableKernelArtifact {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct VulkanLoadedReusableKernelArtifactManifest {
-    pub schema: String,
-    pub backend_id: String,
-    pub artifacts: Vec<VulkanLoadedReusableKernelArtifact>,
-    pub total_word_count: usize,
-}
-
-impl VulkanLoadedReusableKernelArtifactManifest {
-    pub fn from_manifest(
-        manifest: &VulkanReusableKernelArtifactManifest,
-        artifact_root: impl AsRef<Path>,
-    ) -> io::Result<Self> {
-        let artifact_root = artifact_root.as_ref();
-        let mut artifacts = Vec::with_capacity(manifest.artifacts.len());
-        let mut total_word_count = 0usize;
-
-        for artifact in &manifest.artifacts {
-            let resolved_path =
-                resolve_reusable_kernel_artifact_path(artifact_root, &artifact.path);
-            let words = read_spirv_words(&resolved_path)?;
-            total_word_count = total_word_count.checked_add(words.len()).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "loaded reusable kernel word count overflowed",
-                )
-            })?;
-            artifacts.push(VulkanLoadedReusableKernelArtifact {
-                artifact: artifact.clone(),
-                resolved_path,
-                words,
-            });
-        }
-
-        Ok(Self {
-            schema: manifest.schema.clone(),
-            backend_id: manifest.backend_id.clone(),
-            artifacts,
-            total_word_count,
-        })
-    }
-
-    pub fn artifact(&self, family_id: &str) -> Option<&VulkanLoadedReusableKernelArtifact> {
-        self.artifacts
-            .iter()
-            .find(|artifact| artifact.artifact.family_id == family_id)
-    }
-
-    pub fn family_ids(&self) -> Vec<&str> {
-        self.artifacts
-            .iter()
-            .map(|artifact| artifact.artifact.family_id.as_str())
-            .collect()
-    }
-
-    pub fn artifact_manifest(&self) -> VulkanReusableKernelArtifactManifest {
-        VulkanReusableKernelArtifactManifest::new(
-            self.artifacts
-                .iter()
-                .map(|loaded| loaded.artifact.clone())
-                .collect(),
-        )
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct VulkanLoadedReusableKernelArtifact {
     pub artifact: VulkanReusableKernelArtifact,
     pub resolved_path: PathBuf,
     pub words: Vec<u32>,
-}
-
-fn resolve_reusable_kernel_artifact_path(artifact_root: &Path, path: &str) -> PathBuf {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        artifact_root.join(path)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

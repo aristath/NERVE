@@ -1027,7 +1027,7 @@ impl VulkanResidentComponentBatchSliceRunner {
             let artifact = slice
                 .package_slice
                 .loaded_manifest
-                .artifact(&dispatch.reusable_family_id)
+                .reusable_artifact(&dispatch.reusable_family_id)
                 .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
                         "component batch scalar kernel {}.{} has no loaded artifact",

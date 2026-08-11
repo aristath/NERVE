@@ -3,7 +3,7 @@ impl VulkanResidentInProcessPlacedStreamProcessorDevice {
         &self.mounted
     }
 
-    pub fn loaded_manifest(&self) -> &VulkanLoadedReusableKernelArtifactManifest {
+    pub fn loaded_manifest(&self) -> &VulkanLoadedKernelArtifactCatalog {
         self.package_slice.loaded_manifest()
     }
 }

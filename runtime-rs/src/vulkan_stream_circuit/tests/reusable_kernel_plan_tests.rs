@@ -282,10 +282,11 @@ fn reusable_kernel_artifact_manifest_links_fixture_model_kernel_families() {
     }
 
     let loaded = manifest.load_artifacts(&artifact_root).unwrap();
-    assert_eq!(loaded.artifacts.len(), family_count);
-    assert_eq!(loaded.family_ids().len(), family_count);
-    assert_eq!(loaded.total_word_count, family_count * 2);
-    let loaded_selected = loaded.artifact(selected_family_id).unwrap();
+    assert_eq!(loaded.reusable_artifacts.len(), family_count);
+    assert_eq!(loaded.reusable_family_ids().len(), family_count);
+    assert_eq!(loaded.reusable_word_count, family_count * 2);
+    assert_eq!(loaded.physical_word_count, 0);
+    let loaded_selected = loaded.reusable_artifact(selected_family_id).unwrap();
     assert_eq!(loaded_selected.artifact.family_id, selected_family_id);
     assert_eq!(
         loaded_selected.resolved_path,

@@ -217,6 +217,8 @@ include!("vulkan_stream_circuit/stream_control_bytes.rs");
 include!("vulkan_stream_circuit/kernel_interface.rs");
 include!("vulkan_stream_circuit/descriptor_resources.rs");
 include!("vulkan_stream_circuit/reusable_kernels.rs");
+include!("vulkan_stream_circuit/physical_kernel_artifacts.rs");
+include!("vulkan_stream_circuit/kernel_artifact_catalog.rs");
 include!("vulkan_stream_circuit/dispatch_binding_plan.rs");
 include!("vulkan_stream_circuit/tick_plan.rs");
 include!("vulkan_stream_circuit/tick_cursor.rs");

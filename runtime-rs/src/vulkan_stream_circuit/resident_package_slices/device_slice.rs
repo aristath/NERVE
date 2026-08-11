@@ -166,7 +166,7 @@ impl VulkanResidentModelPackageDeviceSlice {
         })
     }
 
-    pub fn loaded_manifest(&self) -> &VulkanLoadedReusableKernelArtifactManifest {
+    pub fn loaded_manifest(&self) -> &VulkanLoadedKernelArtifactCatalog {
         &self.loaded_manifest
     }
 

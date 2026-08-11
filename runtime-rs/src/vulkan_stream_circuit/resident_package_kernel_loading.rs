@@ -18,10 +18,12 @@ fn resident_package_reusable_kernel_manifest(
 
 fn resident_package_loaded_kernel_manifest_for_slice_plans(
     slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
-) -> Result<VulkanLoadedReusableKernelArtifactManifest, VulkanResidentTokenModelPackageError> {
+) -> Result<VulkanLoadedKernelArtifactCatalog, VulkanResidentTokenModelPackageError> {
     let mut artifacts_by_family = BTreeMap::<String, VulkanLoadedReusableKernelArtifact>::new();
+    let mut physical_artifacts_by_id =
+        BTreeMap::<String, VulkanLoadedPhysicalKernelArtifact>::new();
     for slice in slice_plans {
-        for artifact in &slice.loaded_manifest.artifacts {
+        for artifact in &slice.loaded_manifest.reusable_artifacts {
             if let Some(existing) = artifacts_by_family.get(&artifact.artifact.family_id) {
                 let mut existing_contract = existing.artifact.clone();
                 existing_contract.path.clear();
@@ -37,20 +39,49 @@ fn resident_package_loaded_kernel_manifest_for_slice_plans(
                 artifacts_by_family.insert(artifact.artifact.family_id.clone(), artifact.clone());
             }
         }
+        for artifact in &slice.loaded_manifest.physical_artifacts {
+            if let Some(existing) =
+                physical_artifacts_by_id.get(&artifact.artifact.artifact_id)
+            {
+                if existing.artifact != artifact.artifact || existing.words != artifact.words {
+                    return Err(VulkanResidentTokenModelPackageError::new(format!(
+                        "loaded physical Vulkan artifact {:?} conflicts across device slices",
+                        artifact.artifact.artifact_id
+                    )));
+                }
+            } else {
+                physical_artifacts_by_id
+                    .insert(artifact.artifact.artifact_id.clone(), artifact.clone());
+            }
+        }
     }
-    let artifacts = artifacts_by_family.into_values().collect::<Vec<_>>();
-    let total_word_count = artifacts.iter().try_fold(0usize, |total, artifact| {
-        total.checked_add(artifact.words.len()).ok_or_else(|| {
-            VulkanResidentTokenModelPackageError::new(
-                "combined reusable Vulkan kernel word count overflowed",
-            )
-        })
-    })?;
-    Ok(VulkanLoadedReusableKernelArtifactManifest {
-        schema: VULKAN_REUSABLE_KERNEL_ARTIFACT_MANIFEST_SCHEMA.to_string(),
-        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
-        artifacts,
-        total_word_count,
+    let reusable_artifacts = artifacts_by_family.into_values().collect::<Vec<_>>();
+    let physical_artifacts = physical_artifacts_by_id.into_values().collect::<Vec<_>>();
+    let reusable_word_count = reusable_artifacts
+        .iter()
+        .map(|artifact| artifact.words.len())
+        .try_fold(0usize, |total, words| {
+            total.checked_add(words).ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(
+                    "combined reusable Vulkan kernel word count overflowed",
+                )
+            })
+        })?;
+    let physical_word_count = physical_artifacts
+        .iter()
+        .map(|artifact| artifact.words.len())
+        .try_fold(0usize, |total, words| {
+            total.checked_add(words).ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(
+                    "combined physical Vulkan kernel word count overflowed",
+                )
+            })
+        })?;
+    Ok(VulkanLoadedKernelArtifactCatalog {
+        reusable_artifacts,
+        physical_artifacts,
+        reusable_word_count,
+        physical_word_count,
     })
 }
 
@@ -131,10 +162,13 @@ fn loaded_kernel_pack_from_package_shader_refs(
     placed_plan: &VulkanPlacedStreamCircuitPlan,
     prepared_plan: &VulkanPreparedDispatchPlan,
     dispatch_shaders: &[VulkanResidentComponentKernelShaderRef],
-) -> Result<VulkanLoadedReusableKernelArtifactManifest, VulkanResidentTokenModelPackageError> {
+) -> Result<VulkanLoadedKernelArtifactCatalog, VulkanResidentTokenModelPackageError> {
     let mut loaded_artifacts = Vec::new();
+    let mut loaded_physical_artifacts = Vec::new();
     let mut loaded_families = BTreeSet::new();
-    let mut total_word_count = 0usize;
+    let mut loaded_physical_metadata = BTreeMap::new();
+    let mut reusable_word_count = 0usize;
+    let mut physical_word_count = 0usize;
 
     for shader in dispatch_shaders {
         let dispatch = prepared_plan
@@ -145,18 +179,6 @@ fn loaded_kernel_pack_from_package_shader_refs(
                     shader.component_id, shader.node_id
                 ))
             })?;
-        if !loaded_families.insert(dispatch.reusable_family_id.clone()) {
-            continue;
-        }
-        let spirv_words =
-            load_required_resident_model_package_shader(manifest_dir, &shader.shader_path)?;
-        total_word_count = total_word_count
-            .checked_add(spirv_words.len())
-            .ok_or_else(|| {
-                VulkanResidentTokenModelPackageError::new(
-                    "reusable kernel artifact word count overflowed",
-                )
-            })?;
         let family = placed_plan
             .reusable_kernel_plan
             .family(&dispatch.reusable_family_id)
@@ -166,13 +188,76 @@ fn loaded_kernel_pack_from_package_shader_refs(
                     dispatch.reusable_family_id, shader.component_id, shader.node_id
                 ))
             })?;
-        loaded_artifacts.push(VulkanLoadedReusableKernelArtifact {
-            artifact: VulkanReusableKernelArtifact::from_family(family, shader.shader_path.clone())
+        if loaded_families.insert(dispatch.reusable_family_id.clone()) {
+            let spirv_words =
+                load_required_resident_model_package_shader(manifest_dir, &shader.shader_path)?;
+            reusable_word_count = reusable_word_count
+                .checked_add(spirv_words.len())
+                .ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(
+                        "reusable kernel artifact word count overflowed",
+                    )
+                })?;
+            loaded_artifacts.push(VulkanLoadedReusableKernelArtifact {
+                artifact: VulkanReusableKernelArtifact::from_family(
+                    family,
+                    shader.shader_path.clone(),
+                )
                 .with_local_size_x(shader.local_size_x)
                 .with_workgroup_count_x(shader.workgroup_count_x),
-            resolved_path: resolve_resident_model_package_path(manifest_dir, &shader.shader_path),
-            words: spirv_words,
-        });
+                resolved_path: resolve_resident_model_package_path(
+                    manifest_dir,
+                    &shader.shader_path,
+                ),
+                words: spirv_words,
+            });
+        }
+        for contract in shader
+            .physical_execution_contracts
+            .iter()
+            .filter(|contract| contract.strategy.is_distributed())
+        {
+            for (artifact_index, identity) in contract.artifacts.iter().enumerate() {
+                let artifact = physical_contract_kernel_artifact(
+                    family,
+                    contract,
+                    artifact_index,
+                    identity,
+                )?;
+                if let Some(existing) =
+                    loaded_physical_metadata.get(&artifact.artifact_id)
+                {
+                    if existing != &artifact {
+                        return Err(VulkanResidentTokenModelPackageError::new(format!(
+                            "physical kernel artifact {:?} has conflicting metadata",
+                            artifact.artifact_id
+                        )));
+                    }
+                    continue;
+                }
+                loaded_physical_metadata
+                    .insert(artifact.artifact_id.clone(), artifact.clone());
+                let spirv_words = load_required_resident_model_package_shader(
+                    manifest_dir,
+                    &identity.path,
+                )?;
+                physical_word_count = physical_word_count
+                    .checked_add(spirv_words.len())
+                    .ok_or_else(|| {
+                        VulkanResidentTokenModelPackageError::new(
+                            "physical kernel artifact word count overflowed",
+                        )
+                    })?;
+                loaded_physical_artifacts.push(VulkanLoadedPhysicalKernelArtifact {
+                    artifact,
+                    resolved_path: resolve_resident_model_package_path(
+                        manifest_dir,
+                        &identity.path,
+                    ),
+                    words: spirv_words,
+                });
+            }
+        }
     }
 
     let required_families: BTreeSet<&str> = placed_plan
@@ -196,12 +281,89 @@ fn loaded_kernel_pack_from_package_shader_refs(
         )));
     }
 
-    Ok(VulkanLoadedReusableKernelArtifactManifest {
-        schema: VULKAN_REUSABLE_KERNEL_ARTIFACT_MANIFEST_SCHEMA.to_string(),
-        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
-        artifacts: loaded_artifacts,
-        total_word_count,
+    Ok(VulkanLoadedKernelArtifactCatalog {
+        reusable_artifacts: loaded_artifacts,
+        physical_artifacts: loaded_physical_artifacts,
+        reusable_word_count,
+        physical_word_count,
     })
+}
+
+fn physical_contract_kernel_artifact(
+    family: &VulkanReusableKernelFamily,
+    contract: &nerve_execution_contracts::PhysicalExecutionContract,
+    artifact_index: usize,
+    identity: &nerve_execution_contracts::ArtifactIdentity,
+) -> Result<VulkanPhysicalKernelArtifact, VulkanResidentTokenModelPackageError> {
+    Ok(VulkanPhysicalKernelArtifact {
+        artifact_id: physical_execution_artifact_id(&contract.contract_id, artifact_index),
+        op: contract.operation_family.clone(),
+        path: identity.path.clone(),
+        entry_point: identity.entry_point.clone(),
+        local_size_x: physical_contract_geometry_u32(contract, "local_size_x")?,
+        workgroup_count_x: physical_contract_geometry_u32(contract, "workgroup_count_x")?,
+        descriptor_signature: family.descriptor_signature.clone(),
+        push_constants: physical_contract_push_constants(contract)?,
+        stream_control_binding: family.stream_control_binding,
+    })
+}
+
+fn physical_contract_geometry_u32(
+    contract: &nerve_execution_contracts::PhysicalExecutionContract,
+    dimension: &str,
+) -> Result<u32, VulkanResidentTokenModelPackageError> {
+    contract
+        .geometry
+        .dimensions
+        .get(dimension)
+        .copied()
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "physical contract {:?} has no positive u32 {dimension} geometry",
+                contract.contract_id
+            ))
+        })
+}
+
+fn physical_contract_push_constants(
+    contract: &nerve_execution_contracts::PhysicalExecutionContract,
+) -> Result<Vec<VulkanKernelScalarBinding>, VulkanResidentTokenModelPackageError> {
+    let launch = contract.partition_launch.as_ref().ok_or_else(|| {
+        VulkanResidentTokenModelPackageError::new(format!(
+            "distributed physical contract {:?} has no partition launch",
+            contract.contract_id
+        ))
+    })?;
+    if launch.origin == nerve_execution_contracts::PartitionOrigin::LocalZero {
+        return Ok(Vec::new());
+    }
+    let origin = launch.origin_push_constant.as_ref().ok_or_else(|| {
+        VulkanResidentTokenModelPackageError::new(format!(
+            "distributed physical contract {:?} has no partition-origin control",
+            contract.contract_id
+        ))
+    })?;
+    let mut controls = vec![VulkanKernelScalarBinding {
+        name: origin.clone(),
+        scalar_type: "u32".to_string(),
+        source: VulkanKernelScalarSource::PushConstant,
+    }];
+    if launch.workgroup_x == nerve_execution_contracts::WorkgroupXMapping::Repeated {
+        let count = launch.count_push_constant.as_ref().ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "distributed physical contract {:?} has no partition-count control",
+                contract.contract_id
+            ))
+        })?;
+        controls.push(VulkanKernelScalarBinding {
+            name: count.clone(),
+            scalar_type: "u32".to_string(),
+            source: VulkanKernelScalarSource::PushConstant,
+        });
+    }
+    Ok(controls)
 }
 
 fn load_resident_component_batch_kernels(

@@ -22,7 +22,9 @@ mod tests {
     use crate::stream_plan::TensorMetadata;
     use crate::vulkan_stream_circuit::{
         VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
-        VulkanResolvedDescriptorBinding, VulkanReusableKernelArtifact,
+        VulkanPhysicalKernelArtifact, VulkanResolvedDescriptorBinding,
+        VulkanReusableKernelArtifact,
+        physical_execution_artifact_id,
     };
 
     #[test]
@@ -426,7 +428,7 @@ mod tests {
             node_id: "down-partial".to_string(),
             op: "linear_partial".to_string(),
             reusable_family_id: "down-partial-family".to_string(),
-            artifact_path: "down-partial.spv".to_string(),
+            artifact_path: "canonical-down.spv".to_string(),
             entry_point: "main".to_string(),
             local_size_x: 64,
             descriptors: vec![
@@ -484,7 +486,7 @@ mod tests {
         let artifact = VulkanReusableKernelArtifact {
             family_id: "down-partial-family".to_string(),
             op: "linear_partial".to_string(),
-            path: "down-partial.spv".to_string(),
+            path: "canonical-down.spv".to_string(),
             entry_point: "main".to_string(),
             local_size_x: 64,
             workgroup_count_x: 2,
@@ -492,7 +494,8 @@ mod tests {
             push_constants: dispatch.push_constants.clone(),
             stream_control_binding: None,
         };
-        let artifacts = VulkanReusableKernelArtifactManifest::new(vec![artifact.clone()]);
+        let mut artifacts = test_artifact_manifest_with_physical(artifact.clone());
+        artifacts.artifacts[0].path = "down-partial.spv".to_string();
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared)],
             &tensor_index,
@@ -505,6 +508,19 @@ mod tests {
 
         assert_eq!(plan.distributed_parameter_byte_count, 96);
         let planned = &plan.dispatches[0];
+        assert_eq!(
+            planned.physical_artifact_id,
+            physical_execution_artifact_id(&contract.contract_id, 0)
+        );
+        assert_eq!(
+            artifacts
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_id == planned.physical_artifact_id)
+                .unwrap()
+                .path,
+            "down-partial.spv"
+        );
         assert_eq!(
             planned.distribution,
             VulkanDistributedDispatchDistribution::InputColumns
@@ -691,12 +707,12 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("produces 16 bytes"));
 
-        let mut wrong_abi = prepared.clone();
-        wrong_abi.dispatches[0].push_constants.pop();
+        let mut wrong_abi = artifacts.clone();
+        wrong_abi.artifacts[0].push_constants.pop();
         let error = VulkanDistributedExecutionPlan::from_prepared_plans(
-            &[("owner", &wrong_abi)],
+            &[("owner", &prepared)],
             &tensor_index,
-            &artifacts,
+            &wrong_abi,
             &component_device_pools("component", &["owner", "helper-a"]),
             &[],
             4,
@@ -748,7 +764,7 @@ mod tests {
                 byte_count: Some(bytes),
             },
         };
-        let mut prepared = VulkanPreparedDispatchPlan {
+        let prepared = VulkanPreparedDispatchPlan {
             backend_id: "vulkan_stream_circuit".to_string(),
             reusable_family_count: 1,
             dispatches: vec![VulkanPreparedDispatch {
@@ -854,8 +870,7 @@ mod tests {
                 ),
             ]),
         };
-        let artifacts =
-            VulkanReusableKernelArtifactManifest::new(vec![VulkanReusableKernelArtifact {
+        let artifacts = test_artifact_manifest_with_physical(VulkanReusableKernelArtifact {
                 family_id: "sparse-family".to_string(),
                 op: "sparse_moe_down".to_string(),
                 path: "sparse.spv".to_string(),
@@ -876,7 +891,7 @@ mod tests {
                     },
                 ],
                 stream_control_binding: None,
-            }]);
+            });
 
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared)],
@@ -1021,8 +1036,6 @@ mod tests {
         );
 
         let mut custom_range_abi = prepared.clone();
-        custom_range_abi.dispatches[0].push_constants[1].name =
-            "owned_expert_count".to_string();
         custom_range_abi.dispatches[0].physical_execution_contracts[0]
             .partition_launch
             .as_mut()
@@ -1041,11 +1054,12 @@ mod tests {
         )
         .unwrap();
 
-        prepared.dispatches[0].push_constants.truncate(1);
+        let mut stale_artifacts = artifacts.clone();
+        stale_artifacts.artifacts[0].push_constants.truncate(1);
         let stale_abi_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared)],
             &tensor_index,
-            &artifacts,
+            &stale_artifacts,
             &component_device_pools("moe", &["owner", "helper"]),
             &[],
             256,
@@ -1212,11 +1226,18 @@ mod tests {
         prepared_plan.dispatches[0]
             .physical_execution_contracts
             .push(duplicate);
+        let mut artifact_manifest = fixture_artifact_manifest();
+        let mut duplicate_artifact = artifact_manifest.artifacts[0].clone();
+        duplicate_artifact.artifact_id = physical_execution_artifact_id(
+            &format!("sha256:{}", "d".repeat(64)),
+            0,
+        );
+        artifact_manifest.artifacts.push(duplicate_artifact);
 
         let error = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared_plan)],
             &fixture_tensor_index("row_major"),
-            &fixture_artifact_manifest(),
+            &artifact_manifest,
             &component_device_pools("component", &["owner", "helper"]),
             &[],
             4,
@@ -1231,7 +1252,9 @@ mod tests {
         let mut prepared_plan = fixture_prepared_plan();
         prepared_plan.dispatches[0].op = "future_fused_projection".to_string();
         let mut artifacts = fixture_artifact_manifest();
-        artifacts.artifacts[0].op = "future_fused_projection".to_string();
+        for artifact in &mut artifacts.artifacts {
+            artifact.op = "future_fused_projection".to_string();
+        }
         prepared_plan.dispatches[0].physical_execution_contracts[0].operation_family =
             "future_fused_projection".to_string();
 
@@ -1455,9 +1478,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_requested_push_constant_dispatches() {
-        let mut prepared_plan = fixture_prepared_plan();
-        prepared_plan.dispatches[0].push_constants = vec![VulkanKernelScalarBinding {
+    fn rejects_physical_artifact_push_constants_outside_the_contract() {
+        let prepared_plan = fixture_prepared_plan();
+        let mut artifact_manifest = fixture_artifact_manifest();
+        artifact_manifest.artifacts[0].push_constants = vec![VulkanKernelScalarBinding {
             name: "stream_tick".to_string(),
             scalar_type: "u64".to_string(),
             source: VulkanKernelScalarSource::PushConstant,
@@ -1466,7 +1490,7 @@ mod tests {
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared_plan)],
             &fixture_tensor_index("row_major"),
-            &fixture_artifact_manifest(),
+            &artifact_manifest,
             &component_device_pools("component", &["owner", "helper"]),
             &[],
             4,
@@ -1799,8 +1823,7 @@ mod tests {
                 ("weight_scale".to_string(), scale),
             ]),
         };
-        let artifacts =
-            VulkanReusableKernelArtifactManifest::new(vec![VulkanReusableKernelArtifact {
+        let artifacts = test_artifact_manifest_with_physical(VulkanReusableKernelArtifact {
                 family_id: "residual-family".to_string(),
                 op: "linear_residual".to_string(),
                 path: "residual.spv".to_string(),
@@ -1810,7 +1833,7 @@ mod tests {
                 descriptor_signature: Vec::new(),
                 push_constants: Vec::new(),
                 stream_control_binding: None,
-            }]);
+            });
 
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared)],
@@ -2088,7 +2111,7 @@ mod tests {
         }
     }
 
-    fn fixture_artifact_manifest() -> VulkanReusableKernelArtifactManifest {
+    fn fixture_artifact_manifest() -> VulkanPhysicalKernelArtifactManifest {
         test_artifact_manifest(
             "family",
             "parallel_linear_silu_multiply",
@@ -2102,8 +2125,8 @@ mod tests {
         op: &str,
         path: &str,
         workgroup_count_x: u32,
-    ) -> VulkanReusableKernelArtifactManifest {
-        VulkanReusableKernelArtifactManifest::new(vec![VulkanReusableKernelArtifact {
+    ) -> VulkanPhysicalKernelArtifactManifest {
+        test_artifact_manifest_with_physical(VulkanReusableKernelArtifact {
             family_id: family_id.to_string(),
             op: op.to_string(),
             path: path.to_string(),
@@ -2113,6 +2136,25 @@ mod tests {
             descriptor_signature: Vec::new(),
             push_constants: Vec::new(),
             stream_control_binding: None,
+        })
+    }
+
+    fn test_artifact_manifest_with_physical(
+        canonical: VulkanReusableKernelArtifact,
+    ) -> VulkanPhysicalKernelArtifactManifest {
+        VulkanPhysicalKernelArtifactManifest::new(vec![VulkanPhysicalKernelArtifact {
+            artifact_id: physical_execution_artifact_id(
+                &format!("sha256:{}", "a".repeat(64)),
+                0,
+            ),
+            op: canonical.op,
+            path: canonical.path,
+            entry_point: canonical.entry_point,
+            local_size_x: canonical.local_size_x,
+            workgroup_count_x: canonical.workgroup_count_x,
+            descriptor_signature: canonical.descriptor_signature,
+            push_constants: canonical.push_constants,
+            stream_control_binding: canonical.stream_control_binding,
         }])
     }
 
@@ -2167,6 +2209,7 @@ mod tests {
                 shape_class: "test-shape".to_string(),
                 dimensions: BTreeMap::from([
                     ("partition".to_string(), extent),
+                    ("local_size_x".to_string(), 64),
                     ("workgroup_count_x".to_string(), u64::from(workgroup_count_x)),
                 ]),
                 dynamic_dimensions: Vec::new(),

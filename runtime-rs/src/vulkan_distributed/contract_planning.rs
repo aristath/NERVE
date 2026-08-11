@@ -91,24 +91,74 @@ fn resolved_owner_residency_requirements(
         .collect())
 }
 
-fn select_distributed_contract<'a>(
+fn select_distributed_contract<'a, 'b>(
     dispatch: &'a VulkanPreparedDispatch,
-    artifact: &crate::vulkan_stream_circuit::VulkanReusableKernelArtifact,
-) -> Result<Option<&'a PhysicalExecutionContract>, VulkanDistributedPlanError> {
-    let candidates = dispatch
-        .physical_execution_contracts
-        .iter()
-        .filter(|contract| {
-            contract.strategy.is_distributed()
-                && contract.phases.contains(&ExecutionPhase::Decode)
-                && contract.operation_family == dispatch.op
-                && contract.member_node_ids.contains(&dispatch.node_id)
-                && contract.artifacts.iter().any(|identity| {
-                    identity.path == artifact.path && identity.entry_point == artifact.entry_point
-                })
-        })
-        .collect::<Vec<_>>();
-    let [contract] = candidates.as_slice() else {
+    artifact_manifest: &'b VulkanPhysicalKernelArtifactManifest,
+) -> Result<
+    Option<(
+        &'a PhysicalExecutionContract,
+        &'b crate::vulkan_stream_circuit::VulkanPhysicalKernelArtifact,
+    )>,
+    VulkanDistributedPlanError,
+> {
+    let mut candidates = Vec::new();
+    for contract in dispatch.physical_execution_contracts.iter().filter(|contract| {
+        contract.strategy.is_distributed()
+            && contract.phases.contains(&ExecutionPhase::Decode)
+            && contract.operation_family == dispatch.op
+            && contract.member_node_ids.contains(&dispatch.node_id)
+    }) {
+        contract
+            .validate()
+            .map_err(|error| dispatch_error(dispatch, format!("has an invalid contract: {error}")))?;
+        let [identity] = contract.artifacts.as_slice() else {
+            return Err(dispatch_error(
+                dispatch,
+                format!(
+                    "physical contract {:?} requires exactly one scalar artifact, found {}",
+                    contract.contract_id,
+                    contract.artifacts.len()
+                ),
+            ));
+        };
+        let artifact_id = crate::vulkan_stream_circuit::physical_execution_artifact_id(
+            &contract.contract_id,
+            0,
+        );
+        let artifact = artifact_manifest
+            .artifact(&artifact_id)
+            .ok_or_else(|| {
+                dispatch_error(
+                    dispatch,
+                    format!(
+                        "physical contract {:?} has no loaded artifact {:?}",
+                        contract.contract_id, artifact_id
+                    ),
+                )
+            })?;
+        let local_size_x = contract.geometry.dimensions.get("local_size_x").copied();
+        let workgroup_count_x = contract
+            .geometry
+            .dimensions
+            .get("workgroup_count_x")
+            .copied();
+        if artifact.op != contract.operation_family
+            || artifact.path != identity.path
+            || artifact.entry_point != identity.entry_point
+            || local_size_x != Some(u64::from(artifact.local_size_x))
+            || workgroup_count_x != Some(u64::from(artifact.workgroup_count_x))
+        {
+            return Err(dispatch_error(
+                dispatch,
+                format!(
+                    "physical artifact {:?} disagrees with contract {:?}",
+                    artifact.artifact_id, contract.contract_id
+                ),
+            ));
+        }
+        candidates.push((contract, artifact));
+    }
+    let [candidate] = candidates.as_slice() else {
         if candidates.is_empty() {
             return Ok(None);
         }
@@ -117,14 +167,11 @@ fn select_distributed_contract<'a>(
             format!(
                 "has {} ambiguous decode distribution contracts for reusable artifact family {:?}",
                 candidates.len(),
-                artifact.family_id
+                dispatch.reusable_family_id
             ),
         ));
     };
-    contract
-        .validate()
-        .map_err(|error| dispatch_error(dispatch, format!("has an invalid contract: {error}")))?;
-    Ok(Some(*contract))
+    Ok(Some(*candidate))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -134,7 +181,7 @@ fn plan_contract_dispatch(
     tensor_index: &TensorIndex,
     device_ids: &[String],
     edge_placements: &[ComponentEdgePlacement],
-    artifact: &crate::vulkan_stream_circuit::VulkanReusableKernelArtifact,
+    artifact: &crate::vulkan_stream_circuit::VulkanPhysicalKernelArtifact,
     contract: &PhysicalExecutionContract,
     storage_buffer_offset_alignment: usize,
 ) -> Result<Option<VulkanDistributedDispatchPlan>, VulkanDistributedPlanError> {
@@ -175,7 +222,7 @@ fn plan_contract_dispatch(
             ),
         ));
     }
-    validate_partition_origin(dispatch, launch)?;
+    validate_partition_origin(dispatch, artifact, launch)?;
 
     let mut inputs = Vec::with_capacity(contract.inputs.len());
     for input in &contract.inputs {
@@ -526,7 +573,7 @@ fn plan_contract_dispatch(
         dispatch_index: dispatch.dispatch_index,
         component_id: dispatch.component_id.clone(),
         node_id: dispatch.node_id.clone(),
-        reusable_family_id: dispatch.reusable_family_id.clone(),
+        physical_artifact_id: artifact.artifact_id.clone(),
         physical_execution_contract_id: contract.contract_id.clone(),
         implementation_digest: contract.implementation_digest.clone(),
         contract_member_node_ids: contract.member_node_ids.clone(),
@@ -623,10 +670,11 @@ fn validate_contract_descriptor_coverage(
 
 fn validate_partition_origin(
     dispatch: &VulkanPreparedDispatch,
+    artifact: &crate::vulkan_stream_circuit::VulkanPhysicalKernelArtifact,
     launch: &nerve_execution_contracts::PartitionLaunch,
 ) -> Result<(), VulkanDistributedPlanError> {
     match launch.origin {
-        PartitionOrigin::LocalZero if dispatch.push_constants.is_empty() => Ok(()),
+        PartitionOrigin::LocalZero if artifact.push_constants.is_empty() => Ok(()),
         PartitionOrigin::PushConstantU32 => {
             let Some(name) = launch.origin_push_constant.as_deref() else {
                 return Err(dispatch_error(
@@ -652,7 +700,7 @@ fn validate_partition_origin(
                     source: VulkanKernelScalarSource::PushConstant,
                 });
             }
-            if dispatch.push_constants == expected {
+            if artifact.push_constants == expected {
                 Ok(())
             } else {
                 Err(dispatch_error(

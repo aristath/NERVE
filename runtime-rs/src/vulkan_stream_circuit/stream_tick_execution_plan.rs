@@ -98,7 +98,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         tick_plan: VulkanMountedPlacedStreamTickPlan,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
         Self::from_tick_plan_with_distributed_dispatches(
@@ -115,7 +115,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         tick_plan: VulkanMountedPlacedStreamTickPlan,
         distributed_dispatch_indices: &BTreeSet<usize>,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
@@ -137,7 +137,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         tick_plan: VulkanMountedPlacedStreamTickPlan,
         physical_execution_islands: &[Vec<usize>],
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
@@ -159,7 +159,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         tick_plan: VulkanMountedPlacedStreamTickPlan,
         physical_execution_islands: &[Vec<usize>],
         physical_residency_schedule: Option<&VulkanPhysicalResidencySchedule>,

@@ -12,7 +12,7 @@ impl VulkanMountedPlacedResidentExecutionGraphRunner {
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         component_ids: I,
-        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError>
     where
         I: IntoIterator<Item = S>,
