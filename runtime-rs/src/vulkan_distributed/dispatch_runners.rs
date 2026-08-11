@@ -4,6 +4,22 @@ pub struct VulkanDistributedDispatchRunners {
     pub shard_count: usize,
 }
 
+fn distributed_shard_push_constants(
+    planned_dispatch: &VulkanDistributedDispatchPlan,
+    planned_shard: &VulkanDistributedDispatchShard,
+) -> Result<Vec<u8>, VulkanDistributedDispatchRunnerError> {
+    let mut bytes = planned_shard.base_workgroup_z.to_le_bytes().to_vec();
+    if planned_dispatch.distribution == VulkanDistributedDispatchDistribution::ExpertRange {
+        let expert_count = u32::try_from(planned_shard.row_count).map_err(|_| {
+            VulkanDistributedDispatchRunnerError(
+                "distributed expert shard count exceeds u32".to_string(),
+            )
+        })?;
+        bytes.extend_from_slice(&expert_count.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
 fn create_distributed_resident_dispatch(
     device: &VulkanComputeDevice,
     planned_dispatch: &VulkanDistributedDispatchPlan,
@@ -142,6 +158,7 @@ fn create_distributed_resident_dispatch(
                 .with_access(VulkanResidentKernelBufferAccess::Read),
         );
     }
+    let push_constant_bytes = distributed_shard_push_constants(planned_dispatch, planned_shard)?;
     device
         .create_resident_kernel_dispatch_2d_with_base_z(
             &artifact.words,
@@ -150,7 +167,7 @@ fn create_distributed_resident_dispatch(
             1,
             0,
             artifact.artifact.local_size_x,
-            std::mem::size_of::<u32>() as u32,
+            u32::try_from(push_constant_bytes.len()).expect("push constant size is at most 8"),
             Some(format!(
                 "component={} node={} distributed=device:{} rows={}..{} base_z={} distribution={:?}",
                 planned_dispatch.component_id,
@@ -252,8 +269,9 @@ impl VulkanDistributedDispatchRunners {
                 })?;
                 let push_constants = planned_shards
                     .iter()
-                    .map(|shard| shard.base_workgroup_z.to_le_bytes())
-                    .collect::<Vec<_>>();
+                    .zip(&planned_island.dispatches)
+                    .map(|(shard, dispatch)| distributed_shard_push_constants(dispatch, shard))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let steps = resident_dispatches
                     .iter()
                     .zip(&push_constants)
@@ -442,8 +460,11 @@ impl VulkanDistributedDispatchRunners {
                 let push_constants = shard
                     .planned
                     .iter()
-                    .map(|planned| planned.base_workgroup_z.to_le_bytes())
-                    .collect::<Vec<_>>();
+                    .zip(&dispatch.planned.dispatches)
+                    .map(|(planned, dispatch)| {
+                        distributed_shard_push_constants(dispatch, planned)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let steps = shard
                     .resident_dispatches
                     .iter()

@@ -74,6 +74,10 @@ def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Pa
     assert "const uint HIDDEN_SIZE = 1024u;" in reduce
     assert "route >= EXPERTS_PER_TOKEN" in gate_up
     assert "route >= EXPERTS_PER_TOKEN" in down
+    assert "uint expert_count;" in gate_up
+    assert "uint expert_count;" in down
+    assert "dispatch_control.expert_count != 0u" in gate_up
+    assert "dispatch_control.expert_count != 0u" in down
     assert "for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++)" in reduce
     assert "route < NUM_EXPERTS" not in gate_up
     assert "route < NUM_EXPERTS" not in down
@@ -293,6 +297,8 @@ def test_compiler_renders_route_aware_sparse_moe_fp8_intermediate(
         )
     ).read_text()
     assert "readonly buffer RouteMap" in down
+    assert "uint expert_count;" in down
+    assert "dispatch_control.expert_count != 0u" in down
     assert "shared fe4m3vec4 cached_intermediate" in down
     assert "subgroupClusteredMax" not in down
     assert "readonly buffer RouteMaps" in batch_down
@@ -301,6 +307,8 @@ def test_compiler_renders_route_aware_sparse_moe_fp8_intermediate(
     assert "expert_route_map.values[route] = route;" in emitting_gate_up
     assert "compact_batch * EXPERTS_PER_TOKEN" in emitting_batch_gate_up
     assert "buffer ExpertIntermediates" in emitting_gate_up
+    assert "uint expert_count;" in emitting_gate_up
+    assert "dispatch_control.expert_count != 0u" in emitting_gate_up
     assert "buffer ExpertIntermediates" in emitting_batch_gate_up
     assert all(
         "{{" not in (tmp_path / shader_file).read_text()
@@ -681,6 +689,9 @@ def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
     assert "expert_scales.words[index >> 1u]" in gate_source
     assert "buffer DynamicResourceAddresses" in gate_source
     assert "buffer DynamicParameterSlots" in down_source
+    assert "uint expert_count;" in gate_source
+    assert "owned_expert_count != 0u" in gate_source
+    assert "owned_expert_count != 0u" in down_source
     assert "route_weight" in down_source
     assert "gl_WorkGroupID.y" in batch_source
     assert "layout(push_constant) uniform BatchControl" in batch_source

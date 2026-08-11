@@ -128,10 +128,10 @@ impl VulkanKernelStreamMetadata {
             ),
             stream_control_binding,
             push_constants: if matches!(op, "sparse_moe_gate_up" | "sparse_moe_down") {
-                vec![VulkanKernelScalarBinding::push_constant(
-                    "expert_start",
-                    "u32",
-                )]
+                vec![
+                    VulkanKernelScalarBinding::push_constant("expert_start", "u32"),
+                    VulkanKernelScalarBinding::push_constant("expert_count", "u32"),
+                ]
             } else {
                 Vec::new()
             },

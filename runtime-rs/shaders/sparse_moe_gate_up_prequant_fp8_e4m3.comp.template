@@ -23,7 +23,10 @@ layout(set = 0, binding = 2) readonly buffer ExpertRoutes { uint words[]; } expe
 {{OUTPUT_BINDINGS}}
 layout(set = 0, binding = {{DYNAMIC_RESOURCE_BINDING}}) readonly buffer DynamicResourceAddresses { uint words[]; } dynamic_resource_addresses;
 layout(set = 0, binding = {{DYNAMIC_SLOT_BINDING}}) readonly buffer DynamicParameterSlots { uint words[]; } dynamic_parameter_slots;
-layout(push_constant) uniform DispatchControl { uint expert_start; } dispatch_control;
+layout(push_constant) uniform DispatchControl {
+    uint expert_start;
+    uint expert_count;
+} dispatch_control;
 
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer DynamicU32Buffer {
     uint words[];
@@ -110,7 +113,16 @@ void main() {
         return;
     }
     uint expert = expert_routes.words[route] & 0xffffu;
-    if (expert >= NUM_EXPERTS) {
+    if (
+        expert >= NUM_EXPERTS
+        || (
+            dispatch_control.expert_count != 0u
+            && (
+                expert < dispatch_control.expert_start
+                || expert - dispatch_control.expert_start >= dispatch_control.expert_count
+            )
+        )
+    ) {
         return;
     }
     if (

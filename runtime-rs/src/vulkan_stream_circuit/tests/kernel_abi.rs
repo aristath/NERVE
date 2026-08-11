@@ -338,18 +338,25 @@ fn operation_name_does_not_implicitly_require_stream_control() {
 }
 
 #[test]
-fn sparse_moe_kernels_receive_an_explicit_expert_start() {
+fn sparse_moe_kernels_receive_an_explicit_expert_range() {
     for op in ["sparse_moe_gate_up", "sparse_moe_down"] {
         let metadata = VulkanKernelStreamMetadata::from_compiled_contract(op, None);
         let push_constants = metadata.push_constants();
 
         assert_eq!(
             push_constants,
-            vec![VulkanKernelScalarBinding {
-                name: "expert_start".to_string(),
-                scalar_type: "u32".to_string(),
-                source: VulkanKernelScalarSource::PushConstant,
-            }]
+            vec![
+                VulkanKernelScalarBinding {
+                    name: "expert_start".to_string(),
+                    scalar_type: "u32".to_string(),
+                    source: VulkanKernelScalarSource::PushConstant,
+                },
+                VulkanKernelScalarBinding {
+                    name: "expert_count".to_string(),
+                    scalar_type: "u32".to_string(),
+                    source: VulkanKernelScalarSource::PushConstant,
+                },
+            ]
         );
         assert_eq!(
             stream_control_push_constant_bytes(
@@ -361,7 +368,7 @@ fn sparse_moe_kernels_receive_an_explicit_expert_start() {
                 },
             )
             .unwrap(),
-            0u32.to_le_bytes()
+            [0u8; 8]
         );
     }
 }

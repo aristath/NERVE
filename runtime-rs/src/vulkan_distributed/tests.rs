@@ -326,6 +326,26 @@ mod tests {
     }
 
     #[test]
+    fn expert_range_push_constants_include_start_and_count() {
+        let mut expert_dispatch = fixture_plan("row_major").dispatches.remove(0);
+        expert_dispatch.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
+        let mut expert_shard = expert_dispatch.shards[1].clone();
+        expert_shard.base_workgroup_z = 7;
+        let bytes = distributed_shard_push_constants(&expert_dispatch, &expert_shard).unwrap();
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 7);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..].try_into().unwrap()),
+            u32::try_from(expert_shard.row_count).unwrap(),
+        );
+
+        let output_rows = fixture_plan("row_major").dispatches.remove(0);
+        let bytes =
+            distributed_shard_push_constants(&output_rows, &output_rows.shards[1]).unwrap();
+        assert_eq!(bytes, 0u32.to_le_bytes());
+    }
+
+    #[test]
     fn plans_sparse_expert_ranges_with_shared_routes_and_full_outputs() {
         let activation = |binding, signal: &str, slot, bytes| VulkanResolvedDescriptorBinding {
             binding,
@@ -375,11 +395,18 @@ mod tests {
                     parameter(3, "expert-weight", 256 * 2048 * 512),
                     parameter(4, "expert-scale", 256 * 16 * 4 * 2),
                 ],
-                push_constants: vec![VulkanKernelScalarBinding {
-                    name: "expert_start".to_string(),
-                    scalar_type: "u32".to_string(),
-                    source: VulkanKernelScalarSource::PushConstant,
-                }],
+                push_constants: vec![
+                    VulkanKernelScalarBinding {
+                        name: "expert_start".to_string(),
+                        scalar_type: "u32".to_string(),
+                        source: VulkanKernelScalarSource::PushConstant,
+                    },
+                    VulkanKernelScalarBinding {
+                        name: "expert_count".to_string(),
+                        scalar_type: "u32".to_string(),
+                        source: VulkanKernelScalarSource::PushConstant,
+                    },
+                ],
                 stream_control_binding: None,
                 physical_execution_contracts: vec![test_physical_contract(
                     "sparse_moe_down",
@@ -448,11 +475,18 @@ mod tests {
                 local_size_x: 64,
                 workgroup_count_x: 8192,
                 descriptor_signature: Vec::new(),
-                push_constants: vec![VulkanKernelScalarBinding {
-                    name: "expert_start".to_string(),
-                    scalar_type: "u32".to_string(),
-                    source: VulkanKernelScalarSource::PushConstant,
-                }],
+                push_constants: vec![
+                    VulkanKernelScalarBinding {
+                        name: "expert_start".to_string(),
+                        scalar_type: "u32".to_string(),
+                        source: VulkanKernelScalarSource::PushConstant,
+                    },
+                    VulkanKernelScalarBinding {
+                        name: "expert_count".to_string(),
+                        scalar_type: "u32".to_string(),
+                        source: VulkanKernelScalarSource::PushConstant,
+                    },
+                ],
                 stream_control_binding: None,
             }]);
 
@@ -585,8 +619,8 @@ mod tests {
             vec![4, 5]
         );
 
-        prepared.dispatches[0].push_constants.clear();
-        let legacy_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+        prepared.dispatches[0].push_constants.truncate(1);
+        let stale_abi_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared)],
             &tensor_index,
             &artifacts,
@@ -595,7 +629,10 @@ mod tests {
             256,
         )
         .unwrap_err();
-        assert!(legacy_plan.to_string().contains("requires the sole u32 push constant"));
+        assert!(stale_abi_plan
+            .to_string()
+            .contains("requires exact push-constant ABI"));
+        assert!(stale_abi_plan.to_string().contains("expert_count"));
     }
 
     #[test]

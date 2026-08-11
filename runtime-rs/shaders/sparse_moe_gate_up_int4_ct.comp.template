@@ -146,7 +146,18 @@ void main() {
 {{ROUTE_MAPPING}}
     uint route_offset = batch_index * EXPERTS_PER_TOKEN;
     uint expert = expert_routes.words[route_offset + route] & 0xffffu;
-    if (expert >= NUM_EXPERTS) return;
+    uint owned_expert_start = {{EXPERT_START}};
+    uint owned_expert_count = {{EXPERT_COUNT}};
+    if (
+        expert >= NUM_EXPERTS
+        || (
+            owned_expert_count != 0u
+            && (
+                expert < owned_expert_start
+                || expert - owned_expert_start >= owned_expert_count
+            )
+        )
+    ) return;
     if (
         dynamic_parameter_slot(expert, 0u) == UNBOUND_PARAMETER_SLOT
         || dynamic_parameter_slot(expert, 1u) == UNBOUND_PARAMETER_SLOT

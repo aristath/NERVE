@@ -526,19 +526,25 @@ fn validate_partition_origin(
                     "partition-origin push constant is unnamed".to_string(),
                 ));
             };
-            if dispatch.push_constants.as_slice()
-                == [VulkanKernelScalarBinding {
+            let mut expected = vec![VulkanKernelScalarBinding {
                     name: name.to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
-                }]
-            {
+                }];
+            if launch.workgroup_x == WorkgroupXMapping::Repeated {
+                expected.push(VulkanKernelScalarBinding {
+                    name: "expert_count".to_string(),
+                    scalar_type: "u32".to_string(),
+                    source: VulkanKernelScalarSource::PushConstant,
+                });
+            }
+            if dispatch.push_constants == expected {
                 Ok(())
             } else {
                 Err(dispatch_error(
                     dispatch,
                     format!(
-                        "partition contract requires the sole u32 push constant {name:?}"
+                        "partition contract requires exact push-constant ABI {expected:?}"
                     ),
                 ))
             }

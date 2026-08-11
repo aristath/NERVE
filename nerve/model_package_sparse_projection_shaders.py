@@ -79,7 +79,7 @@ def render_sparse_moe_projection_shader(
                 "TILE_ROWS": str(INT4_CT_OUTPUT_TILE_ROWS),
                 "BATCH_CONTROL": (
                     "layout(push_constant) uniform DispatchControl { uint "
-                    "expert_start; } dispatch_control;"
+                    "expert_start; uint expert_count; } dispatch_control;"
                     if batch_tile is None
                     else "layout(push_constant) uniform BatchControl { uint "
                     "batch_width; uint expert_start; uint expert_count; uint "
@@ -118,21 +118,9 @@ def render_sparse_moe_projection_shader(
                     )
                 ),
                 "EXPERT_COUNT": (
-                    "expert_input_weight.words.length() / EXPERT_INPUT_WORDS"
-                    if batch_tile is None and stage == "gate_up"
-                    else "expert_output_weight.words.length() / EXPERT_OUTPUT_WORDS"
+                    "dispatch_control.expert_count"
                     if batch_tile is None
-                    else (
-                        "(batch_control.expert_count == 0u "
-                        "? expert_input_weight.words.length() / EXPERT_INPUT_WORDS "
-                        ": batch_control.expert_count)"
-                        if stage == "gate_up"
-                        else (
-                            "(batch_control.expert_count == 0u "
-                            "? expert_output_weight.words.length() / EXPERT_OUTPUT_WORDS "
-                            ": batch_control.expert_count)"
-                        )
-                    )
+                    else "batch_control.expert_count"
                 ),
                 "ROUTE_MAPPING": (
                     ""
