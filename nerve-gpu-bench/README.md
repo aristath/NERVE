@@ -87,8 +87,8 @@ options can narrow the run:
 ```sh
 cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- run \
   --execute \
-  --include-target vulkan:pci:0000:03:00.0 \
-  --include-target vulkan:pci:0000:07:00.0 \
+  --include-target vulkan-uuid:00112233445566778899aabbccddeeff \
+  --include-target vulkan-uuid:ffeeddccbbaa99887766554433221100 \
   --exclude-kind integrated_gpu \
   --max-group-size 2 \
   --output nerve-gpu-bench/placement-benchmark.json
@@ -97,6 +97,10 @@ cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- run \
 `--format` narrows the format set. `--payload-bytes` and `--samples` override
 the small defaults. `--max-group-size` accepts any positive number and is
 clamped to the number of selected targets.
+
+Vulkan targets use the same `vulkan-uuid:<32 lowercase hex digits>` identity as
+the NERVE runtime. PCI addresses remain topology metadata and can be selected
+through `--exclude-pci`; they are not stable execution identities.
 
 Validate or summarize an artifact:
 

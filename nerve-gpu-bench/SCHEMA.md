@@ -11,31 +11,31 @@
       "placements": [
         {
           "mode": "single",
-          "targets": ["vulkan:pci:0000:03:00.0"],
+          "targets": ["vulkan-uuid:00112233445566778899aabbccddeeff"],
           "duration_ns": 382941
         },
         {
           "mode": "tp",
           "targets": [
-            "vulkan:pci:0000:03:00.0",
-            "vulkan:pci:0000:07:00.0"
+            "vulkan-uuid:00112233445566778899aabbccddeeff",
+            "vulkan-uuid:ffeeddccbbaa99887766554433221100"
           ],
           "duration_ns": 451870,
-          "owner": "vulkan:pci:0000:03:00.0",
+          "owner": "vulkan-uuid:00112233445566778899aabbccddeeff",
           "transport": "shared_host"
         }
       ],
       "serial": [
         {
           "mode": "single",
-          "targets": ["vulkan:pci:0000:03:00.0"],
+          "targets": ["vulkan-uuid:00112233445566778899aabbccddeeff"],
           "duration_ns": 718522
         },
         {
           "mode": "serial",
           "targets": [
-            "vulkan:pci:0000:03:00.0",
-            "vulkan:pci:0000:07:00.0"
+            "vulkan-uuid:00112233445566778899aabbccddeeff",
+            "vulkan-uuid:ffeeddccbbaa99887766554433221100"
           ],
           "duration_ns": 912523,
           "transport": "external_device_local"
@@ -47,21 +47,21 @@
     "fp8_e4m3": [
       {
         "targets": [
-          "vulkan:pci:0000:03:00.0",
-          "vulkan:pci:0000:07:00.0"
+          "vulkan-uuid:00112233445566778899aabbccddeeff",
+          "vulkan-uuid:ffeeddccbbaa99887766554433221100"
         ],
         "split": [1, 1],
         "serialized": {
           "duration_ns": 491205,
           "order": [
-            "vulkan:pci:0000:03:00.0",
-            "vulkan:pci:0000:07:00.0"
+            "vulkan-uuid:00112233445566778899aabbccddeeff",
+            "vulkan-uuid:ffeeddccbbaa99887766554433221100"
           ],
           "transport": "external_device_local"
         },
         "tp": {
           "duration_ns": 382941,
-          "owner": "vulkan:pci:0000:03:00.0",
+          "owner": "vulkan-uuid:00112233445566778899aabbccddeeff",
           "transport": "shared_host"
         }
       }

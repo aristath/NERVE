@@ -44,6 +44,7 @@ unsafe fn discover_physical_devices(instance: &ash::Instance) -> Result<Vec<Targ
     let mut targets = Vec::new();
     for (index, physical_device) in physical_devices.iter().copied().enumerate() {
         let properties = unsafe { instance.get_physical_device_properties(physical_device) };
+        let device_uuid = unsafe { vulkan_device_uuid(instance, physical_device) };
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
         let queue_properties =
@@ -58,6 +59,7 @@ unsafe fn discover_physical_devices(instance: &ash::Instance) -> Result<Vec<Targ
         let pci_address = unsafe { vulkan_pci_address(instance, physical_device, &extensions) };
         targets.push(vulkan_target(
             index,
+            device_uuid,
             properties,
             &memory_properties,
             &queue_properties,
@@ -71,6 +73,7 @@ unsafe fn discover_physical_devices(instance: &ash::Instance) -> Result<Vec<Targ
 
 fn vulkan_target(
     index: usize,
+    device_uuid: [u8; vk::UUID_SIZE],
     properties: vk::PhysicalDeviceProperties,
     memory_properties: &vk::PhysicalDeviceMemoryProperties,
     queue_properties: &[vk::QueueFamilyProperties],
@@ -89,13 +92,7 @@ fn vulkan_target(
     let format_capabilities = vulkan_format_capabilities(&extension_names, &feature_flags);
     let memory_heaps = vulkan_memory_heaps(memory_properties);
     let queue_families = vulkan_queue_families(queue_properties);
-    let stable_target_id = vulkan_stable_target_id(
-        index,
-        &vendor_id,
-        &device_id,
-        &device_name,
-        pci_address.as_deref(),
-    );
+    let stable_target_id = vulkan_stable_target_id(&device_uuid);
     let has_compute = queue_families
         .iter()
         .any(|family| family.flags.iter().any(|flag| flag == "compute"));
@@ -116,7 +113,7 @@ fn vulkan_target(
     );
 
     Target {
-        stable_target_id,
+        stable_target_id: stable_target_id.clone(),
         backend: "vulkan".to_string(),
         kind: vulkan_target_kind(properties.device_type).to_string(),
         name: device_name.clone(),
@@ -128,7 +125,7 @@ fn vulkan_target(
             pci_address
                 .as_deref()
                 .map(|address| format!("pci:{address}"))
-                .unwrap_or_else(|| format!("vulkan:{index}")),
+                .unwrap_or_else(|| stable_target_id.clone()),
         ),
         numa_node: None,
         boot_vga: None,
@@ -211,21 +208,26 @@ unsafe fn vulkan_pci_address(
     ))
 }
 
-fn vulkan_stable_target_id(
-    index: usize,
-    vendor_id: &str,
-    device_id: &str,
-    device_name: &str,
-    pci_address: Option<&str>,
-) -> String {
-    pci_address
-        .map(|address| format!("vulkan:pci:{address}"))
-        .unwrap_or_else(|| {
-            format!(
-                "vulkan:{index}:{vendor_id}:{device_id}:{}",
-                stable_name_fragment(device_name)
-            )
-        })
+unsafe fn vulkan_device_uuid(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> [u8; vk::UUID_SIZE] {
+    let mut id = vk::PhysicalDeviceIDProperties::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+    unsafe {
+        instance.get_physical_device_properties2(physical_device, &mut properties);
+    }
+    id.device_uuid
+}
+
+fn vulkan_stable_target_id(device_uuid: &[u8; vk::UUID_SIZE]) -> String {
+    let mut id = String::with_capacity("vulkan-uuid:".len() + vk::UUID_SIZE * 2);
+    id.push_str("vulkan-uuid:");
+    for byte in device_uuid {
+        use std::fmt::Write as _;
+        write!(id, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    id
 }
 
 fn vulkan_unavailable_target(message: String) -> Target {
@@ -455,44 +457,19 @@ fn vendor_name(vendor_id: u32) -> &'static str {
     }
 }
 
-fn stable_name_fragment(name: &str) -> String {
-    let mut fragment = name
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    while fragment.contains("--") {
-        fragment = fragment.replace("--", "-");
-    }
-    fragment.trim_matches('-').to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn stable_name_fragments_are_target_id_safe() {
+    fn stable_target_ids_match_the_runtime_device_uuid_identity() {
+        let uuid = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+            0xdd, 0xee, 0xff,
+        ];
         assert_eq!(
-            stable_name_fragment("AMD Radeon RX 7900 XTX"),
-            "amd-radeon-rx-7900-xtx"
-        );
-    }
-
-    #[test]
-    fn stable_target_ids_prefer_pci_addresses() {
-        assert_eq!(
-            vulkan_stable_target_id(2, "0x1002", "0x744c", "AMD Radeon", Some("0000:03:00.0")),
-            "vulkan:pci:0000:03:00.0"
-        );
-        assert_eq!(
-            vulkan_stable_target_id(2, "0x1002", "0x744c", "AMD Radeon", None),
-            "vulkan:2:0x1002:0x744c:amd-radeon"
+            vulkan_stable_target_id(&uuid),
+            "vulkan-uuid:00112233445566778899aabbccddeeff"
         );
     }
 

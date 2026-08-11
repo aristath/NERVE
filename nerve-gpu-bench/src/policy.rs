@@ -123,13 +123,13 @@ mod tests {
         let targets = [
             target("cpu:host", "cpu", "cpu", None),
             target(
-                "vulkan:pci:0000:01:00.0",
+                "vulkan-uuid:11111111111111111111111111111111",
                 "vulkan",
                 "discrete_gpu",
                 Some("0000:01:00.0"),
             ),
             target(
-                "vulkan:pci:0000:02:00.0",
+                "vulkan-uuid:22222222222222222222222222222222",
                 "vulkan",
                 "integrated_gpu",
                 Some("0000:02:00.0"),
@@ -149,7 +149,10 @@ mod tests {
             execute: false,
         };
         let selection = apply_selection_policy(&targets, &policy);
-        assert_eq!(selection.selected_target_ids, ["vulkan:pci:0000:01:00.0"]);
+        assert_eq!(
+            selection.selected_target_ids,
+            ["vulkan-uuid:11111111111111111111111111111111"]
+        );
         assert_eq!(selection.skipped_targets.len(), 2);
         assert_eq!(
             selection
@@ -164,7 +167,10 @@ mod tests {
             selection
                 .skipped_targets
                 .iter()
-                .find(|target| target.stable_target_id == "vulkan:pci:0000:02:00.0")
+                .find(|target| {
+                    target.stable_target_id
+                        == "vulkan-uuid:22222222222222222222222222222222"
+                })
                 .unwrap()
                 .reason,
             "user_excluded_kind"
