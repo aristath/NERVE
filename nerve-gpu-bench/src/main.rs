@@ -15,6 +15,9 @@ use benchmark::{plan_benchmarks, run_benchmarks, validate_execution_coverage};
 use cli::{Command, parse_args};
 use discovery::discover_targets;
 use nerve_execution_contracts::{PHYSICAL_EXECUTION_CONTRACT_SCHEMA, PhysicalExecutionContract};
+use nerve_runtime::{
+    VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA, VulkanPlacementCalibrationCatalog,
+};
 use policy::apply_selection_policy;
 
 fn main() {
@@ -121,6 +124,10 @@ fn print_json_summary(payload: &str) -> Result<(), Box<dyn Error>> {
                 .map_err(|message| format!("invalid benchmark JSON: {message}"))?;
             print_placement_summary(&run)?;
         }
+        Some(VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA) => {
+            let catalog = VulkanPlacementCalibrationCatalog::from_json_slice(payload.as_bytes())?;
+            print_exact_calibration_summary(&catalog)?;
+        }
         Some(schema) => {
             return Err(format!("unsupported benchmark JSON schema {schema:?}").into());
         }
@@ -148,11 +155,36 @@ fn validate_json_document(payload: &str) -> Result<(), Box<dyn Error>> {
             let contract = serde_json::from_str::<PhysicalExecutionContract>(payload)?;
             contract.validate()?;
         }
+        Some(VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA) => {
+            VulkanPlacementCalibrationCatalog::from_json_slice(payload.as_bytes())?;
+        }
         Some(schema) => {
             return Err(format!("unsupported benchmark JSON schema {schema:?}").into());
         }
         None => return Err("missing benchmark JSON schema".into()),
     }
+    Ok(())
+}
+
+fn print_exact_calibration_summary(
+    catalog: &VulkanPlacementCalibrationCatalog,
+) -> Result<(), Box<dyn Error>> {
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "schema: {}",
+        VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA
+    )?;
+    writeln!(
+        stdout,
+        "canonical_references: {}",
+        catalog.reference_count()
+    )?;
+    writeln!(
+        stdout,
+        "output_valid_observations: {}",
+        catalog.observation_count()
+    )?;
     Ok(())
 }
 
@@ -306,6 +338,7 @@ fn format_link(target: &model::Target) -> String {
 #[cfg(test)]
 mod tests {
     use super::{resolve_max_group_size, validate_json_document};
+    use nerve_runtime::VulkanPlacementCalibrationCatalog;
 
     #[test]
     fn omitted_group_cap_uses_every_selected_target() {
@@ -325,5 +358,30 @@ mod tests {
             "../../execution-contracts/fixtures/tensor_parallel_projection.json"
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn benchmark_accepts_the_runtime_exact_calibration_catalog() {
+        let payload = VulkanPlacementCalibrationCatalog::default()
+            .to_json_bytes()
+            .unwrap();
+        validate_json_document(std::str::from_utf8(&payload).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn benchmark_rejects_a_stale_runtime_calibration_schema() {
+        let payload = VulkanPlacementCalibrationCatalog::default()
+            .to_json_bytes()
+            .unwrap();
+        let mut document = serde_json::from_slice::<serde_json::Value>(&payload).unwrap();
+        document["schema"] =
+            serde_json::Value::String("nerve.vulkan_placement_calibration_catalog.v1".to_string());
+
+        assert!(
+            validate_json_document(&serde_json::to_string(&document).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
     }
 }

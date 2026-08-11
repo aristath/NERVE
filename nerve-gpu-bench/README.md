@@ -111,5 +111,13 @@ cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- summarize \
   --input nerve-gpu-bench/placement-benchmark.json
 ```
 
+The validator and summarizer also accept NERVE's exact
+`nerve.vulkan_placement_calibration_catalog.v2` catalogs. Those catalogs retain
+compiler artifact, contract, phase, geometry, device UUID, driver, shard,
+owner, endpoint, transport, resource, output, and state identity. They are the
+only benchmark artifacts intended for future automatic placement consumption;
+the compact `nerve.placement_bench` ranking remains historical hardware
+evidence.
+
 The final JSON contains completed, validated comparisons only. A missing target
 or combination was not a usable measured path.
