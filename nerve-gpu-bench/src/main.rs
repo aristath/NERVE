@@ -4,15 +4,17 @@ mod discovery;
 mod model;
 mod policy;
 mod vulkan_exec;
+mod vulkan_features;
 mod vulkan_probe;
 
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 
-use benchmark::{plan_benchmarks, run_benchmarks};
+use benchmark::{plan_benchmarks, run_benchmarks, validate_execution_coverage};
 use cli::{Command, parse_args};
 use discovery::discover_targets;
+use model::MAX_PLACEMENT_GROUP_SIZE;
 use policy::apply_selection_policy;
 
 fn main() {
@@ -62,7 +64,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             execute,
         } => {
             let targets = discover_targets();
-            let policy = model::RunPolicy {
+            let mut policy = model::RunPolicy {
                 payload_bytes,
                 samples,
                 benchmark_formats,
@@ -72,16 +74,20 @@ fn run() -> Result<(), Box<dyn Error>> {
                 exclude_pci,
                 exclude_kinds,
                 pair_measurements: pairs,
-                max_group_size,
+                max_group_size: max_group_size.unwrap_or(MAX_PLACEMENT_GROUP_SIZE),
                 execute,
             };
             let selection = apply_selection_policy(&targets, &policy);
+            policy.max_group_size =
+                resolve_max_group_size(max_group_size, selection.selected_target_ids.len());
             let payload = if dry_plan {
                 plan_benchmarks(targets, selection, policy).to_json_pretty()?
             } else {
-                run_benchmarks(targets, selection, policy)
-                    .to_placement_benchmark()
-                    .to_json()?
+                let run = run_benchmarks(targets, selection, policy);
+                validate_execution_coverage(&run)?;
+                let placement = run.to_placement_benchmark();
+                placement.validate_basic()?;
+                placement.to_json()?
             };
             if let Some(path) = output {
                 fs::write(path, payload.as_bytes())?;
@@ -91,6 +97,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn resolve_max_group_size(requested: Option<usize>, selected_target_count: usize) -> usize {
+    requested
+        .unwrap_or(MAX_PLACEMENT_GROUP_SIZE)
+        .min(MAX_PLACEMENT_GROUP_SIZE)
+        .min(selected_target_count)
+        .max(1)
 }
 
 fn print_json_summary(payload: &str) -> Result<(), Box<dyn Error>> {
@@ -143,8 +157,15 @@ fn print_placement_summary(run: &model::PlacementBenchmark) -> Result<(), Box<dy
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "schema: {}", run.schema)?;
     writeln!(stdout, "payload_bytes: {}", run.payload_bytes)?;
-    writeln!(stdout, "samples: {}", run.samples)?;
-    writeln!(stdout, "results: {}", run.results.len())?;
+    writeln!(stdout, "formats: {}", run.formats.len())?;
+    for (format, ranking) in &run.formats {
+        writeln!(
+            stdout,
+            "  {format}: placements={} serial={}",
+            ranking.placements.len(),
+            ranking.serial.len()
+        )?;
+    }
     Ok(())
 }
 
@@ -275,5 +296,22 @@ fn format_link(target: &model::Target) -> String {
         (Some(speed), None, _) => speed.to_string(),
         (None, Some(width), _) => format!("x{width}"),
         _ => "-".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_max_group_size;
+
+    #[test]
+    fn omitted_group_cap_uses_at_most_four_selected_targets() {
+        assert_eq!(resolve_max_group_size(None, 8), 4);
+        assert_eq!(resolve_max_group_size(None, 3), 3);
+    }
+
+    #[test]
+    fn explicit_group_cap_is_bounded_by_selected_targets() {
+        assert_eq!(resolve_max_group_size(Some(4), 8), 4);
+        assert_eq!(resolve_max_group_size(Some(12), 8), 4);
     }
 }

@@ -1,28 +1,46 @@
 use std::ffi::CString;
 use std::hint::black_box;
 use std::mem;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::ptr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use ash::{Entry, vk};
 
 use crate::benchmark::{
-    activation_bytes_for_payload, format_workload_id, output_bytes_for_payload,
-    single_target_status_measurement, single_target_status_measurements,
+    MULTI_TARGET_TENSOR_PARALLEL_STRATEGY, activation_bytes_for_payload, component_chain_regime,
+    format_workload_id, output_bytes_for_payload, single_target_status_measurement,
+    single_target_status_measurements, target_index_combinations, targets_support_tensor_parallel,
+    tensor_parallel_group_pattern, tensor_parallel_group_workload_id,
 };
-use crate::model::{GroupMeasurement, Measurement, PairMeasurement, Sample, Summary, Target};
+use crate::model::{
+    GroupMeasurement, MAX_PLACEMENT_GROUP_SIZE, Measurement, PairMeasurement, Sample, Summary,
+    Target,
+};
+use crate::vulkan_features::{
+    MIXED_FLOAT_DOT_PRODUCT_NAME, MixedFloatDotProductFeatures, NATIVE_FP8_DOT_FEATURE,
+    SHADER_FLOAT8_NAME, ShaderFloat8Features, external_timeline_semaphore_supported,
+};
 
 const F32_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_router_reduction.spv");
 const F32_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/f32_gemm.spv");
+const F16_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_gemm.spv");
 const F16_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/f16_router_reduction.spv");
 const INT8_ROUTER_REDUCTION_SHADER_SPV: &[u8] = include_bytes!("shaders/int8_router_reduction.spv");
 const FORMAT_DEQUANT_SHADER_SPV: &[u8] = include_bytes!("shaders/format_dequant.spv");
 const FORMAT_DEQUANT_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/format_dequant_gemm.spv");
-const TENSOR_PARALLEL_SYNTHETIC_LAYERS: usize = 4;
+const KV_CACHE_SHADER_SPV: &[u8] = include_bytes!("shaders/kv_cache.spv");
+const TP_FORMAT_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/tp_format_gemm.spv");
+const TP_F16_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/tp_f16_gemm.spv");
+const NATIVE_FP8_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/native_fp8_gemm.spv");
+const TP_NATIVE_FP8_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/tp_native_fp8_gemm.spv");
+const MAX_VULKAN_WAIT_NS: u64 = 10_000_000_000;
 const TENSOR_PARALLEL_PAIR_PATTERN: &str = "synthetic_tensor_parallel_small_payload";
-const TENSOR_PARALLEL_TRIPLET_PATTERN: &str = "synthetic_tensor_parallel_group_small_payload";
 const TWO_TARGET_TENSOR_PARALLEL_STRATEGY: &str = "two_target_tensor_parallel";
-const THREE_TARGET_TENSOR_PARALLEL_STRATEGY: &str = "three_target_tensor_parallel";
+const SINGLE_COMPONENT_REGIME: &str = "single_component";
+const TWO_COMPONENT_CHAIN_REGIME: &str = "two_component_chain";
+const MOE_SELECTED_EXPERTS: usize = 6;
 
 #[derive(Clone, Copy)]
 enum ShaderCode {
@@ -31,29 +49,202 @@ enum ShaderCode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KernelShape {
-    Elementwise,
+    RouterReduction,
     F32Gemm,
     PackedGemm,
+    KvCache,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KernelWorkload {
+    DenseProjection,
+    MoeExpert,
+    KvCache,
+    RouterReduction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WeightLayout {
+    Plain,
+    Bf16Scaled { group_size: usize },
+    E8m0Scaled { group_size: usize },
+    NerveQ8_0,
 }
 
 #[derive(Clone)]
 struct DenseFormatKernel {
     format: String,
     shader: ShaderCode,
+    execution_path: &'static str,
     bytes_per_storage_element: usize,
     logical_elements_per_storage_element: u64,
-    operations_per_storage_element: u64,
     pattern: &'static str,
     required_feature: Option<&'static str>,
     format_kind: u32,
     shape: KernelShape,
+    workload: KernelWorkload,
+    weight_layout: WeightLayout,
+    phase: &'static str,
+    batch_size: usize,
+}
+
+fn kernel_identity(kernel: &DenseFormatKernel) -> String {
+    let base = format!(
+        "{}:{}:phase={}",
+        kernel.execution_path, kernel.pattern, kernel.phase
+    );
+    if matches!(
+        kernel.shape,
+        KernelShape::F32Gemm | KernelShape::PackedGemm | KernelShape::KvCache
+    ) {
+        format!("{base}:activation=bf16:output=bf16")
+    } else {
+        base
+    }
 }
 
 fn workload_format_kernel(workload_class: &str, format: &str) -> Option<DenseFormatKernel> {
-    match workload_class {
+    let family = workload_family(workload_class)?;
+    let mut kernel = match family {
         "dense_projection" => dense_format_kernel(format),
         "moe_expert" => moe_expert_kernel(format),
+        "kv_cache" => kv_cache_kernel(format),
         "router_reduction" => router_reduction_kernel(format),
+        _ => None,
+    }?;
+    kernel.workload = match family {
+        "dense_projection" => KernelWorkload::DenseProjection,
+        "moe_expert" => KernelWorkload::MoeExpert,
+        "kv_cache" => KernelWorkload::KvCache,
+        "router_reduction" => KernelWorkload::RouterReduction,
+        _ => return None,
+    };
+    kernel.phase = workload_phase(workload_class)?;
+    kernel.batch_size = workload_batch_size(workload_class)?;
+    Some(kernel)
+}
+
+fn workload_format_kernel_for_devices(
+    workload_class: &str,
+    format: &str,
+    devices: &[&OpenVulkanComputeDevice],
+) -> Option<DenseFormatKernel> {
+    let family = workload_family(workload_class)?;
+    let phase = workload_phase(workload_class)?;
+    let batch_size = workload_batch_size(workload_class)?;
+    if family == "router_reduction"
+        && format == "f16"
+        && devices
+            .iter()
+            .any(|device| !feature_flags_include(&device.feature_flags, "shader_float16"))
+    {
+        let mut kernel =
+            format_dequant_workload_kernel("f16", "router_reduction_f16_dequant_compute")?;
+        kernel.phase = phase;
+        kernel.batch_size = batch_size;
+        return Some(kernel);
+    }
+    if family == "router_reduction"
+        && format == "int8"
+        && devices
+            .iter()
+            .any(|device| !feature_flags_include(&device.feature_flags, "shader_int8"))
+    {
+        let mut kernel =
+            format_dequant_workload_kernel("int8", "router_reduction_int8_dequant_compute")?;
+        kernel.phase = phase;
+        kernel.batch_size = batch_size;
+        return Some(kernel);
+    }
+    if format == "f16"
+        && matches!(family, "dense_projection" | "moe_expert")
+        && devices
+            .iter()
+            .all(|device| feature_flags_include(&device.feature_flags, "shader_float16"))
+    {
+        return Some(DenseFormatKernel {
+            format: "f16".to_string(),
+            shader: ShaderCode::Bytes(F16_GEMM_SHADER_SPV),
+            execution_path: "native_f16",
+            bytes_per_storage_element: mem::size_of::<u32>(),
+            logical_elements_per_storage_element: 2,
+            pattern: if family == "moe_expert" {
+                "moe_expert_f16_native_gemm_compute"
+            } else {
+                "dense_projection_f16_native_gemm_compute"
+            },
+            required_feature: Some("shader_float16"),
+            format_kind: 17,
+            shape: KernelShape::PackedGemm,
+            workload: if family == "moe_expert" {
+                KernelWorkload::MoeExpert
+            } else {
+                KernelWorkload::DenseProjection
+            },
+            weight_layout: WeightLayout::Plain,
+            phase,
+            batch_size,
+        });
+    }
+    if matches!(format, "fp8" | "fp8_e4m3" | "mxfp4")
+        && matches!(family, "dense_projection" | "moe_expert")
+        && devices
+            .iter()
+            .all(|device| feature_flags_include(&device.feature_flags, NATIVE_FP8_DOT_FEATURE))
+    {
+        let mut kernel = match family {
+            "dense_projection" => dense_format_kernel(format),
+            "moe_expert" => moe_expert_kernel(format),
+            _ => None,
+        }?;
+        kernel.shader = ShaderCode::Bytes(NATIVE_FP8_GEMM_SHADER_SPV);
+        kernel.execution_path = NATIVE_FP8_DOT_FEATURE;
+        kernel.pattern = native_fp8_pattern(family, format)?;
+        kernel.required_feature = Some(NATIVE_FP8_DOT_FEATURE);
+        kernel.phase = phase;
+        kernel.batch_size = batch_size;
+        return Some(kernel);
+    }
+    workload_format_kernel(workload_class, format)
+}
+
+fn native_fp8_pattern(family: &str, format: &str) -> Option<&'static str> {
+    match (family, format) {
+        ("dense_projection", "fp8" | "fp8_e4m3") => {
+            Some("dense_projection_fp8_e4m3_native_dot_compute")
+        }
+        ("dense_projection", "mxfp4") => Some("dense_projection_mxfp4_native_dot_compute"),
+        ("moe_expert", "fp8" | "fp8_e4m3") => Some("moe_expert_fp8_e4m3_native_dot_compute"),
+        ("moe_expert", "mxfp4") => Some("moe_expert_mxfp4_native_dot_compute"),
+        _ => None,
+    }
+}
+
+fn workload_family(workload: &str) -> Option<&'static str> {
+    [
+        "dense_projection",
+        "moe_expert",
+        "kv_cache",
+        "router_reduction",
+    ]
+    .into_iter()
+    .find(|family| workload == *family || workload.starts_with(&format!("{family}_")))
+}
+
+fn workload_phase(workload: &str) -> Option<&'static str> {
+    if workload.ends_with("_decode") {
+        Some("decode")
+    } else if workload.ends_with("_prefill") || workload_family(workload).is_some() {
+        Some("prefill")
+    } else {
+        None
+    }
+}
+
+fn workload_batch_size(workload: &str) -> Option<usize> {
+    match workload_phase(workload)? {
+        "decode" => Some(1),
+        "prefill" => Some(16),
         _ => None,
     }
 }
@@ -63,121 +254,80 @@ fn dense_format_kernel(format: &str) -> Option<DenseFormatKernel> {
         "f32" => Some(DenseFormatKernel {
             format: "f32".to_string(),
             shader: ShaderCode::Bytes(F32_GEMM_SHADER_SPV),
+            execution_path: "native_f32",
             bytes_per_storage_element: mem::size_of::<f32>(),
             logical_elements_per_storage_element: 1,
-            operations_per_storage_element: 0,
             pattern: "dense_projection_f32_gemm_compute",
             required_feature: None,
             format_kind: 0,
             shape: KernelShape::F32Gemm,
+            workload: KernelWorkload::DenseProjection,
+            weight_layout: WeightLayout::Plain,
+            phase: "prefill",
+            batch_size: 16,
         }),
         "f16" => Some(format_dequant_gemm_kernel(
             "f16",
             2,
             17,
+            WeightLayout::Plain,
             "dense_projection_f16_gemm_compute",
         )),
         "bf16" => Some(format_dequant_gemm_kernel(
             "bf16",
             2,
             1,
+            WeightLayout::Plain,
             "dense_projection_bf16_gemm_compute",
         )),
         "fp8" | "fp8_e4m3" => Some(format_dequant_gemm_kernel(
             format,
             4,
             2,
+            WeightLayout::Bf16Scaled { group_size: 128 },
             "dense_projection_fp8_e4m3_gemm_compute",
         )),
         "fp8_e5m2" => Some(format_dequant_gemm_kernel(
             format,
             4,
             3,
+            WeightLayout::Bf16Scaled { group_size: 128 },
             "dense_projection_fp8_e5m2_gemm_compute",
         )),
         "int8" => Some(format_dequant_gemm_kernel(
             "int8",
             4,
             8,
+            WeightLayout::Plain,
             "dense_projection_int8_gemm_compute",
         )),
         "q8_0" => Some(format_dequant_gemm_kernel(
             format,
-            4,
-            8,
+            32,
+            18,
+            WeightLayout::NerveQ8_0,
             "dense_projection_q8_0_gemm_compute",
-        )),
-        "q6_k" => Some(format_dequant_gemm_kernel(
-            format,
-            5,
-            9,
-            "dense_projection_q6_k_gemm_compute",
-        )),
-        "q5_0" | "q5_1" | "q5_k" => Some(format_dequant_gemm_kernel(
-            format,
-            6,
-            10,
-            "dense_projection_q5_gemm_compute",
         )),
         "int4" => Some(format_dequant_gemm_kernel(
             format,
             8,
             7,
+            WeightLayout::Bf16Scaled { group_size: 128 },
             "dense_projection_int4_gemm_compute",
-        )),
-        "q4_0" | "q4_1" | "q4_k" => Some(format_dequant_gemm_kernel(
-            format,
-            8,
-            11,
-            "dense_projection_q4_gemm_compute",
-        )),
-        "q3_k" => Some(format_dequant_gemm_kernel(
-            format,
-            10,
-            12,
-            "dense_projection_q3_k_gemm_compute",
-        )),
-        "q2_k" => Some(format_dequant_gemm_kernel(
-            format,
-            16,
-            13,
-            "dense_projection_q2_k_gemm_compute",
-        )),
-        "iq4_nl" | "iq4_xs" => Some(format_dequant_gemm_kernel(
-            format,
-            8,
-            14,
-            "dense_projection_iq4_gemm_compute",
-        )),
-        "iq3_s" => Some(format_dequant_gemm_kernel(
-            format,
-            10,
-            15,
-            "dense_projection_iq3_s_gemm_compute",
-        )),
-        "iq2_xs" => Some(format_dequant_gemm_kernel(
-            format,
-            16,
-            16,
-            "dense_projection_iq2_xs_gemm_compute",
         )),
         "fp4" => Some(format_dequant_gemm_kernel(
             "fp4",
             8,
             4,
+            WeightLayout::Plain,
             "dense_projection_fp4_gemm_compute",
         )),
         "mxfp4" => Some(format_dequant_gemm_kernel(
             format,
             8,
             5,
+            WeightLayout::E8m0Scaled { group_size: 32 },
             "dense_projection_mxfp4_gemm_compute",
-        )),
-        "nvfp4" => Some(format_dequant_gemm_kernel(
-            format,
-            8,
-            6,
-            "dense_projection_nvfp4_gemm_compute",
         )),
         _ => None,
     }
@@ -191,13 +341,27 @@ fn format_dequant_kernel(
     DenseFormatKernel {
         format: format.to_string(),
         shader: ShaderCode::Bytes(FORMAT_DEQUANT_SHADER_SPV),
+        execution_path: "dequant_f32",
         bytes_per_storage_element: mem::size_of::<u32>(),
         logical_elements_per_storage_element,
-        operations_per_storage_element: logical_elements_per_storage_element * 8,
         pattern: "single_target_format_dequant_compute",
         required_feature: None,
         format_kind,
-        shape: KernelShape::Elementwise,
+        shape: KernelShape::RouterReduction,
+        workload: KernelWorkload::RouterReduction,
+        weight_layout: weight_layout_for_format(format),
+        phase: "prefill",
+        batch_size: 16,
+    }
+}
+
+fn weight_layout_for_format(format: &str) -> WeightLayout {
+    match format {
+        "fp8" | "fp8_e4m3" | "fp8_e5m2" => WeightLayout::Bf16Scaled { group_size: 128 },
+        "mxfp4" => WeightLayout::E8m0Scaled { group_size: 32 },
+        "int4" => WeightLayout::Bf16Scaled { group_size: 128 },
+        "q8_0" => WeightLayout::NerveQ8_0,
+        _ => WeightLayout::Plain,
     }
 }
 
@@ -205,44 +369,55 @@ fn format_dequant_gemm_kernel(
     format: &str,
     logical_elements_per_storage_element: u64,
     format_kind: u32,
+    weight_layout: WeightLayout,
     pattern: &'static str,
 ) -> DenseFormatKernel {
     DenseFormatKernel {
         format: format.to_string(),
         shader: ShaderCode::Bytes(FORMAT_DEQUANT_GEMM_SHADER_SPV),
+        execution_path: "dequant_f32",
         bytes_per_storage_element: mem::size_of::<u32>(),
         logical_elements_per_storage_element,
-        operations_per_storage_element: 0,
         pattern,
         required_feature: None,
         format_kind,
         shape: KernelShape::PackedGemm,
+        workload: KernelWorkload::DenseProjection,
+        weight_layout,
+        phase: "prefill",
+        batch_size: 16,
     }
 }
 
 fn moe_expert_kernel(format: &str) -> Option<DenseFormatKernel> {
-    match format {
+    let mut kernel = match format {
         "f32" => Some(DenseFormatKernel {
             format: "f32".to_string(),
             shader: ShaderCode::Bytes(F32_GEMM_SHADER_SPV),
+            execution_path: "native_f32",
             bytes_per_storage_element: mem::size_of::<f32>(),
             logical_elements_per_storage_element: 1,
-            operations_per_storage_element: 0,
             pattern: "moe_expert_f32_gemm_compute",
             required_feature: None,
             format_kind: 0,
             shape: KernelShape::F32Gemm,
+            workload: KernelWorkload::MoeExpert,
+            weight_layout: WeightLayout::Plain,
+            phase: "prefill",
+            batch_size: 16,
         }),
         "f16" => Some(format_dequant_gemm_kernel(
             "f16",
             2,
             17,
+            WeightLayout::Plain,
             "moe_expert_f16_gemm_compute",
         )),
         "int8" => Some(format_dequant_gemm_kernel(
             "int8",
             4,
             8,
+            WeightLayout::Plain,
             "moe_expert_int8_gemm_compute",
         )),
         _ => dense_format_kernel(format).map(|base| DenseFormatKernel {
@@ -252,22 +427,33 @@ fn moe_expert_kernel(format: &str) -> Option<DenseFormatKernel> {
                 "fp8_e5m2" => "moe_expert_fp8_e5m2_gemm_compute",
                 "fp4" => "moe_expert_fp4_gemm_compute",
                 "mxfp4" => "moe_expert_mxfp4_gemm_compute",
-                "nvfp4" => "moe_expert_nvfp4_gemm_compute",
                 "int4" => "moe_expert_int4_gemm_compute",
                 "q8_0" => "moe_expert_q8_0_gemm_compute",
-                "q6_k" => "moe_expert_q6_k_gemm_compute",
-                "q5_0" | "q5_1" | "q5_k" => "moe_expert_q5_gemm_compute",
-                "q4_0" | "q4_1" | "q4_k" => "moe_expert_q4_gemm_compute",
-                "q3_k" => "moe_expert_q3_k_gemm_compute",
-                "q2_k" => "moe_expert_q2_k_gemm_compute",
-                "iq4_nl" | "iq4_xs" => "moe_expert_iq4_gemm_compute",
-                "iq3_s" => "moe_expert_iq3_s_gemm_compute",
-                "iq2_xs" => "moe_expert_iq2_xs_gemm_compute",
                 _ => base.pattern,
             },
             ..base
         }),
-    }
+    }?;
+    kernel.workload = KernelWorkload::MoeExpert;
+    Some(kernel)
+}
+
+fn kv_cache_kernel(format: &str) -> Option<DenseFormatKernel> {
+    (format == "bf16").then(|| DenseFormatKernel {
+        format: "bf16".to_string(),
+        shader: ShaderCode::Bytes(KV_CACHE_SHADER_SPV),
+        execution_path: "native_bf16_state",
+        bytes_per_storage_element: mem::size_of::<u32>(),
+        logical_elements_per_storage_element: 2,
+        pattern: "kv_cache_context_read_append",
+        required_feature: None,
+        format_kind: 1,
+        shape: KernelShape::KvCache,
+        workload: KernelWorkload::KvCache,
+        weight_layout: WeightLayout::Plain,
+        phase: "prefill",
+        batch_size: 16,
+    })
 }
 
 fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
@@ -275,258 +461,388 @@ fn router_reduction_kernel(format: &str) -> Option<DenseFormatKernel> {
         "f32" => Some(DenseFormatKernel {
             format: "f32".to_string(),
             shader: ShaderCode::Bytes(F32_ROUTER_REDUCTION_SHADER_SPV),
+            execution_path: "native_f32",
             bytes_per_storage_element: mem::size_of::<f32>(),
             logical_elements_per_storage_element: 1,
-            operations_per_storage_element: 8,
             pattern: "router_reduction_compute",
             required_feature: None,
             format_kind: 0,
-            shape: KernelShape::Elementwise,
+            shape: KernelShape::RouterReduction,
+            workload: KernelWorkload::RouterReduction,
+            weight_layout: WeightLayout::Plain,
+            phase: "prefill",
+            batch_size: 16,
         }),
         "f16" => Some(DenseFormatKernel {
             format: "f16".to_string(),
             shader: ShaderCode::Bytes(F16_ROUTER_REDUCTION_SHADER_SPV),
+            execution_path: "native_f16",
             bytes_per_storage_element: mem::size_of::<u32>(),
             logical_elements_per_storage_element: 2,
-            operations_per_storage_element: 10,
             pattern: "router_reduction_f16_native_compute",
             required_feature: Some("shader_float16"),
             format_kind: 0,
-            shape: KernelShape::Elementwise,
+            shape: KernelShape::RouterReduction,
+            workload: KernelWorkload::RouterReduction,
+            weight_layout: WeightLayout::Plain,
+            phase: "prefill",
+            batch_size: 16,
         }),
         "int8" => Some(DenseFormatKernel {
             format: "int8".to_string(),
             shader: ShaderCode::Bytes(INT8_ROUTER_REDUCTION_SHADER_SPV),
+            execution_path: "native_int8",
             bytes_per_storage_element: mem::size_of::<u32>(),
             logical_elements_per_storage_element: 4,
-            operations_per_storage_element: 12,
             pattern: "router_reduction_int8_native_compute",
             required_feature: Some("shader_int8"),
             format_kind: 0,
-            shape: KernelShape::Elementwise,
+            shape: KernelShape::RouterReduction,
+            workload: KernelWorkload::RouterReduction,
+            weight_layout: WeightLayout::Plain,
+            phase: "prefill",
+            batch_size: 16,
         }),
-        _ => format_dequant_workload_kernel(format, "router_reduction_format_dequant_compute", 8),
+        _ => format_dequant_workload_kernel(format, "router_reduction_format_dequant_compute"),
     }
 }
 
 fn format_dequant_workload_kernel(
     format: &str,
     pattern: &'static str,
-    operation_multiplier: u64,
 ) -> Option<DenseFormatKernel> {
-    format_dequant_elementwise_kernel(format).map(|base| DenseFormatKernel {
-        operations_per_storage_element: base.logical_elements_per_storage_element
-            * operation_multiplier,
-        pattern,
-        ..base
-    })
+    format_dequant_elementwise_kernel(format).map(|base| DenseFormatKernel { pattern, ..base })
 }
 
 fn format_dequant_elementwise_kernel(format: &str) -> Option<DenseFormatKernel> {
     match format {
+        "f16" => Some(format_dequant_kernel("f16", 2, 17)),
         "bf16" => Some(format_dequant_kernel("bf16", 2, 1)),
         "fp8" | "fp8_e4m3" => Some(format_dequant_kernel(format, 4, 2)),
         "fp8_e5m2" => Some(format_dequant_kernel(format, 4, 3)),
-        "q8_0" => Some(format_dequant_kernel(format, 4, 8)),
-        "q6_k" => Some(format_dequant_kernel(format, 5, 9)),
-        "q5_0" | "q5_1" | "q5_k" => Some(format_dequant_kernel(format, 6, 10)),
+        "int8" => Some(format_dequant_kernel("int8", 4, 8)),
+        "q8_0" => Some(format_dequant_kernel(format, 32, 18)),
         "int4" => Some(format_dequant_kernel(format, 8, 7)),
-        "q4_0" | "q4_1" | "q4_k" => Some(format_dequant_kernel(format, 8, 11)),
-        "q3_k" => Some(format_dequant_kernel(format, 10, 12)),
-        "q2_k" => Some(format_dequant_kernel(format, 16, 13)),
-        "iq4_nl" | "iq4_xs" => Some(format_dequant_kernel(format, 8, 14)),
-        "iq3_s" => Some(format_dequant_kernel(format, 10, 15)),
-        "iq2_xs" => Some(format_dequant_kernel(format, 16, 16)),
         "fp4" => Some(format_dequant_kernel("fp4", 8, 4)),
         "mxfp4" => Some(format_dequant_kernel(format, 8, 5)),
-        "nvfp4" => Some(format_dequant_kernel(format, 8, 6)),
         _ => None,
     }
 }
 
-pub fn run_vulkan_single_target_measurements(
-    target: &Target,
-    payload_bytes: usize,
-    samples: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<Measurement> {
-    match open_compute_device(target) {
-        Ok(device) => vulkan_measurements(
-            &device,
-            &target.stable_target_id,
-            payload_bytes,
-            samples,
-            formats,
-            workloads,
-        ),
-        Err(message) => single_target_status_measurements(
-            &target.stable_target_id,
-            payload_bytes,
-            formats,
-            workloads,
-            "failed",
-            &message,
-        ),
-    }
+pub struct VulkanBenchmarkResults {
+    pub measurements: Vec<Measurement>,
+    pub pair_measurements: Vec<PairMeasurement>,
+    pub group_measurements: Vec<GroupMeasurement>,
 }
 
-pub fn run_vulkan_pair_measurements(
+pub fn run_vulkan_benchmarks(
     targets: &[&Target],
     payload_bytes: usize,
     samples: usize,
     formats: &[String],
     workloads: &[String],
-) -> Vec<PairMeasurement> {
+    max_group_size: usize,
+) -> VulkanBenchmarkResults {
+    let opened = targets
+        .iter()
+        .map(|target| open_compute_device(target))
+        .collect::<Vec<_>>();
     let mut measurements = Vec::new();
-    for (source_index, source) in targets.iter().enumerate() {
-        for (destination_index, destination) in targets.iter().enumerate() {
-            if source.stable_target_id == destination.stable_target_id {
-                continue;
-            }
-            measurements.extend(run_vulkan_ordered_transfer_measurements(
-                source,
-                destination,
-                payload_bytes,
-                samples,
-                formats,
-                workloads,
-            ));
-            measurements.extend(run_vulkan_ordered_serial_pair_measurements(
-                source,
-                destination,
-                payload_bytes,
-                samples,
-                formats,
-                workloads,
-            ));
-            if source_index < destination_index {
-                measurements.extend(run_vulkan_tensor_parallel_pair_measurements(
-                    source,
-                    destination,
+    let mut pair_measurements = Vec::new();
+    let mut group_measurements = Vec::new();
+
+    for (index, target) in targets.iter().enumerate() {
+        match &opened[index] {
+            Ok(device) => {
+                measurements.extend(vulkan_measurements(
+                    device,
+                    &target.stable_target_id,
                     payload_bytes,
                     samples,
                     formats,
                     workloads,
+                    max_group_size,
                 ));
+            }
+            Err(message) => {
+                measurements.extend(single_target_status_measurements(
+                    &target.stable_target_id,
+                    payload_bytes,
+                    formats,
+                    workloads,
+                    "failed",
+                    message,
+                ));
+                measurements.extend(formats.iter().flat_map(|format| {
+                    workloads.iter().filter_map(|workload| {
+                        supports_component_chain(workload).then(|| {
+                            single_target_status_measurement_for_regime(
+                                &target.stable_target_id,
+                                payload_bytes,
+                                workload,
+                                format,
+                                TWO_COMPONENT_CHAIN_REGIME,
+                                "failed",
+                                message,
+                            )
+                        })
+                    })
+                }));
             }
         }
     }
-    measurements
+
+    if max_group_size >= 2 {
+        for source_index in 0..targets.len() {
+            for destination_index in 0..targets.len() {
+                if source_index == destination_index {
+                    continue;
+                }
+                let source = targets[source_index];
+                let destination = targets[destination_index];
+                let tensor_parallel = targets_support_tensor_parallel(&[source, destination]);
+                match (&opened[source_index], &opened[destination_index]) {
+                    (Ok(source_device), Ok(destination_device)) => {
+                        pair_measurements.extend(opened_serial_pair_measurements(
+                            source_device,
+                            destination_device,
+                            &source.stable_target_id,
+                            &destination.stable_target_id,
+                            payload_bytes,
+                            samples,
+                            formats,
+                            workloads,
+                        ));
+                        if tensor_parallel {
+                            pair_measurements.extend(opened_tensor_parallel_pair_measurements(
+                                source_device,
+                                destination_device,
+                                &source.stable_target_id,
+                                &destination.stable_target_id,
+                                payload_bytes,
+                                samples,
+                                formats,
+                                workloads,
+                            ));
+                        }
+                    }
+                    (Err(message), _) | (_, Err(message)) => {
+                        pair_measurements.extend(failed_dense_pair_measurements(
+                            &source.stable_target_id,
+                            &destination.stable_target_id,
+                            "synthetic_layer_split_small_payload",
+                            "two_target_serial",
+                            payload_bytes,
+                            formats,
+                            workloads,
+                            message,
+                        ));
+                        if tensor_parallel {
+                            pair_measurements.extend(failed_dense_pair_measurements(
+                                &source.stable_target_id,
+                                &destination.stable_target_id,
+                                TENSOR_PARALLEL_PAIR_PATTERN,
+                                TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
+                                payload_bytes,
+                                formats,
+                                workloads,
+                                message,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let max_group_size = max_group_size
+        .min(MAX_PLACEMENT_GROUP_SIZE)
+        .min(targets.len());
+    if max_group_size >= 3 {
+        drop(opened);
+        for group_size in 3..=max_group_size {
+            for indices in target_index_combinations(targets.len(), group_size) {
+                let group = indices
+                    .iter()
+                    .map(|index| targets[*index])
+                    .collect::<Vec<_>>();
+                if !targets_support_tensor_parallel(&group) {
+                    continue;
+                }
+                for owner in 0..group_size {
+                    let mut ordered_targets = Vec::with_capacity(group_size);
+                    ordered_targets.push(targets[indices[owner]]);
+                    ordered_targets.extend(
+                        indices
+                            .iter()
+                            .copied()
+                            .enumerate()
+                            .filter(|(index, _)| *index != owner)
+                            .map(|(_, target_index)| targets[target_index]),
+                    );
+                    // Bound driver object lifetime to one placement candidate. Some drivers retain
+                    // destroyed command resources until the logical device itself is destroyed.
+                    let candidate_devices = ordered_targets
+                        .iter()
+                        .map(|target| open_compute_device(target))
+                        .collect::<Vec<_>>();
+                    let order = (0..group_size).collect::<Vec<_>>();
+                    group_measurements.extend(opened_tensor_parallel_group_measurements(
+                        &candidate_devices,
+                        &ordered_targets,
+                        &order,
+                        payload_bytes,
+                        samples,
+                        formats,
+                        workloads,
+                    ));
+                }
+            }
+        }
+    }
+
+    VulkanBenchmarkResults {
+        measurements,
+        pair_measurements,
+        group_measurements,
+    }
 }
 
-fn run_vulkan_ordered_transfer_measurements(
-    source: &Target,
-    destination: &Target,
+#[allow(clippy::too_many_arguments)]
+fn failed_dense_pair_measurements(
+    source_id: &str,
+    destination_id: &str,
+    workload_prefix: &str,
+    placement_strategy: &str,
     payload_bytes: usize,
-    samples: usize,
     formats: &[String],
     workloads: &[String],
+    reason: &str,
 ) -> Vec<PairMeasurement> {
-    let source_device = match open_compute_device(source) {
-        Ok(device) => device,
-        Err(message) => {
-            return failed_transfer_measurements(
-                &source.stable_target_id,
-                &destination.stable_target_id,
-                payload_bytes,
-                formats,
-                workloads,
-                &message,
-            );
-        }
-    };
-    let destination_device = match open_compute_device(destination) {
-        Ok(device) => device,
-        Err(message) => {
-            return failed_transfer_measurements(
-                &source.stable_target_id,
-                &destination.stable_target_id,
-                payload_bytes,
-                formats,
-                workloads,
-                &message,
-            );
-        }
-    };
     formats
         .iter()
         .flat_map(|format| {
-            workloads.iter().map(|workload| {
-                match run_host_staged_transfer(
-                    &source_device,
-                    &destination_device,
-                    &source.stable_target_id,
-                    &destination.stable_target_id,
-                    payload_bytes,
-                    samples,
-                    workload,
-                    format,
-                ) {
-                    Ok(measurement) => measurement,
-                    Err(message) => failed_transfer_measurement(
-                        &source.stable_target_id,
-                        &destination.stable_target_id,
+            workloads.iter().filter_map(move |workload| {
+                let executable = if placement_strategy == "two_target_serial" {
+                    supports_component_chain(workload)
+                } else {
+                    supports_tensor_parallel(workload)
+                };
+                if !executable {
+                    return None;
+                }
+                workload_format_kernel(workload, format).map(|_| {
+                    failed_dense_pair_measurement(
+                        source_id,
+                        destination_id,
+                        workload_prefix,
+                        placement_strategy,
                         payload_bytes,
                         workload,
                         format,
-                        &message,
-                    ),
+                        reason,
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn failed_dense_pair_measurement(
+    source_id: &str,
+    destination_id: &str,
+    workload_prefix: &str,
+    placement_strategy: &str,
+    payload_bytes: usize,
+    workload_class: &str,
+    format: &str,
+    reason: &str,
+) -> PairMeasurement {
+    dense_pair_status_measurement(
+        source_id,
+        destination_id,
+        workload_prefix,
+        placement_strategy,
+        "failed",
+        payload_bytes,
+        workload_class,
+        format,
+        reason,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dense_pair_status_measurement(
+    source_id: &str,
+    destination_id: &str,
+    workload_prefix: &str,
+    placement_strategy: &str,
+    status: &str,
+    payload_bytes: usize,
+    workload_class: &str,
+    format: &str,
+    reason: &str,
+) -> PairMeasurement {
+    let source_payload_bytes = payload_bytes / 2;
+    let destination_payload_bytes = payload_bytes - source_payload_bytes;
+    PairMeasurement {
+        workload_id: format_workload_id(workload_prefix, workload_class, format),
+        comparison_group: "small_payload_placement_comparison".to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: placement_strategy.to_string(),
+        source_target_id: source_id.to_string(),
+        destination_target_id: destination_id.to_string(),
+        pattern: workload_prefix.to_string(),
+        operation_family: workload_class.to_string(),
+        regime: if placement_strategy == "two_target_serial" {
+            TWO_COMPONENT_CHAIN_REGIME
+        } else {
+            SINGLE_COMPONENT_REGIME
+        }
+        .to_string(),
+        format: format.to_string(),
+        status: status.to_string(),
+        reason: Some(reason.to_string()),
+        payload_bytes,
+        source_payload_bytes,
+        destination_payload_bytes,
+        activation_bytes: activation_bytes_for_payload(payload_bytes),
+        output_bytes: output_bytes_for_payload(payload_bytes),
+        samples: Vec::new(),
+        summary: None,
+    }
+}
+
+fn opened_serial_pair_measurements(
+    source_device: &OpenVulkanComputeDevice,
+    destination_device: &OpenVulkanComputeDevice,
+    source_id: &str,
+    destination_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<PairMeasurement> {
+    formats
+        .iter()
+        .flat_map(|format| {
+            workloads.iter().filter_map(|workload| {
+                if !supports_component_chain(workload) {
+                    return None;
                 }
-            })
-        })
-        .collect()
-}
-
-fn run_vulkan_ordered_serial_pair_measurements(
-    source: &Target,
-    destination: &Target,
-    payload_bytes: usize,
-    samples: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<PairMeasurement> {
-    let source_device = match open_compute_device(source) {
-        Ok(device) => device,
-        Err(message) => {
-            return failed_dense_pair_measurements(
-                &source.stable_target_id,
-                &destination.stable_target_id,
-                "synthetic_layer_split_small_payload",
-                "two_target_serial",
-                payload_bytes,
-                formats,
-                workloads,
-                &message,
-            );
-        }
-    };
-    let destination_device = match open_compute_device(destination) {
-        Ok(device) => device,
-        Err(message) => {
-            return failed_dense_pair_measurements(
-                &source.stable_target_id,
-                &destination.stable_target_id,
-                "synthetic_layer_split_small_payload",
-                "two_target_serial",
-                payload_bytes,
-                formats,
-                workloads,
-                &message,
-            );
-        }
-    };
-    formats
-        .iter()
-        .flat_map(|format| {
-            workloads.iter().filter_map(|workload| {
-                workload_format_kernel(workload, format).map(|kernel| {
+                workload_format_kernel_for_devices(
+                    workload,
+                    format,
+                    &[source_device, destination_device],
+                )
+                .map(|kernel| {
                     if let Some(reason) =
-                        unsupported_kernel_reason(&kernel, &[&source_device, &destination_device])
+                        unsupported_kernel_reason(&kernel, &[source_device, destination_device])
                     {
                         return dense_pair_status_measurement(
-                            &source.stable_target_id,
-                            &destination.stable_target_id,
+                            source_id,
+                            destination_id,
                             "synthetic_layer_split_small_payload",
                             "two_target_serial",
                             "unsupported",
@@ -536,250 +852,155 @@ fn run_vulkan_ordered_serial_pair_measurements(
                             &reason,
                         );
                     }
-                    match run_vulkan_dense_serial_pair(
-                        &source_device,
-                        &destination_device,
-                        &source.stable_target_id,
-                        &destination.stable_target_id,
+                    run_vulkan_dense_serial_pair(
+                        source_device,
+                        destination_device,
+                        source_id,
+                        destination_id,
                         payload_bytes,
                         samples,
                         workload,
                         kernel,
-                    ) {
-                        Ok(measurement) => measurement,
-                        Err(message) => failed_dense_pair_measurement(
-                            &source.stable_target_id,
-                            &destination.stable_target_id,
+                    )
+                    .unwrap_or_else(|message| {
+                        failed_dense_pair_measurement(
+                            source_id,
+                            destination_id,
                             "synthetic_layer_split_small_payload",
                             "two_target_serial",
                             payload_bytes,
                             workload,
                             format,
                             &message,
-                        ),
-                    }
+                        )
+                    })
                 })
             })
         })
         .collect()
 }
 
-fn run_vulkan_tensor_parallel_pair_measurements(
-    left: &Target,
-    right: &Target,
+#[allow(clippy::too_many_arguments)]
+fn opened_tensor_parallel_pair_measurements(
+    left_device: &OpenVulkanComputeDevice,
+    right_device: &OpenVulkanComputeDevice,
+    left_id: &str,
+    right_id: &str,
     payload_bytes: usize,
     samples: usize,
     formats: &[String],
     workloads: &[String],
 ) -> Vec<PairMeasurement> {
-    let left_device = match open_compute_device(left) {
-        Ok(device) => device,
-        Err(message) => {
-            return failed_dense_pair_measurements(
-                &left.stable_target_id,
-                &right.stable_target_id,
-                TENSOR_PARALLEL_PAIR_PATTERN,
-                TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
-                payload_bytes,
-                formats,
-                workloads,
-                &message,
-            );
-        }
-    };
-    let right_device = match open_compute_device(right) {
-        Ok(device) => device,
-        Err(message) => {
-            return failed_dense_pair_measurements(
-                &left.stable_target_id,
-                &right.stable_target_id,
-                TENSOR_PARALLEL_PAIR_PATTERN,
-                TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
-                payload_bytes,
-                formats,
-                workloads,
-                &message,
-            );
-        }
-    };
     formats
         .iter()
         .flat_map(|format| {
             workloads.iter().filter_map(|workload| {
-                workload_format_kernel(workload, format).map(|kernel| {
-                    if let Some(reason) =
-                        unsupported_kernel_reason(&kernel, &[&left_device, &right_device])
-                    {
-                        return dense_pair_status_measurement(
-                            &left.stable_target_id,
-                            &right.stable_target_id,
-                            TENSOR_PARALLEL_PAIR_PATTERN,
-                            TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
-                            "unsupported",
+                if !supports_tensor_parallel(workload) {
+                    return None;
+                }
+                workload_format_kernel_for_devices(workload, format, &[left_device, right_device])
+                    .map(|kernel| {
+                        if let Some(reason) =
+                            unsupported_kernel_reason(&kernel, &[left_device, right_device])
+                        {
+                            return dense_pair_status_measurement(
+                                left_id,
+                                right_id,
+                                TENSOR_PARALLEL_PAIR_PATTERN,
+                                TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
+                                "unsupported",
+                                payload_bytes,
+                                workload,
+                                format,
+                                &reason,
+                            );
+                        }
+                        run_vulkan_dense_tensor_parallel_pair(
+                            left_device,
+                            right_device,
+                            left_id,
+                            right_id,
                             payload_bytes,
+                            samples,
                             workload,
-                            format,
-                            &reason,
-                        );
-                    }
-                    match run_vulkan_dense_tensor_parallel_pair(
-                        &left_device,
-                        &right_device,
-                        &left.stable_target_id,
-                        &right.stable_target_id,
-                        payload_bytes,
-                        samples,
-                        workload,
-                        kernel,
-                    ) {
-                        Ok(measurement) => measurement,
-                        Err(message) => failed_dense_pair_measurement(
-                            &left.stable_target_id,
-                            &right.stable_target_id,
-                            TENSOR_PARALLEL_PAIR_PATTERN,
-                            TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
-                            payload_bytes,
-                            workload,
-                            format,
-                            &message,
-                        ),
-                    }
-                })
+                            kernel,
+                        )
+                        .unwrap_or_else(|message| {
+                            failed_dense_pair_measurement(
+                                left_id,
+                                right_id,
+                                TENSOR_PARALLEL_PAIR_PATTERN,
+                                TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
+                                payload_bytes,
+                                workload,
+                                format,
+                                &message,
+                            )
+                        })
+                    })
             })
         })
         .collect()
 }
 
-pub fn run_vulkan_group_measurements(
+#[allow(clippy::too_many_arguments)]
+fn opened_tensor_parallel_group_measurements(
+    opened: &[Result<OpenVulkanComputeDevice, String>],
     targets: &[&Target],
+    order: &[usize],
     payload_bytes: usize,
     samples: usize,
     formats: &[String],
     workloads: &[String],
 ) -> Vec<GroupMeasurement> {
-    let mut measurements = Vec::new();
-    for first_index in 0..targets.len() {
-        for second_index in (first_index + 1)..targets.len() {
-            for third_index in (second_index + 1)..targets.len() {
-                measurements.extend(run_vulkan_triplet_measurements(
-                    targets[first_index],
-                    targets[second_index],
-                    targets[third_index],
-                    payload_bytes,
-                    samples,
-                    formats,
-                    workloads,
-                ));
+    let target_ids = order
+        .iter()
+        .map(|index| targets[*index].stable_target_id.clone())
+        .collect::<Vec<_>>();
+    let mut devices = Vec::with_capacity(order.len());
+    let mut open_error = None;
+    for index in order {
+        match &opened[*index] {
+            Ok(device) => devices.push(device),
+            Err(message) => {
+                open_error = Some(message.as_str());
+                break;
             }
         }
     }
-    measurements
-}
-
-fn run_vulkan_triplet_measurements(
-    first: &Target,
-    second: &Target,
-    third: &Target,
-    payload_bytes: usize,
-    samples: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<GroupMeasurement> {
-    let target_ids = [
-        first.stable_target_id.clone(),
-        second.stable_target_id.clone(),
-        third.stable_target_id.clone(),
-    ];
-    let first_device = match open_compute_device(first) {
-        Ok(device) => device,
-        Err(message) => {
-            return failed_triplet_measurements(
-                &target_ids,
-                payload_bytes,
-                formats,
-                workloads,
-                &message,
-            );
-        }
-    };
-    let second_device = match open_compute_device(second) {
-        Ok(device) => device,
-        Err(message) => {
-            return failed_triplet_measurements(
-                &target_ids,
-                payload_bytes,
-                formats,
-                workloads,
-                &message,
-            );
-        }
-    };
-    let third_device = match open_compute_device(third) {
-        Ok(device) => device,
-        Err(message) => {
-            return failed_triplet_measurements(
-                &target_ids,
-                payload_bytes,
-                formats,
-                workloads,
-                &message,
-            );
-        }
-    };
 
     formats
         .iter()
         .flat_map(|format| {
             workloads.iter().filter_map(|workload| {
-                workload_format_kernel(workload, format).map(|kernel| {
-                    if let Some(reason) = unsupported_kernel_reason(
-                        &kernel,
-                        &[&first_device, &second_device, &third_device],
-                    ) {
-                        return [
-                            triplet_status_measurement(
-                                &target_ids,
-                                "synthetic_layer_split_group_small_payload",
-                                "three_target_serial",
-                                "unsupported",
-                                payload_bytes,
-                                workload,
-                                format,
-                                &reason,
-                            ),
-                            triplet_status_measurement(
-                                &target_ids,
-                                TENSOR_PARALLEL_TRIPLET_PATTERN,
-                                THREE_TARGET_TENSOR_PARALLEL_STRATEGY,
-                                "unsupported",
-                                payload_bytes,
-                                workload,
-                                format,
-                                &reason,
-                            ),
-                        ];
-                    }
-                    let serial = run_vulkan_dense_serial_triplet(
-                        [&first_device, &second_device, &third_device],
-                        &target_ids,
-                        payload_bytes,
-                        samples,
-                        workload,
-                        kernel.clone(),
-                    )
-                    .unwrap_or_else(|message| {
-                        failed_triplet_measurement(
+                if !supports_tensor_parallel(workload) {
+                    return None;
+                }
+                if let Some(message) = open_error {
+                    return workload_format_kernel(workload, format).map(|_| {
+                        tensor_parallel_group_status_measurement(
                             &target_ids,
-                            "synthetic_layer_split_group_small_payload",
-                            "three_target_serial",
+                            "failed",
                             payload_bytes,
                             workload,
                             format,
-                            &message,
+                            message,
                         )
                     });
-                    let tensor_parallel = run_vulkan_dense_tensor_parallel_triplet(
-                        [&first_device, &second_device, &third_device],
+                }
+                workload_format_kernel_for_devices(workload, format, &devices).map(|kernel| {
+                    if let Some(reason) = unsupported_kernel_reason(&kernel, &devices) {
+                        return tensor_parallel_group_status_measurement(
+                            &target_ids,
+                            "unsupported",
+                            payload_bytes,
+                            workload,
+                            format,
+                            &reason,
+                        );
+                    }
+                    run_vulkan_dense_tensor_parallel_group(
+                        &devices,
                         &target_ids,
                         payload_bytes,
                         samples,
@@ -787,24 +1008,22 @@ fn run_vulkan_triplet_measurements(
                         kernel,
                     )
                     .unwrap_or_else(|message| {
-                        failed_triplet_measurement(
+                        tensor_parallel_group_status_measurement(
                             &target_ids,
-                            TENSOR_PARALLEL_TRIPLET_PATTERN,
-                            THREE_TARGET_TENSOR_PARALLEL_STRATEGY,
+                            "failed",
                             payload_bytes,
                             workload,
                             format,
                             &message,
                         )
-                    });
-                    [serial, tensor_parallel]
+                    })
                 })
             })
         })
-        .flatten()
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn vulkan_measurements(
     device: &OpenVulkanComputeDevice,
     target_id: &str,
@@ -812,12 +1031,13 @@ fn vulkan_measurements(
     samples: usize,
     formats: &[String],
     workloads: &[String],
+    _max_group_size: usize,
 ) -> Vec<Measurement> {
-    formats
+    let mut measurements = formats
         .iter()
         .flat_map(|format| {
             workloads.iter().filter_map(move |workload| {
-                workload_format_kernel(workload, format).map(|kernel| {
+                workload_format_kernel_for_devices(workload, format, &[device]).map(|kernel| {
                     if let Some(reason) = unsupported_kernel_reason(&kernel, &[device]) {
                         return single_target_status_measurement(
                             target_id,
@@ -849,7 +1069,84 @@ fn vulkan_measurements(
                 })
             })
         })
+        .collect::<Vec<_>>();
+
+    measurements.extend(vulkan_chain_measurements(
+        device,
+        target_id,
+        payload_bytes,
+        samples,
+        formats,
+        workloads,
+        2,
+    ));
+    measurements
+}
+
+#[allow(clippy::too_many_arguments)]
+fn vulkan_chain_measurements(
+    device: &OpenVulkanComputeDevice,
+    target_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+    stages: usize,
+) -> Vec<Measurement> {
+    formats
+        .iter()
+        .flat_map(|format| {
+            workloads.iter().filter_map(|workload| {
+                if !supports_component_chain(workload) {
+                    return None;
+                }
+                workload_format_kernel_for_devices(workload, format, &[device]).map(|kernel| {
+                    if let Some(reason) = unsupported_kernel_reason(&kernel, &[device]) {
+                        return single_target_status_measurement_for_regime(
+                            target_id,
+                            payload_bytes,
+                            workload,
+                            format,
+                            component_chain_regime(stages),
+                            "unsupported",
+                            &reason,
+                        );
+                    }
+                    run_vulkan_dense_single_target_chain(
+                        device,
+                        target_id,
+                        payload_bytes,
+                        samples,
+                        workload,
+                        kernel,
+                        stages,
+                    )
+                    .unwrap_or_else(|message| {
+                        single_target_status_measurement_for_regime(
+                            target_id,
+                            payload_bytes,
+                            workload,
+                            format,
+                            component_chain_regime(stages),
+                            "failed",
+                            &message,
+                        )
+                    })
+                })
+            })
+        })
         .collect()
+}
+
+fn supports_component_chain(workload_class: &str) -> bool {
+    workload_family(workload_class) == Some("dense_projection")
+}
+
+fn supports_tensor_parallel(workload_class: &str) -> bool {
+    matches!(
+        workload_family(workload_class),
+        Some("dense_projection" | "moe_expert")
+    )
 }
 
 #[cfg(test)]
@@ -899,6 +1196,10 @@ struct OpenVulkanComputeDevice {
     timestamp_period_ns: f32,
     timestamp_valid_bits: u32,
     feature_flags: Vec<String>,
+    external_memory_fd: bool,
+    external_memory_host: bool,
+    shared_host_alignment: Option<usize>,
+    external_timeline_semaphore: bool,
 }
 
 impl Drop for OpenVulkanComputeDevice {
@@ -916,6 +1217,7 @@ struct VulkanBuffer {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     size: vk::DeviceSize,
+    _shared_host: Option<Arc<SharedHostAllocation>>,
 }
 
 impl Drop for VulkanBuffer {
@@ -924,6 +1226,53 @@ impl Drop for VulkanBuffer {
             self.device.destroy_buffer(self.buffer, None);
             self.device.free_memory(self.memory, None);
         }
+    }
+}
+
+struct SharedHostAllocation {
+    pointer: ptr::NonNull<u8>,
+    layout: std::alloc::Layout,
+}
+
+struct UnboundExternalBuffer {
+    device: ash::Device,
+    buffer: Option<vk::Buffer>,
+    size: vk::DeviceSize,
+    requirements: vk::MemoryRequirements,
+    requires_dedicated: bool,
+}
+
+impl UnboundExternalBuffer {
+    fn into_bound(
+        mut self,
+        memory: vk::DeviceMemory,
+        shared_host: Option<Arc<SharedHostAllocation>>,
+    ) -> VulkanBuffer {
+        let buffer = self.buffer.take().unwrap();
+        VulkanBuffer {
+            device: self.device.clone(),
+            buffer,
+            memory,
+            size: self.size,
+            _shared_host: shared_host,
+        }
+    }
+}
+
+impl Drop for UnboundExternalBuffer {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            unsafe { self.device.destroy_buffer(buffer, None) };
+        }
+    }
+}
+
+unsafe impl Send for SharedHostAllocation {}
+unsafe impl Sync for SharedHostAllocation {}
+
+impl Drop for SharedHostAllocation {
+    fn drop(&mut self) {
+        unsafe { std::alloc::dealloc(self.pointer.as_ptr(), self.layout) };
     }
 }
 
@@ -964,6 +1313,9 @@ struct DenseComputeContext {
 struct ComputePlan {
     storage_elements: usize,
     buffer_size: vk::DeviceSize,
+    activation_size: vk::DeviceSize,
+    output_offset: vk::DeviceSize,
+    output_size: vk::DeviceSize,
     dispatch: [u32; 3],
     push_constants: Vec<u32>,
     operations: u64,
@@ -971,75 +1323,237 @@ struct ComputePlan {
 
 fn compute_plan_for_payload(payload_bytes: usize, kernel: &DenseFormatKernel) -> ComputePlan {
     match kernel.shape {
-        KernelShape::Elementwise => elementwise_compute_plan(payload_bytes, kernel),
+        KernelShape::RouterReduction => router_compute_plan(payload_bytes, kernel),
+        KernelShape::F32Gemm | KernelShape::PackedGemm
+            if kernel.workload == KernelWorkload::MoeExpert =>
+        {
+            moe_compute_plan(payload_bytes, kernel)
+        }
         KernelShape::F32Gemm | KernelShape::PackedGemm => gemm_compute_plan(payload_bytes, kernel),
+        KernelShape::KvCache => kv_cache_compute_plan(payload_bytes, kernel),
     }
 }
 
-fn elementwise_compute_plan(payload_bytes: usize, kernel: &DenseFormatKernel) -> ComputePlan {
-    let storage_elements = (payload_bytes / kernel.bytes_per_storage_element).max(1);
+fn kv_cache_compute_plan(payload_bytes: usize, kernel: &DenseFormatKernel) -> ComputePlan {
+    let width = 256_usize;
+    let query_tokens = kernel.batch_size;
+    let words_per_token = width.div_ceil(2);
+    let context_tokens = (payload_bytes / (words_per_token * mem::size_of::<u32>())).max(1);
+    let state_words = context_tokens * words_per_token;
+    let output_words = query_tokens * words_per_token;
+    ComputePlan {
+        storage_elements: state_words + output_words,
+        buffer_size: ((state_words + output_words) * mem::size_of::<u32>()) as vk::DeviceSize,
+        activation_size: (state_words * mem::size_of::<u32>()) as vk::DeviceSize,
+        output_offset: (state_words * mem::size_of::<u32>()) as vk::DeviceSize,
+        output_size: (output_words * mem::size_of::<u32>()) as vk::DeviceSize,
+        dispatch: [
+            width.div_ceil(2).div_ceil(256) as u32,
+            query_tokens as u32,
+            1,
+        ],
+        push_constants: vec![
+            width as u32,
+            context_tokens as u32,
+            query_tokens as u32,
+            state_words as u32,
+        ],
+        operations: 2 * width as u64 * context_tokens as u64 * query_tokens as u64,
+    }
+}
+
+fn router_compute_plan(payload_bytes: usize, kernel: &DenseFormatKernel) -> ComputePlan {
+    let logical_per_storage = kernel.logical_elements_per_storage_element.max(1) as usize;
+    let tokens = kernel.batch_size;
+    let logical_values = (payload_bytes / mem::size_of::<u32>())
+        .max(1)
+        .saturating_mul(logical_per_storage);
+    let mut experts = (logical_values / tokens).clamp(6, 4092);
+    experts -= experts % 6;
+    router_compute_plan_for_dimensions(tokens, experts, kernel)
+}
+
+fn router_compute_plan_for_dimensions(
+    tokens: usize,
+    experts: usize,
+    kernel: &DenseFormatKernel,
+) -> ComputePlan {
+    let logical_per_storage = kernel.logical_elements_per_storage_element.max(1) as usize;
+    let (input_words, scale_words) = parameter_storage_words(tokens, experts, kernel);
+    let scale_offset_words = input_words;
+    let output_offset_words = input_words + scale_words;
+    let output_words = tokens;
+    let storage_elements = output_offset_words + output_words;
     ComputePlan {
         storage_elements,
-        buffer_size: (storage_elements * kernel.bytes_per_storage_element) as vk::DeviceSize,
-        dispatch: [storage_elements.div_ceil(64) as u32, 1, 1],
-        push_constants: vec![storage_elements as u32, kernel.format_kind],
-        operations: storage_elements as u64 * kernel.operations_per_storage_element,
+        buffer_size: (storage_elements * mem::size_of::<u32>()) as vk::DeviceSize,
+        activation_size: (input_words * mem::size_of::<u32>()) as vk::DeviceSize,
+        output_offset: (output_offset_words * mem::size_of::<u32>()) as vk::DeviceSize,
+        output_size: (output_words * mem::size_of::<u32>()) as vk::DeviceSize,
+        dispatch: [tokens as u32, 1, 1],
+        push_constants: vec![
+            tokens as u32,
+            experts as u32,
+            0,
+            output_offset_words as u32,
+            logical_per_storage as u32,
+            kernel.format_kind,
+            scale_offset_words as u32,
+            weight_group_size(kernel) as u32,
+        ],
+        operations: tokens as u64 * experts as u64 * 2,
     }
 }
 
 fn gemm_compute_plan(payload_bytes: usize, kernel: &DenseFormatKernel) -> ComputePlan {
-    let logical_per_storage = kernel.logical_elements_per_storage_element.max(1) as usize;
-    let storage_budget = (payload_bytes / kernel.bytes_per_storage_element).max(1);
-    let (m, k) = if storage_budget
-        >= (16_usize * 256).div_ceil(logical_per_storage)
-            + (256_usize.div_ceil(logical_per_storage) + 16) * 8
-    {
-        (16_usize, 256_usize)
-    } else if storage_budget
-        >= (16_usize * 64).div_ceil(logical_per_storage)
-            + (64_usize.div_ceil(logical_per_storage) + 16) * 8
-    {
-        (16_usize, 64_usize)
-    } else {
-        (8_usize, 32_usize)
-    };
-    let a_logical_elements = m * k;
-    let a_storage_elements = a_logical_elements.div_ceil(logical_per_storage);
-    let storage_per_output_column = k.div_ceil(logical_per_storage) + m;
-    let mut n = storage_budget
-        .saturating_sub(a_storage_elements)
-        .checked_div(storage_per_output_column)
-        .unwrap_or(0)
-        .max(1);
-    let b_logical_elements = k * n;
-    let c_logical_elements = m * n;
-    let input_logical_elements = a_logical_elements + b_logical_elements;
-    let mut c_storage_offset = input_logical_elements.div_ceil(logical_per_storage);
-    let c_storage_elements = c_logical_elements;
-    let mut storage_elements = c_storage_offset + c_storage_elements;
-    while storage_elements > storage_budget && n > 1 {
-        n -= 1;
-        let b_logical_elements = k * n;
-        let c_logical_elements = m * n;
-        c_storage_offset = (a_logical_elements + b_logical_elements).div_ceil(logical_per_storage);
-        storage_elements = c_storage_offset + c_logical_elements;
+    let logical_per_storage = kernel.logical_elements_per_storage_element.clamp(1, 8) as usize;
+    let upper = ((payload_bytes / mem::size_of::<u32>()).saturating_mul(logical_per_storage) as f64)
+        .sqrt()
+        .floor() as usize;
+    let mut low = 1_usize;
+    let mut high = (upper / 12).max(1);
+    while low < high {
+        let midpoint = (low + high).div_ceil(2);
+        let hidden = midpoint * 12;
+        let words = parameter_storage_words(hidden, hidden, kernel);
+        if (words.0 + words.1) * mem::size_of::<u32>() <= payload_bytes {
+            low = midpoint;
+        } else {
+            high = midpoint - 1;
+        }
     }
+    let hidden = (low * 12).max(12);
+    let m = kernel.batch_size;
+    gemm_compute_plan_for_dimensions(m, hidden, hidden, kernel)
+}
+
+fn moe_compute_plan(payload_bytes: usize, kernel: &DenseFormatKernel) -> ComputePlan {
+    let logical_per_storage = kernel.logical_elements_per_storage_element.clamp(1, 8) as usize;
+    let logical_budget = (payload_bytes / mem::size_of::<u32>())
+        .saturating_mul(logical_per_storage)
+        / MOE_SELECTED_EXPERTS;
+    let upper = (logical_budget as f64).sqrt().floor() as usize;
+    let mut low = 1_usize;
+    let mut high = (upper / 12).max(1);
+    while low < high {
+        let midpoint = (low + high).div_ceil(2);
+        let hidden = midpoint * 12;
+        let words = parameter_storage_words(MOE_SELECTED_EXPERTS * hidden, hidden, kernel);
+        if (words.0 + words.1) * mem::size_of::<u32>() <= payload_bytes {
+            low = midpoint;
+        } else {
+            high = midpoint - 1;
+        }
+    }
+    let hidden = (low * 12).max(12);
+    gemm_compute_plan_for_dimensions(
+        kernel.batch_size,
+        MOE_SELECTED_EXPERTS * hidden,
+        hidden,
+        kernel,
+    )
+}
+
+fn gemm_compute_plan_for_dimensions(
+    m: usize,
+    n: usize,
+    k: usize,
+    kernel: &DenseFormatKernel,
+) -> ComputePlan {
+    let activation_words = (m * k).div_ceil(2);
+    let (weight_words, scale_words) = parameter_storage_words(n, k, kernel);
+    let weight_storage_offset = activation_words;
+    let scale_storage_offset = weight_storage_offset + weight_words;
+    let c_storage_offset = scale_storage_offset + scale_words;
+    let output_words = (m * n).div_ceil(2);
+    let storage_elements = c_storage_offset + output_words;
     ComputePlan {
         storage_elements,
         buffer_size: (storage_elements * kernel.bytes_per_storage_element) as vk::DeviceSize,
-        dispatch: [n.div_ceil(16) as u32, m.div_ceil(16) as u32, 1],
+        activation_size: (activation_words * mem::size_of::<u32>()) as vk::DeviceSize,
+        output_offset: (c_storage_offset * mem::size_of::<u32>()) as vk::DeviceSize,
+        output_size: (output_words * mem::size_of::<u32>()) as vk::DeviceSize,
+        dispatch: [n.div_ceil(32) as u32, m.div_ceil(16) as u32, 1],
         push_constants: vec![
             m as u32,
             n as u32,
             k as u32,
             0,
-            a_logical_elements as u32,
+            weight_storage_offset as u32,
             c_storage_offset as u32,
-            logical_per_storage as u32,
+            kernel.logical_elements_per_storage_element as u32,
             kernel.format_kind,
+            scale_storage_offset as u32,
+            weight_group_size(kernel) as u32,
         ],
         operations: 2 * m as u64 * n as u64 * k as u64,
     }
+}
+
+fn parameter_storage_words(
+    rows: usize,
+    columns: usize,
+    kernel: &DenseFormatKernel,
+) -> (usize, usize) {
+    match kernel.weight_layout {
+        WeightLayout::Plain => (
+            (rows * columns).div_ceil(kernel.logical_elements_per_storage_element.max(1) as usize),
+            0,
+        ),
+        WeightLayout::Bf16Scaled { group_size } => {
+            let value_words = (rows * columns)
+                .div_ceil(kernel.logical_elements_per_storage_element.max(1) as usize);
+            let scale_count = rows * columns.div_ceil(group_size);
+            (value_words, scale_count.div_ceil(2))
+        }
+        WeightLayout::E8m0Scaled { group_size } => {
+            let value_words = (rows * columns)
+                .div_ceil(kernel.logical_elements_per_storage_element.max(1) as usize);
+            let scale_count = rows * columns.div_ceil(group_size);
+            (value_words, scale_count.div_ceil(4))
+        }
+        WeightLayout::NerveQ8_0 => (rows * columns.div_ceil(32) * 9, 0),
+    }
+}
+
+fn weight_group_size(kernel: &DenseFormatKernel) -> usize {
+    match kernel.weight_layout {
+        WeightLayout::Bf16Scaled { group_size } | WeightLayout::E8m0Scaled { group_size } => {
+            group_size
+        }
+        WeightLayout::NerveQ8_0 => 32,
+        WeightLayout::Plain => 1,
+    }
+}
+
+fn split_extent(extent: usize, parts: usize) -> Vec<usize> {
+    let base = extent / parts;
+    let remainder = extent % parts;
+    (0..parts)
+        .map(|index| base + usize::from(index < remainder))
+        .collect()
+}
+
+fn split_extent_aligned(
+    extent: usize,
+    parts: usize,
+    alignment: usize,
+) -> Result<Vec<usize>, String> {
+    if parts == 0 || alignment == 0 || !extent.is_multiple_of(alignment) {
+        return Err(format!(
+            "extent {extent} cannot be split into {parts} parts aligned to {alignment}"
+        ));
+    }
+    let units = extent / alignment;
+    if units < parts {
+        return Err(format!(
+            "extent {extent} has fewer than {parts} aligned shard units"
+        ));
+    }
+    Ok(split_extent(units, parts)
+        .into_iter()
+        .map(|units| units * alignment)
+        .collect())
 }
 
 impl Drop for DenseComputeContext {
@@ -1054,170 +1568,164 @@ impl Drop for DenseComputeContext {
     }
 }
 
-struct HostStagedTransfer {
-    source_storage: VulkanBuffer,
-    source_readback: VulkanBuffer,
-    destination_upload: VulkanBuffer,
-    destination_storage: VulkanBuffer,
-    source_transfer: TransferContext,
-    destination_transfer: TransferContext,
-    host_stage: Vec<u8>,
-    activation_bytes: usize,
-    buffer_size: vk::DeviceSize,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharedTransferRoute {
+    ExternalDeviceLocal,
+    SharedHost,
+}
+
+impl SharedTransferRoute {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ExternalDeviceLocal => "external_device_local",
+            Self::SharedHost => "shared_host",
+        }
+    }
+}
+
+struct SharedTransferBuffers {
+    route: SharedTransferRoute,
+    source: VulkanBuffer,
+    destination: VulkanBuffer,
+    timeline: Option<ExternalTimelineSemaphore>,
+}
+
+struct SharedMultiBuffer {
+    buffers: Vec<VulkanBuffer>,
+}
+
+struct ExternalTimelineSemaphore {
+    source_device: ash::Device,
+    destination_device: ash::Device,
+    source: vk::Semaphore,
+    destination: vk::Semaphore,
+    next_value: u64,
+}
+
+impl Drop for ExternalTimelineSemaphore {
+    fn drop(&mut self) {
+        unsafe {
+            self.source_device.destroy_semaphore(self.source, None);
+            self.destination_device
+                .destroy_semaphore(self.destination, None);
+        }
+    }
 }
 
 struct TransferSampleMetrics {
-    duration_ns: u128,
     bytes_read: u64,
     bytes_written: u64,
 }
 
-fn run_host_staged_transfer(
-    source_device: &OpenVulkanComputeDevice,
-    destination_device: &OpenVulkanComputeDevice,
-    source_id: &str,
-    destination_id: &str,
-    payload_bytes: usize,
-    samples: usize,
-    workload_class: &str,
-    format: &str,
-) -> Result<PairMeasurement, String> {
-    let activation_bytes = activation_bytes_for_payload(payload_bytes);
-    let mut transfer =
-        create_host_staged_transfer(source_device, destination_device, activation_bytes)?;
-    let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
-        let metrics =
-            run_host_staged_transfer_sample(source_device, destination_device, &mut transfer)?;
-        measured_samples.push(Sample {
-            sample_index,
-            duration_ns: metrics.duration_ns,
-            iterations: 1,
-            bytes_read: metrics.bytes_read,
-            bytes_written: metrics.bytes_written,
-            operations: 0,
-        });
+enum ComputeOutputTransferRoute {
+    Shared {
+        buffers: SharedTransferBuffers,
+        source_transfer: TransferContext,
+        destination_transfer: TransferContext,
+    },
+    HostStaged {
+        destination_transfer: TransferContext,
+        host_stage: Vec<u8>,
+    },
+}
+
+struct ComputeOutputTransfer {
+    route: ComputeOutputTransferRoute,
+    size: vk::DeviceSize,
+}
+
+impl ComputeOutputTransfer {
+    fn route_name(&self) -> &'static str {
+        match &self.route {
+            ComputeOutputTransferRoute::Shared { buffers, .. } => buffers.route.name(),
+            ComputeOutputTransferRoute::HostStaged { .. } => "host_staged",
+        }
     }
 
-    let summary = summarize_samples(&measured_samples);
-    Ok(PairMeasurement {
-        workload_id: format_workload_id("ordered_activation_transfer", workload_class, format),
-        comparison_group: "small_payload_placement_comparison".to_string(),
-        workload_class: workload_class.to_string(),
-        placement_strategy: "activation_transfer_only".to_string(),
-        source_target_id: source_id.to_string(),
-        destination_target_id: destination_id.to_string(),
-        pattern: "ordered_activation_transfer".to_string(),
-        operation_family: "activation_transfer".to_string(),
-        regime: "small_payload".to_string(),
-        format: format.to_string(),
-        status: "completed".to_string(),
-        reason: None,
-        payload_bytes,
-        source_payload_bytes: activation_bytes,
-        destination_payload_bytes: activation_bytes,
-        activation_bytes,
-        output_bytes: 0,
-        samples: measured_samples,
-        summary,
-    })
+    fn requires_compute_readback(&self) -> bool {
+        matches!(self.route, ComputeOutputTransferRoute::HostStaged { .. })
+    }
 }
 
-fn create_host_staged_transfer(
+fn create_compute_output_transfer(
     source_device: &OpenVulkanComputeDevice,
     destination_device: &OpenVulkanComputeDevice,
-    activation_bytes: usize,
-) -> Result<HostStagedTransfer, String> {
-    let buffer_size = activation_bytes as vk::DeviceSize;
-    let source_upload = create_buffer(
-        source_device,
-        buffer_size,
-        vk::BufferUsageFlags::TRANSFER_SRC,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    )?;
-    let source_storage = create_buffer(
-        source_device,
-        buffer_size,
-        vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    )?;
-    let source_readback = create_buffer(
-        source_device,
-        buffer_size,
-        vk::BufferUsageFlags::TRANSFER_DST,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    )?;
-    let destination_upload = create_buffer(
-        destination_device,
-        buffer_size,
-        vk::BufferUsageFlags::TRANSFER_SRC,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    )?;
-    let destination_storage = create_buffer(
-        destination_device,
-        buffer_size,
-        vk::BufferUsageFlags::TRANSFER_DST,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    )?;
-    write_pattern_bytes(&source_device.device, &source_upload)?;
-    let source_transfer = create_transfer_context(source_device)?;
-    let destination_transfer = create_transfer_context(destination_device)?;
-    submit_copy_buffer(
-        source_device,
-        &source_transfer,
-        source_upload.buffer,
-        source_storage.buffer,
-        buffer_size,
-    )?;
-    Ok(HostStagedTransfer {
-        source_storage,
-        source_readback,
-        destination_upload,
-        destination_storage,
-        source_transfer,
-        destination_transfer,
-        host_stage: vec![0_u8; activation_bytes],
-        activation_bytes,
-        buffer_size,
-    })
+    source_context: &DenseComputeContext,
+    destination_context: &DenseComputeContext,
+    requested_bytes: usize,
+) -> Result<ComputeOutputTransfer, String> {
+    let size = requested_bytes
+        .min(source_context.plan.output_size as usize)
+        .min(destination_context.upload.size as usize)
+        .min(destination_context.storage.size as usize)
+        .max(mem::size_of::<u32>());
+    let size = size as vk::DeviceSize;
+    let route = match create_shared_transfer_buffers(source_device, destination_device, size) {
+        Ok(buffers) => ComputeOutputTransferRoute::Shared {
+            buffers,
+            source_transfer: create_transfer_context(source_device)?,
+            destination_transfer: create_transfer_context(destination_device)?,
+        },
+        Err(_) => ComputeOutputTransferRoute::HostStaged {
+            destination_transfer: create_transfer_context(destination_device)?,
+            host_stage: vec![0_u8; size as usize],
+        },
+    };
+    Ok(ComputeOutputTransfer { route, size })
 }
 
-fn run_host_staged_transfer_sample(
+fn transfer_compute_output_to_input(
     source_device: &OpenVulkanComputeDevice,
     destination_device: &OpenVulkanComputeDevice,
-    transfer: &mut HostStagedTransfer,
+    source_context: &DenseComputeContext,
+    destination_context: &DenseComputeContext,
+    transfer: &mut ComputeOutputTransfer,
+    destination_offset: vk::DeviceSize,
 ) -> Result<TransferSampleMetrics, String> {
-    let started = Instant::now();
-    submit_copy_buffer(
-        source_device,
-        &transfer.source_transfer,
-        transfer.source_storage.buffer,
-        transfer.source_readback.buffer,
-        transfer.buffer_size,
-    )?;
-    read_buffer_bytes(
-        &source_device.device,
-        &transfer.source_readback,
-        &mut transfer.host_stage,
-    )?;
-    write_buffer_bytes(
-        &destination_device.device,
-        &transfer.destination_upload,
-        &transfer.host_stage,
-    )?;
-    submit_copy_buffer(
-        destination_device,
-        &transfer.destination_transfer,
-        transfer.destination_upload.buffer,
-        transfer.destination_storage.buffer,
-        transfer.buffer_size,
-    )?;
-    let duration = started.elapsed();
-    black_box(transfer.host_stage.first().copied().unwrap_or_default());
+    match &mut transfer.route {
+        ComputeOutputTransferRoute::Shared {
+            buffers,
+            source_transfer,
+            destination_transfer,
+        } => {
+            submit_shared_buffer_transfer(
+                source_device,
+                destination_device,
+                source_transfer,
+                destination_transfer,
+                source_context.storage.buffer,
+                source_context.plan.output_offset,
+                destination_context.storage.buffer,
+                destination_offset,
+                buffers,
+                transfer.size,
+            )?;
+        }
+        ComputeOutputTransferRoute::HostStaged {
+            destination_transfer,
+            host_stage,
+        } => {
+            read_buffer_bytes(&source_device.device, &source_context.readback, host_stage)?;
+            write_buffer_bytes(
+                &destination_device.device,
+                &destination_context.upload,
+                host_stage,
+            )?;
+            submit_copy_buffer_region(
+                destination_device,
+                destination_transfer,
+                destination_context.upload.buffer,
+                0,
+                destination_context.storage.buffer,
+                destination_offset,
+                transfer.size,
+            )?;
+            black_box(checksum_bytes(host_stage));
+        }
+    }
     Ok(TransferSampleMetrics {
-        duration_ns: duration.as_nanos(),
-        bytes_read: transfer.activation_bytes as u64,
-        bytes_written: transfer.activation_bytes as u64,
+        bytes_read: transfer.size as u64,
+        bytes_written: transfer.size as u64,
     })
 }
 
@@ -1233,21 +1741,44 @@ fn create_transfer_context(
         )
     }
     .map_err(|error| format!("could not create Vulkan transfer command pool: {error:?}"))?;
-    let command_buffer = unsafe {
+    let command_buffer = match unsafe {
         compute_device.device.allocate_command_buffers(
             &vk::CommandBufferAllocateInfo::default()
                 .command_pool(command_pool)
                 .level(vk::CommandBufferLevel::PRIMARY)
                 .command_buffer_count(1),
         )
-    }
-    .map_err(|error| format!("could not allocate Vulkan transfer command buffer: {error:?}"))?[0];
-    let fence = unsafe {
+    } {
+        Ok(command_buffers) => command_buffers[0],
+        Err(error) => {
+            unsafe {
+                compute_device
+                    .device
+                    .destroy_command_pool(command_pool, None)
+            };
+            return Err(format!(
+                "could not allocate Vulkan transfer command buffer: {error:?}"
+            ));
+        }
+    };
+    let fence = match unsafe {
         compute_device
             .device
             .create_fence(&vk::FenceCreateInfo::default(), None)
-    }
-    .map_err(|error| format!("could not create Vulkan transfer fence: {error:?}"))?;
+    } {
+        Ok(fence) => fence,
+        Err(error) => {
+            unsafe {
+                compute_device
+                    .device
+                    .free_command_buffers(command_pool, &[command_buffer]);
+                compute_device
+                    .device
+                    .destroy_command_pool(command_pool, None);
+            }
+            return Err(format!("could not create Vulkan transfer fence: {error:?}"));
+        }
+    };
     Ok(TransferContext {
         device: compute_device.device.clone(),
         command_pool,
@@ -1261,6 +1792,19 @@ fn submit_copy_buffer(
     context: &TransferContext,
     source: vk::Buffer,
     destination: vk::Buffer,
+    size: vk::DeviceSize,
+) -> Result<(), String> {
+    submit_copy_buffer_region(compute_device, context, source, 0, destination, 0, size)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_copy_buffer_region(
+    compute_device: &OpenVulkanComputeDevice,
+    context: &TransferContext,
+    source: vk::Buffer,
+    source_offset: vk::DeviceSize,
+    destination: vk::Buffer,
+    destination_offset: vk::DeviceSize,
     size: vk::DeviceSize,
 ) -> Result<(), String> {
     unsafe {
@@ -1280,11 +1824,62 @@ fn submit_copy_buffer(
             .map_err(|error| {
                 format!("could not begin Vulkan transfer command buffer: {error:?}")
             })?;
+        let source_visibility = [vk::BufferMemoryBarrier::default()
+            .src_access_mask(
+                vk::AccessFlags::HOST_WRITE
+                    | vk::AccessFlags::SHADER_WRITE
+                    | vk::AccessFlags::TRANSFER_WRITE,
+            )
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(source)
+            .offset(source_offset)
+            .size(size)];
+        compute_device.device.cmd_pipeline_barrier(
+            context.command_buffer,
+            vk::PipelineStageFlags::HOST
+                | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &source_visibility,
+            &[],
+        );
         compute_device.device.cmd_copy_buffer(
             context.command_buffer,
             source,
             destination,
-            &[vk::BufferCopy::default().size(size)],
+            &[vk::BufferCopy::default()
+                .src_offset(source_offset)
+                .dst_offset(destination_offset)
+                .size(size)],
+        );
+        let destination_visibility = [vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::HOST_READ
+                    | vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::SHADER_WRITE
+                    | vk::AccessFlags::TRANSFER_READ
+                    | vk::AccessFlags::TRANSFER_WRITE,
+            )
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(destination)
+            .offset(destination_offset)
+            .size(size)];
+        compute_device.device.cmd_pipeline_barrier(
+            context.command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::HOST
+                | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &destination_visibility,
+            &[],
         );
         compute_device
             .device
@@ -1304,67 +1899,210 @@ fn submit_copy_buffer(
             .map_err(|error| format!("could not submit Vulkan transfer work: {error:?}"))?;
         compute_device
             .device
-            .wait_for_fences(&[context.fence], true, u64::MAX)
+            .wait_for_fences(&[context.fence], true, MAX_VULKAN_WAIT_NS)
             .map_err(|error| format!("could not wait for Vulkan transfer work: {error:?}"))?;
     }
     Ok(())
 }
 
-fn failed_transfer_measurements(
-    source_id: &str,
-    destination_id: &str,
-    payload_bytes: usize,
-    formats: &[String],
-    workloads: &[String],
-    reason: &str,
-) -> Vec<PairMeasurement> {
-    formats
-        .iter()
-        .flat_map(|format| {
-            workloads.iter().map(|workload| {
-                failed_transfer_measurement(
-                    source_id,
-                    destination_id,
-                    payload_bytes,
-                    workload,
-                    format,
-                    reason,
-                )
-            })
-        })
-        .collect()
+#[allow(clippy::too_many_arguments)]
+fn record_copy_buffer_region(
+    compute_device: &OpenVulkanComputeDevice,
+    context: &TransferContext,
+    source: vk::Buffer,
+    source_offset: vk::DeviceSize,
+    destination: vk::Buffer,
+    destination_offset: vk::DeviceSize,
+    size: vk::DeviceSize,
+) -> Result<(), String> {
+    unsafe {
+        compute_device
+            .device
+            .reset_command_buffer(context.command_buffer, vk::CommandBufferResetFlags::empty())
+            .map_err(|error| {
+                format!("could not reset Vulkan transfer command buffer: {error:?}")
+            })?;
+        compute_device
+            .device
+            .begin_command_buffer(
+                context.command_buffer,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .map_err(|error| {
+                format!("could not begin Vulkan transfer command buffer: {error:?}")
+            })?;
+        let source_visibility = [vk::BufferMemoryBarrier::default()
+            .src_access_mask(
+                vk::AccessFlags::HOST_WRITE
+                    | vk::AccessFlags::SHADER_WRITE
+                    | vk::AccessFlags::TRANSFER_WRITE,
+            )
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(source)
+            .offset(source_offset)
+            .size(size)];
+        compute_device.device.cmd_pipeline_barrier(
+            context.command_buffer,
+            vk::PipelineStageFlags::HOST
+                | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &source_visibility,
+            &[],
+        );
+        compute_device.device.cmd_copy_buffer(
+            context.command_buffer,
+            source,
+            destination,
+            &[vk::BufferCopy::default()
+                .src_offset(source_offset)
+                .dst_offset(destination_offset)
+                .size(size)],
+        );
+        let destination_visibility = [vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::HOST_READ
+                    | vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::SHADER_WRITE
+                    | vk::AccessFlags::TRANSFER_READ
+                    | vk::AccessFlags::TRANSFER_WRITE,
+            )
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(destination)
+            .offset(destination_offset)
+            .size(size)];
+        compute_device.device.cmd_pipeline_barrier(
+            context.command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::HOST
+                | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &destination_visibility,
+            &[],
+        );
+        compute_device
+            .device
+            .end_command_buffer(context.command_buffer)
+            .map_err(|error| format!("could not end Vulkan transfer command buffer: {error:?}"))?;
+    }
+    Ok(())
 }
 
-fn failed_transfer_measurement(
-    source_id: &str,
-    destination_id: &str,
-    payload_bytes: usize,
-    workload_class: &str,
-    format: &str,
-    reason: &str,
-) -> PairMeasurement {
-    let activation_bytes = activation_bytes_for_payload(payload_bytes);
-    PairMeasurement {
-        workload_id: format_workload_id("ordered_activation_transfer", workload_class, format),
-        comparison_group: "small_payload_placement_comparison".to_string(),
-        workload_class: workload_class.to_string(),
-        placement_strategy: "activation_transfer_only".to_string(),
-        source_target_id: source_id.to_string(),
-        destination_target_id: destination_id.to_string(),
-        pattern: "ordered_activation_transfer".to_string(),
-        operation_family: "activation_transfer".to_string(),
-        regime: "small_payload".to_string(),
-        format: format.to_string(),
-        status: "failed".to_string(),
-        reason: Some(reason.to_string()),
-        payload_bytes,
-        source_payload_bytes: activation_bytes,
-        destination_payload_bytes: activation_bytes,
-        activation_bytes,
-        output_bytes: 0,
-        samples: Vec::new(),
-        summary: None,
+#[allow(clippy::too_many_arguments)]
+fn submit_shared_buffer_transfer(
+    source_device: &OpenVulkanComputeDevice,
+    destination_device: &OpenVulkanComputeDevice,
+    source_context: &TransferContext,
+    destination_context: &TransferContext,
+    source_buffer: vk::Buffer,
+    source_offset: vk::DeviceSize,
+    destination_buffer: vk::Buffer,
+    destination_offset: vk::DeviceSize,
+    shared: &mut SharedTransferBuffers,
+    size: vk::DeviceSize,
+) -> Result<(), String> {
+    let Some(timeline) = &mut shared.timeline else {
+        submit_copy_buffer_region(
+            source_device,
+            source_context,
+            source_buffer,
+            source_offset,
+            shared.source.buffer,
+            0,
+            size,
+        )?;
+        return submit_copy_buffer_region(
+            destination_device,
+            destination_context,
+            shared.destination.buffer,
+            0,
+            destination_buffer,
+            destination_offset,
+            size,
+        );
+    };
+
+    record_copy_buffer_region(
+        source_device,
+        source_context,
+        source_buffer,
+        source_offset,
+        shared.source.buffer,
+        0,
+        size,
+    )?;
+    record_copy_buffer_region(
+        destination_device,
+        destination_context,
+        shared.destination.buffer,
+        0,
+        destination_buffer,
+        destination_offset,
+        size,
+    )?;
+    timeline.next_value = timeline
+        .next_value
+        .checked_add(1)
+        .ok_or_else(|| "external timeline semaphore value overflowed".to_string())?;
+    let value = timeline.next_value;
+    let command_buffers = [source_context.command_buffer];
+    let signal_semaphores = [timeline.source];
+    let signal_values = [value];
+    let mut signal_timeline =
+        vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&signal_values);
+    let source_submit = [vk::SubmitInfo::default()
+        .command_buffers(&command_buffers)
+        .signal_semaphores(&signal_semaphores)
+        .push_next(&mut signal_timeline)];
+    let destination_command_buffers = [destination_context.command_buffer];
+    let wait_semaphores = [timeline.destination];
+    let wait_values = [value];
+    let wait_stages = [vk::PipelineStageFlags::TRANSFER];
+    let mut wait_timeline =
+        vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wait_values);
+    let destination_submit = [vk::SubmitInfo::default()
+        .command_buffers(&destination_command_buffers)
+        .wait_semaphores(&wait_semaphores)
+        .wait_dst_stage_mask(&wait_stages)
+        .push_next(&mut wait_timeline)];
+    unsafe {
+        source_device
+            .device
+            .reset_fences(&[source_context.fence])
+            .map_err(|error| format!("could not reset source transfer fence: {error:?}"))?;
+        destination_device
+            .device
+            .reset_fences(&[destination_context.fence])
+            .map_err(|error| format!("could not reset destination transfer fence: {error:?}"))?;
+        source_device
+            .device
+            .queue_submit(source_device.queue, &source_submit, source_context.fence)
+            .map_err(|error| format!("could not submit source timeline transfer: {error:?}"))?;
+        destination_device
+            .device
+            .queue_submit(
+                destination_device.queue,
+                &destination_submit,
+                destination_context.fence,
+            )
+            .map_err(|error| {
+                format!("could not submit destination timeline transfer: {error:?}")
+            })?;
+        destination_device
+            .device
+            .wait_for_fences(&[destination_context.fence], true, MAX_VULKAN_WAIT_NS)
+            .map_err(|error| format!("could not wait for timeline transfer: {error:?}"))?;
     }
+    Ok(())
 }
 
 fn run_vulkan_dense_projection(
@@ -1377,15 +2115,15 @@ fn run_vulkan_dense_projection(
 ) -> Result<Measurement, String> {
     let context = create_dense_compute_context(compute_device, payload_bytes, kernel)?;
     let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
-        let sample = submit_dense_compute_sample(compute_device, &context, sample_index)?;
-        black_box(read_first_storage_word(
-            &compute_device.device,
-            &context.readback,
-            &context.kernel,
-        )?);
+    for iteration in 0..=samples {
+        let sample_index = iteration.saturating_sub(1);
+        let sample = submit_dense_compute_sample(compute_device, &context, sample_index, false)?;
+        if iteration == 0 {
+            continue;
+        }
         measured_samples.push(sample);
     }
+    validate_compute_output(compute_device, &context)?;
 
     Ok(Measurement {
         workload_id: format!(
@@ -1396,23 +2134,97 @@ fn run_vulkan_dense_projection(
         workload_class: workload_class.to_string(),
         placement_strategy: "single_target_serial".to_string(),
         target_id: target_id.to_string(),
-        pattern: context.kernel.pattern.to_string(),
+        pattern: kernel_identity(&context.kernel),
         operation_family: workload_class.to_string(),
-        regime: "small_payload".to_string(),
+        regime: SINGLE_COMPONENT_REGIME.to_string(),
         format: context.kernel.format.to_string(),
         status: "completed".to_string(),
         reason: None,
         payload_bytes,
         working_set_bytes: context.buffer_size as usize,
+        activation_bytes: context.plan.activation_size as usize,
+        output_bytes: context.plan.output_size as usize,
         summary: summarize_samples(&measured_samples),
         samples: measured_samples,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_vulkan_dense_single_target_chain(
+    device: &OpenVulkanComputeDevice,
+    target_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    workload_class: &str,
+    kernel: DenseFormatKernel,
+    stages: usize,
+) -> Result<Measurement, String> {
+    let result = run_direct_local_serial_chain(device, payload_bytes, samples, &kernel, stages)?;
+    let summary = summarize_samples(&result.samples);
+    Ok(Measurement {
+        workload_id: format!(
+            "single_target_{stages}_component_chain:{workload_class}:{}",
+            kernel.format
+        ),
+        comparison_group: "small_payload_placement_comparison".to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: "single_target_serial".to_string(),
+        target_id: target_id.to_string(),
+        pattern: format!(
+            "{}:{stages}_component_chain:transport={}",
+            kernel_identity(&kernel),
+            result.transport
+        ),
+        operation_family: workload_class.to_string(),
+        regime: component_chain_regime(stages).to_string(),
+        format: kernel.format,
+        status: "completed".to_string(),
+        reason: None,
+        payload_bytes,
+        working_set_bytes: result.parameter_bytes_per_stage.iter().sum::<usize>()
+            + result.activation_bytes * (stages + 1),
+        activation_bytes: result.activation_bytes,
+        output_bytes: result.output_bytes,
+        summary,
+        samples: result.samples,
+    })
+}
+
+fn single_target_status_measurement_for_regime(
+    target_id: &str,
+    payload_bytes: usize,
+    workload_class: &str,
+    format: &str,
+    regime: &str,
+    status: &str,
+    reason: &str,
+) -> Measurement {
+    let mut measurement = single_target_status_measurement(
+        target_id,
+        payload_bytes,
+        workload_class,
+        format,
+        status,
+        reason,
+    );
+    measurement.regime = regime.to_string();
+    measurement.workload_id = format!("single_target_{regime}:{workload_class}:{format}");
+    measurement
 }
 
 fn create_dense_compute_context(
     compute_device: &OpenVulkanComputeDevice,
     payload_bytes: usize,
     kernel: DenseFormatKernel,
+) -> Result<DenseComputeContext, String> {
+    let plan = compute_plan_for_payload(payload_bytes, &kernel);
+    create_dense_compute_context_with_plan(compute_device, kernel, plan)
+}
+
+fn create_dense_compute_context_with_plan(
+    compute_device: &OpenVulkanComputeDevice,
+    kernel: DenseFormatKernel,
+    plan: ComputePlan,
 ) -> Result<DenseComputeContext, String> {
     if let Some(required_feature) = kernel.required_feature {
         if !compute_device
@@ -1429,7 +2241,6 @@ fn create_dense_compute_context(
         return Err("selected Vulkan compute queue does not expose usable timestamps".to_string());
     }
 
-    let plan = compute_plan_for_payload(payload_bytes, &kernel);
     let buffer_size = plan.buffer_size;
     let upload = create_buffer(
         compute_device,
@@ -1439,7 +2250,7 @@ fn create_dense_compute_context(
     )?;
     let readback = create_buffer(
         compute_device,
-        buffer_size,
+        plan.output_size.max(plan.activation_size),
         vk::BufferUsageFlags::TRANSFER_DST,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
     )?;
@@ -1452,6 +2263,14 @@ fn create_dense_compute_context(
         vk::MemoryPropertyFlags::DEVICE_LOCAL,
     )?;
     fill_upload_buffer(&compute_device.device, &upload, &plan, &kernel)?;
+    let initialization = create_transfer_context(compute_device)?;
+    submit_copy_buffer(
+        compute_device,
+        &initialization,
+        upload.buffer,
+        storage.buffer,
+        buffer_size,
+    )?;
 
     let resources =
         create_compute_resources(compute_device, storage.buffer, buffer_size, kernel.shader)?;
@@ -1508,19 +2327,19 @@ fn submit_dense_compute_sample(
     compute_device: &OpenVulkanComputeDevice,
     context: &DenseComputeContext,
     sample_index: usize,
+    readback_output: bool,
 ) -> Result<Sample, String> {
-    let started = Instant::now();
     record_compute_dispatch(
         compute_device,
         &context.resources,
         context.command_buffer,
         context.query_pool,
-        context.upload.buffer,
         context.storage.buffer,
         context.readback.buffer,
-        context.buffer_size,
         &context.plan,
+        readback_output,
     )?;
+    let started = Instant::now();
     unsafe {
         compute_device
             .device
@@ -1536,7 +2355,7 @@ fn submit_dense_compute_sample(
             .map_err(|error| format!("could not submit Vulkan compute work: {error:?}"))?;
         compute_device
             .device
-            .wait_for_fences(&[context.fence], true, u64::MAX)
+            .wait_for_fences(&[context.fence], true, MAX_VULKAN_WAIT_NS)
             .map_err(|error| format!("could not wait for Vulkan compute work: {error:?}"))?;
     }
     let wall_duration_ns = started.elapsed().as_nanos();
@@ -1545,10 +2364,53 @@ fn submit_dense_compute_sample(
         sample_index,
         duration_ns: wall_duration_ns.max(gpu_duration_ns),
         iterations: 1,
-        bytes_read: context.buffer_size as u64,
-        bytes_written: context.buffer_size as u64,
+        bytes_read: context.plan.output_offset as u64,
+        bytes_written: context.plan.output_size as u64,
         operations: context.plan.operations,
     })
+}
+
+fn validate_compute_output(
+    compute_device: &OpenVulkanComputeDevice,
+    context: &DenseComputeContext,
+) -> Result<(), String> {
+    let transfer = create_transfer_context(compute_device)?;
+    submit_copy_buffer_region(
+        compute_device,
+        &transfer,
+        context.storage.buffer,
+        context.plan.output_offset,
+        context.readback.buffer,
+        0,
+        context.plan.output_size,
+    )?;
+    let mut bytes = vec![0_u8; context.plan.output_size as usize];
+    read_buffer_bytes(&compute_device.device, &context.readback, &mut bytes)?;
+    match context.kernel.shape {
+        KernelShape::F32Gemm | KernelShape::PackedGemm | KernelShape::KvCache => {
+            for (index, chunk) in bytes.chunks_exact(mem::size_of::<u16>()).enumerate() {
+                let bits = u16::from_le_bytes(chunk.try_into().unwrap());
+                let value = f32::from_bits(u32::from(bits) << 16);
+                if !value.is_finite() {
+                    return Err(format!(
+                        "output value {index} was not written to a finite BF16 value"
+                    ));
+                }
+            }
+        }
+        KernelShape::RouterReduction => {
+            for (index, chunk) in bytes.chunks_exact(mem::size_of::<f32>()).enumerate() {
+                let value = f32::from_le_bytes(chunk.try_into().unwrap());
+                if !value.is_finite() {
+                    return Err(format!(
+                        "router output value {index} was not written to a finite F32 value"
+                    ));
+                }
+            }
+        }
+    }
+    black_box(checksum_bytes(&bytes));
+    Ok(())
 }
 
 fn run_vulkan_dense_serial_pair(
@@ -1561,9 +2423,73 @@ fn run_vulkan_dense_serial_pair(
     workload_class: &str,
     kernel: DenseFormatKernel,
 ) -> Result<PairMeasurement, String> {
+    match run_direct_external_serial_chain(
+        &[source_device, destination_device],
+        payload_bytes,
+        samples,
+        &kernel,
+    ) {
+        Ok(result) => {
+            let summary = summarize_samples(&result.samples);
+            Ok(PairMeasurement {
+                workload_id: format_workload_id(
+                    "synthetic_layer_split_small_payload",
+                    workload_class,
+                    &kernel.format,
+                ),
+                comparison_group: "small_payload_placement_comparison".to_string(),
+                workload_class: workload_class.to_string(),
+                placement_strategy: "two_target_serial".to_string(),
+                source_target_id: source_id.to_string(),
+                destination_target_id: destination_id.to_string(),
+                pattern: format!(
+                    "{}:transport={}",
+                    kernel_identity(&kernel),
+                    result.transport
+                ),
+                operation_family: workload_class.to_string(),
+                regime: TWO_COMPONENT_CHAIN_REGIME.to_string(),
+                format: kernel.format,
+                status: "completed".to_string(),
+                reason: None,
+                payload_bytes,
+                source_payload_bytes: result.parameter_bytes_per_stage[0],
+                destination_payload_bytes: result.parameter_bytes_per_stage[1],
+                activation_bytes: result.activation_bytes,
+                output_bytes: result.output_bytes,
+                samples: result.samples,
+                summary,
+            })
+        }
+        Err(error) if error.starts_with(SERIAL_DIRECT_ROUTE_UNAVAILABLE) => {
+            run_vulkan_dense_serial_pair_staged(
+                source_device,
+                destination_device,
+                source_id,
+                destination_id,
+                payload_bytes,
+                samples,
+                workload_class,
+                kernel,
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn run_vulkan_dense_serial_pair_staged(
+    source_device: &OpenVulkanComputeDevice,
+    destination_device: &OpenVulkanComputeDevice,
+    source_id: &str,
+    destination_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    workload_class: &str,
+    kernel: DenseFormatKernel,
+) -> Result<PairMeasurement, String> {
     let source_payload_bytes = payload_bytes / 2;
     let destination_payload_bytes = payload_bytes - source_payload_bytes;
-    let activation_bytes = activation_bytes_for_payload(payload_bytes);
+    let requested_activation_bytes = activation_bytes_for_payload(payload_bytes);
     let source_context =
         create_dense_compute_context(source_device, source_payload_bytes, kernel.clone())?;
     let destination_context = create_dense_compute_context(
@@ -1571,23 +2497,43 @@ fn run_vulkan_dense_serial_pair(
         destination_payload_bytes,
         kernel.clone(),
     )?;
-    let mut transfer =
-        create_host_staged_transfer(source_device, destination_device, activation_bytes)?;
+    let mut transfer = create_compute_output_transfer(
+        source_device,
+        destination_device,
+        &source_context,
+        &destination_context,
+        requested_activation_bytes,
+    )?;
+    let transfer_route = transfer.route_name();
+    let activation_bytes = transfer.size as usize;
     let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
+    for iteration in 0..=samples {
+        let sample_index = iteration.saturating_sub(1);
         let started = Instant::now();
-        let source_sample =
-            submit_dense_compute_sample(source_device, &source_context, sample_index)?;
-        let transfer_sample =
-            run_host_staged_transfer_sample(source_device, destination_device, &mut transfer)?;
-        let destination_sample =
-            submit_dense_compute_sample(destination_device, &destination_context, sample_index)?;
+        let source_sample = submit_dense_compute_sample(
+            source_device,
+            &source_context,
+            sample_index,
+            transfer.requires_compute_readback(),
+        )?;
+        let transfer_sample = transfer_compute_output_to_input(
+            source_device,
+            destination_device,
+            &source_context,
+            &destination_context,
+            &mut transfer,
+            0,
+        )?;
+        let destination_sample = submit_dense_compute_sample(
+            destination_device,
+            &destination_context,
+            sample_index,
+            false,
+        )?;
         let duration = started.elapsed();
-        black_box(read_first_storage_word(
-            &destination_device.device,
-            &destination_context.readback,
-            &destination_context.kernel,
-        )?);
+        if iteration == 0 {
+            continue;
+        }
         measured_samples.push(Sample {
             sample_index,
             duration_ns: duration.as_nanos(),
@@ -1601,6 +2547,7 @@ fn run_vulkan_dense_serial_pair(
             operations: source_sample.operations + destination_sample.operations,
         });
     }
+    validate_compute_output(destination_device, &destination_context)?;
 
     let summary = summarize_samples(&measured_samples);
     Ok(PairMeasurement {
@@ -1614,193 +2561,1135 @@ fn run_vulkan_dense_serial_pair(
         placement_strategy: "two_target_serial".to_string(),
         source_target_id: source_id.to_string(),
         destination_target_id: destination_id.to_string(),
-        pattern: "synthetic_layer_split_small_payload".to_string(),
+        pattern: format!("{}:transport={transfer_route}", kernel_identity(&kernel)),
         operation_family: workload_class.to_string(),
-        regime: "small_payload".to_string(),
+        regime: TWO_COMPONENT_CHAIN_REGIME.to_string(),
         format: kernel.format,
         status: "completed".to_string(),
         reason: None,
         payload_bytes,
-        source_payload_bytes,
-        destination_payload_bytes,
+        source_payload_bytes: (source_context.plan.output_offset
+            - source_context.plan.activation_size) as usize,
+        destination_payload_bytes: (destination_context.plan.output_offset
+            - destination_context.plan.activation_size) as usize,
         activation_bytes,
-        output_bytes: output_bytes_for_payload(payload_bytes),
+        output_bytes: destination_context.plan.output_size as usize,
         samples: measured_samples,
         summary,
     })
 }
 
-struct TensorParallelExchange {
-    plan: TensorParallelExchangePlan,
-    partials: Vec<Vec<u8>>,
-    combined: Vec<u8>,
-}
-
-#[derive(Clone, Copy)]
-struct TensorParallelExchangePlan {
-    collective: &'static str,
-    reduction: TensorParallelReduction,
-    exchange_bytes: usize,
-    write_participants: usize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TensorParallelReduction {
-    Sum,
-    Interleave,
-    Max,
-}
-
-struct TensorParallelExchangeMetrics {
-    bytes_read: u64,
-    bytes_written: u64,
+#[derive(Clone)]
+struct TensorParallelShardPlan {
+    parameter_words: usize,
+    scale_words: usize,
+    parameter_word_offset: usize,
+    dispatch: [u32; 3],
+    push_constants: Vec<u32>,
     operations: u64,
 }
 
-fn tensor_parallel_exchange_plan(
-    workload_class: &str,
+struct TensorParallelShardContext {
+    device: ash::Device,
+    resources: ComputeResources,
+    _upload: VulkanBuffer,
+    weights: VulkanBuffer,
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    query_pool: vk::QueryPool,
+    fence: vk::Fence,
+    plan: TensorParallelShardPlan,
+}
+
+impl Drop for TensorParallelShardContext {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_fence(self.fence, None);
+            self.device.destroy_query_pool(self.query_pool, None);
+            self.device
+                .free_command_buffers(self.command_pool, &[self.command_buffer]);
+            self.device.destroy_command_pool(self.command_pool, None);
+        }
+    }
+}
+
+struct TensorParallelSynchronization {
+    ready: ExternalTimelineSemaphore,
+    done: ExternalTimelineSemaphore,
+}
+
+struct TensorParallelRunResult {
+    samples: Vec<Sample>,
+    parameter_bytes_per_participant: Vec<usize>,
     activation_bytes: usize,
     output_bytes: usize,
-    contexts: &[&DenseComputeContext],
-) -> TensorParallelExchangePlan {
-    let (collective, reduction, requested_bytes, write_participants) =
-        tensor_parallel_collective_spec(workload_class, activation_bytes, output_bytes);
-    let exchange_bytes = contexts
-        .iter()
-        .map(|context| context.readback.size as usize)
-        .chain(contexts.iter().map(|context| context.upload.size as usize))
-        .fold(requested_bytes, usize::min)
-        .max(1);
-    TensorParallelExchangePlan {
-        collective,
-        reduction,
-        exchange_bytes,
-        write_participants: write_participants.min(contexts.len()).max(1),
-    }
+    transport: &'static str,
 }
 
-fn tensor_parallel_collective_spec(
-    workload_class: &str,
+struct SerialChainRunResult {
+    samples: Vec<Sample>,
+    parameter_bytes_per_stage: Vec<usize>,
     activation_bytes: usize,
     output_bytes: usize,
-) -> (&'static str, TensorParallelReduction, usize, usize) {
-    match workload_class {
-        "dense_projection" => (
-            "all_reduce_output",
-            TensorParallelReduction::Sum,
-            output_bytes,
-            usize::MAX,
-        ),
-        "moe_expert" => (
-            "expert_activation_gather",
-            TensorParallelReduction::Interleave,
-            activation_bytes,
-            1,
-        ),
-        "router_reduction" => (
-            "router_score_reduce",
-            TensorParallelReduction::Max,
-            output_bytes.min((activation_bytes / 4).max(4 * 1024)),
-            1,
-        ),
-        _ => (
-            "all_reduce_output",
-            TensorParallelReduction::Sum,
-            output_bytes,
-            usize::MAX,
-        ),
+    transport: &'static str,
+}
+
+const SERIAL_DIRECT_ROUTE_UNAVAILABLE: &str = "serial direct route unavailable:";
+
+fn tensor_parallel_shader(kernel: &DenseFormatKernel) -> ShaderCode {
+    if kernel.execution_path == "native_f16" {
+        ShaderCode::Bytes(TP_F16_GEMM_SHADER_SPV)
+    } else if kernel.execution_path == NATIVE_FP8_DOT_FEATURE {
+        ShaderCode::Bytes(TP_NATIVE_FP8_GEMM_SHADER_SPV)
+    } else {
+        ShaderCode::Bytes(TP_FORMAT_GEMM_SHADER_SPV)
     }
 }
 
-fn create_tensor_parallel_exchange(plan: TensorParallelExchangePlan) -> TensorParallelExchange {
-    TensorParallelExchange {
-        plan,
-        partials: Vec::new(),
-        combined: vec![0_u8; plan.exchange_bytes],
+fn tensor_parallel_shard_plans(
+    payload_bytes: usize,
+    kernel: &DenseFormatKernel,
+    participants: usize,
+) -> Result<(usize, usize, usize, Vec<TensorParallelShardPlan>), String> {
+    if !matches!(kernel.shape, KernelShape::F32Gemm | KernelShape::PackedGemm) {
+        return Err(format!(
+            "{} does not have a NERVE tensor-parallel execution contract",
+            kernel.pattern
+        ));
     }
+    let full = compute_plan_for_payload(payload_bytes, kernel);
+    let m = full.push_constants[0] as usize;
+    let n = full.push_constants[1] as usize;
+    let k = full.push_constants[2] as usize;
+    let shard_alignment = 2;
+    let widths = split_extent_aligned(n, participants, shard_alignment)?;
+    if widths.contains(&0) {
+        return Err(format!(
+            "output width {n} cannot be sharded across {participants} devices"
+        ));
+    }
+    let mut column_offset = 0_usize;
+    let plans = widths
+        .into_iter()
+        .map(|local_n| {
+            let (parameter_words, scale_words) = parameter_storage_words(local_n, k, kernel);
+            let (parameter_word_offset, _) = parameter_storage_words(column_offset, k, kernel);
+            let plan = TensorParallelShardPlan {
+                parameter_words,
+                scale_words,
+                parameter_word_offset,
+                dispatch: [local_n.div_ceil(32) as u32, m.div_ceil(16) as u32, 1],
+                push_constants: vec![
+                    m as u32,
+                    local_n as u32,
+                    k as u32,
+                    n as u32,
+                    column_offset as u32,
+                    kernel.logical_elements_per_storage_element as u32,
+                    kernel.format_kind,
+                    parameter_words as u32,
+                    weight_group_size(kernel) as u32,
+                ],
+                operations: 2 * m as u64 * local_n as u64 * k as u64,
+            };
+            column_offset += local_n;
+            plan
+        })
+        .collect();
+    Ok((m, n, k, plans))
 }
 
-fn run_tensor_parallel_exchange(
-    devices: &[&OpenVulkanComputeDevice],
-    contexts: &[&DenseComputeContext],
-    exchange: &mut TensorParallelExchange,
-) -> Result<TensorParallelExchangeMetrics, String> {
-    debug_assert_eq!(devices.len(), contexts.len());
-    if exchange.partials.len() != contexts.len() {
-        exchange.partials = vec![vec![0_u8; exchange.plan.exchange_bytes]; contexts.len()];
-    }
-
-    for (index, context) in contexts.iter().enumerate() {
-        read_buffer_bytes(
-            &devices[index].device,
-            &context.readback,
-            &mut exchange.partials[index],
-        )?;
-    }
-
-    reduce_tensor_parallel_partials(
-        exchange.plan.reduction,
-        &exchange.partials,
-        &mut exchange.combined,
-    );
-
-    for (index, context) in contexts
-        .iter()
-        .take(exchange.plan.write_participants)
-        .enumerate()
+fn create_tensor_parallel_shard_context(
+    device: &OpenVulkanComputeDevice,
+    kernel: &DenseFormatKernel,
+    plan: TensorParallelShardPlan,
+    activation: &VulkanBuffer,
+    output: &VulkanBuffer,
+) -> Result<TensorParallelShardContext, String> {
+    if let Some(required_feature) = kernel.required_feature
+        && !feature_flags_include(&device.feature_flags, required_feature)
     {
-        write_buffer_bytes(&devices[index].device, &context.upload, &exchange.combined)?;
+        return Err(format!(
+            "selected Vulkan device does not support required feature {required_feature}"
+        ));
     }
-
-    let participant_count = contexts.len() as u64;
-    let write_participant_count = exchange.plan.write_participants as u64;
-    let exchange_bytes = exchange.combined.len() as u64;
-    Ok(TensorParallelExchangeMetrics {
-        bytes_read: participant_count * exchange_bytes,
-        bytes_written: write_participant_count * exchange_bytes,
-        operations: participant_count * exchange_bytes * exchange_operation_cost(exchange.plan),
+    if device.timestamp_valid_bits == 0 || device.timestamp_period_ns <= 0.0 {
+        return Err("selected Vulkan compute queue does not expose usable timestamps".to_string());
+    }
+    let weight_words = plan.parameter_words + plan.scale_words;
+    let weight_size = (weight_words.max(1) * mem::size_of::<u32>()) as vk::DeviceSize;
+    let upload = create_buffer(
+        device,
+        weight_size,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )?;
+    fill_tensor_parallel_weights(&device.device, &upload, kernel, &plan)?;
+    let weights = create_buffer(
+        device,
+        weight_size,
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+    let initialization = create_transfer_context(device)?;
+    submit_copy_buffer(
+        device,
+        &initialization,
+        upload.buffer,
+        weights.buffer,
+        weight_size,
+    )?;
+    let resources = create_compute_resources_for_buffers(
+        device,
+        &[
+            (activation.buffer, activation.size),
+            (weights.buffer, weights.size),
+            (output.buffer, output.size),
+        ],
+        tensor_parallel_shader(kernel),
+    )?;
+    let command_pool = unsafe {
+        device.device.create_command_pool(
+            &vk::CommandPoolCreateInfo::default()
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                .queue_family_index(device.compute_queue_family_index),
+            None,
+        )
+    }
+    .map_err(|error| format!("could not create TP command pool: {error:?}"))?;
+    let command_buffer = unsafe {
+        device.device.allocate_command_buffers(
+            &vk::CommandBufferAllocateInfo::default()
+                .command_pool(command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1),
+        )
+    }
+    .map_err(|error| format!("could not allocate TP command buffer: {error:?}"))?[0];
+    let query_pool = unsafe {
+        device.device.create_query_pool(
+            &vk::QueryPoolCreateInfo::default()
+                .query_type(vk::QueryType::TIMESTAMP)
+                .query_count(2),
+            None,
+        )
+    }
+    .map_err(|error| format!("could not create TP timestamp query pool: {error:?}"))?;
+    let fence = unsafe {
+        device
+            .device
+            .create_fence(&vk::FenceCreateInfo::default(), None)
+    }
+    .map_err(|error| format!("could not create TP completion fence: {error:?}"))?;
+    Ok(TensorParallelShardContext {
+        device: device.device.clone(),
+        resources,
+        _upload: upload,
+        weights,
+        command_pool,
+        command_buffer,
+        query_pool,
+        fence,
+        plan,
     })
 }
 
-fn exchange_operation_cost(plan: TensorParallelExchangePlan) -> u64 {
-    match plan.collective {
-        "router_score_reduce" => 2,
-        "expert_activation_gather" => 1,
-        _ => 1,
+fn fill_tensor_parallel_weights(
+    device: &ash::Device,
+    buffer: &VulkanBuffer,
+    kernel: &DenseFormatKernel,
+    plan: &TensorParallelShardPlan,
+) -> Result<(), String> {
+    let mapped = unsafe {
+        device
+            .map_memory(buffer.memory, 0, buffer.size, vk::MemoryMapFlags::empty())
+            .map_err(|error| format!("could not map TP parameter upload: {error:?}"))?
+    };
+    let words = mapped.cast::<u32>();
+    for index in 0..plan.parameter_words {
+        unsafe {
+            words
+                .add(index)
+                .write(parameter_word(kernel, plan.parameter_word_offset + index))
+        };
+    }
+    for index in 0..plan.scale_words {
+        unsafe {
+            words
+                .add(plan.parameter_words + index)
+                .write(scale_word(kernel))
+        };
+    }
+    unsafe { device.unmap_memory(buffer.memory) };
+    Ok(())
+}
+
+fn initialize_tensor_parallel_buffer(
+    owner: &OpenVulkanComputeDevice,
+    buffer: &VulkanBuffer,
+    activation: bool,
+) -> Result<(), String> {
+    let upload = create_buffer(
+        owner,
+        buffer.size,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )?;
+    let mapped = unsafe {
+        owner
+            .device
+            .map_memory(upload.memory, 0, upload.size, vk::MemoryMapFlags::empty())
+            .map_err(|error| format!("could not map TP activation upload: {error:?}"))?
+    };
+    let words = mapped.cast::<u32>();
+    for index in 0..(upload.size as usize / mem::size_of::<u32>()) {
+        let value = if activation {
+            let first = f32_to_bf16_bits(0.5 + (((index * 2) % 251) as f32) / 512.0);
+            let second = f32_to_bf16_bits(0.5 + (((index * 2 + 1) % 251) as f32) / 512.0);
+            u32::from(first) | (u32::from(second) << 16)
+        } else {
+            0x7fc0_7fc0
+        };
+        unsafe { words.add(index).write(value) };
+    }
+    unsafe { owner.device.unmap_memory(upload.memory) };
+    let transfer = create_transfer_context(owner)?;
+    submit_copy_buffer(owner, &transfer, upload.buffer, buffer.buffer, buffer.size)
+}
+
+fn f32_to_bf16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    ((bits + 0x7fff + ((bits >> 16) & 1)) >> 16) as u16
+}
+
+fn record_tensor_parallel_shard(
+    device: &OpenVulkanComputeDevice,
+    context: &TensorParallelShardContext,
+    activation: &VulkanBuffer,
+    output: &VulkanBuffer,
+) -> Result<(), String> {
+    unsafe {
+        device
+            .device
+            .reset_command_buffer(context.command_buffer, vk::CommandBufferResetFlags::empty())
+            .map_err(|error| format!("could not reset TP command buffer: {error:?}"))?;
+        device
+            .device
+            .begin_command_buffer(
+                context.command_buffer,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .map_err(|error| format!("could not begin TP command buffer: {error:?}"))?;
+        device
+            .device
+            .cmd_reset_query_pool(context.command_buffer, context.query_pool, 0, 2);
+        let barriers = [
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(
+                    vk::AccessFlags::HOST_WRITE
+                        | vk::AccessFlags::TRANSFER_WRITE
+                        | vk::AccessFlags::SHADER_WRITE,
+                )
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(activation.buffer)
+                .offset(0)
+                .size(activation.size),
+            vk::BufferMemoryBarrier::default()
+                .src_access_mask(
+                    vk::AccessFlags::HOST_WRITE
+                        | vk::AccessFlags::TRANSFER_WRITE
+                        | vk::AccessFlags::SHADER_WRITE,
+                )
+                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(output.buffer)
+                .offset(0)
+                .size(output.size),
+        ];
+        device.device.cmd_pipeline_barrier(
+            context.command_buffer,
+            vk::PipelineStageFlags::HOST
+                | vk::PipelineStageFlags::TRANSFER
+                | vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &barriers,
+            &[],
+        );
+        device.device.cmd_write_timestamp(
+            context.command_buffer,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            context.query_pool,
+            0,
+        );
+        device.device.cmd_bind_pipeline(
+            context.command_buffer,
+            vk::PipelineBindPoint::COMPUTE,
+            context.resources.pipeline,
+        );
+        device.device.cmd_bind_descriptor_sets(
+            context.command_buffer,
+            vk::PipelineBindPoint::COMPUTE,
+            context.resources.pipeline_layout,
+            0,
+            &[context.resources.descriptor_set],
+            &[],
+        );
+        let push_bytes = std::slice::from_raw_parts(
+            context.plan.push_constants.as_ptr().cast::<u8>(),
+            context.plan.push_constants.len() * mem::size_of::<u32>(),
+        );
+        device.device.cmd_push_constants(
+            context.command_buffer,
+            context.resources.pipeline_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            push_bytes,
+        );
+        device.device.cmd_dispatch(
+            context.command_buffer,
+            context.plan.dispatch[0],
+            context.plan.dispatch[1],
+            context.plan.dispatch[2],
+        );
+        device.device.cmd_write_timestamp(
+            context.command_buffer,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            context.query_pool,
+            1,
+        );
+        device
+            .device
+            .end_command_buffer(context.command_buffer)
+            .map_err(|error| format!("could not end TP command buffer: {error:?}"))?;
+    }
+    Ok(())
+}
+
+fn reserve_tensor_parallel_values(
+    synchronizations: &mut [TensorParallelSynchronization],
+) -> Result<Vec<(u64, u64)>, String> {
+    synchronizations
+        .iter_mut()
+        .map(|synchronization| {
+            synchronization.ready.next_value = synchronization
+                .ready
+                .next_value
+                .checked_add(1)
+                .ok_or_else(|| "TP ready timeline value overflowed".to_string())?;
+            synchronization.done.next_value = synchronization
+                .done
+                .next_value
+                .checked_add(1)
+                .ok_or_else(|| "TP done timeline value overflowed".to_string())?;
+            Ok((
+                synchronization.ready.next_value,
+                synchronization.done.next_value,
+            ))
+        })
+        .collect()
+}
+
+fn submit_owner_timeline_bridge(
+    owner: &OpenVulkanComputeDevice,
+    synchronizations: &[TensorParallelSynchronization],
+    values: &[(u64, u64)],
+    previous_done_values: Option<&[(u64, u64)]>,
+) -> Result<(), String> {
+    let signal_semaphores = synchronizations
+        .iter()
+        .map(|sync| sync.ready.source)
+        .collect::<Vec<_>>();
+    let signal_values = values.iter().map(|(ready, _)| *ready).collect::<Vec<_>>();
+    let wait_semaphores = previous_done_values
+        .map(|_| {
+            synchronizations
+                .iter()
+                .map(|sync| sync.done.destination)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let wait_values = previous_done_values
+        .map(|values| values.iter().map(|(_, done)| *done).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let wait_stages = vec![vk::PipelineStageFlags::COMPUTE_SHADER; wait_semaphores.len()];
+    let mut timeline = vk::TimelineSemaphoreSubmitInfo::default()
+        .wait_semaphore_values(&wait_values)
+        .signal_semaphore_values(&signal_values);
+    let submit = [vk::SubmitInfo::default()
+        .wait_semaphores(&wait_semaphores)
+        .wait_dst_stage_mask(&wait_stages)
+        .signal_semaphores(&signal_semaphores)
+        .push_next(&mut timeline)];
+    unsafe {
+        owner
+            .device
+            .queue_submit(owner.queue, &submit, vk::Fence::null())
+    }
+    .map_err(|error| format!("could not submit TP owner dependency bridge: {error:?}"))
+}
+
+fn submit_tensor_parallel_stage(
+    devices: &[&OpenVulkanComputeDevice],
+    contexts: &[TensorParallelShardContext],
+    synchronizations: &[TensorParallelSynchronization],
+    values: &[(u64, u64)],
+) -> Result<(), String> {
+    for participant in 1..devices.len() {
+        let context = &contexts[participant];
+        let synchronization = &synchronizations[participant - 1];
+        let (ready_value, done_value) = values[participant - 1];
+        let command_buffers = [context.command_buffer];
+        let wait_semaphores = [synchronization.ready.destination];
+        let wait_values = [ready_value];
+        let wait_stages = [vk::PipelineStageFlags::COMPUTE_SHADER];
+        let signal_semaphores = [synchronization.done.source];
+        let signal_values = [done_value];
+        let mut timeline = vk::TimelineSemaphoreSubmitInfo::default()
+            .wait_semaphore_values(&wait_values)
+            .signal_semaphore_values(&signal_values);
+        let submit = [vk::SubmitInfo::default()
+            .command_buffers(&command_buffers)
+            .wait_semaphores(&wait_semaphores)
+            .wait_dst_stage_mask(&wait_stages)
+            .signal_semaphores(&signal_semaphores)
+            .push_next(&mut timeline)];
+        unsafe {
+            devices[participant].device.queue_submit(
+                devices[participant].queue,
+                &submit,
+                vk::Fence::null(),
+            )
+        }
+        .map_err(|error| format!("could not submit TP helper {participant} compute: {error:?}"))?;
+    }
+    let owner_commands = [contexts[0].command_buffer];
+    unsafe {
+        devices[0].device.queue_submit(
+            devices[0].queue,
+            &[vk::SubmitInfo::default().command_buffers(&owner_commands)],
+            vk::Fence::null(),
+        )
+    }
+    .map_err(|error| format!("could not submit TP owner compute: {error:?}"))
+}
+
+fn submit_tensor_parallel_completion(
+    owner: &OpenVulkanComputeDevice,
+    owner_context: &TensorParallelShardContext,
+    synchronizations: &[TensorParallelSynchronization],
+    values: &[(u64, u64)],
+) -> Result<(), String> {
+    let wait_semaphores = synchronizations
+        .iter()
+        .map(|sync| sync.done.destination)
+        .collect::<Vec<_>>();
+    let wait_values = values.iter().map(|(_, done)| *done).collect::<Vec<_>>();
+    let wait_stages = vec![vk::PipelineStageFlags::COMPUTE_SHADER; wait_semaphores.len()];
+    let mut timeline =
+        vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wait_values);
+    let submit = [vk::SubmitInfo::default()
+        .wait_semaphores(&wait_semaphores)
+        .wait_dst_stage_mask(&wait_stages)
+        .push_next(&mut timeline)];
+    unsafe {
+        owner
+            .device
+            .reset_fences(&[owner_context.fence])
+            .map_err(|error| format!("could not reset TP completion fence: {error:?}"))?;
+        owner
+            .device
+            .queue_submit(owner.queue, &submit, owner_context.fence)
+            .map_err(|error| format!("could not submit TP completion wait: {error:?}"))?;
+        owner
+            .device
+            .wait_for_fences(&[owner_context.fence], true, MAX_VULKAN_WAIT_NS)
+            .map_err(|error| format!("could not wait for TP completion: {error:?}"))?;
+    }
+    Ok(())
+}
+
+fn validate_tensor_parallel_output(
+    owner: &OpenVulkanComputeDevice,
+    output: &VulkanBuffer,
+) -> Result<(), String> {
+    let readback = create_buffer(
+        owner,
+        output.size,
+        vk::BufferUsageFlags::TRANSFER_DST,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    )?;
+    let transfer = create_transfer_context(owner)?;
+    submit_copy_buffer(
+        owner,
+        &transfer,
+        output.buffer,
+        readback.buffer,
+        output.size,
+    )?;
+    let mut bytes = vec![0_u8; output.size as usize];
+    read_buffer_bytes(&owner.device, &readback, &mut bytes)?;
+    for (index, chunk) in bytes.chunks_exact(mem::size_of::<u16>()).enumerate() {
+        let bits = u16::from_le_bytes(chunk.try_into().unwrap());
+        let value = f32::from_bits(u32::from(bits) << 16);
+        if !value.is_finite() {
+            return Err(format!(
+                "distributed output value {index} was not written to a finite BF16 value"
+            ));
+        }
+    }
+    black_box(checksum_bytes(&bytes));
+    Ok(())
+}
+
+fn run_shared_tensor_parallel(
+    devices: &[&OpenVulkanComputeDevice],
+    payload_bytes: usize,
+    samples: usize,
+    kernel: &DenseFormatKernel,
+    stages: usize,
+) -> Result<TensorParallelRunResult, String> {
+    if devices.len() < 2 || stages == 0 {
+        return Err("TP execution requires multiple devices and at least one stage".to_string());
+    }
+    if devices
+        .iter()
+        .any(|device| !device.external_timeline_semaphore)
+    {
+        return Err(
+            "NERVE TP requires opaque-FD timeline semaphores on every participant".to_string(),
+        );
+    }
+    let device_local_available = devices.iter().all(|device| device.external_memory_fd);
+    let shared_host_available = devices.iter().all(|device| device.external_memory_host);
+    if device_local_available {
+        match run_shared_tensor_parallel_with_route(
+            devices,
+            payload_bytes,
+            samples,
+            kernel,
+            stages,
+            SharedTransferRoute::ExternalDeviceLocal,
+        ) {
+            Ok(result) => return Ok(result),
+            Err(device_local_error) if shared_host_available => {
+                return run_shared_tensor_parallel_with_route(
+                    devices,
+                    payload_bytes,
+                    samples,
+                    kernel,
+                    stages,
+                    SharedTransferRoute::SharedHost,
+                )
+                .map_err(|host_error| {
+                    format!(
+                        "device-local TP route failed ({device_local_error}); shared-host TP route failed ({host_error})"
+                    )
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if shared_host_available {
+        return run_shared_tensor_parallel_with_route(
+            devices,
+            payload_bytes,
+            samples,
+            kernel,
+            stages,
+            SharedTransferRoute::SharedHost,
+        );
+    }
+    Err("TP execution has no common shared-buffer route".to_string())
+}
+
+fn run_shared_tensor_parallel_with_route(
+    devices: &[&OpenVulkanComputeDevice],
+    payload_bytes: usize,
+    samples: usize,
+    kernel: &DenseFormatKernel,
+    stages: usize,
+    route: SharedTransferRoute,
+) -> Result<TensorParallelRunResult, String> {
+    let stage_payload = payload_bytes / stages;
+    if stage_payload == 0 {
+        return Err("payload is too small for the requested TP chain".to_string());
+    }
+    let (m, n, k, shard_plans) = tensor_parallel_shard_plans(stage_payload, kernel, devices.len())?;
+    let activation_size = ((m * k).div_ceil(2) * mem::size_of::<u32>()) as vk::DeviceSize;
+    let output_size = ((m * n).div_ceil(2) * mem::size_of::<u32>()) as vk::DeviceSize;
+    if stages > 1 && activation_size != output_size {
+        return Err("TP component chain requires equal activation and output shapes".to_string());
+    }
+    let shared_buffers = (0..=stages)
+        .map(|stage| {
+            create_shared_multi_buffer(
+                devices,
+                if stage == 0 {
+                    activation_size
+                } else {
+                    output_size
+                },
+                route,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    initialize_tensor_parallel_buffer(devices[0], &shared_buffers[0].buffers[0], true)?;
+    for shared in &shared_buffers[1..] {
+        initialize_tensor_parallel_buffer(devices[0], &shared.buffers[0], false)?;
+    }
+    let mut stage_contexts = Vec::with_capacity(stages);
+    for stage in 0..stages {
+        let contexts = devices
+            .iter()
+            .enumerate()
+            .map(|(participant, device)| {
+                create_tensor_parallel_shard_context(
+                    device,
+                    kernel,
+                    shard_plans[participant].clone(),
+                    &shared_buffers[stage].buffers[participant],
+                    &shared_buffers[stage + 1].buffers[participant],
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        stage_contexts.push(contexts);
+    }
+    let mut synchronizations = devices[1..]
+        .iter()
+        .map(|helper| {
+            Ok(TensorParallelSynchronization {
+                ready: create_external_timeline_semaphore(devices[0], helper)?,
+                done: create_external_timeline_semaphore(helper, devices[0])?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut measured_samples = Vec::with_capacity(samples);
+    for iteration in 0..=samples {
+        for stage in 0..stages {
+            for participant in 0..devices.len() {
+                record_tensor_parallel_shard(
+                    devices[participant],
+                    &stage_contexts[stage][participant],
+                    &shared_buffers[stage].buffers[participant],
+                    &shared_buffers[stage + 1].buffers[participant],
+                )?;
+            }
+        }
+        let started = Instant::now();
+        let mut previous_values: Option<Vec<(u64, u64)>> = None;
+        let mut final_values = Vec::new();
+        for contexts in &stage_contexts {
+            let values = reserve_tensor_parallel_values(&mut synchronizations)?;
+            submit_owner_timeline_bridge(
+                devices[0],
+                &synchronizations,
+                &values,
+                previous_values.as_deref(),
+            )?;
+            submit_tensor_parallel_stage(devices, contexts, &synchronizations, &values)?;
+            previous_values = Some(values.clone());
+            final_values = values;
+        }
+        submit_tensor_parallel_completion(
+            devices[0],
+            &stage_contexts.last().unwrap()[0],
+            &synchronizations,
+            &final_values,
+        )?;
+        let wall_duration_ns = started.elapsed().as_nanos();
+        if iteration == 0 {
+            continue;
+        }
+        let mut gpu_duration_ns = 0_u128;
+        for contexts in &stage_contexts {
+            let stage_duration = contexts
+                .iter()
+                .enumerate()
+                .map(|(participant, context)| {
+                    read_timestamp_duration_ns(devices[participant], context.query_pool)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .max()
+                .unwrap_or_default();
+            gpu_duration_ns += stage_duration;
+        }
+        measured_samples.push(Sample {
+            sample_index: iteration - 1,
+            duration_ns: wall_duration_ns.max(gpu_duration_ns),
+            iterations: 1,
+            bytes_read: stage_contexts
+                .iter()
+                .flat_map(|contexts| contexts.iter())
+                .map(|context| activation_size as u64 + context.weights.size as u64)
+                .sum(),
+            bytes_written: (output_size as u64) * stages as u64,
+            operations: stage_contexts
+                .iter()
+                .flat_map(|contexts| contexts.iter())
+                .map(|context| context.plan.operations)
+                .sum(),
+        });
+    }
+    validate_tensor_parallel_output(devices[0], &shared_buffers.last().unwrap().buffers[0])?;
+    let parameter_bytes_per_participant = (0..devices.len())
+        .map(|participant| {
+            stage_contexts
+                .iter()
+                .map(|contexts| contexts[participant].weights.size as usize)
+                .sum()
+        })
+        .collect();
+    let transport = route.name();
+    Ok(TensorParallelRunResult {
+        samples: measured_samples,
+        parameter_bytes_per_participant,
+        activation_bytes: activation_size as usize,
+        output_bytes: output_size as usize,
+        transport,
+    })
+}
+
+fn serial_chain_plan(
+    payload_bytes: usize,
+    kernel: &DenseFormatKernel,
+) -> Result<(usize, usize, usize, TensorParallelShardPlan), String> {
+    let (m, n, k, mut plans) = tensor_parallel_shard_plans(payload_bytes, kernel, 1)?;
+    Ok((m, n, k, plans.pop().unwrap()))
+}
+
+fn serial_chain_sample(
+    duration_ns: u128,
+    sample_index: usize,
+    contexts: &[TensorParallelShardContext],
+    activation_size: vk::DeviceSize,
+    output_size: vk::DeviceSize,
+) -> Sample {
+    Sample {
+        sample_index,
+        duration_ns,
+        iterations: 1,
+        bytes_read: contexts
+            .iter()
+            .map(|context| activation_size as u64 + context.weights.size as u64)
+            .sum(),
+        bytes_written: output_size as u64 * contexts.len() as u64,
+        operations: contexts.iter().map(|context| context.plan.operations).sum(),
     }
 }
 
-fn reduce_tensor_parallel_partials(
-    reduction: TensorParallelReduction,
-    partials: &[Vec<u8>],
-    combined: &mut [u8],
-) {
-    match reduction {
-        TensorParallelReduction::Sum => {
-            for (index, byte) in combined.iter_mut().enumerate() {
-                let mut value = 0_u8;
-                for partial in partials {
-                    value = value.wrapping_add(partial[index]);
-                }
-                *byte = value.rotate_left((index & 7) as u32);
-            }
-        }
-        TensorParallelReduction::Interleave => {
-            for (index, byte) in combined.iter_mut().enumerate() {
-                let partial = &partials[index % partials.len()];
-                *byte = partial[index].wrapping_add((index & 0xff) as u8);
-            }
-        }
-        TensorParallelReduction::Max => {
-            for (index, byte) in combined.iter_mut().enumerate() {
-                let mut value = 0_u8;
-                for partial in partials {
-                    value = value.max(partial[index]);
-                }
-                *byte = value;
-            }
-        }
+fn run_direct_local_serial_chain(
+    device: &OpenVulkanComputeDevice,
+    payload_bytes: usize,
+    samples: usize,
+    kernel: &DenseFormatKernel,
+    stages: usize,
+) -> Result<SerialChainRunResult, String> {
+    let stage_payload = payload_bytes / stages;
+    let (m, n, k, plan) = serial_chain_plan(stage_payload, kernel)?;
+    let activation_size = ((m * k).div_ceil(2) * mem::size_of::<u32>()) as vk::DeviceSize;
+    let output_size = ((m * n).div_ceil(2) * mem::size_of::<u32>()) as vk::DeviceSize;
+    if activation_size != output_size {
+        return Err("component chain requires equal BF16 activation and output shapes".to_string());
     }
+    let slots = (0..=stages)
+        .map(|_| {
+            create_buffer(
+                device,
+                activation_size,
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_SRC
+                    | vk::BufferUsageFlags::TRANSFER_DST,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    initialize_tensor_parallel_buffer(device, &slots[0], true)?;
+    for slot in &slots[1..] {
+        initialize_tensor_parallel_buffer(device, slot, false)?;
+    }
+    let contexts = (0..stages)
+        .map(|stage| {
+            create_tensor_parallel_shard_context(
+                device,
+                kernel,
+                plan.clone(),
+                &slots[stage],
+                &slots[stage + 1],
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut measured_samples = Vec::with_capacity(samples);
+    for iteration in 0..=samples {
+        for stage in 0..stages {
+            record_tensor_parallel_shard(
+                device,
+                &contexts[stage],
+                &slots[stage],
+                &slots[stage + 1],
+            )?;
+        }
+        let command_buffers = contexts
+            .iter()
+            .map(|context| context.command_buffer)
+            .collect::<Vec<_>>();
+        let completion = &contexts[stages - 1];
+        let started = Instant::now();
+        unsafe {
+            device
+                .device
+                .reset_fences(&[completion.fence])
+                .map_err(|error| format!("could not reset local chain fence: {error:?}"))?;
+            device
+                .device
+                .queue_submit(
+                    device.queue,
+                    &[vk::SubmitInfo::default().command_buffers(&command_buffers)],
+                    completion.fence,
+                )
+                .map_err(|error| format!("could not submit local component chain: {error:?}"))?;
+            device
+                .device
+                .wait_for_fences(&[completion.fence], true, MAX_VULKAN_WAIT_NS)
+                .map_err(|error| format!("could not wait for local component chain: {error:?}"))?;
+        }
+        let wall_duration_ns = started.elapsed().as_nanos();
+        if iteration == 0 {
+            continue;
+        }
+        let gpu_duration_ns = contexts
+            .iter()
+            .map(|context| read_timestamp_duration_ns(device, context.query_pool))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum();
+        measured_samples.push(serial_chain_sample(
+            wall_duration_ns.max(gpu_duration_ns),
+            iteration - 1,
+            &contexts,
+            activation_size,
+            output_size,
+        ));
+    }
+    validate_tensor_parallel_output(device, &slots[stages])?;
+    Ok(SerialChainRunResult {
+        samples: measured_samples,
+        parameter_bytes_per_stage: contexts
+            .iter()
+            .map(|context| context.weights.size as usize)
+            .collect(),
+        activation_bytes: activation_size as usize,
+        output_bytes: output_size as usize,
+        transport: "device_local",
+    })
+}
+
+fn run_direct_external_serial_chain(
+    devices: &[&OpenVulkanComputeDevice],
+    payload_bytes: usize,
+    samples: usize,
+    kernel: &DenseFormatKernel,
+) -> Result<SerialChainRunResult, String> {
+    if devices.len() < 2 {
+        return Err("external serial chain requires at least two devices".to_string());
+    }
+    if devices
+        .iter()
+        .any(|device| !device.external_timeline_semaphore)
+    {
+        return Err(format!(
+            "{SERIAL_DIRECT_ROUTE_UNAVAILABLE} opaque-FD timeline semaphores are unavailable"
+        ));
+    }
+    let stage_payload = payload_bytes / devices.len();
+    let (m, n, k, plan) = serial_chain_plan(stage_payload, kernel)?;
+    let activation_size = ((m * k).div_ceil(2) * mem::size_of::<u32>()) as vk::DeviceSize;
+    let output_size = ((m * n).div_ceil(2) * mem::size_of::<u32>()) as vk::DeviceSize;
+    if activation_size != output_size {
+        return Err("component chain requires equal BF16 activation and output shapes".to_string());
+    }
+    let input = create_buffer(
+        devices[0],
+        activation_size,
+        vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+    let output = create_buffer(
+        devices[devices.len() - 1],
+        output_size,
+        vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+    initialize_tensor_parallel_buffer(devices[0], &input, true)?;
+    initialize_tensor_parallel_buffer(devices[devices.len() - 1], &output, false)?;
+    let boundaries = devices
+        .windows(2)
+        .map(|pair| {
+            let shared = create_shared_multi_buffer(
+                &[pair[0], pair[1]],
+                output_size,
+                SharedTransferRoute::ExternalDeviceLocal,
+            )
+            .map_err(|error| format!("{SERIAL_DIRECT_ROUTE_UNAVAILABLE} {error}"))?;
+            Ok(shared)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    for (stage, boundary) in boundaries.iter().enumerate() {
+        initialize_tensor_parallel_buffer(devices[stage], &boundary.buffers[0], false)?;
+    }
+    let mut synchronizations = devices
+        .windows(2)
+        .map(|pair| create_external_timeline_semaphore(pair[0], pair[1]))
+        .collect::<Result<Vec<_>, _>>()?;
+    let contexts = (0..devices.len())
+        .map(|stage| {
+            let activation = if stage == 0 {
+                &input
+            } else {
+                &boundaries[stage - 1].buffers[1]
+            };
+            let stage_output = if stage + 1 == devices.len() {
+                &output
+            } else {
+                &boundaries[stage].buffers[0]
+            };
+            create_tensor_parallel_shard_context(
+                devices[stage],
+                kernel,
+                plan.clone(),
+                activation,
+                stage_output,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut measured_samples = Vec::with_capacity(samples);
+    for iteration in 0..=samples {
+        for stage in 0..devices.len() {
+            let activation = if stage == 0 {
+                &input
+            } else {
+                &boundaries[stage - 1].buffers[1]
+            };
+            let stage_output = if stage + 1 == devices.len() {
+                &output
+            } else {
+                &boundaries[stage].buffers[0]
+            };
+            record_tensor_parallel_shard(
+                devices[stage],
+                &contexts[stage],
+                activation,
+                stage_output,
+            )?;
+        }
+        let values = synchronizations
+            .iter_mut()
+            .map(|synchronization| {
+                synchronization.next_value = synchronization
+                    .next_value
+                    .checked_add(1)
+                    .ok_or_else(|| "serial timeline value overflowed".to_string())?;
+                Ok(synchronization.next_value)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let completion = &contexts[contexts.len() - 1];
+        unsafe {
+            devices[devices.len() - 1]
+                .device
+                .reset_fences(&[completion.fence])
+                .map_err(|error| format!("could not reset serial completion fence: {error:?}"))?;
+        }
+        let started = Instant::now();
+        for stage in 0..devices.len() {
+            let command_buffers = [contexts[stage].command_buffer];
+            let wait_semaphores = if stage == 0 {
+                Vec::new()
+            } else {
+                vec![synchronizations[stage - 1].destination]
+            };
+            let wait_values = if stage == 0 {
+                Vec::new()
+            } else {
+                vec![values[stage - 1]]
+            };
+            let wait_stages = vec![vk::PipelineStageFlags::COMPUTE_SHADER; wait_values.len()];
+            let signal_semaphores = if stage + 1 == devices.len() {
+                Vec::new()
+            } else {
+                vec![synchronizations[stage].source]
+            };
+            let signal_values = if stage + 1 == devices.len() {
+                Vec::new()
+            } else {
+                vec![values[stage]]
+            };
+            let mut timeline = vk::TimelineSemaphoreSubmitInfo::default()
+                .wait_semaphore_values(&wait_values)
+                .signal_semaphore_values(&signal_values);
+            let submit = [vk::SubmitInfo::default()
+                .command_buffers(&command_buffers)
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .signal_semaphores(&signal_semaphores)
+                .push_next(&mut timeline)];
+            let fence = if stage + 1 == devices.len() {
+                completion.fence
+            } else {
+                vk::Fence::null()
+            };
+            unsafe {
+                devices[stage]
+                    .device
+                    .queue_submit(devices[stage].queue, &submit, fence)
+            }
+            .map_err(|error| format!("could not submit serial stage {stage}: {error:?}"))?;
+        }
+        unsafe {
+            devices[devices.len() - 1]
+                .device
+                .wait_for_fences(&[completion.fence], true, MAX_VULKAN_WAIT_NS)
+                .map_err(|error| format!("could not wait for serial chain: {error:?}"))?;
+        }
+        let wall_duration_ns = started.elapsed().as_nanos();
+        if iteration == 0 {
+            continue;
+        }
+        let gpu_duration_ns = contexts
+            .iter()
+            .enumerate()
+            .map(|(stage, context)| read_timestamp_duration_ns(devices[stage], context.query_pool))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum();
+        measured_samples.push(serial_chain_sample(
+            wall_duration_ns.max(gpu_duration_ns),
+            iteration - 1,
+            &contexts,
+            activation_size,
+            output_size,
+        ));
+    }
+    validate_tensor_parallel_output(devices[devices.len() - 1], &output)?;
+    Ok(SerialChainRunResult {
+        samples: measured_samples,
+        parameter_bytes_per_stage: contexts
+            .iter()
+            .map(|context| context.weights.size as usize)
+            .collect(),
+        activation_bytes: activation_size as usize,
+        output_bytes: output_size as usize,
+        transport: "external_device_local",
+    })
 }
 
 fn run_vulkan_dense_tensor_parallel_pair(
@@ -1813,140 +3702,14 @@ fn run_vulkan_dense_tensor_parallel_pair(
     workload_class: &str,
     kernel: DenseFormatKernel,
 ) -> Result<PairMeasurement, String> {
-    let left_payload_bytes = payload_bytes / 2;
-    let right_payload_bytes = payload_bytes - left_payload_bytes;
-    let activation_bytes = activation_bytes_for_payload(payload_bytes);
-    let output_bytes = output_bytes_for_payload(payload_bytes);
-    let left_context =
-        create_dense_compute_context(left_device, left_payload_bytes, kernel.clone())?;
-    let right_context =
-        create_dense_compute_context(right_device, right_payload_bytes, kernel.clone())?;
-    let exchange_plan = tensor_parallel_exchange_plan(
-        workload_class,
-        activation_bytes,
-        output_bytes,
-        &[&left_context, &right_context],
-    );
-    let mut exchange = create_tensor_parallel_exchange(exchange_plan);
-    let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
-        let started = Instant::now();
-        let mut max_gpu_duration = 0_u128;
-        let mut bytes_read = 0_u64;
-        let mut bytes_written = 0_u64;
-        let mut operations = 0_u64;
-
-        for _ in 0..TENSOR_PARALLEL_SYNTHETIC_LAYERS {
-            record_compute_dispatch(
-                left_device,
-                &left_context.resources,
-                left_context.command_buffer,
-                left_context.query_pool,
-                left_context.upload.buffer,
-                left_context.storage.buffer,
-                left_context.readback.buffer,
-                left_context.buffer_size,
-                &left_context.plan,
-            )?;
-            record_compute_dispatch(
-                right_device,
-                &right_context.resources,
-                right_context.command_buffer,
-                right_context.query_pool,
-                right_context.upload.buffer,
-                right_context.storage.buffer,
-                right_context.readback.buffer,
-                right_context.buffer_size,
-                &right_context.plan,
-            )?;
-            unsafe {
-                left_device
-                    .device
-                    .reset_fences(&[left_context.fence])
-                    .map_err(|error| {
-                        format!("could not reset Vulkan left tensor-parallel fence: {error:?}")
-                    })?;
-                right_device
-                    .device
-                    .reset_fences(&[right_context.fence])
-                    .map_err(|error| {
-                        format!("could not reset Vulkan right tensor-parallel fence: {error:?}")
-                    })?;
-                left_device
-                    .device
-                    .queue_submit(
-                        left_device.queue,
-                        &[vk::SubmitInfo::default()
-                            .command_buffers(&[left_context.command_buffer])],
-                        left_context.fence,
-                    )
-                    .map_err(|error| {
-                        format!("could not submit Vulkan left tensor-parallel work: {error:?}")
-                    })?;
-                right_device
-                    .device
-                    .queue_submit(
-                        right_device.queue,
-                        &[vk::SubmitInfo::default()
-                            .command_buffers(&[right_context.command_buffer])],
-                        right_context.fence,
-                    )
-                    .map_err(|error| {
-                        format!("could not submit Vulkan right tensor-parallel work: {error:?}")
-                    })?;
-                left_device
-                    .device
-                    .wait_for_fences(&[left_context.fence], true, u64::MAX)
-                    .map_err(|error| {
-                        format!("could not wait for Vulkan left tensor-parallel work: {error:?}")
-                    })?;
-                right_device
-                    .device
-                    .wait_for_fences(&[right_context.fence], true, u64::MAX)
-                    .map_err(|error| {
-                        format!("could not wait for Vulkan right tensor-parallel work: {error:?}")
-                    })?;
-            }
-            let left_duration = read_timestamp_duration_ns(left_device, left_context.query_pool)?;
-            let right_duration =
-                read_timestamp_duration_ns(right_device, right_context.query_pool)?;
-            max_gpu_duration = max_gpu_duration.max(left_duration).max(right_duration);
-            bytes_read += left_context.buffer_size as u64 + right_context.buffer_size as u64;
-            bytes_written += left_context.buffer_size as u64 + right_context.buffer_size as u64;
-            operations += left_context.plan.operations + right_context.plan.operations;
-
-            let exchange_metrics = run_tensor_parallel_exchange(
-                &[left_device, right_device],
-                &[&left_context, &right_context],
-                &mut exchange,
-            )?;
-            bytes_read += exchange_metrics.bytes_read;
-            bytes_written += exchange_metrics.bytes_written;
-            operations += exchange_metrics.operations;
-        }
-        let duration = started.elapsed();
-        black_box(checksum_bytes(&exchange.combined));
-        black_box(read_first_storage_word(
-            &left_device.device,
-            &left_context.readback,
-            &left_context.kernel,
-        )?);
-        black_box(read_first_storage_word(
-            &right_device.device,
-            &right_context.readback,
-            &right_context.kernel,
-        )?);
-        measured_samples.push(Sample {
-            sample_index,
-            duration_ns: duration.as_nanos().max(max_gpu_duration),
-            iterations: TENSOR_PARALLEL_SYNTHETIC_LAYERS as u64,
-            bytes_read,
-            bytes_written,
-            operations,
-        });
-    }
-
-    let summary = summarize_samples(&measured_samples);
+    let result = run_shared_tensor_parallel(
+        &[left_device, right_device],
+        payload_bytes,
+        samples,
+        &kernel,
+        1,
+    )?;
+    let summary = summarize_samples(&result.samples);
     Ok(PairMeasurement {
         workload_id: format_workload_id(
             TENSOR_PARALLEL_PAIR_PATTERN,
@@ -1958,399 +3721,69 @@ fn run_vulkan_dense_tensor_parallel_pair(
         placement_strategy: TWO_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
         source_target_id: left_id.to_string(),
         destination_target_id: right_id.to_string(),
-        pattern: exchange_plan.collective.to_string(),
+        pattern: format!(
+            "{}:shared_resident:transport={}",
+            kernel_identity(&kernel),
+            result.transport
+        ),
         operation_family: workload_class.to_string(),
-        regime: "small_payload".to_string(),
+        regime: SINGLE_COMPONENT_REGIME.to_string(),
         format: kernel.format,
         status: "completed".to_string(),
         reason: None,
         payload_bytes,
-        source_payload_bytes: left_payload_bytes,
-        destination_payload_bytes: right_payload_bytes,
-        activation_bytes,
-        output_bytes,
-        samples: measured_samples,
+        source_payload_bytes: result.parameter_bytes_per_participant[0],
+        destination_payload_bytes: result.parameter_bytes_per_participant[1],
+        activation_bytes: result.activation_bytes,
+        output_bytes: result.output_bytes,
+        samples: result.samples,
         summary,
     })
 }
 
-fn failed_dense_pair_measurements(
-    source_id: &str,
-    destination_id: &str,
-    workload_prefix: &str,
-    placement_strategy: &str,
-    payload_bytes: usize,
-    formats: &[String],
-    workloads: &[String],
-    reason: &str,
-) -> Vec<PairMeasurement> {
-    formats
-        .iter()
-        .flat_map(|format| {
-            workloads.iter().filter_map(move |workload| {
-                if workload_format_kernel(workload, format).is_none() {
-                    return None;
-                }
-                Some(failed_dense_pair_measurement(
-                    source_id,
-                    destination_id,
-                    workload_prefix,
-                    placement_strategy,
-                    payload_bytes,
-                    workload,
-                    format,
-                    reason,
-                ))
-            })
-        })
-        .collect()
-}
-
-fn failed_dense_pair_measurement(
-    source_id: &str,
-    destination_id: &str,
-    workload_prefix: &str,
-    placement_strategy: &str,
-    payload_bytes: usize,
-    workload_class: &str,
-    format: &str,
-    reason: &str,
-) -> PairMeasurement {
-    dense_pair_status_measurement(
-        source_id,
-        destination_id,
-        workload_prefix,
-        placement_strategy,
-        "failed",
-        payload_bytes,
-        workload_class,
-        format,
-        reason,
-    )
-}
-
-fn dense_pair_status_measurement(
-    source_id: &str,
-    destination_id: &str,
-    workload_prefix: &str,
-    placement_strategy: &str,
-    status: &str,
-    payload_bytes: usize,
-    workload_class: &str,
-    format: &str,
-    reason: &str,
-) -> PairMeasurement {
-    let source_payload_bytes = payload_bytes / 2;
-    let destination_payload_bytes = payload_bytes - source_payload_bytes;
-    PairMeasurement {
-        workload_id: format_workload_id(workload_prefix, workload_class, format),
-        comparison_group: "small_payload_placement_comparison".to_string(),
-        workload_class: workload_class.to_string(),
-        placement_strategy: placement_strategy.to_string(),
-        source_target_id: source_id.to_string(),
-        destination_target_id: destination_id.to_string(),
-        pattern: workload_prefix.to_string(),
-        operation_family: workload_class.to_string(),
-        regime: "small_payload".to_string(),
-        format: format.to_string(),
-        status: status.to_string(),
-        reason: Some(reason.to_string()),
-        payload_bytes,
-        source_payload_bytes,
-        destination_payload_bytes,
-        activation_bytes: activation_bytes_for_payload(payload_bytes),
-        output_bytes: output_bytes_for_payload(payload_bytes),
-        samples: Vec::new(),
-        summary: None,
-    }
-}
-
-fn run_vulkan_dense_serial_triplet(
-    devices: [&OpenVulkanComputeDevice; 3],
-    target_ids: &[String; 3],
+#[allow(clippy::too_many_arguments)]
+fn run_vulkan_dense_tensor_parallel_group(
+    devices: &[&OpenVulkanComputeDevice],
+    target_ids: &[String],
     payload_bytes: usize,
     samples: usize,
     workload_class: &str,
     kernel: DenseFormatKernel,
 ) -> Result<GroupMeasurement, String> {
-    let payload_split = split_three_payload_bytes(payload_bytes);
-    let activation_bytes = activation_bytes_for_payload(payload_bytes);
-    let contexts = [
-        create_dense_compute_context(devices[0], payload_split[0], kernel.clone())?,
-        create_dense_compute_context(devices[1], payload_split[1], kernel.clone())?,
-        create_dense_compute_context(devices[2], payload_split[2], kernel.clone())?,
-    ];
-    let mut first_transfer = create_host_staged_transfer(devices[0], devices[1], activation_bytes)?;
-    let mut second_transfer =
-        create_host_staged_transfer(devices[1], devices[2], activation_bytes)?;
-    let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
-        let started = Instant::now();
-        let first_sample = submit_dense_compute_sample(devices[0], &contexts[0], sample_index)?;
-        let first_transfer_sample =
-            run_host_staged_transfer_sample(devices[0], devices[1], &mut first_transfer)?;
-        let second_sample = submit_dense_compute_sample(devices[1], &contexts[1], sample_index)?;
-        let second_transfer_sample =
-            run_host_staged_transfer_sample(devices[1], devices[2], &mut second_transfer)?;
-        let third_sample = submit_dense_compute_sample(devices[2], &contexts[2], sample_index)?;
-        let duration = started.elapsed();
-        black_box(read_first_storage_word(
-            &devices[2].device,
-            &contexts[2].readback,
-            &contexts[2].kernel,
-        )?);
-        measured_samples.push(Sample {
-            sample_index,
-            duration_ns: duration.as_nanos(),
-            iterations: 1,
-            bytes_read: first_sample.bytes_read
-                + second_sample.bytes_read
-                + third_sample.bytes_read
-                + first_transfer_sample.bytes_read
-                + second_transfer_sample.bytes_read,
-            bytes_written: first_sample.bytes_written
-                + second_sample.bytes_written
-                + third_sample.bytes_written
-                + first_transfer_sample.bytes_written
-                + second_transfer_sample.bytes_written,
-            operations: first_sample.operations
-                + second_sample.operations
-                + third_sample.operations,
-        });
-    }
-
-    let summary = summarize_samples(&measured_samples);
+    let result = run_shared_tensor_parallel(devices, payload_bytes, samples, &kernel, 1)?;
+    let summary = summarize_samples(&result.samples);
     Ok(GroupMeasurement {
-        workload_id: format_workload_id(
-            "synthetic_layer_split_group_small_payload",
+        workload_id: tensor_parallel_group_workload_id(
+            devices.len(),
             workload_class,
             &kernel.format,
         ),
         comparison_group: "small_payload_placement_comparison".to_string(),
         workload_class: workload_class.to_string(),
-        placement_strategy: "three_target_serial".to_string(),
+        placement_strategy: MULTI_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
         target_ids: target_ids.to_vec(),
-        pattern: "synthetic_layer_split_group_small_payload".to_string(),
-        operation_family: workload_class.to_string(),
-        regime: "small_payload".to_string(),
-        format: kernel.format,
-        status: "completed".to_string(),
-        reason: None,
-        participant_count: 3,
-        payload_bytes,
-        payload_bytes_per_participant: payload_split,
-        activation_bytes,
-        output_bytes: output_bytes_for_payload(payload_bytes),
-        samples: measured_samples,
-        summary,
-    })
-}
-
-fn run_vulkan_dense_tensor_parallel_triplet(
-    devices: [&OpenVulkanComputeDevice; 3],
-    target_ids: &[String; 3],
-    payload_bytes: usize,
-    samples: usize,
-    workload_class: &str,
-    kernel: DenseFormatKernel,
-) -> Result<GroupMeasurement, String> {
-    let payload_split = split_three_payload_bytes(payload_bytes);
-    let activation_bytes = activation_bytes_for_payload(payload_bytes);
-    let output_bytes = output_bytes_for_payload(payload_bytes);
-    let contexts = [
-        create_dense_compute_context(devices[0], payload_split[0], kernel.clone())?,
-        create_dense_compute_context(devices[1], payload_split[1], kernel.clone())?,
-        create_dense_compute_context(devices[2], payload_split[2], kernel.clone())?,
-    ];
-    let exchange_plan = tensor_parallel_exchange_plan(
-        workload_class,
-        activation_bytes,
-        output_bytes,
-        &[&contexts[0], &contexts[1], &contexts[2]],
-    );
-    let mut exchange = create_tensor_parallel_exchange(exchange_plan);
-    let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
-        let started = Instant::now();
-        let mut max_gpu_duration = 0_u128;
-        let mut bytes_read = 0_u64;
-        let mut bytes_written = 0_u64;
-        let mut operations = 0_u64;
-
-        for _ in 0..TENSOR_PARALLEL_SYNTHETIC_LAYERS {
-            for index in 0..3 {
-                record_compute_dispatch(
-                    devices[index],
-                    &contexts[index].resources,
-                    contexts[index].command_buffer,
-                    contexts[index].query_pool,
-                    contexts[index].upload.buffer,
-                    contexts[index].storage.buffer,
-                    contexts[index].readback.buffer,
-                    contexts[index].buffer_size,
-                    &contexts[index].plan,
-                )?;
-            }
-            for index in 0..3 {
-                unsafe {
-                    devices[index]
-                        .device
-                        .reset_fences(&[contexts[index].fence])
-                        .map_err(|error| {
-                            format!(
-                                "could not reset Vulkan triplet tensor-parallel fence {index}: {error:?}"
-                            )
-                        })?;
-                    devices[index]
-                        .device
-                        .queue_submit(
-                            devices[index].queue,
-                            &[vk::SubmitInfo::default()
-                                .command_buffers(&[contexts[index].command_buffer])],
-                            contexts[index].fence,
-                        )
-                        .map_err(|error| {
-                            format!(
-                                "could not submit Vulkan triplet tensor-parallel work {index}: {error:?}"
-                            )
-                        })?;
-                }
-            }
-            for index in 0..3 {
-                unsafe {
-                    devices[index]
-                        .device
-                        .wait_for_fences(&[contexts[index].fence], true, u64::MAX)
-                        .map_err(|error| {
-                            format!(
-                                "could not wait for Vulkan triplet tensor-parallel work {index}: {error:?}"
-                            )
-                        })?;
-                }
-            }
-            for index in 0..3 {
-                max_gpu_duration = max_gpu_duration.max(read_timestamp_duration_ns(
-                    devices[index],
-                    contexts[index].query_pool,
-                )?);
-                bytes_read += contexts[index].buffer_size as u64;
-                bytes_written += contexts[index].buffer_size as u64;
-                operations += contexts[index].plan.operations;
-            }
-
-            let exchange_metrics = run_tensor_parallel_exchange(
-                &devices,
-                &[&contexts[0], &contexts[1], &contexts[2]],
-                &mut exchange,
-            )?;
-            bytes_read += exchange_metrics.bytes_read;
-            bytes_written += exchange_metrics.bytes_written;
-            operations += exchange_metrics.operations;
-        }
-        let duration = started.elapsed();
-        black_box(checksum_bytes(&exchange.combined));
-        measured_samples.push(Sample {
-            sample_index,
-            duration_ns: duration.as_nanos().max(max_gpu_duration),
-            iterations: TENSOR_PARALLEL_SYNTHETIC_LAYERS as u64,
-            bytes_read,
-            bytes_written,
-            operations,
-        });
-    }
-
-    let summary = summarize_samples(&measured_samples);
-    Ok(GroupMeasurement {
-        workload_id: format_workload_id(
-            TENSOR_PARALLEL_TRIPLET_PATTERN,
-            workload_class,
-            &kernel.format,
+        pattern: format!(
+            "{}:shared_resident:transport={}",
+            kernel_identity(&kernel),
+            result.transport
         ),
-        comparison_group: "small_payload_placement_comparison".to_string(),
-        workload_class: workload_class.to_string(),
-        placement_strategy: THREE_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
-        target_ids: target_ids.to_vec(),
-        pattern: exchange_plan.collective.to_string(),
         operation_family: workload_class.to_string(),
-        regime: "small_payload".to_string(),
+        regime: SINGLE_COMPONENT_REGIME.to_string(),
         format: kernel.format,
         status: "completed".to_string(),
         reason: None,
-        participant_count: 3,
+        participant_count: devices.len(),
         payload_bytes,
-        payload_bytes_per_participant: payload_split,
-        activation_bytes,
-        output_bytes,
-        samples: measured_samples,
+        payload_bytes_per_participant: result.parameter_bytes_per_participant,
+        activation_bytes: result.activation_bytes,
+        output_bytes: result.output_bytes,
+        samples: result.samples,
         summary,
     })
 }
 
-fn failed_triplet_measurements(
-    target_ids: &[String; 3],
-    payload_bytes: usize,
-    formats: &[String],
-    workloads: &[String],
-    reason: &str,
-) -> Vec<GroupMeasurement> {
-    formats
-        .iter()
-        .flat_map(|format| {
-            workloads.iter().filter_map(move |workload| {
-                if workload_format_kernel(workload, format).is_none() {
-                    return None;
-                }
-                Some([
-                    failed_triplet_measurement(
-                        target_ids,
-                        "synthetic_layer_split_group_small_payload",
-                        "three_target_serial",
-                        payload_bytes,
-                        workload,
-                        format,
-                        reason,
-                    ),
-                    failed_triplet_measurement(
-                        target_ids,
-                        TENSOR_PARALLEL_TRIPLET_PATTERN,
-                        THREE_TARGET_TENSOR_PARALLEL_STRATEGY,
-                        payload_bytes,
-                        workload,
-                        format,
-                        reason,
-                    ),
-                ])
-            })
-        })
-        .flatten()
-        .collect()
-}
-
-fn failed_triplet_measurement(
-    target_ids: &[String; 3],
-    workload_prefix: &str,
-    placement_strategy: &str,
-    payload_bytes: usize,
-    workload_class: &str,
-    format: &str,
-    reason: &str,
-) -> GroupMeasurement {
-    triplet_status_measurement(
-        target_ids,
-        workload_prefix,
-        placement_strategy,
-        "failed",
-        payload_bytes,
-        workload_class,
-        format,
-        reason,
-    )
-}
-
-fn triplet_status_measurement(
-    target_ids: &[String; 3],
-    workload_prefix: &str,
-    placement_strategy: &str,
+fn tensor_parallel_group_status_measurement(
+    target_ids: &[String],
     status: &str,
     payload_bytes: usize,
     workload_class: &str,
@@ -2358,20 +3791,20 @@ fn triplet_status_measurement(
     reason: &str,
 ) -> GroupMeasurement {
     GroupMeasurement {
-        workload_id: format_workload_id(workload_prefix, workload_class, format),
+        workload_id: tensor_parallel_group_workload_id(target_ids.len(), workload_class, format),
         comparison_group: "small_payload_placement_comparison".to_string(),
         workload_class: workload_class.to_string(),
-        placement_strategy: placement_strategy.to_string(),
+        placement_strategy: MULTI_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
         target_ids: target_ids.to_vec(),
-        pattern: workload_prefix.to_string(),
+        pattern: tensor_parallel_group_pattern(target_ids.len()),
         operation_family: workload_class.to_string(),
-        regime: "small_payload".to_string(),
+        regime: SINGLE_COMPONENT_REGIME.to_string(),
         format: format.to_string(),
         status: status.to_string(),
         reason: Some(reason.to_string()),
-        participant_count: 3,
+        participant_count: target_ids.len(),
         payload_bytes,
-        payload_bytes_per_participant: split_three_payload_bytes(payload_bytes),
+        payload_bytes_per_participant: split_payload_bytes(payload_bytes, target_ids.len()),
         activation_bytes: activation_bytes_for_payload(payload_bytes),
         output_bytes: output_bytes_for_payload(payload_bytes),
         samples: Vec::new(),
@@ -2379,11 +3812,8 @@ fn triplet_status_measurement(
     }
 }
 
-fn split_three_payload_bytes(payload_bytes: usize) -> Vec<usize> {
-    let first = payload_bytes.div_ceil(3);
-    let remaining = payload_bytes - first;
-    let second = remaining.div_ceil(2);
-    vec![first, second, remaining - second]
+fn split_payload_bytes(payload_bytes: usize, parts: usize) -> Vec<usize> {
+    split_extent(payload_bytes, parts)
 }
 
 struct ComputeResources {
@@ -2415,15 +3845,29 @@ fn create_compute_resources(
     buffer_size: vk::DeviceSize,
     shader: ShaderCode,
 ) -> Result<ComputeResources, String> {
+    create_compute_resources_for_buffers(compute_device, &[(storage_buffer, buffer_size)], shader)
+}
+
+fn create_compute_resources_for_buffers(
+    compute_device: &OpenVulkanComputeDevice,
+    buffers: &[(vk::Buffer, vk::DeviceSize)],
+    shader: ShaderCode,
+) -> Result<ComputeResources, String> {
     let device = &compute_device.device;
-    let binding = [vk::DescriptorSetLayoutBinding::default()
-        .binding(0)
-        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-        .descriptor_count(1)
-        .stage_flags(vk::ShaderStageFlags::COMPUTE)];
+    let bindings = buffers
+        .iter()
+        .enumerate()
+        .map(|(binding, _)| {
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(binding as u32)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        })
+        .collect::<Vec<_>>();
     let descriptor_set_layout = unsafe {
         device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&binding),
+            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
             None,
         )
     }
@@ -2431,7 +3875,7 @@ fn create_compute_resources(
     let push_ranges = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
         .offset(0)
-        .size((mem::size_of::<u32>() * 8) as u32)];
+        .size((mem::size_of::<u32>() * 10) as u32)];
     let set_layouts = [descriptor_set_layout];
     let pipeline_layout = unsafe {
         device.create_pipeline_layout(
@@ -2468,7 +3912,7 @@ fn create_compute_resources(
     unsafe { device.destroy_shader_module(shader_module, None) };
     let pool_sizes = [vk::DescriptorPoolSize::default()
         .ty(vk::DescriptorType::STORAGE_BUFFER)
-        .descriptor_count(1)];
+        .descriptor_count(buffers.len() as u32)];
     let descriptor_pool = unsafe {
         device.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default()
@@ -2486,19 +3930,30 @@ fn create_compute_resources(
         )
     }
     .map_err(|error| format!("could not allocate Vulkan descriptor set: {error:?}"))?[0];
-    let buffer_info = [vk::DescriptorBufferInfo::default()
-        .buffer(storage_buffer)
-        .offset(0)
-        .range(buffer_size)];
-    unsafe {
-        device.update_descriptor_sets(
-            &[vk::WriteDescriptorSet::default()
+    let buffer_infos = buffers
+        .iter()
+        .map(|(buffer, size)| {
+            vec![
+                vk::DescriptorBufferInfo::default()
+                    .buffer(*buffer)
+                    .offset(0)
+                    .range(*size),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let descriptor_writes = buffer_infos
+        .iter()
+        .enumerate()
+        .map(|(binding, info)| {
+            vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
-                .dst_binding(0)
+                .dst_binding(binding as u32)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&buffer_info)],
-            &[],
-        );
+                .buffer_info(info)
+        })
+        .collect::<Vec<_>>();
+    unsafe {
+        device.update_descriptor_sets(&descriptor_writes, &[]);
     }
     Ok(ComputeResources {
         device: device.clone(),
@@ -2529,11 +3984,10 @@ fn record_compute_dispatch(
     resources: &ComputeResources,
     command_buffer: vk::CommandBuffer,
     query_pool: vk::QueryPool,
-    upload_buffer: vk::Buffer,
     storage_buffer: vk::Buffer,
     readback_buffer: vk::Buffer,
-    buffer_size: vk::DeviceSize,
     plan: &ComputePlan,
+    readback_output: bool,
 ) -> Result<(), String> {
     let device = &compute_device.device;
     unsafe {
@@ -2548,24 +4002,18 @@ fn record_compute_dispatch(
             )
             .map_err(|error| format!("could not begin Vulkan command buffer: {error:?}"))?;
         device.cmd_reset_query_pool(command_buffer, query_pool, 0, 2);
-        device.cmd_copy_buffer(
-            command_buffer,
-            upload_buffer,
-            storage_buffer,
-            &[vk::BufferCopy::default().size(buffer_size)],
-        );
         device.cmd_pipeline_barrier(
             command_buffer,
-            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER,
             vk::PipelineStageFlags::COMPUTE_SHADER,
             vk::DependencyFlags::empty(),
             &[],
             &[vk::BufferMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
                 .buffer(storage_buffer)
                 .offset(0)
-                .size(buffer_size)],
+                .size(plan.buffer_size)],
             &[],
         );
         device.cmd_write_timestamp(
@@ -2610,26 +4058,30 @@ fn record_compute_dispatch(
             query_pool,
             1,
         );
-        device.cmd_pipeline_barrier(
-            command_buffer,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[vk::BufferMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                .buffer(storage_buffer)
-                .offset(0)
-                .size(buffer_size)],
-            &[],
-        );
-        device.cmd_copy_buffer(
-            command_buffer,
-            storage_buffer,
-            readback_buffer,
-            &[vk::BufferCopy::default().size(buffer_size)],
-        );
+        if readback_output {
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[vk::BufferMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .buffer(storage_buffer)
+                    .offset(plan.output_offset)
+                    .size(plan.output_size)],
+                &[],
+            );
+            device.cmd_copy_buffer(
+                command_buffer,
+                storage_buffer,
+                readback_buffer,
+                &[vk::BufferCopy::default()
+                    .src_offset(plan.output_offset)
+                    .size(plan.output_size)],
+            );
+        }
         device
             .end_command_buffer(command_buffer)
             .map_err(|error| format!("could not end Vulkan command buffer: {error:?}"))?;
@@ -2705,7 +4157,581 @@ fn create_buffer(
         buffer,
         memory,
         size,
+        _shared_host: None,
     })
+}
+
+fn create_shared_transfer_buffers(
+    source: &OpenVulkanComputeDevice,
+    destination: &OpenVulkanComputeDevice,
+    size: vk::DeviceSize,
+) -> Result<SharedTransferBuffers, String> {
+    match create_external_device_local_buffers(source, destination, size) {
+        Ok((source_buffer, destination_buffer)) => {
+            match create_external_timeline_semaphore(source, destination) {
+                Ok(timeline) => Ok(SharedTransferBuffers {
+                    route: SharedTransferRoute::ExternalDeviceLocal,
+                    source: source_buffer,
+                    destination: destination_buffer,
+                    timeline: Some(timeline),
+                }),
+                Err(timeline_error) => create_shared_host_buffers(source, destination, size)
+                    .map(|(source_buffer, destination_buffer)| SharedTransferBuffers {
+                        route: SharedTransferRoute::SharedHost,
+                        source: source_buffer,
+                        destination: destination_buffer,
+                        timeline: create_external_timeline_semaphore(source, destination).ok(),
+                    })
+                    .map_err(|host_error| {
+                        format!(
+                            "device-local memory exists but external timeline synchronization is unavailable ({timeline_error}); shared-host route unavailable ({host_error})"
+                        )
+                    }),
+            }
+        }
+        Err(device_local_error) => {
+            create_shared_host_buffers(source, destination, size)
+                .map(|(source_buffer, destination_buffer)| SharedTransferBuffers {
+                    route: SharedTransferRoute::SharedHost,
+                    source: source_buffer,
+                    destination: destination_buffer,
+                    timeline: create_external_timeline_semaphore(source, destination).ok(),
+                })
+                .map_err(|host_error| {
+                    format!(
+                        "external device-local route unavailable ({device_local_error}); shared-host route unavailable ({host_error})"
+                    )
+                })
+        }
+    }
+}
+
+fn create_shared_multi_buffer(
+    devices: &[&OpenVulkanComputeDevice],
+    size: vk::DeviceSize,
+    route: SharedTransferRoute,
+) -> Result<SharedMultiBuffer, String> {
+    if devices.len() < 2 {
+        return Err("shared multi-device buffer requires at least two devices".to_string());
+    }
+    let buffers = match route {
+        SharedTransferRoute::ExternalDeviceLocal => {
+            create_external_device_local_multi_buffers(devices, size)
+        }
+        SharedTransferRoute::SharedHost => create_shared_host_multi_buffers(devices, size),
+    }?;
+    Ok(SharedMultiBuffer { buffers })
+}
+
+fn create_external_timeline_semaphore(
+    source: &OpenVulkanComputeDevice,
+    destination: &OpenVulkanComputeDevice,
+) -> Result<ExternalTimelineSemaphore, String> {
+    if !source.external_timeline_semaphore || !destination.external_timeline_semaphore {
+        return Err("opaque-FD timeline semaphores are not available on both devices".to_string());
+    }
+    let handle_type = vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD;
+    let mut timeline_info = vk::SemaphoreTypeCreateInfo::default()
+        .semaphore_type(vk::SemaphoreType::TIMELINE)
+        .initial_value(0);
+    let mut export_info = vk::ExportSemaphoreCreateInfo::default().handle_types(handle_type);
+    let source_semaphore = unsafe {
+        source.device.create_semaphore(
+            &vk::SemaphoreCreateInfo::default()
+                .push_next(&mut timeline_info)
+                .push_next(&mut export_info),
+            None,
+        )
+    }
+    .map_err(|error| format!("could not create exportable timeline semaphore: {error:?}"))?;
+    let source_loader =
+        ash::khr::external_semaphore_fd::Device::new(&source.instance, &source.device);
+    let raw_fd = match unsafe {
+        source_loader.get_semaphore_fd(
+            &vk::SemaphoreGetFdInfoKHR::default()
+                .semaphore(source_semaphore)
+                .handle_type(handle_type),
+        )
+    } {
+        Ok(fd) => fd,
+        Err(error) => {
+            unsafe { source.device.destroy_semaphore(source_semaphore, None) };
+            return Err(format!("could not export timeline semaphore: {error:?}"));
+        }
+    };
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let mut destination_timeline_info = vk::SemaphoreTypeCreateInfo::default()
+        .semaphore_type(vk::SemaphoreType::TIMELINE)
+        .initial_value(0);
+    let destination_semaphore = match unsafe {
+        destination.device.create_semaphore(
+            &vk::SemaphoreCreateInfo::default().push_next(&mut destination_timeline_info),
+            None,
+        )
+    } {
+        Ok(semaphore) => semaphore,
+        Err(error) => {
+            unsafe { source.device.destroy_semaphore(source_semaphore, None) };
+            return Err(format!(
+                "could not create imported timeline semaphore: {error:?}"
+            ));
+        }
+    };
+    let destination_loader =
+        ash::khr::external_semaphore_fd::Device::new(&destination.instance, &destination.device);
+    let import_info = vk::ImportSemaphoreFdInfoKHR::default()
+        .semaphore(destination_semaphore)
+        .handle_type(handle_type)
+        .fd(fd.as_raw_fd());
+    if let Err(error) = unsafe { destination_loader.import_semaphore_fd(&import_info) } {
+        unsafe {
+            destination
+                .device
+                .destroy_semaphore(destination_semaphore, None);
+            source.device.destroy_semaphore(source_semaphore, None);
+        }
+        return Err(format!("could not import timeline semaphore: {error:?}"));
+    }
+    let _fd_owned_by_vulkan = fd.into_raw_fd();
+    Ok(ExternalTimelineSemaphore {
+        source_device: source.device.clone(),
+        destination_device: destination.device.clone(),
+        source: source_semaphore,
+        destination: destination_semaphore,
+        next_value: 0,
+    })
+}
+
+fn create_unbound_external_buffer(
+    compute_device: &OpenVulkanComputeDevice,
+    size: vk::DeviceSize,
+    handle_type: vk::ExternalMemoryHandleTypeFlags,
+) -> Result<UnboundExternalBuffer, String> {
+    let usage = vk::BufferUsageFlags::TRANSFER_SRC
+        | vk::BufferUsageFlags::TRANSFER_DST
+        | vk::BufferUsageFlags::STORAGE_BUFFER;
+    let mut external = vk::ExternalMemoryBufferCreateInfo::default().handle_types(handle_type);
+    let buffer = unsafe {
+        compute_device.device.create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(size)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .push_next(&mut external),
+            None,
+        )
+    }
+    .map_err(|error| format!("could not create external Vulkan buffer: {error:?}"))?;
+    let mut dedicated = vk::MemoryDedicatedRequirements::default();
+    let mut requirements = vk::MemoryRequirements2::default().push_next(&mut dedicated);
+    unsafe {
+        compute_device.device.get_buffer_memory_requirements2(
+            &vk::BufferMemoryRequirementsInfo2::default().buffer(buffer),
+            &mut requirements,
+        );
+    }
+    Ok(UnboundExternalBuffer {
+        device: compute_device.device.clone(),
+        buffer: Some(buffer),
+        size,
+        requirements: requirements.memory_requirements,
+        requires_dedicated: dedicated.requires_dedicated_allocation == vk::TRUE,
+    })
+}
+
+fn create_external_device_local_buffers(
+    source: &OpenVulkanComputeDevice,
+    destination: &OpenVulkanComputeDevice,
+    size: vk::DeviceSize,
+) -> Result<(VulkanBuffer, VulkanBuffer), String> {
+    if !source.external_memory_fd || !destination.external_memory_fd {
+        return Err(
+            "VK_KHR_external_memory_fd with DMA-BUF is not available on both devices".to_string(),
+        );
+    }
+    let handle_type = vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
+    let source_raw = create_unbound_external_buffer(source, size, handle_type)?;
+    let destination_raw = create_unbound_external_buffer(destination, size, handle_type)?;
+    let dedicated = source_raw.requires_dedicated || destination_raw.requires_dedicated;
+    if dedicated && source_raw.requirements.size != destination_raw.requirements.size {
+        return Err(format!(
+            "dedicated cross-device requirements disagree: source={} destination={}",
+            source_raw.requirements.size, destination_raw.requirements.size
+        ));
+    }
+    let shared_allocation_size = source_raw
+        .requirements
+        .size
+        .max(destination_raw.requirements.size);
+    let source_memory_type = memory_type_index(
+        &source.memory_properties,
+        source_raw.requirements.memory_type_bits,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )
+    .ok_or_else(|| "source has no exportable device-local memory type".to_string())?;
+    let source_buffer_handle = source_raw.buffer.unwrap();
+    let mut export = vk::ExportMemoryAllocateInfo::default().handle_types(handle_type);
+    let mut source_dedicated =
+        vk::MemoryDedicatedAllocateInfo::default().buffer(source_buffer_handle);
+    let mut source_allocate = vk::MemoryAllocateInfo::default()
+        .allocation_size(shared_allocation_size)
+        .memory_type_index(source_memory_type)
+        .push_next(&mut export);
+    if dedicated {
+        source_allocate = source_allocate.push_next(&mut source_dedicated);
+    }
+    let source_memory = unsafe { source.device.allocate_memory(&source_allocate, None) }
+        .map_err(|error| format!("could not allocate exportable device-local memory: {error:?}"))?;
+    if let Err(error) = unsafe {
+        source
+            .device
+            .bind_buffer_memory(source_buffer_handle, source_memory, 0)
+    } {
+        unsafe { source.device.free_memory(source_memory, None) };
+        return Err(format!(
+            "could not bind exportable device-local memory: {error:?}"
+        ));
+    }
+    let source_buffer = source_raw.into_bound(source_memory, None);
+
+    let source_fd_loader =
+        ash::khr::external_memory_fd::Device::new(&source.instance, &source.device);
+    let raw_fd = unsafe {
+        source_fd_loader.get_memory_fd(
+            &vk::MemoryGetFdInfoKHR::default()
+                .memory(source_buffer.memory)
+                .handle_type(handle_type),
+        )
+    }
+    .map_err(|error| format!("could not export device-local DMA-BUF: {error:?}"))?;
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let destination_fd_loader =
+        ash::khr::external_memory_fd::Device::new(&destination.instance, &destination.device);
+    let mut fd_properties = vk::MemoryFdPropertiesKHR::default();
+    unsafe {
+        destination_fd_loader.get_memory_fd_properties(
+            handle_type,
+            fd.as_raw_fd(),
+            &mut fd_properties,
+        )
+    }
+    .map_err(|error| format!("could not inspect imported DMA-BUF: {error:?}"))?;
+    let compatible_types =
+        destination_raw.requirements.memory_type_bits & fd_properties.memory_type_bits;
+    let destination_memory_type = memory_type_index(
+        &destination.memory_properties,
+        compatible_types,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )
+    .ok_or_else(|| {
+        "destination has no device-local memory type for imported DMA-BUF".to_string()
+    })?;
+    let destination_buffer_handle = destination_raw.buffer.unwrap();
+    let mut import = vk::ImportMemoryFdInfoKHR::default()
+        .handle_type(handle_type)
+        .fd(fd.as_raw_fd());
+    let mut destination_dedicated =
+        vk::MemoryDedicatedAllocateInfo::default().buffer(destination_buffer_handle);
+    let mut destination_allocate = vk::MemoryAllocateInfo::default()
+        .allocation_size(shared_allocation_size)
+        .memory_type_index(destination_memory_type)
+        .push_next(&mut import);
+    if dedicated {
+        destination_allocate = destination_allocate.push_next(&mut destination_dedicated);
+    }
+    let destination_memory = unsafe {
+        destination
+            .device
+            .allocate_memory(&destination_allocate, None)
+    }
+    .map_err(|error| format!("could not import device-local DMA-BUF: {error:?}"))?;
+    let _vulkan_owned_fd = fd.into_raw_fd();
+    if let Err(error) = unsafe {
+        destination
+            .device
+            .bind_buffer_memory(destination_buffer_handle, destination_memory, 0)
+    } {
+        unsafe { destination.device.free_memory(destination_memory, None) };
+        return Err(format!(
+            "could not bind imported device-local DMA-BUF: {error:?}"
+        ));
+    }
+    let destination_buffer = destination_raw.into_bound(destination_memory, None);
+    Ok((source_buffer, destination_buffer))
+}
+
+fn create_external_device_local_multi_buffers(
+    devices: &[&OpenVulkanComputeDevice],
+    size: vk::DeviceSize,
+) -> Result<Vec<VulkanBuffer>, String> {
+    if devices.iter().any(|device| !device.external_memory_fd) {
+        return Err(
+            "VK_KHR_external_memory_fd with DMA-BUF is not available on every device".to_string(),
+        );
+    }
+    let owner = devices[0];
+    let handle_type = vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
+    let raw_buffers = devices
+        .iter()
+        .map(|device| create_unbound_external_buffer(device, size, handle_type))
+        .collect::<Result<Vec<_>, _>>()?;
+    let dedicated = raw_buffers.iter().any(|raw| raw.requires_dedicated);
+    let allocation_size = if dedicated {
+        let required_size = raw_buffers[0].requirements.size;
+        if raw_buffers
+            .iter()
+            .any(|raw| raw.requirements.size != required_size)
+        {
+            return Err(
+                "dedicated cross-device buffer requirements disagree on allocation size"
+                    .to_string(),
+            );
+        }
+        required_size
+    } else {
+        raw_buffers
+            .iter()
+            .map(|raw| raw.requirements.size)
+            .max()
+            .unwrap_or(size)
+    };
+    let owner_raw = &raw_buffers[0];
+    let owner_memory_type = memory_type_index(
+        &owner.memory_properties,
+        owner_raw.requirements.memory_type_bits,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )
+    .ok_or_else(|| "owner has no exportable device-local memory type".to_string())?;
+    let owner_buffer_handle = owner_raw.buffer.unwrap();
+    let mut export = vk::ExportMemoryAllocateInfo::default().handle_types(handle_type);
+    let mut owner_dedicated =
+        vk::MemoryDedicatedAllocateInfo::default().buffer(owner_buffer_handle);
+    let mut owner_allocate = vk::MemoryAllocateInfo::default()
+        .allocation_size(allocation_size)
+        .memory_type_index(owner_memory_type)
+        .push_next(&mut export);
+    if dedicated {
+        owner_allocate = owner_allocate.push_next(&mut owner_dedicated);
+    }
+    let owner_memory = unsafe { owner.device.allocate_memory(&owner_allocate, None) }
+        .map_err(|error| format!("could not allocate shared owner memory: {error:?}"))?;
+    if let Err(error) = unsafe {
+        owner
+            .device
+            .bind_buffer_memory(owner_buffer_handle, owner_memory, 0)
+    } {
+        unsafe { owner.device.free_memory(owner_memory, None) };
+        return Err(format!("could not bind shared owner memory: {error:?}"));
+    }
+
+    let mut raw_buffers = raw_buffers.into_iter();
+    let owner_raw = raw_buffers.next().unwrap();
+    let owner_buffer = owner_raw.into_bound(owner_memory, None);
+    let owner_loader = ash::khr::external_memory_fd::Device::new(&owner.instance, &owner.device);
+    let mut buffers = Vec::with_capacity(devices.len());
+    buffers.push(owner_buffer);
+
+    for (peer, peer_raw) in devices[1..].iter().zip(raw_buffers) {
+        let raw_fd = unsafe {
+            owner_loader.get_memory_fd(
+                &vk::MemoryGetFdInfoKHR::default()
+                    .memory(buffers[0].memory)
+                    .handle_type(handle_type),
+            )
+        }
+        .map_err(|error| format!("could not export owner DMA-BUF: {error:?}"))?;
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let peer_loader = ash::khr::external_memory_fd::Device::new(&peer.instance, &peer.device);
+        let mut fd_properties = vk::MemoryFdPropertiesKHR::default();
+        unsafe {
+            peer_loader.get_memory_fd_properties(handle_type, fd.as_raw_fd(), &mut fd_properties)
+        }
+        .map_err(|error| format!("could not inspect owner DMA-BUF on peer: {error:?}"))?;
+        let compatible_types =
+            peer_raw.requirements.memory_type_bits & fd_properties.memory_type_bits;
+        let peer_memory_type = memory_type_index(
+            &peer.memory_properties,
+            compatible_types,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )
+        .ok_or_else(|| "peer has no device-local memory type for owner DMA-BUF".to_string())?;
+        let peer_buffer_handle = peer_raw.buffer.unwrap();
+        let mut import = vk::ImportMemoryFdInfoKHR::default()
+            .handle_type(handle_type)
+            .fd(fd.as_raw_fd());
+        let mut peer_dedicated =
+            vk::MemoryDedicatedAllocateInfo::default().buffer(peer_buffer_handle);
+        let mut peer_allocate = vk::MemoryAllocateInfo::default()
+            .allocation_size(allocation_size)
+            .memory_type_index(peer_memory_type)
+            .push_next(&mut import);
+        if dedicated {
+            peer_allocate = peer_allocate.push_next(&mut peer_dedicated);
+        }
+        let peer_memory = unsafe { peer.device.allocate_memory(&peer_allocate, None) }
+            .map_err(|error| format!("could not import owner DMA-BUF on peer: {error:?}"))?;
+        let _vulkan_owned_fd = fd.into_raw_fd();
+        if let Err(error) = unsafe {
+            peer.device
+                .bind_buffer_memory(peer_buffer_handle, peer_memory, 0)
+        } {
+            unsafe { peer.device.free_memory(peer_memory, None) };
+            return Err(format!("could not bind owner DMA-BUF on peer: {error:?}"));
+        }
+        buffers.push(peer_raw.into_bound(peer_memory, None));
+    }
+    Ok(buffers)
+}
+
+fn create_shared_host_buffers(
+    source: &OpenVulkanComputeDevice,
+    destination: &OpenVulkanComputeDevice,
+    size: vk::DeviceSize,
+) -> Result<(VulkanBuffer, VulkanBuffer), String> {
+    if !source.external_memory_host || !destination.external_memory_host {
+        return Err("VK_EXT_external_memory_host is not available on both devices".to_string());
+    }
+    let handle_type = vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
+    let source_raw = create_unbound_external_buffer(source, size, handle_type)?;
+    let destination_raw = create_unbound_external_buffer(destination, size, handle_type)?;
+    let alignment = source
+        .shared_host_alignment
+        .into_iter()
+        .chain(destination.shared_host_alignment)
+        .chain([
+            source_raw.requirements.alignment as usize,
+            destination_raw.requirements.alignment as usize,
+        ])
+        .max()
+        .ok_or_else(|| "shared-host alignment is unavailable".to_string())?;
+    if !alignment.is_power_of_two() {
+        return Err(format!(
+            "shared-host alignment {alignment} is not a power of two"
+        ));
+    }
+    let required_size = (source_raw
+        .requirements
+        .size
+        .max(destination_raw.requirements.size) as usize)
+        .max(size as usize);
+    let allocation_size = required_size
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .ok_or_else(|| "shared-host allocation size overflowed".to_string())?;
+    let layout = std::alloc::Layout::from_size_align(allocation_size, alignment)
+        .map_err(|error| format!("invalid shared-host allocation layout: {error}"))?;
+    let pointer = unsafe { std::alloc::alloc_zeroed(layout) };
+    let pointer = ptr::NonNull::new(pointer)
+        .ok_or_else(|| format!("could not allocate {allocation_size} shared-host bytes"))?;
+    let allocation = Arc::new(SharedHostAllocation { pointer, layout });
+    let source_buffer = import_shared_host_buffer(source, source_raw, Arc::clone(&allocation))?;
+    let destination_buffer = import_shared_host_buffer(destination, destination_raw, allocation)?;
+    Ok((source_buffer, destination_buffer))
+}
+
+fn create_shared_host_multi_buffers(
+    devices: &[&OpenVulkanComputeDevice],
+    size: vk::DeviceSize,
+) -> Result<Vec<VulkanBuffer>, String> {
+    if devices.iter().any(|device| !device.external_memory_host) {
+        return Err("VK_EXT_external_memory_host is not available on every device".to_string());
+    }
+    let handle_type = vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
+    let raw_buffers = devices
+        .iter()
+        .map(|device| create_unbound_external_buffer(device, size, handle_type))
+        .collect::<Result<Vec<_>, _>>()?;
+    let alignment = devices
+        .iter()
+        .filter_map(|device| device.shared_host_alignment)
+        .chain(
+            raw_buffers
+                .iter()
+                .map(|raw| raw.requirements.alignment as usize),
+        )
+        .max()
+        .ok_or_else(|| "shared-host alignment is unavailable".to_string())?;
+    if !alignment.is_power_of_two() {
+        return Err(format!(
+            "shared-host alignment {alignment} is not a power of two"
+        ));
+    }
+    let required_size = raw_buffers
+        .iter()
+        .map(|raw| raw.requirements.size as usize)
+        .max()
+        .unwrap_or(size as usize)
+        .max(size as usize);
+    let allocation_size = required_size
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .ok_or_else(|| "shared-host allocation size overflowed".to_string())?;
+    let layout = std::alloc::Layout::from_size_align(allocation_size, alignment)
+        .map_err(|error| format!("invalid shared-host allocation layout: {error}"))?;
+    let pointer = unsafe { std::alloc::alloc_zeroed(layout) };
+    let pointer = ptr::NonNull::new(pointer)
+        .ok_or_else(|| format!("could not allocate {allocation_size} shared-host bytes"))?;
+    let allocation = Arc::new(SharedHostAllocation { pointer, layout });
+    devices
+        .iter()
+        .zip(raw_buffers)
+        .map(|(device, raw)| import_shared_host_buffer(device, raw, Arc::clone(&allocation)))
+        .collect()
+}
+
+fn import_shared_host_buffer(
+    compute_device: &OpenVulkanComputeDevice,
+    raw: UnboundExternalBuffer,
+    allocation: Arc<SharedHostAllocation>,
+) -> Result<VulkanBuffer, String> {
+    let loader = ash::ext::external_memory_host::Device::new(
+        &compute_device.instance,
+        &compute_device.device,
+    );
+    let handle_type = vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
+    let mut host_properties = vk::MemoryHostPointerPropertiesEXT::default();
+    let result = unsafe {
+        (loader.fp().get_memory_host_pointer_properties_ext)(
+            loader.device(),
+            handle_type,
+            allocation.pointer.as_ptr().cast(),
+            &mut host_properties,
+        )
+    };
+    if result != vk::Result::SUCCESS {
+        return Err(format!(
+            "could not query shared-host memory types: {result:?}"
+        ));
+    }
+    let compatible_types = raw.requirements.memory_type_bits & host_properties.memory_type_bits;
+    let memory_type = memory_type_index(
+        &compute_device.memory_properties,
+        compatible_types,
+        vk::MemoryPropertyFlags::HOST_VISIBLE,
+    )
+    .ok_or_else(|| "no host-visible type can import the shared-host allocation".to_string())?;
+    let mut import = vk::ImportMemoryHostPointerInfoEXT::default()
+        .handle_type(handle_type)
+        .host_pointer(allocation.pointer.as_ptr().cast());
+    let memory = unsafe {
+        compute_device.device.allocate_memory(
+            &vk::MemoryAllocateInfo::default()
+                .allocation_size(allocation.layout.size() as vk::DeviceSize)
+                .memory_type_index(memory_type)
+                .push_next(&mut import),
+            None,
+        )
+    }
+    .map_err(|error| format!("could not import shared-host memory: {error:?}"))?;
+    if let Err(error) = unsafe {
+        compute_device
+            .device
+            .bind_buffer_memory(raw.buffer.unwrap(), memory, 0)
+    } {
+        unsafe { compute_device.device.free_memory(memory, None) };
+        return Err(format!("could not bind shared-host memory: {error:?}"));
+    }
+    Ok(raw.into_bound(memory, Some(allocation)))
 }
 
 fn fill_upload_buffer(
@@ -2719,17 +4745,58 @@ fn fill_upload_buffer(
             .map_memory(buffer.memory, 0, buffer.size, vk::MemoryMapFlags::empty())
             .map_err(|error| format!("could not map Vulkan upload buffer: {error:?}"))?
     };
-    if matches!(kernel.shape, KernelShape::F32Gemm) {
-        let values = ptr.cast::<f32>();
-        for index in 0..plan.storage_elements {
+    let values = ptr.cast::<u32>();
+    if matches!(kernel.shape, KernelShape::KvCache) {
+        let output_offset = plan.push_constants[3] as usize;
+        for index in 0..output_offset {
+            let first = f32_to_bf16_bits(0.25 + (((index * 2) % 251) as f32) / 512.0);
+            let second = f32_to_bf16_bits(0.25 + (((index * 2 + 1) % 251) as f32) / 512.0);
             unsafe {
                 values
                     .add(index)
-                    .write(((index % 1024) as f32) * 0.001 + 1.0);
-            }
+                    .write(u32::from(first) | (u32::from(second) << 16))
+            };
+        }
+        for index in output_offset..plan.storage_elements {
+            unsafe { values.add(index).write(0x7fc0_7fc0) };
+        }
+    } else if matches!(kernel.shape, KernelShape::F32Gemm | KernelShape::PackedGemm) {
+        let weight_offset = plan.push_constants[4] as usize;
+        let output_offset = plan.push_constants[5] as usize;
+        let scale_offset = plan.push_constants[8] as usize;
+        for index in 0..weight_offset {
+            let first = f32_to_bf16_bits(0.5 + (((index * 2) % 251) as f32) / 512.0);
+            let second = f32_to_bf16_bits(0.5 + (((index * 2 + 1) % 251) as f32) / 512.0);
+            unsafe {
+                values
+                    .add(index)
+                    .write(u32::from(first) | (u32::from(second) << 16))
+            };
+        }
+        for index in weight_offset..scale_offset {
+            let value = parameter_word(kernel, index - weight_offset);
+            unsafe { values.add(index).write(value) };
+        }
+        for index in scale_offset..output_offset {
+            unsafe { values.add(index).write(scale_word(kernel)) };
+        }
+        for index in output_offset..plan.storage_elements {
+            unsafe { values.add(index).write(0x7fc0_7fc0) };
+        }
+    } else if matches!(kernel.shape, KernelShape::RouterReduction) {
+        let output_offset = plan.push_constants[3] as usize;
+        let scale_offset = plan.push_constants[6] as usize;
+        for index in 0..scale_offset {
+            let value = parameter_word(kernel, index);
+            unsafe { values.add(index).write(value) };
+        }
+        for index in scale_offset..output_offset {
+            unsafe { values.add(index).write(scale_word(kernel)) };
+        }
+        for index in output_offset..plan.storage_elements {
+            unsafe { values.add(index).write(f32::NAN.to_bits()) };
         }
     } else {
-        let values = ptr.cast::<u32>();
         for index in 0..plan.storage_elements {
             unsafe {
                 values
@@ -2742,12 +4809,35 @@ fn fill_upload_buffer(
     Ok(())
 }
 
-fn write_pattern_bytes(device: &ash::Device, buffer: &VulkanBuffer) -> Result<(), String> {
-    let mut bytes = vec![0_u8; buffer.size as usize];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = (index as u8).wrapping_mul(31).wrapping_add(17);
+fn parameter_word(kernel: &DenseFormatKernel, relative_word: usize) -> u32 {
+    match kernel.format.as_str() {
+        "f32" => {
+            let magnitude = (1.0 + ((relative_word % 7) as f32) / 8.0) / 4096.0;
+            if relative_word.is_multiple_of(2) {
+                magnitude.to_bits()
+            } else {
+                (-magnitude).to_bits()
+            }
+        }
+        "f16" => 0x9400_1400,
+        "bf16" => 0xba80_3a80,
+        "fp8" | "fp8_e4m3" => 0x3834_b8b4,
+        "fp8_e5m2" => 0x3c38_bcb8,
+        "fp4" | "mxfp4" => 0xba32_9810,
+        "int8" => 0x7f40_c080,
+        "int4" => 0xfdb9_7531,
+        "q8_0" if relative_word.is_multiple_of(9) => 0x0000_3a80,
+        "q8_0" => 0x6040_c0a0,
+        _ => 0,
     }
-    write_buffer_bytes(device, buffer, &bytes)
+}
+
+fn scale_word(kernel: &DenseFormatKernel) -> u32 {
+    match kernel.weight_layout {
+        WeightLayout::Bf16Scaled { .. } => 0x3a80_3a80,
+        WeightLayout::E8m0Scaled { .. } => 0x7575_7575,
+        WeightLayout::Plain | WeightLayout::NerveQ8_0 => 0,
+    }
 }
 
 fn write_buffer_bytes(
@@ -2794,30 +4884,6 @@ fn checksum_bytes(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0_u64, |sum, byte| {
         sum.rotate_left(5).wrapping_add(u64::from(*byte))
     })
-}
-
-fn read_first_storage_word(
-    device: &ash::Device,
-    buffer: &VulkanBuffer,
-    kernel: &DenseFormatKernel,
-) -> Result<u32, String> {
-    let ptr = unsafe {
-        device
-            .map_memory(
-                buffer.memory,
-                0,
-                kernel.bytes_per_storage_element as vk::DeviceSize,
-                vk::MemoryMapFlags::empty(),
-            )
-            .map_err(|error| format!("could not map Vulkan readback buffer: {error:?}"))?
-    };
-    let value = if kernel.format == "f32" {
-        unsafe { ptr.cast::<f32>().read().to_bits() }
-    } else {
-        unsafe { ptr.cast::<u32>().read() }
-    };
-    unsafe { device.unmap_memory(buffer.memory) };
-    Ok(value)
 }
 
 fn memory_type_index(
@@ -2889,6 +4955,7 @@ fn open_compute_device(target: &Target) -> Result<OpenVulkanComputeDevice, Strin
             instance,
             vulkan.physical_device_index,
             vulkan.feature_flags.clone(),
+            vulkan.extension_names.clone(),
         )
     };
     match result {
@@ -2905,6 +4972,7 @@ unsafe fn open_compute_device_from_instance(
     instance: ash::Instance,
     physical_device_index: usize,
     feature_flags: Vec<String>,
+    extension_names: Vec<String>,
 ) -> Result<OpenVulkanComputeDevice, (ash::Instance, String)> {
     let physical_devices = unsafe { instance.enumerate_physical_devices() }.map_err(|error| {
         (
@@ -2949,9 +5017,64 @@ unsafe fn open_compute_device_from_instance(
     if feature_flags.iter().any(|feature| feature == "shader_int8") {
         shader_float16_int8.shader_int8 = vk::TRUE;
     }
-    let device_info = vk::DeviceCreateInfo::default()
+    let external_memory_fd = extension_names
+        .iter()
+        .any(|name| name == ash::khr::external_memory_fd::NAME.to_str().unwrap());
+    let external_memory_dma_buf = extension_names
+        .iter()
+        .any(|name| name == ash::ext::external_memory_dma_buf::NAME.to_str().unwrap());
+    let external_memory_host = extension_names
+        .iter()
+        .any(|name| name == ash::ext::external_memory_host::NAME.to_str().unwrap());
+    let external_timeline_semaphore = unsafe {
+        external_timeline_semaphore_supported(&instance, physical_device, &extension_names)
+    };
+    let shared_host_alignment = if external_memory_host {
+        let mut host_properties = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
+        let mut properties =
+            vk::PhysicalDeviceProperties2::default().push_next(&mut host_properties);
+        unsafe { instance.get_physical_device_properties2(physical_device, &mut properties) };
+        usize::try_from(host_properties.min_imported_host_pointer_alignment)
+            .ok()
+            .filter(|alignment| alignment.is_power_of_two())
+    } else {
+        None
+    };
+    let mut enabled_extensions = Vec::new();
+    if external_memory_fd {
+        enabled_extensions.push(ash::khr::external_memory_fd::NAME.as_ptr());
+    }
+    if external_memory_dma_buf {
+        enabled_extensions.push(ash::ext::external_memory_dma_buf::NAME.as_ptr());
+    }
+    if external_memory_host {
+        enabled_extensions.push(ash::ext::external_memory_host::NAME.as_ptr());
+    }
+    if external_timeline_semaphore {
+        enabled_extensions.push(ash::khr::external_semaphore_fd::NAME.as_ptr());
+    }
+    let native_fp8_dot = feature_flags_include(&feature_flags, NATIVE_FP8_DOT_FEATURE);
+    let mut shader_float8 = ShaderFloat8Features::disabled();
+    let mut mixed_float_dot = MixedFloatDotProductFeatures::disabled();
+    if native_fp8_dot {
+        shader_float8.shader_float8 = vk::TRUE;
+        mixed_float_dot.shader_float8_acc_float32 = vk::TRUE;
+        enabled_extensions.push(SHADER_FLOAT8_NAME.as_ptr());
+        enabled_extensions.push(MIXED_FLOAT_DOT_PRODUCT_NAME.as_ptr());
+    }
+    let mut timeline_features = vk::PhysicalDeviceTimelineSemaphoreFeatures::default()
+        .timeline_semaphore(external_timeline_semaphore);
+    let mut device_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_info)
-        .push_next(&mut shader_float16_int8);
+        .enabled_extension_names(&enabled_extensions)
+        .push_next(&mut shader_float16_int8)
+        .push_next(&mut timeline_features);
+    if native_fp8_dot {
+        mixed_float_dot.p_next = device_info.p_next.cast_mut();
+        device_info.p_next = std::ptr::from_ref(&mixed_float_dot).cast();
+        shader_float8.p_next = device_info.p_next.cast_mut();
+        device_info.p_next = std::ptr::from_ref(&shader_float8).cast();
+    }
     let device = unsafe { instance.create_device(physical_device, &device_info, None) }.map_err(
         |error| {
             (
@@ -2971,6 +5094,10 @@ unsafe fn open_compute_device_from_instance(
         timestamp_period_ns: physical_device_properties.limits.timestamp_period,
         timestamp_valid_bits,
         feature_flags,
+        external_memory_fd: external_memory_fd && external_memory_dma_buf,
+        external_memory_host,
+        shared_host_alignment,
+        external_timeline_semaphore,
     })
 }
 
@@ -3050,17 +5177,8 @@ mod tests {
             ("fp8_e5m2", 4, 3),
             ("fp4", 8, 4),
             ("mxfp4", 8, 5),
-            ("nvfp4", 8, 6),
             ("int4", 8, 7),
-            ("q8_0", 4, 8),
-            ("q6_k", 5, 9),
-            ("q5_1", 6, 10),
-            ("q4_k", 8, 11),
-            ("q3_k", 10, 12),
-            ("q2_k", 16, 13),
-            ("iq4_xs", 8, 14),
-            ("iq3_s", 10, 15),
-            ("iq2_xs", 16, 16),
+            ("q8_0", 32, 18),
         ] {
             let kernel = dense_format_kernel(format).unwrap();
             assert_eq!(kernel.format, format);
@@ -3092,7 +5210,7 @@ mod tests {
             (
                 "router_reduction",
                 "router_reduction_f16_native_compute",
-                KernelShape::Elementwise,
+                KernelShape::RouterReduction,
                 Some("shader_float16"),
             ),
         ] {
@@ -3129,7 +5247,7 @@ mod tests {
             (
                 "router_reduction",
                 "router_reduction_int8_native_compute",
-                KernelShape::Elementwise,
+                KernelShape::RouterReduction,
                 Some("shader_int8"),
             ),
         ] {
@@ -3162,7 +5280,7 @@ mod tests {
             assert!(dequant_kernel.pattern.contains("gemm_compute"));
         }
         let router_kernel = workload_format_kernel("router_reduction", "mxfp4").unwrap();
-        assert_eq!(router_kernel.shape, KernelShape::Elementwise);
+        assert_eq!(router_kernel.shape, KernelShape::RouterReduction);
         assert_eq!(
             router_kernel.pattern,
             "router_reduction_format_dequant_compute"
@@ -3172,18 +5290,94 @@ mod tests {
     }
 
     #[test]
-    fn gemm_plans_keep_split_work_comparable_to_single_payload() {
+    fn native_fp8_dot_patterns_cover_runtime_dense_and_expert_families() {
+        assert_eq!(
+            native_fp8_pattern("dense_projection", "fp8_e4m3"),
+            Some("dense_projection_fp8_e4m3_native_dot_compute")
+        );
+        assert_eq!(
+            native_fp8_pattern("dense_projection", "mxfp4"),
+            Some("dense_projection_mxfp4_native_dot_compute")
+        );
+        assert_eq!(
+            native_fp8_pattern("moe_expert", "fp8_e4m3"),
+            Some("moe_expert_fp8_e4m3_native_dot_compute")
+        );
+        assert_eq!(native_fp8_pattern("dense_projection", "fp8_e5m2"), None);
+        assert_eq!(native_fp8_pattern("router_reduction", "fp8_e4m3"), None);
+    }
+
+    #[test]
+    fn gemm_plan_uses_payload_for_resident_weights_and_chainable_activations() {
         let kernel = workload_format_kernel("dense_projection", "f32").unwrap();
         let full = compute_plan_for_payload(5 * 1024 * 1024, &kernel);
-        let left = compute_plan_for_payload((5 * 1024 * 1024) / 2, &kernel);
-        let right = compute_plan_for_payload((5 * 1024 * 1024) - (5 * 1024 * 1024) / 2, &kernel);
-        assert!(full.buffer_size as usize <= 5 * 1024 * 1024);
+        let weight_words = full.push_constants[5] - full.push_constants[4];
+        assert!(weight_words as usize * mem::size_of::<u32>() <= 5 * 1024 * 1024);
         assert_eq!(full.push_constants[0], 16);
-        assert_eq!(full.push_constants[2], 256);
+        assert_eq!(full.push_constants[1], full.push_constants[2]);
+        assert_eq!(full.activation_size, full.output_size);
         assert!(full.operations > 0);
-        let split_operations = left.operations + right.operations;
-        let operation_gap = full.operations.abs_diff(split_operations);
-        assert!(operation_gap * 100 < full.operations);
+    }
+
+    #[test]
+    fn generated_gemm_geometry_is_native_fp8_vector_aligned() {
+        for format in ["fp8_e4m3", "mxfp4"] {
+            let kernel = workload_format_kernel("dense_projection_decode", format).unwrap();
+            for payload in [4 * 1024, 5 * 1024 * 1024, 64 * 1024 * 1024] {
+                let plan = compute_plan_for_payload(payload, &kernel);
+                assert!((plan.push_constants[1] as usize).is_multiple_of(4));
+                assert!((plan.push_constants[2] as usize).is_multiple_of(4));
+            }
+        }
+    }
+
+    #[test]
+    fn generated_weights_are_balanced_and_chain_safe() {
+        let f32_kernel = workload_format_kernel("dense_projection_decode", "f32").unwrap();
+        let positive = f32::from_bits(parameter_word(&f32_kernel, 0));
+        let negative = f32::from_bits(parameter_word(&f32_kernel, 1));
+        assert!(positive.is_finite() && positive > 0.0 && positive < 0.001);
+        assert!(negative.is_finite() && negative < 0.0 && negative > -0.001);
+
+        let f16_kernel = workload_format_kernel("dense_projection_decode", "f16").unwrap();
+        assert_eq!(parameter_word(&f16_kernel, 0), 0x9400_1400);
+        let bf16_kernel = workload_format_kernel("dense_projection_decode", "bf16").unwrap();
+        assert_eq!(parameter_word(&bf16_kernel, 0), 0xba80_3a80);
+
+        let fp8_kernel = workload_format_kernel("dense_projection_decode", "fp8_e4m3").unwrap();
+        assert_eq!(scale_word(&fp8_kernel), 0x3a80_3a80);
+        let mxfp4_kernel = workload_format_kernel("dense_projection_decode", "mxfp4").unwrap();
+        assert_eq!(parameter_word(&mxfp4_kernel, 0), 0xba32_9810);
+        assert_eq!(scale_word(&mxfp4_kernel), 0x7575_7575);
+    }
+
+    #[test]
+    fn tensor_parallel_gemm_shards_exactly_match_full_work_and_output() {
+        let kernel = workload_format_kernel("dense_projection", "f32").unwrap();
+        let full = compute_plan_for_payload(5 * 1024 * 1024, &kernel);
+        for participants in 2..=8 {
+            let (m, n, k, shards) =
+                tensor_parallel_shard_plans(5 * 1024 * 1024, &kernel, participants).unwrap();
+            assert_eq!(shards.len(), participants);
+            assert_eq!(
+                shards.iter().map(|plan| plan.operations).sum::<u64>(),
+                full.operations
+            );
+            assert_eq!(
+                shards
+                    .iter()
+                    .map(|plan| plan.push_constants[1] as usize)
+                    .sum::<usize>(),
+                n
+            );
+            assert_eq!(m, full.push_constants[0] as usize);
+            assert_eq!(k, full.push_constants[2] as usize);
+            let mut expected_offset = 0_u32;
+            for shard in shards {
+                assert_eq!(shard.push_constants[4], expected_offset);
+                expected_offset += shard.push_constants[1];
+            }
+        }
     }
 
     #[test]
@@ -3193,8 +5387,57 @@ mod tests {
         assert_eq!(kernel.shape, KernelShape::PackedGemm);
         assert_eq!(plan.push_constants[6], 8);
         assert_eq!(plan.push_constants[7], 5);
-        assert!(plan.buffer_size as usize <= 5 * 1024 * 1024);
+        let weight_words = plan.push_constants[5] - plan.push_constants[4];
+        assert!(weight_words as usize * mem::size_of::<u32>() <= 5 * 1024 * 1024);
+        assert_eq!(
+            plan.output_size,
+            plan.activation_size * MOE_SELECTED_EXPERTS as u64
+        );
+        assert_eq!(
+            plan.push_constants[1],
+            plan.push_constants[2] * MOE_SELECTED_EXPERTS as u32
+        );
         assert!(plan.operations > 0);
+    }
+
+    #[test]
+    fn scaled_router_plan_allocates_parameters_scales_and_output() {
+        let kernel = workload_format_kernel("router_reduction_prefill", "mxfp4").unwrap();
+        let plan = compute_plan_for_payload(5 * 1024 * 1024, &kernel);
+        assert!(plan.push_constants[6] < plan.push_constants[3]);
+        assert!(plan.output_offset + plan.output_size <= plan.buffer_size);
+        assert_eq!(plan.output_size, 16 * mem::size_of::<f32>() as u64);
+    }
+
+    #[test]
+    fn kv_cache_plan_uses_bf16_context_and_phase_query_counts() {
+        let payload_bytes = 64 * 1024;
+        let decode = workload_format_kernel("kv_cache_decode", "bf16").unwrap();
+        let prefill = workload_format_kernel("kv_cache_prefill", "bf16").unwrap();
+        let decode_plan = compute_plan_for_payload(payload_bytes, &decode);
+        let prefill_plan = compute_plan_for_payload(payload_bytes, &prefill);
+        assert_eq!(decode_plan.push_constants[0], 256);
+        assert_eq!(decode_plan.push_constants[2], 1);
+        assert_eq!(prefill_plan.push_constants[2], 16);
+        assert_eq!(
+            decode_plan.push_constants[1],
+            prefill_plan.push_constants[1]
+        );
+        assert_eq!(decode_plan.output_size, 256 * mem::size_of::<u16>() as u64);
+        assert_eq!(
+            prefill_plan.output_size,
+            16 * 256 * mem::size_of::<u16>() as u64
+        );
+    }
+
+    #[test]
+    fn tensor_parallel_is_limited_to_runtime_supported_workloads() {
+        assert!(supports_tensor_parallel("dense_projection_decode"));
+        assert!(supports_tensor_parallel("dense_projection_prefill"));
+        assert!(supports_tensor_parallel("moe_expert_decode"));
+        assert!(supports_tensor_parallel("moe_expert_prefill"));
+        assert!(!supports_tensor_parallel("router_reduction_decode"));
+        assert!(!supports_tensor_parallel("kv_cache_prefill"));
     }
 
     #[test]
@@ -3212,28 +5455,6 @@ mod tests {
         assert!(skipped.contains(&("unknown_format", "dense_projection")));
         assert!(skipped.contains(&("unknown_format", "moe_expert")));
         assert!(skipped.contains(&("unknown_format", "router_reduction")));
-    }
-
-    #[test]
-    fn failed_transfer_measurement_preserves_ordered_pair_metadata() {
-        let measurement = failed_transfer_measurement(
-            "vulkan:pci:0000:01:00.0",
-            "vulkan:pci:0000:02:00.0",
-            5 * 1024 * 1024,
-            "dense_projection",
-            "mxfp4",
-            "boom",
-        );
-        assert_eq!(
-            measurement.workload_id,
-            "ordered_activation_transfer:dense_projection:mxfp4"
-        );
-        assert_eq!(measurement.placement_strategy, "activation_transfer_only");
-        assert_eq!(measurement.source_target_id, "vulkan:pci:0000:01:00.0");
-        assert_eq!(measurement.destination_target_id, "vulkan:pci:0000:02:00.0");
-        assert_eq!(measurement.status, "failed");
-        assert_eq!(measurement.activation_bytes, 256 * 1024);
-        assert!(measurement.samples.is_empty());
     }
 
     #[test]
@@ -3265,9 +5486,7 @@ mod tests {
             ids,
             [
                 "synthetic_tensor_parallel_small_payload:dense_projection:f32",
-                "synthetic_tensor_parallel_small_payload:router_reduction:f32",
                 "synthetic_tensor_parallel_small_payload:dense_projection:mxfp4",
-                "synthetic_tensor_parallel_small_payload:router_reduction:mxfp4",
             ]
         );
         assert!(measurements.iter().all(|measurement| {
@@ -3279,64 +5498,100 @@ mod tests {
     }
 
     #[test]
-    fn triplet_payload_split_preserves_total_bytes() {
-        assert_eq!(split_three_payload_bytes(10), [4, 3, 3]);
-        assert_eq!(split_three_payload_bytes(11), [4, 4, 3]);
-        assert_eq!(split_three_payload_bytes(12), [4, 4, 4]);
+    fn group_payload_split_preserves_total_bytes() {
+        assert_eq!(split_payload_bytes(10, 3), [4, 3, 3]);
+        assert_eq!(split_payload_bytes(11, 3), [4, 4, 3]);
+        assert_eq!(split_payload_bytes(12, 3), [4, 4, 4]);
+        assert_eq!(split_payload_bytes(10, 4), [3, 3, 2, 2]);
     }
 
     #[test]
-    fn failed_triplet_measurements_cover_serial_and_tensor_parallel_axes() {
-        let target_ids = ["a".to_string(), "b".to_string(), "c".to_string()];
-        let formats = vec!["f32".to_string(), "unknown_format".to_string()];
-        let workloads = vec!["moe_expert".to_string()];
-        let measurements =
-            failed_triplet_measurements(&target_ids, 10, &formats, &workloads, "no device");
-        let strategies = measurements
+    fn failed_tensor_parallel_group_preserves_order_and_strategy() {
+        let target_ids = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let measurement = tensor_parallel_group_status_measurement(
+            &target_ids,
+            "failed",
+            10,
+            "moe_expert",
+            "f32",
+            "no device",
+        );
+        assert_eq!(measurement.target_ids, target_ids);
+        assert_eq!(
+            measurement.placement_strategy,
+            MULTI_TARGET_TENSOR_PARALLEL_STRATEGY
+        );
+        assert_eq!(measurement.participant_count, 4);
+        assert_eq!(measurement.payload_bytes_per_participant, [3, 3, 2, 2]);
+        assert_eq!(measurement.status, "failed");
+    }
+
+    #[test]
+    fn tensor_parallel_shards_keep_parameters_local_and_output_offsets_global() {
+        let kernel = workload_format_kernel("moe_expert", "mxfp4").unwrap();
+        let (_, n, k, shards) = tensor_parallel_shard_plans(5 * 1024 * 1024, &kernel, 3).unwrap();
+        let parameter_bytes = shards
             .iter()
-            .map(|measurement| measurement.placement_strategy.as_str())
-            .collect::<Vec<_>>();
+            .map(|shard| (shard.parameter_words + shard.scale_words) * mem::size_of::<u32>())
+            .sum::<usize>();
+        assert!(parameter_bytes <= 5 * 1024 * 1024);
+        let full = compute_plan_for_payload(5 * 1024 * 1024, &kernel);
         assert_eq!(
-            strategies,
-            ["three_target_serial", THREE_TARGET_TENSOR_PARALLEL_STRATEGY]
+            shards.iter().map(|shard| shard.operations).sum::<u64>(),
+            full.operations
         );
-        assert!(measurements.iter().all(|measurement| {
-            measurement.target_ids == target_ids
-                && measurement.participant_count == 3
-                && measurement.payload_bytes_per_participant == [4, 3, 3]
-                && measurement.status == "failed"
-        }));
+        assert_eq!(
+            shards.last().unwrap().push_constants[4] + shards.last().unwrap().push_constants[1],
+            n as u32
+        );
+        assert!(
+            shards
+                .iter()
+                .all(|shard| (shard.push_constants[1] as usize).is_multiple_of(k))
+        );
+        assert_eq!(
+            shards
+                .iter()
+                .map(|shard| shard.push_constants[1] as usize / k)
+                .sum::<usize>(),
+            MOE_SELECTED_EXPERTS
+        );
+        assert!(shards[1].parameter_word_offset > 0);
     }
 
     #[test]
-    fn tensor_parallel_collectives_are_workload_specific() {
-        assert_eq!(
-            tensor_parallel_collective_spec("dense_projection", 256 * 1024, 512 * 1024),
-            (
-                "all_reduce_output",
-                TensorParallelReduction::Sum,
-                512 * 1024,
-                usize::MAX
-            )
+    fn moe_tensor_parallel_can_shard_expert_rows_across_seven_devices() {
+        let kernel = workload_format_kernel("moe_expert", "mxfp4").unwrap();
+        let (_, n, _, shards) = tensor_parallel_shard_plans(5 * 1024 * 1024, &kernel, 7).unwrap();
+        assert_eq!(shards.len(), 7);
+        assert!(
+            shards
+                .iter()
+                .all(|shard| shard.push_constants[1] > 0
+                    && shard.push_constants[1].is_multiple_of(2))
         );
         assert_eq!(
-            tensor_parallel_collective_spec("moe_expert", 256 * 1024, 512 * 1024),
-            (
-                "expert_activation_gather",
-                TensorParallelReduction::Interleave,
-                256 * 1024,
-                1
-            )
+            shards
+                .iter()
+                .map(|shard| shard.push_constants[1] as usize)
+                .sum::<usize>(),
+            n
         );
-        assert_eq!(
-            tensor_parallel_collective_spec("router_reduction", 256 * 1024, 512 * 1024),
-            (
-                "router_score_reduce",
-                TensorParallelReduction::Max,
-                64 * 1024,
-                1
-            )
-        );
+    }
+
+    #[test]
+    fn gemm_plan_identifies_only_the_output_region_for_readback() {
+        let kernel = workload_format_kernel("dense_projection", "mxfp4").unwrap();
+        let plan = compute_plan_for_payload(5 * 1024 * 1024, &kernel);
+        assert!(plan.output_offset > 0);
+        assert!(plan.output_size > 0);
+        assert!(plan.output_offset + plan.output_size <= plan.buffer_size);
+        assert!(plan.output_size < plan.buffer_size);
     }
 
     #[test]

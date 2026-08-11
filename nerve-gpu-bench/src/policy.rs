@@ -27,6 +27,8 @@ pub fn apply_selection_policy(targets: &[Target], policy: &RunPolicy) -> Selecti
             Some("user_excluded_pci")
         } else if exclude_kinds.contains(&target.kind) {
             Some("user_excluded_kind")
+        } else if target.backend != "vulkan" {
+            Some("no_vulkan_execution_backend")
         } else {
             None
         };
@@ -95,10 +97,10 @@ pub fn apply_selection_policy(targets: &[Target], policy: &RunPolicy) -> Selecti
 mod tests {
     use super::*;
 
-    fn target(id: &str, kind: &str, pci: Option<&str>) -> Target {
+    fn target(id: &str, backend: &str, kind: &str, pci: Option<&str>) -> Target {
         Target {
             stable_target_id: id.to_string(),
-            backend: "test".to_string(),
+            backend: backend.to_string(),
             kind: kind.to_string(),
             name: id.to_string(),
             vendor_id: None,
@@ -119,9 +121,19 @@ mod tests {
     #[test]
     fn inclusion_and_exclusion_are_explicit_policy() {
         let targets = [
-            target("cpu:host", "cpu", None),
-            target("pci:0000:01:00.0", "discrete_gpu", Some("0000:01:00.0")),
-            target("pci:0000:02:00.0", "integrated_gpu", Some("0000:02:00.0")),
+            target("cpu:host", "cpu", "cpu", None),
+            target(
+                "vulkan:pci:0000:01:00.0",
+                "vulkan",
+                "discrete_gpu",
+                Some("0000:01:00.0"),
+            ),
+            target(
+                "vulkan:pci:0000:02:00.0",
+                "vulkan",
+                "integrated_gpu",
+                Some("0000:02:00.0"),
+            ),
         ];
         let policy = RunPolicy {
             payload_bytes: 1024,
@@ -137,19 +149,33 @@ mod tests {
             execute: false,
         };
         let selection = apply_selection_policy(&targets, &policy);
+        assert_eq!(selection.selected_target_ids, ["vulkan:pci:0000:01:00.0"]);
+        assert_eq!(selection.skipped_targets.len(), 2);
         assert_eq!(
-            selection.selected_target_ids,
-            ["cpu:host", "pci:0000:01:00.0"]
+            selection
+                .skipped_targets
+                .iter()
+                .find(|target| target.stable_target_id == "cpu:host")
+                .unwrap()
+                .reason,
+            "no_vulkan_execution_backend"
         );
-        assert_eq!(selection.skipped_targets.len(), 1);
-        assert_eq!(selection.skipped_targets[0].reason, "user_excluded_kind");
+        assert_eq!(
+            selection
+                .skipped_targets
+                .iter()
+                .find(|target| target.stable_target_id == "vulkan:pci:0000:02:00.0")
+                .unwrap()
+                .reason,
+            "user_excluded_kind"
+        );
     }
 
     #[test]
     fn unavailable_targets_are_discovered_but_not_selected() {
         let targets = [
-            target("cpu:host", "cpu", None),
-            target("vulkan:unavailable", "unavailable", None),
+            target("cpu:host", "cpu", "cpu", None),
+            target("vulkan:unavailable", "vulkan", "unavailable", None),
         ];
         let policy = RunPolicy {
             payload_bytes: 1024,
@@ -165,11 +191,16 @@ mod tests {
             execute: false,
         };
         let selection = apply_selection_policy(&targets, &policy);
-        assert_eq!(selection.selected_target_ids, ["cpu:host"]);
+        assert!(selection.selected_target_ids.is_empty());
+        assert_eq!(selection.skipped_targets.len(), 2);
         assert_eq!(
-            selection.skipped_targets[0].stable_target_id,
-            "vulkan:unavailable"
+            selection
+                .skipped_targets
+                .iter()
+                .find(|target| target.stable_target_id == "vulkan:unavailable")
+                .unwrap()
+                .reason,
+            "target_unavailable"
         );
-        assert_eq!(selection.skipped_targets[0].reason, "target_unavailable");
     }
 }

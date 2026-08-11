@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(push_constant) uniform Params {
@@ -15,9 +16,16 @@ layout(std430, binding = 0) buffer Data {
     uint words[];
 } data;
 
-float bf16_at(uint logical_index) {
+float activation_at(uint logical_index) {
     uint packed = data.words[params.a_offset + (logical_index >> 1u)];
     return uintBitsToFloat(((packed >> ((logical_index & 1u) * 16u)) & 0xffffu) << 16u);
+}
+
+float16_t weight_at(uint output_row, uint input_column) {
+    uint logical_index = output_row * params.k + input_column;
+    uint word = data.words[params.b_offset + logical_index / 2u];
+    vec2 values = unpackHalf2x16(word);
+    return float16_t(values[logical_index & 1u]);
 }
 
 uint f32_to_bf16(float value) {
@@ -32,22 +40,15 @@ void main() {
         return;
     }
 
-    vec2 accum = vec2(0.0);
+    float16_t accum0 = float16_t(0.0);
+    float16_t accum1 = float16_t(0.0);
     for (uint kk = 0u; kk < params.k; kk++) {
-        float activation = bf16_at(row * params.k + kk);
-        accum.x = fma(
-            activation,
-            uintBitsToFloat(data.words[params.b_offset + first_col * params.k + kk]),
-            accum.x
-        );
+        float16_t a = float16_t(activation_at(row * params.k + kk));
+        accum0 += a * weight_at(first_col, kk);
         if (first_col + 1u < params.n) {
-            accum.y = fma(
-                activation,
-                uintBitsToFloat(data.words[params.b_offset + (first_col + 1u) * params.k + kk]),
-                accum.y
-            );
+            accum1 += a * weight_at(first_col + 1u, kk);
         }
     }
     data.words[params.c_offset + (row * params.n + first_col) / 2u] =
-        f32_to_bf16(accum.x) | (f32_to_bf16(accum.y) << 16u);
+        f32_to_bf16(float(accum0)) | (f32_to_bf16(float(accum1)) << 16u);
 }

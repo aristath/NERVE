@@ -1,0 +1,59 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(push_constant) uniform Params {
+    uint m;
+    uint local_n;
+    uint k;
+    uint global_n;
+    uint output_column_offset;
+    uint logical_per_word;
+    uint format_kind;
+    uint scale_offset;
+    uint group_size;
+} params;
+layout(std430, binding = 0) readonly buffer Activations {
+    uint words[];
+} activations;
+layout(std430, binding = 1) readonly buffer Weights {
+    uint words[];
+} weights;
+layout(std430, binding = 2) writeonly buffer Outputs {
+    uint words[];
+} outputs;
+
+float16_t weight_at(uint output_row, uint input_column) {
+    uint logical_index = output_row * params.k + input_column;
+    uint word = weights.words[logical_index / 2u];
+    return float16_t(unpackHalf2x16(word)[logical_index & 1u]);
+}
+
+void main() {
+    uint first_local_column = gl_GlobalInvocationID.x * 2u;
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= params.m || first_local_column >= params.local_n) {
+        return;
+    }
+
+    float16_t accum0 = float16_t(0.0);
+    float16_t accum1 = float16_t(0.0);
+    for (uint kk = 0u; kk < params.k; kk++) {
+        uint activation_index = row * params.k + kk;
+        uint packed = activations.words[activation_index >> 1u];
+        float value = uintBitsToFloat(
+            ((packed >> ((activation_index & 1u) * 16u)) & 0xffffu) << 16u
+        );
+        float16_t activation = float16_t(value);
+        accum0 += activation * weight_at(first_local_column, kk);
+        if (first_local_column + 1u < params.local_n) {
+            accum1 += activation * weight_at(first_local_column + 1u, kk);
+        }
+    }
+    uint output_column = params.output_column_offset + first_local_column;
+    uint bits0 = floatBitsToUint(float(accum0));
+    uint bits1 = floatBitsToUint(float(accum1));
+    uint bf16_0 = (bits0 + 0x7fffu + ((bits0 >> 16u) & 1u)) >> 16u;
+    uint bf16_1 = (bits1 + 0x7fffu + ((bits1 >> 16u) & 1u)) >> 16u;
+    outputs.words[(row * params.global_n + output_column) / 2u] = bf16_0 | (bf16_1 << 16u);
+}

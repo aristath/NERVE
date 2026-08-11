@@ -2,19 +2,17 @@ use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::model::MAX_PLACEMENT_GROUP_SIZE;
+
 const DEFAULT_PAYLOAD_BYTES: usize = 5 * 1024 * 1024;
-const DEFAULT_SAMPLES: usize = 5;
-const DEFAULT_MAX_GROUP_SIZE: usize = 3;
+const DEFAULT_SAMPLES: usize = 1;
 const DEFAULT_BENCHMARK_FORMATS: &[&str] = &[
-    "f16", "bf16", "fp8_e4m3", "fp8_e5m2", "fp4", "mxfp4", "nvfp4", "int8", "int4", "q8_0", "q6_k",
-    "q5_0", "q5_1", "q5_k", "q4_0", "q4_1", "q4_k", "q3_k", "q2_k", "iq4_nl", "iq4_xs", "iq3_s",
-    "iq2_xs", "f32",
+    "f16", "bf16", "fp8_e4m3", "fp8_e5m2", "fp4", "mxfp4", "int8", "int4", "q8_0", "f32",
 ];
-const DEFAULT_BENCHMARK_WORKLOADS: &[&str] =
-    &["dense_projection", "moe_expert", "router_reduction"];
+const PLACEMENT_WORKLOAD: &str = "dense_projection_decode";
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MIN_PAYLOAD_BYTES: usize = 4 * 1024;
 const MAX_SAMPLES: usize = 30;
-const MAX_GROUP_SIZE: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -39,7 +37,7 @@ pub enum Command {
         exclude_pci: Vec<String>,
         exclude_kinds: Vec<String>,
         pairs: bool,
-        max_group_size: usize,
+        max_group_size: Option<usize>,
         dry_plan: bool,
         execute: bool,
     },
@@ -135,9 +133,9 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
     let mut exclude_pci = Vec::new();
     let mut exclude_kinds = Vec::new();
     let mut benchmark_formats = Vec::new();
-    let mut benchmark_workloads = Vec::new();
+    let benchmark_workloads = vec![PLACEMENT_WORKLOAD.to_string()];
     let mut pairs = true;
-    let mut max_group_size = DEFAULT_MAX_GROUP_SIZE;
+    let mut max_group_size = None;
     let mut dry_plan = false;
     let mut execute = false;
 
@@ -163,16 +161,13 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
                 )?;
             }
             "--max-group-size" => {
-                max_group_size = parse_usize(
+                max_group_size = Some(parse_usize(
                     &required_value(&arguments, &mut index, "--max-group-size")?,
                     "--max-group-size",
-                )?;
+                )?);
             }
             "--format" => {
                 benchmark_formats.push(required_value(&arguments, &mut index, "--format")?);
-            }
-            "--workload" => {
-                benchmark_workloads.push(required_value(&arguments, &mut index, "--workload")?);
             }
             "--include-target" => {
                 include_targets.push(required_value(&arguments, &mut index, "--include-target")?);
@@ -199,9 +194,9 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
         index += 1;
     }
 
-    if payload_bytes == 0 || payload_bytes > MAX_PAYLOAD_BYTES {
+    if !(MIN_PAYLOAD_BYTES..=MAX_PAYLOAD_BYTES).contains(&payload_bytes) {
         return Err(CliError(format!(
-            "--payload-bytes must be between 1 and {MAX_PAYLOAD_BYTES}"
+            "--payload-bytes must be between {MIN_PAYLOAD_BYTES} and {MAX_PAYLOAD_BYTES}"
         )));
     }
     if samples == 0 || samples > MAX_SAMPLES {
@@ -209,10 +204,12 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
             "--samples must be between 1 and {MAX_SAMPLES}"
         )));
     }
-    if max_group_size == 0 || max_group_size > MAX_GROUP_SIZE {
-        return Err(CliError(format!(
-            "--max-group-size must be between 1 and {MAX_GROUP_SIZE}"
-        )));
+    if let Some(max_group_size) = max_group_size {
+        if !(1..=MAX_PLACEMENT_GROUP_SIZE).contains(&max_group_size) {
+            return Err(CliError(format!(
+                "--max-group-size must be between 1 and {MAX_PLACEMENT_GROUP_SIZE}"
+            )));
+        }
     }
     if benchmark_formats.is_empty() {
         benchmark_formats = DEFAULT_BENCHMARK_FORMATS
@@ -222,24 +219,12 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
     }
     benchmark_formats.sort();
     benchmark_formats.dedup();
-    if benchmark_formats.iter().any(|format| format.is_empty()) {
-        return Err(CliError("--format cannot be empty".to_string()));
-    }
-    if benchmark_workloads.is_empty() {
-        benchmark_workloads = DEFAULT_BENCHMARK_WORKLOADS
-            .iter()
-            .map(|workload| (*workload).to_string())
-            .collect();
-    }
-    benchmark_workloads.sort();
-    benchmark_workloads.dedup();
-    if benchmark_workloads
+    if let Some(format) = benchmark_formats
         .iter()
-        .any(|workload| workload.is_empty())
+        .find(|format| !DEFAULT_BENCHMARK_FORMATS.contains(&format.as_str()))
     {
-        return Err(CliError("--workload cannot be empty".to_string()));
+        return Err(CliError(format!("unsupported --format {format:?}")));
     }
-
     Ok(Command::Run {
         output,
         payload_bytes,
@@ -276,7 +261,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--workload WORKLOAD ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -297,7 +282,7 @@ mod tests {
     fn parses_run_defaults() {
         let command = parse_args(["run".to_string()]).unwrap();
         let default_formats = default_benchmark_formats();
-        for expected in ["mxfp4", "nvfp4", "fp8_e4m3", "q4_k", "iq2_xs", "f32"] {
+        for expected in ["mxfp4", "fp8_e4m3", "int4", "q8_0", "f32"] {
             assert!(default_formats.contains(&expected.to_string()));
         }
         assert_eq!(
@@ -307,20 +292,28 @@ mod tests {
                 payload_bytes: DEFAULT_PAYLOAD_BYTES,
                 samples: DEFAULT_SAMPLES,
                 benchmark_formats: default_formats,
-                benchmark_workloads: DEFAULT_BENCHMARK_WORKLOADS
-                    .iter()
-                    .map(|workload| (*workload).to_string())
-                    .collect(),
+                benchmark_workloads: vec![PLACEMENT_WORKLOAD.to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
                 exclude_pci: Vec::new(),
                 exclude_kinds: Vec::new(),
                 pairs: true,
-                max_group_size: DEFAULT_MAX_GROUP_SIZE,
+                max_group_size: None,
                 dry_plan: false,
                 execute: false,
             }
         );
+    }
+
+    #[test]
+    fn rejects_payloads_too_small_for_aligned_pair_and_triplet_geometry() {
+        let error = parse_args([
+            "run".to_string(),
+            "--payload-bytes".to_string(),
+            (MIN_PAYLOAD_BYTES - 1).to_string(),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains(&MIN_PAYLOAD_BYTES.to_string()));
     }
 
     #[test]
@@ -349,15 +342,9 @@ mod tests {
                 assert_eq!(include_targets, ["cpu:host"]);
                 assert_eq!(exclude_kinds, ["integrated_gpu"]);
                 assert_eq!(benchmark_formats, default_benchmark_formats());
-                assert_eq!(
-                    benchmark_workloads,
-                    DEFAULT_BENCHMARK_WORKLOADS
-                        .iter()
-                        .map(|workload| (*workload).to_string())
-                        .collect::<Vec<_>>()
-                );
+                assert_eq!(benchmark_workloads, [PLACEMENT_WORKLOAD.to_string()]);
                 assert!(!pairs);
-                assert_eq!(max_group_size, DEFAULT_MAX_GROUP_SIZE);
+                assert_eq!(max_group_size, None);
                 assert!(!dry_plan);
                 assert!(!execute);
             }
@@ -374,9 +361,45 @@ mod tests {
         ])
         .unwrap();
         match command {
-            Command::Run { max_group_size, .. } => assert_eq!(max_group_size, 2),
+            Command::Run { max_group_size, .. } => assert_eq!(max_group_size, Some(2)),
             _ => panic!("expected run command"),
         }
+    }
+
+    #[test]
+    fn accepts_four_device_group_size() {
+        let command = parse_args([
+            "run".to_string(),
+            "--max-group-size".to_string(),
+            "4".to_string(),
+        ])
+        .unwrap();
+        match command {
+            Command::Run { max_group_size, .. } => assert_eq!(max_group_size, Some(4)),
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn rejects_group_sizes_above_four() {
+        let error = parse_args([
+            "run".to_string(),
+            "--max-group-size".to_string(),
+            "5".to_string(),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("between 1 and 4"));
+    }
+
+    #[test]
+    fn rejects_zero_group_size() {
+        let error = parse_args([
+            "run".to_string(),
+            "--max-group-size".to_string(),
+            "0".to_string(),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("between 1 and 4"));
     }
 
     #[test]
@@ -411,25 +434,6 @@ mod tests {
             Command::Run {
                 benchmark_formats, ..
             } => assert_eq!(benchmark_formats, ["f32", "fp4"]),
-            _ => panic!("expected run command"),
-        }
-    }
-
-    #[test]
-    fn parses_benchmark_workloads() {
-        let command = parse_args([
-            "run".to_string(),
-            "--workload".to_string(),
-            "dense_projection".to_string(),
-            "--workload".to_string(),
-            "moe_expert".to_string(),
-        ])
-        .unwrap();
-        match command {
-            Command::Run {
-                benchmark_workloads,
-                ..
-            } => assert_eq!(benchmark_workloads, ["dense_projection", "moe_expert"]),
             _ => panic!("expected run command"),
         }
     }

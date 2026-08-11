@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::model::{FormatCapability, PciLink, Target};
 
 const MODEL_BENCHMARK_FORMATS: &[&str] = &[
-    "f32", "f16", "bf16", "fp8_e4m3", "fp8_e5m2", "fp4", "mxfp4", "nvfp4", "int8", "int4", "q8_0",
-    "q6_k", "q5_0", "q5_1", "q5_k", "q4_0", "q4_1", "q4_k", "q3_k", "q2_k", "iq4_nl", "iq4_xs",
-    "iq3_s", "iq2_xs",
+    "f32", "f16", "bf16", "fp8_e4m3", "fp8_e5m2", "fp4", "mxfp4", "int8", "int4", "q8_0",
 ];
 
 pub fn discover_targets() -> Vec<Target> {
@@ -36,11 +34,7 @@ fn discover_cpu_target() -> Target {
         boot_vga: None,
         pci_link: None,
         vulkan: None,
-        capabilities: vec![
-            format!("logical_cpus={cpu_count}"),
-            "f32".to_string(),
-            "u8_copy".to_string(),
-        ],
+        capabilities: vec![format!("logical_cpus={cpu_count}")],
         format_capabilities: cpu_format_capabilities(),
         diagnostics: Vec::new(),
     }
@@ -57,34 +51,17 @@ fn read_cpu_model_name() -> Option<String> {
 }
 
 fn cpu_format_capabilities() -> Vec<FormatCapability> {
-    let mut capabilities = vec![
-        format_capability(
-            "u8",
-            "native",
-            "cpu_baseline",
-            "byte movement benchmark path",
-        ),
-        format_capability(
-            "f32",
-            "native",
-            "cpu_baseline",
-            "scalar/vector CPU reference path",
-        ),
-    ];
-    capabilities.extend(
-        MODEL_BENCHMARK_FORMATS
-            .iter()
-            .filter(|format| **format != "f32")
-            .map(|format| {
-                format_capability(
-                    format,
-                    "unmeasured",
-                    "not_probed",
-                    "requires explicit CPU feature/backend probe",
-                )
-            }),
-    );
-    capabilities
+    MODEL_BENCHMARK_FORMATS
+        .iter()
+        .map(|format| {
+            format_capability(
+                format,
+                "unmeasured",
+                "no_vulkan_execution_backend",
+                "host CPU is discoverable but not executable by the Vulkan inference backend",
+            )
+        })
+        .collect()
 }
 
 fn discover_pci_targets(root: &Path) -> Vec<Target> {
@@ -343,7 +320,7 @@ mod tests {
                 .iter()
                 .map(|capability| capability.format.as_str())
                 .collect::<Vec<_>>();
-            for expected in ["mxfp4", "nvfp4", "fp8_e5m2", "q5_1", "q4_k", "iq2_xs"] {
+            for expected in ["mxfp4", "fp8_e5m2", "int4", "q8_0"] {
                 assert!(formats.contains(&expected), "missing {expected}");
             }
             let unique = formats.iter().collect::<std::collections::BTreeSet<_>>();

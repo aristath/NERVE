@@ -2,121 +2,138 @@
 
 layout(local_size_x = 64) in;
 layout(push_constant) uniform Params {
-    uint elements;
+    uint tokens;
+    uint experts;
+    uint input_offset;
+    uint output_offset;
+    uint logical_per_word;
     uint format_kind;
+    uint scale_offset;
+    uint group_size;
 } params;
 layout(std430, binding = 0) buffer Data {
     uint words[];
 } data;
 
+shared float partial_max[64];
+
 float bf16_lane(uint value, uint lane) {
-    return uintBitsToFloat(((value >> (lane * 16u)) & 0xffffu) << 16u);
+    return uintBitsToFloat(((value >> ((lane & 1u) * 16u)) & 0xffffu) << 16u);
 }
 
 float fp8_lane(uint value, uint lane, uint exponent_bits, uint mantissa_bits, int bias) {
-    uint byte_value = (value >> (lane * 8u)) & 0xffu;
-    float sign = (byte_value & 0x80u) != 0u ? -1.0 : 1.0;
+    uint byte_value = (value >> ((lane & 3u) * 8u)) & 0xffu;
+    float sign_value = (byte_value & 0x80u) != 0u ? -1.0 : 1.0;
     uint exponent_mask = (1u << exponent_bits) - 1u;
     uint mantissa_mask = (1u << mantissa_bits) - 1u;
     uint exponent = (byte_value >> mantissa_bits) & exponent_mask;
     uint mantissa = byte_value & mantissa_mask;
     if (exponent == 0u) {
-        return sign * float(mantissa) / float(1u << mantissa_bits) * exp2(float(1 - bias));
+        return sign_value * float(mantissa) / float(1u << mantissa_bits)
+            * exp2(float(1 - bias));
     }
-    return sign * (1.0 + float(mantissa) / float(1u << mantissa_bits)) * exp2(float(int(exponent) - bias));
+    return sign_value * (1.0 + float(mantissa) / float(1u << mantissa_bits))
+        * exp2(float(int(exponent) - bias));
 }
 
-float signed_bits(uint value, uint bit_width) {
-    uint sign_bit = 1u << (bit_width - 1u);
-    uint mask = (1u << bit_width) - 1u;
-    uint masked = value & mask;
-    int signed_value = (masked & sign_bit) != 0u ? int(masked | (~mask)) : int(masked);
-    return float(signed_value);
+float e2m1_lane(uint value, uint lane) {
+    uint nibble = (value >> ((lane & 7u) * 4u)) & 0x0fu;
+    uint magnitude = nibble & 7u;
+    float decoded = magnitude == 0u ? 0.0
+        : magnitude == 1u ? 0.5
+        : magnitude == 2u ? 1.0
+        : magnitude == 3u ? 1.5
+        : magnitude == 4u ? 2.0
+        : magnitude == 5u ? 3.0
+        : magnitude == 6u ? 4.0
+        : 6.0;
+    return (nibble & 8u) != 0u ? -decoded : decoded;
 }
 
-float fp4_lane(uint value, uint lane) {
-    uint nibble = (value >> (lane * 4u)) & 0x0fu;
-    float sign = (nibble & 0x08u) != 0u ? -1.0 : 1.0;
-    uint exponent = (nibble >> 1u) & 0x03u;
-    uint mantissa = nibble & 0x01u;
-    return sign * (1.0 + float(mantissa) * 0.5) * exp2(float(int(exponent) - 1));
+float bf16_scale(uint index) {
+    return bf16_lane(data.words[params.scale_offset + (index >> 1u)], index);
 }
 
-float mx_like_fp4_lane(uint value, uint lane, float base_scale) {
-    uint scale_bits = (value >> 28u) & 0x0fu;
-    float scale = base_scale * (1.0 + float(scale_bits) * 0.125);
-    return fp4_lane(value, lane) * scale;
+float e8m0_scale(uint index) {
+    uint packed = data.words[params.scale_offset + (index >> 2u)];
+    uint scale_byte = (packed >> ((index & 3u) * 8u)) & 0xffu;
+    return scale_byte == 0u
+        ? uintBitsToFloat(0x00400000u)
+        : uintBitsToFloat(scale_byte << 23u);
 }
 
-float q_lane(uint value, uint lane, uint bit_width, float scale) {
-    uint mask = (1u << bit_width) - 1u;
-    return signed_bits(value >> (lane * bit_width), bit_width) * scale;
+float q8_0_score(uint token, uint expert) {
+    uint blocks_per_row = (params.experts + 31u) / 32u;
+    uint block = token * blocks_per_row + expert / 32u;
+    uint block_offset = params.input_offset + block * 9u;
+    float scale = bf16_lane(data.words[block_offset], 0u);
+    uint byte_index = expert & 31u;
+    uint packed = data.words[block_offset + 1u + (byte_index >> 2u)];
+    uint byte_value = (packed >> ((byte_index & 3u) * 8u)) & 0xffu;
+    return float(int(byte_value << 24u) >> 24) * scale;
 }
 
-float iq_lane(uint value, uint lane, uint bit_width, float scale) {
-    float q = q_lane(value, lane, bit_width, scale);
-    return sign(q) * sqrt(abs(q) + 0.25);
-}
-
-float decode_lane(uint format_kind, uint value, uint lane) {
-    if (format_kind == 1u) {
-        return bf16_lane(value, lane & 1u);
+float score_at(uint token, uint expert) {
+    if (params.format_kind == 18u) {
+        return q8_0_score(token, expert);
     }
-    if (format_kind == 2u) {
-        return fp8_lane(value, lane & 3u, 4u, 3u, 7);
+    uint logical_index = token * params.experts + expert;
+    uint word_index = logical_index / params.logical_per_word;
+    uint lane = logical_index - word_index * params.logical_per_word;
+    uint packed = data.words[params.input_offset + word_index];
+    if (params.format_kind == 17u) {
+        return unpackHalf2x16(packed)[lane & 1u];
     }
-    if (format_kind == 3u) {
-        return fp8_lane(value, lane & 3u, 5u, 2u, 15);
+    if (params.format_kind == 1u) {
+        return bf16_lane(packed, lane);
     }
-    if (format_kind == 4u) {
-        return fp4_lane(value, lane & 7u);
+    if (params.format_kind == 2u || params.format_kind == 3u) {
+        float value = params.format_kind == 2u
+            ? fp8_lane(packed, lane, 4u, 3u, 7)
+            : fp8_lane(packed, lane, 5u, 2u, 15);
+        uint groups_per_row = (params.experts + params.group_size - 1u) / params.group_size;
+        uint scale_index = token * groups_per_row + expert / params.group_size;
+        return value * bf16_scale(scale_index);
     }
-    if (format_kind == 5u) {
-        return mx_like_fp4_lane(value, lane & 7u, 0.75);
+    if (params.format_kind == 4u) {
+        return e2m1_lane(packed, lane);
     }
-    if (format_kind == 6u) {
-        return mx_like_fp4_lane(value, lane & 7u, 0.625);
+    if (params.format_kind == 5u) {
+        uint groups_per_row = (params.experts + params.group_size - 1u) / params.group_size;
+        uint scale_index = token * groups_per_row + expert / params.group_size;
+        return e2m1_lane(packed, lane) * e8m0_scale(scale_index);
     }
-    if (format_kind == 7u) {
-        return q_lane(value, lane & 7u, 4u, 0.125);
+    if (params.format_kind == 7u) {
+        uint nibble = (packed >> ((lane & 7u) * 4u)) & 0x0fu;
+        uint groups_per_row = (params.experts + params.group_size - 1u) / params.group_size;
+        uint scale_index = token * groups_per_row + expert / params.group_size;
+        return float(int(nibble) - 8) * bf16_scale(scale_index);
     }
-    if (format_kind == 8u) {
-        return signed_bits((value >> ((lane & 3u) * 8u)) & 0xffu, 8u) * 0.03125;
-    }
-    if (format_kind == 9u) {
-        return q_lane(value, lane % 5u, 6u, 0.03125);
-    }
-    if (format_kind == 10u) {
-        return q_lane(value, lane % 6u, 5u, 0.0625);
-    }
-    if (format_kind == 11u) {
-        return q_lane(value, lane & 7u, 4u, 0.125);
-    }
-    if (format_kind == 12u) {
-        return q_lane(value, lane % 10u, 3u, 0.25);
-    }
-    if (format_kind == 13u) {
-        return q_lane(value, lane & 15u, 2u, 0.5);
-    }
-    if (format_kind == 14u) {
-        return iq_lane(value, lane & 7u, 4u, 0.125);
-    }
-    if (format_kind == 15u) {
-        return iq_lane(value, lane % 10u, 3u, 0.25);
-    }
-    return iq_lane(value, lane & 15u, 2u, 0.5);
+    uint byte_value = (packed >> ((lane & 3u) * 8u)) & 0xffu;
+    return float(int(byte_value << 24u) >> 24) / 127.0;
 }
 
 void main() {
-    uint index = gl_GlobalInvocationID.x;
-    if (index >= params.elements) {
+    uint token = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (token >= params.tokens) {
         return;
     }
-    uint word = data.words[index];
-    float accum = 0.0;
-    for (uint lane = 0u; lane < 16u; lane++) {
-        float decoded = decode_lane(params.format_kind, word, lane);
-        accum = fma(decoded, 0.0625 + float(lane) * 0.00390625, accum);
+
+    float maximum = -3.402823466e+38;
+    for (uint expert = lane; expert < params.experts; expert += 64u) {
+        maximum = max(maximum, score_at(token, expert));
     }
-    data.words[index] = floatBitsToUint(accum + float(index & 255u) * 0.0009765625);
+    partial_max[lane] = maximum;
+    barrier();
+
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            partial_max[lane] = max(partial_max[lane], partial_max[lane + stride]);
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        data.words[params.output_offset + token] = floatBitsToUint(partial_max[0]);
+    }
 }

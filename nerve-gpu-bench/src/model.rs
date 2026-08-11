@@ -4,10 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-pub const RUN_SCHEMA: &str = "nerve.gpu_benchmark_run.v1";
-pub const PLAN_SCHEMA: &str = "nerve.gpu_benchmark_plan.v1";
-pub const TARGET_LIST_SCHEMA: &str = "nerve.gpu_benchmark_targets.v1";
+pub const RUN_SCHEMA: &str = "nerve.gpu_benchmark_run";
+pub const PLAN_SCHEMA: &str = "nerve.gpu_benchmark_plan";
+pub const TARGET_LIST_SCHEMA: &str = "nerve.gpu_benchmark_targets";
 pub const PLACEMENT_SCHEMA: &str = "nerve.placement_bench";
+pub const MAX_PLACEMENT_GROUP_SIZE: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
@@ -127,8 +128,25 @@ pub struct BenchmarkRun {
 pub struct PlacementBenchmark {
     pub schema: String,
     pub payload_bytes: usize,
-    pub samples: usize,
-    pub results: Vec<PlacementResult>,
+    pub formats: BTreeMap<String, FormatRanking>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormatRanking {
+    pub placements: Vec<RankedPlacement>,
+    pub serial: Vec<RankedPlacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RankedPlacement {
+    pub rank: usize,
+    pub mode: String,
+    pub targets: Vec<String>,
+    pub relative_cost: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,7 +155,10 @@ pub struct PlacementResult {
     pub strategy: String,
     pub targets: Vec<String>,
     pub workload: String,
+    pub regime: String,
+    pub shape: BTreeMap<String, u64>,
     pub format: String,
+    pub kernel: String,
     pub participants: usize,
     pub payload_bytes: usize,
     pub shard_bytes: Vec<usize>,
@@ -232,6 +253,10 @@ pub struct Measurement {
     pub reason: Option<String>,
     pub payload_bytes: usize,
     pub working_set_bytes: usize,
+    #[serde(default)]
+    pub activation_bytes: usize,
+    #[serde(default)]
+    pub output_bytes: usize,
     pub samples: Vec<Sample>,
     pub summary: Option<Summary>,
 }
@@ -371,11 +396,40 @@ impl BenchmarkRun {
         results.extend(self.measurements.iter().filter_map(placement_single));
         results.extend(self.pair_measurements.iter().filter_map(placement_pair));
         results.extend(self.group_measurements.iter().filter_map(placement_group));
+        let formats = self
+            .policy
+            .benchmark_formats
+            .iter()
+            .filter_map(|format| {
+                let placements = results
+                    .iter()
+                    .filter(|result| {
+                        result.format == *format
+                            && result.regime == "single_component"
+                            && matches!(result.strategy.as_str(), "single" | "tp")
+                    })
+                    .cloned()
+                    .collect();
+                let serial = results
+                    .iter()
+                    .filter(|result| {
+                        result.format == *format
+                            && result.regime == "two_component_chain"
+                            && matches!(result.strategy.as_str(), "single" | "serial")
+                    })
+                    .cloned()
+                    .collect();
+                let ranking = FormatRanking {
+                    placements: rank_placements(placements, true),
+                    serial: rank_placements(serial, false),
+                };
+                (!ranking.placements.is_empty()).then(|| (format.clone(), ranking))
+            })
+            .collect();
         PlacementBenchmark {
             schema: PLACEMENT_SCHEMA.to_string(),
             payload_bytes: self.policy.payload_bytes,
-            samples: self.policy.samples,
-            results,
+            formats,
         }
     }
 
@@ -395,6 +449,11 @@ impl BenchmarkRun {
         if self.policy.samples == 0 {
             return Err("policy.samples must be greater than zero".to_string());
         }
+        if !(1..=MAX_PLACEMENT_GROUP_SIZE).contains(&self.policy.max_group_size) {
+            return Err(format!(
+                "policy.max_group_size must be between 1 and {MAX_PLACEMENT_GROUP_SIZE}"
+            ));
+        }
         if self.policy.benchmark_formats.is_empty()
             || self.policy.benchmark_formats.iter().any(String::is_empty)
         {
@@ -405,10 +464,6 @@ impl BenchmarkRun {
         {
             return Err("policy.benchmark_workloads must contain non-empty workloads".to_string());
         }
-        if self.policy.max_group_size == 0 || self.policy.max_group_size > 3 {
-            return Err("policy.max_group_size must be between 1 and 3".to_string());
-        }
-
         let discovered_ids = strictly_unique_target_ids(&self.discovered_targets)?;
         for target in &self.discovered_targets {
             validate_format_capabilities(target)?;
@@ -461,7 +516,7 @@ impl BenchmarkRun {
                     spec.workload_id
                 ));
             }
-            if spec.participant_count == 0 || spec.participant_count > 3 {
+            if spec.participant_count == 0 || spec.participant_count > MAX_PLACEMENT_GROUP_SIZE {
                 return Err(format!(
                     "workload spec {:?} has invalid participant_count",
                     spec.workload_id
@@ -763,6 +818,63 @@ impl BenchmarkRun {
     }
 }
 
+fn rank_placements(
+    results: Vec<PlacementResult>,
+    collapse_tensor_parallel_owners: bool,
+) -> Vec<RankedPlacement> {
+    let mut unique = BTreeMap::<(String, Vec<String>), PlacementResult>::new();
+    for result in results {
+        let mut identity_targets = result.targets.clone();
+        if collapse_tensor_parallel_owners && result.strategy == "tp" {
+            identity_targets.sort();
+        }
+        let key = (result.strategy.clone(), identity_targets);
+        let replace = unique.get(&key).is_none_or(|current| {
+            result.ns < current.ns || (result.ns == current.ns && result.targets < current.targets)
+        });
+        if replace {
+            unique.insert(key, result);
+        }
+    }
+
+    let mut results = unique.into_values().collect::<Vec<_>>();
+    results.sort_by(|left, right| {
+        left.ns
+            .cmp(&right.ns)
+            .then_with(|| left.strategy.cmp(&right.strategy))
+            .then_with(|| left.targets.cmp(&right.targets))
+    });
+    let Some(fastest) = results.first().map(|result| result.ns) else {
+        return Vec::new();
+    };
+
+    let mut rank = 1;
+    let mut rank_anchor = fastest;
+    results
+        .into_iter()
+        .map(|result| {
+            if result.ns as f64 > rank_anchor as f64 * 1.01 {
+                rank += 1;
+                rank_anchor = result.ns;
+            }
+            let owner = (result.strategy == "tp").then(|| result.targets[0].clone());
+            let mut targets = result.targets;
+            if result.strategy == "tp" {
+                targets.sort();
+            }
+            let relative_cost = ((result.ns as f64 / fastest as f64) * 1_000.0).round() / 1_000.0;
+            RankedPlacement {
+                rank,
+                mode: result.strategy.clone(),
+                targets,
+                relative_cost,
+                owner,
+                transport: (result.strategy != "single").then_some(result.transport),
+            }
+        })
+        .collect()
+}
+
 impl PlacementBenchmark {
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
@@ -778,11 +890,18 @@ impl PlacementBenchmark {
         if self.payload_bytes == 0 {
             return Err("payload_bytes must be greater than zero".to_string());
         }
-        if self.samples == 0 {
-            return Err("samples must be greater than zero".to_string());
+        if self.formats.is_empty() {
+            return Err("formats must contain placement rankings".to_string());
         }
-        for result in &self.results {
-            validate_placement_result(result)?;
+        for (format, ranking) in &self.formats {
+            if format.is_empty() {
+                return Err("format names must not be empty".to_string());
+            }
+            if ranking.placements.is_empty() {
+                return Err(format!("format {format:?} has no placement ranking"));
+            }
+            validate_ranked_placements(&ranking.placements, false)?;
+            validate_ranked_placements(&ranking.serial, true)?;
         }
         Ok(())
     }
@@ -810,6 +929,11 @@ impl BenchmarkPlan {
         }
         if self.policy.samples == 0 {
             return Err("policy.samples must be greater than zero".to_string());
+        }
+        if !(1..=MAX_PLACEMENT_GROUP_SIZE).contains(&self.policy.max_group_size) {
+            return Err(format!(
+                "policy.max_group_size must be between 1 and {MAX_PLACEMENT_GROUP_SIZE}"
+            ));
         }
         if self.policy.benchmark_formats.is_empty()
             || self.policy.benchmark_formats.iter().any(String::is_empty)
@@ -881,12 +1005,21 @@ fn placement_single(measurement: &Measurement) -> Option<PlacementResult> {
         strategy: placement_strategy(&measurement.placement_strategy).to_string(),
         targets: vec![measurement.target_id.clone()],
         workload: measurement.workload_class.clone(),
+        regime: measurement.regime.clone(),
+        shape: placement_shape(
+            &measurement.workload_class,
+            &measurement.regime,
+            measurement.activation_bytes,
+            measurement.output_bytes,
+            metrics.work_ops,
+        ),
         format: measurement.format.clone(),
+        kernel: measurement.pattern.clone(),
         participants: 1,
         payload_bytes: measurement.payload_bytes,
-        shard_bytes: vec![measurement.payload_bytes],
-        activation_bytes: 0,
-        output_bytes: 0,
+        shard_bytes: vec![single_parameter_bytes(measurement)],
+        activation_bytes: measurement.activation_bytes,
+        output_bytes: measurement.output_bytes,
         iters: metrics.iters,
         ns: metrics.ns,
         total_ns: metrics.total_ns,
@@ -894,13 +1027,36 @@ fn placement_single(measurement: &Measurement) -> Option<PlacementResult> {
         work_ops: metrics.work_ops,
         bps: metrics.bps,
         ops: metrics.ops,
-        transport: placement_transport(&measurement.placement_strategy).to_string(),
+        transport: placement_transport(&measurement.placement_strategy, &measurement.pattern)
+            .to_string(),
         collective: placement_collective(
             &measurement.placement_strategy,
             &measurement.workload_class,
         )
         .to_string(),
     })
+}
+
+fn single_parameter_bytes(measurement: &Measurement) -> usize {
+    let is_parameterized_gemm = measurement.workload_class == "dense_projection"
+        || measurement.workload_class.starts_with("dense_projection_")
+        || measurement.workload_class == "moe_expert"
+        || measurement.workload_class.starts_with("moe_expert_");
+    if !is_parameterized_gemm {
+        return measurement.payload_bytes;
+    }
+    let components = match measurement.regime.as_str() {
+        "two_component_chain" => 2,
+        "three_component_chain" => 3,
+        "four_component_chain" => 4,
+        _ => 1,
+    };
+    let boundary_bytes = if components == 1 {
+        measurement.activation_bytes + measurement.output_bytes
+    } else {
+        measurement.activation_bytes * (components + 1)
+    };
+    measurement.working_set_bytes.saturating_sub(boundary_bytes)
 }
 
 fn placement_pair(measurement: &PairMeasurement) -> Option<PlacementResult> {
@@ -917,7 +1073,16 @@ fn placement_pair(measurement: &PairMeasurement) -> Option<PlacementResult> {
             measurement.destination_target_id.clone(),
         ],
         workload: measurement.workload_class.clone(),
+        regime: measurement.regime.clone(),
+        shape: placement_shape(
+            &measurement.workload_class,
+            &measurement.regime,
+            measurement.activation_bytes,
+            measurement.output_bytes,
+            metrics.work_ops,
+        ),
         format: measurement.format.clone(),
+        kernel: measurement.pattern.clone(),
         participants: 2,
         payload_bytes: measurement.payload_bytes,
         shard_bytes: vec![
@@ -933,7 +1098,8 @@ fn placement_pair(measurement: &PairMeasurement) -> Option<PlacementResult> {
         work_ops: metrics.work_ops,
         bps: metrics.bps,
         ops: metrics.ops,
-        transport: placement_transport(&measurement.placement_strategy).to_string(),
+        transport: placement_transport(&measurement.placement_strategy, &measurement.pattern)
+            .to_string(),
         collective: placement_collective(
             &measurement.placement_strategy,
             &measurement.workload_class,
@@ -953,7 +1119,16 @@ fn placement_group(measurement: &GroupMeasurement) -> Option<PlacementResult> {
         strategy: placement_strategy(&measurement.placement_strategy).to_string(),
         targets: measurement.target_ids.clone(),
         workload: measurement.workload_class.clone(),
+        regime: measurement.regime.clone(),
+        shape: placement_shape(
+            &measurement.workload_class,
+            &measurement.regime,
+            measurement.activation_bytes,
+            measurement.output_bytes,
+            metrics.work_ops,
+        ),
         format: measurement.format.clone(),
+        kernel: measurement.pattern.clone(),
         participants: measurement.participant_count,
         payload_bytes: measurement.payload_bytes,
         shard_bytes: measurement.payload_bytes_per_participant.clone(),
@@ -966,13 +1141,79 @@ fn placement_group(measurement: &GroupMeasurement) -> Option<PlacementResult> {
         work_ops: metrics.work_ops,
         bps: metrics.bps,
         ops: metrics.ops,
-        transport: placement_transport(&measurement.placement_strategy).to_string(),
+        transport: placement_transport(&measurement.placement_strategy, &measurement.pattern)
+            .to_string(),
         collective: placement_collective(
             &measurement.placement_strategy,
             &measurement.workload_class,
         )
         .to_string(),
     })
+}
+
+fn placement_shape(
+    workload: &str,
+    regime: &str,
+    activation_bytes: usize,
+    output_bytes: usize,
+    work_ops: u64,
+) -> BTreeMap<String, u64> {
+    let mut shape = BTreeMap::new();
+    let stages = match regime {
+        "two_component_chain" => 2_u64,
+        "three_component_chain" => 3_u64,
+        "four_component_chain" => 4_u64,
+        _ => 1_u64,
+    };
+    if stages > 1 {
+        shape.insert("components".to_string(), stages);
+    }
+    let phase_tokens = if workload.ends_with("_decode") {
+        1_u64
+    } else if workload.ends_with("_prefill") {
+        16_u64
+    } else {
+        0
+    };
+    if workload == "dense_projection"
+        || workload.starts_with("dense_projection_")
+        || workload == "moe_expert"
+        || workload.starts_with("moe_expert_")
+    {
+        if phase_tokens > 0 {
+            let input_width = activation_bytes as u64 / (2 * phase_tokens);
+            let output_width = output_bytes as u64 / (2 * phase_tokens);
+            shape.insert("tokens".to_string(), phase_tokens);
+            shape.insert("input_width".to_string(), input_width);
+            shape.insert("output_width".to_string(), output_width);
+            if (workload == "moe_expert" || workload.starts_with("moe_expert_"))
+                && input_width > 0
+                && output_width.is_multiple_of(input_width)
+            {
+                shape.insert("selected_experts".to_string(), output_width / input_width);
+                shape.insert("expert_width".to_string(), input_width);
+            }
+        }
+    } else if workload == "kv_cache" || workload.starts_with("kv_cache_") {
+        if phase_tokens > 0 {
+            let width = output_bytes as u64 / (2 * phase_tokens);
+            shape.insert("query_tokens".to_string(), phase_tokens);
+            shape.insert("width".to_string(), width);
+            if width > 0 {
+                shape.insert(
+                    "context_tokens".to_string(),
+                    activation_bytes as u64 / (2 * width),
+                );
+            }
+        }
+    } else if workload == "router_reduction" || workload.starts_with("router_reduction_") {
+        let tokens = output_bytes as u64 / std::mem::size_of::<f32>() as u64;
+        if tokens > 0 {
+            shape.insert("tokens".to_string(), tokens);
+            shape.insert("experts".to_string(), work_ops / (2 * tokens));
+        }
+    }
+    shape
 }
 
 fn placement_metrics(
@@ -989,9 +1230,17 @@ fn placement_metrics(
         .map(|sample| {
             let iters = sample.iterations.max(1);
             let ns = sample.duration_ns / u128::from(iters);
+            let bytes_written = sample.bytes_written / iters;
             let bytes = (sample.bytes_read + sample.bytes_written) / iters;
             let work_ops = sample.operations / iters;
-            (ns, sample.duration_ns, iters, bytes, work_ops)
+            (
+                ns,
+                sample.duration_ns,
+                iters,
+                bytes_written,
+                bytes,
+                work_ops,
+            )
         })
         .collect::<Vec<_>>();
     rows.sort_unstable_by(|left, right| {
@@ -1001,8 +1250,9 @@ fn placement_metrics(
             .then_with(|| left.2.cmp(&right.2))
             .then_with(|| left.3.cmp(&right.3))
             .then_with(|| left.4.cmp(&right.4))
+            .then_with(|| left.5.cmp(&right.5))
     });
-    let (ns, total_ns, iters, bytes, work_ops) = rows[rows.len() / 2];
+    let (ns, total_ns, iters, _bytes_written, bytes, work_ops) = rows[rows.len() / 2];
     let seconds = ns as f64 / 1_000_000_000.0;
     Some(PlacementMetrics {
         ns,
@@ -1018,22 +1268,63 @@ fn placement_metrics(
 fn placement_strategy(strategy: &str) -> &str {
     match strategy {
         "single_target_serial" => "single",
-        "activation_transfer_only" => "transfer",
-        "two_target_serial" | "three_target_serial" => "serial",
-        "two_target_tensor_parallel" | "three_target_tensor_parallel" => "tp",
+        "single_target_host_to_device"
+        | "single_target_device_to_host"
+        | "single_target_device_local" => "transfer",
+        "activation_transfer_only"
+        | "activation_transfer_external_device_local"
+        | "activation_transfer_shared_host" => "transfer",
+        "two_target_serial" | "three_target_serial" | "four_target_serial" => "serial",
+        "two_target_tensor_parallel"
+        | "three_target_tensor_parallel"
+        | "four_target_tensor_parallel"
+        | "multi_target_tensor_parallel" => "tp",
         other => other,
     }
 }
 
-fn placement_transport(strategy: &str) -> &'static str {
+fn placement_transport(strategy: &str, pattern: &str) -> &'static str {
+    if pattern.contains("transport=device_local") {
+        return "device_local";
+    }
+    if pattern.contains("transport=mixed") {
+        return "mixed";
+    }
+    if pattern.contains("transport=host_staged") {
+        return "host_staged";
+    }
+    if pattern.contains("transport=external_device_local+external_device_local")
+        || pattern.contains("transport=external_device_local")
+            && !pattern.contains("+shared_host")
+            && !pattern.contains("+host_staged")
+    {
+        return "external_device_local";
+    }
+    if pattern.contains("transport=shared_host+shared_host")
+        || pattern.contains("transport=shared_host")
+            && !pattern.contains("+external_device_local")
+            && !pattern.contains("+host_staged")
+    {
+        return "shared_host";
+    }
+    if pattern.contains("transport=") && pattern.contains('+') {
+        return "mixed";
+    }
     match strategy {
         "single_target_serial" => "none",
+        "single_target_host_to_device" => "host_to_device",
+        "single_target_device_to_host" => "device_to_host",
+        "single_target_device_local" => "device_local",
         "activation_transfer_only"
         | "two_target_serial"
         | "three_target_serial"
+        | "four_target_serial"
         | "two_target_tensor_parallel"
-        | "three_target_tensor_parallel" => "host_staged",
-        "two_stage_serial_reference" | "two_shard_parallel_reference" => "host",
+        | "three_target_tensor_parallel"
+        | "four_target_tensor_parallel"
+        | "multi_target_tensor_parallel" => "host_staged",
+        "activation_transfer_external_device_local" => "external_device_local",
+        "activation_transfer_shared_host" => "shared_host",
         _ => "unknown",
     }
 }
@@ -1041,61 +1332,98 @@ fn placement_transport(strategy: &str) -> &'static str {
 fn placement_collective(strategy: &str, workload: &str) -> &'static str {
     match strategy {
         "single_target_serial" => "none",
-        "activation_transfer_only" => "copy",
-        "two_target_serial" | "three_target_serial" => "pipeline",
-        "two_target_tensor_parallel" | "three_target_tensor_parallel" => {
-            tensor_parallel_collective_name(workload)
-        }
-        "two_stage_serial_reference" => "pipeline",
-        "two_shard_parallel_reference" => "reference_shard_merge",
+        "single_target_host_to_device"
+        | "single_target_device_to_host"
+        | "single_target_device_local" => "copy",
+        "activation_transfer_only"
+        | "activation_transfer_external_device_local"
+        | "activation_transfer_shared_host" => "copy",
+        "two_target_serial" | "three_target_serial" | "four_target_serial" => "pipeline",
+        "two_target_tensor_parallel"
+        | "three_target_tensor_parallel"
+        | "four_target_tensor_parallel"
+        | "multi_target_tensor_parallel" => tensor_parallel_collective_name(workload),
         _ => "unknown",
     }
 }
 
 fn tensor_parallel_collective_name(workload: &str) -> &'static str {
-    match workload {
-        "dense_projection" => "all_reduce_output",
-        "moe_expert" => "expert_activation_gather",
-        "router_reduction" => "router_score_reduce",
-        _ => "all_reduce_output",
+    if workload == "dense_projection"
+        || workload.starts_with("dense_projection_")
+        || workload == "moe_expert"
+        || workload.starts_with("moe_expert_")
+    {
+        "shared_output_rows"
+    } else {
+        "unsupported"
     }
 }
 
-fn validate_placement_result(result: &PlacementResult) -> Result<(), String> {
-    if result.kind.is_empty()
-        || result.strategy.is_empty()
-        || result.workload.is_empty()
-        || result.format.is_empty()
-        || result.targets.is_empty()
-        || result.transport.is_empty()
-        || result.collective.is_empty()
-        || result.shard_bytes.is_empty()
-    {
-        return Err("placement result contains empty identity fields".to_string());
-    }
-    if result.participants == 0 {
-        return Err("placement result participants must be greater than zero".to_string());
-    }
-    if result.participants != result.targets.len() {
-        return Err("placement result participants must match target count".to_string());
-    }
-    if result.participants != result.shard_bytes.len() {
-        return Err("placement result participants must match shard count".to_string());
-    }
-    if result.payload_bytes == 0 {
-        return Err("placement result payload_bytes must be greater than zero".to_string());
-    }
-    if result.iters == 0 {
-        return Err("placement result iters must be greater than zero".to_string());
-    }
-    if result.ns == 0 {
-        return Err("placement result ns must be greater than zero".to_string());
-    }
-    if result.total_ns < result.ns {
-        return Err("placement result total_ns must not be smaller than ns".to_string());
-    }
-    if !result.bps.is_finite() || !result.ops.is_finite() {
-        return Err("placement result throughput fields must be finite".to_string());
+fn validate_ranked_placements(results: &[RankedPlacement], serial: bool) -> Result<(), String> {
+    let mut previous_rank = 0;
+    let mut previous_cost = 0.0;
+    let mut identities = BTreeSet::new();
+    for (index, result) in results.iter().enumerate() {
+        let valid_mode = if serial {
+            matches!(result.mode.as_str(), "single" | "serial")
+        } else {
+            matches!(result.mode.as_str(), "single" | "tp")
+        };
+        if !valid_mode {
+            return Err(format!(
+                "ranked placement has invalid mode {:?}",
+                result.mode
+            ));
+        }
+        if result.targets.is_empty() || result.targets.len() > MAX_PLACEMENT_GROUP_SIZE {
+            return Err("ranked placement has an invalid target count".to_string());
+        }
+        if result.rank == 0 || result.rank < previous_rank {
+            return Err("placement ranks must be positive and ordered".to_string());
+        }
+        if !result.relative_cost.is_finite()
+            || result.relative_cost < 1.0
+            || result.relative_cost < previous_cost
+        {
+            return Err("relative placement costs must be finite and ordered".to_string());
+        }
+        if index == 0 && (result.relative_cost - 1.0).abs() > f64::EPSILON {
+            return Err("the fastest placement must have relative_cost 1.0".to_string());
+        }
+        match result.mode.as_str() {
+            "tp" => {
+                let owner = result
+                    .owner
+                    .as_ref()
+                    .ok_or_else(|| "tensor-parallel placement is missing its owner".to_string())?;
+                if !result.targets.contains(owner) {
+                    return Err("tensor-parallel owner is not a group member".to_string());
+                }
+                if result.transport.as_deref().is_none_or(str::is_empty) {
+                    return Err("tensor-parallel placement is missing transport".to_string());
+                }
+            }
+            "serial" => {
+                if result.owner.is_some() {
+                    return Err("serial placement must not have an owner".to_string());
+                }
+                if result.transport.as_deref().is_none_or(str::is_empty) {
+                    return Err("serial placement is missing transport".to_string());
+                }
+            }
+            "single" => {
+                if result.targets.len() != 1 || result.owner.is_some() || result.transport.is_some()
+                {
+                    return Err("single placement has multi-target metadata".to_string());
+                }
+            }
+            _ => unreachable!(),
+        }
+        if !identities.insert((result.mode.as_str(), &result.targets)) {
+            return Err("placement ranking contains duplicate candidates".to_string());
+        }
+        previous_rank = result.rank;
+        previous_cost = result.relative_cost;
     }
     Ok(())
 }
@@ -1164,55 +1492,51 @@ fn coverage_warnings_for_run(
         return Vec::new();
     }
 
-    let mut expected = vec!["single_target_serial"];
-    if run.policy.pair_measurements
-        && run.policy.max_group_size >= 2
-        && run.selected_target_ids.len() >= 2
-    {
-        expected.push("two_target_serial");
-        expected.push("two_target_tensor_parallel");
-    }
-    if run.policy.pair_measurements
-        && run.policy.max_group_size >= 3
-        && run.selected_target_ids.len() >= 3
-    {
-        expected.push("three_target_serial");
-        expected.push("three_target_tensor_parallel");
-    }
-
     let mut warnings = Vec::new();
-    let expected_axes = run
-        .policy
-        .benchmark_workloads
+    let expected = run
+        .workload_specs
         .iter()
-        .flat_map(|workload| {
-            run.policy
-                .benchmark_formats
-                .iter()
-                .map(move |format| (workload.as_str(), format.as_str()))
+        .filter(|spec| {
+            spec.comparison_group == SMALL_GROUP
+                && spec.participant_count == 1
+                && spec.pattern == "single_target_compute"
         })
-        .collect::<Vec<_>>();
-    for (workload_class, format) in expected_axes {
-        for placement_strategy in &expected {
-            let key = (
-                SMALL_GROUP.to_string(),
-                workload_class.to_string(),
-                (*placement_strategy).to_string(),
-                format.to_string(),
-            );
-            match strategy_statuses.get(&key) {
-                Some(status) if status.completed_count > 0 => {}
-                Some(status) => warnings.push(format!(
-                    "placement strategy {placement_strategy:?} has no completed measurements for workload={workload_class} format={format}: unmeasured={} failed={} unsupported={} skipped={}",
-                    status.unmeasured_count,
-                    status.failed_count,
-                    status.unsupported_count,
-                    status.skipped_count
-                )),
-                None => warnings.push(format!(
-                    "placement strategy {placement_strategy:?} is missing from small_payload_placement_comparison for workload={workload_class} format={format}"
-                )),
-            }
+        .map(|spec| {
+            (
+                spec.workload_class.clone(),
+                spec.format.clone(),
+                spec.placement_strategy.clone(),
+            )
+        })
+        .chain(run.comparison_sets.iter().flat_map(|comparison| {
+            comparison.candidates.iter().map(|candidate| {
+                (
+                    comparison.workload_class.clone(),
+                    comparison.format.clone(),
+                    candidate.placement_strategy.clone(),
+                )
+            })
+        }))
+        .collect::<BTreeSet<_>>();
+    for (workload_class, format, placement_strategy) in expected {
+        let key = (
+            SMALL_GROUP.to_string(),
+            workload_class.clone(),
+            placement_strategy.clone(),
+            format.clone(),
+        );
+        match strategy_statuses.get(&key) {
+            Some(status) if status.completed_count > 0 => {}
+            Some(status) => warnings.push(format!(
+                "placement strategy {placement_strategy:?} has no completed measurements for workload={workload_class} format={format}: unmeasured={} failed={} unsupported={} skipped={}",
+                status.unmeasured_count,
+                status.failed_count,
+                status.unsupported_count,
+                status.skipped_count
+            )),
+            None => warnings.push(format!(
+                "placement strategy {placement_strategy:?} is missing from small_payload_placement_comparison for workload={workload_class} format={format}"
+            )),
         }
     }
     for candidate in candidate_statuses {
@@ -1325,8 +1649,7 @@ impl Implementation {
         Self {
             name: "nerve-gpu-bench".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            backend_status: "cpu_reference_plus_opt_in_vulkan_single_pair_and_group_execution"
-                .to_string(),
+            backend_status: "standalone_vulkan_single_pair_and_group_execution".to_string(),
         }
     }
 }
@@ -1539,12 +1862,14 @@ mod tests {
             target_id: "cpu:host".to_string(),
             pattern: "single".to_string(),
             operation_family: "test".to_string(),
-            regime: "small_payload".to_string(),
+            regime: "single_component".to_string(),
             format: "u8".to_string(),
             status: "completed".to_string(),
             reason: None,
             payload_bytes: 1024,
             working_set_bytes: 1024,
+            activation_bytes: 0,
+            output_bytes: 0,
             samples: Vec::new(),
             summary: None,
         });
@@ -1572,7 +1897,7 @@ mod tests {
             policy: RunPolicy {
                 payload_bytes: 1024,
                 samples: 1,
-                benchmark_formats: vec!["f32".to_string()],
+                benchmark_formats: vec!["f32".to_string(), "bf16".to_string()],
                 benchmark_workloads: vec!["dense_projection".to_string()],
                 include_targets: Vec::new(),
                 exclude_targets: Vec::new(),
@@ -1600,12 +1925,14 @@ mod tests {
             target_id: "gpu:a".to_string(),
             pattern: "single".to_string(),
             operation_family: "dense_projection".to_string(),
-            regime: "small_payload".to_string(),
+            regime: "single_component".to_string(),
             format: "f32".to_string(),
             status: "completed".to_string(),
             reason: None,
             payload_bytes: 1024,
             working_set_bytes: 1024,
+            activation_bytes: 32,
+            output_bytes: 64,
             samples: vec![Sample {
                 sample_index: 0,
                 duration_ns: 12,
@@ -1629,12 +1956,14 @@ mod tests {
             target_id: "gpu:a".to_string(),
             pattern: "single".to_string(),
             operation_family: "dense_projection".to_string(),
-            regime: "small_payload".to_string(),
+            regime: "single_component".to_string(),
             format: "bf16".to_string(),
             status: "unsupported".to_string(),
             reason: Some("not available".to_string()),
             payload_bytes: 1024,
             working_set_bytes: 1024,
+            activation_bytes: 0,
+            output_bytes: 0,
             samples: Vec::new(),
             summary: None,
         });
@@ -1647,7 +1976,7 @@ mod tests {
             destination_target_id: "gpu:b".to_string(),
             pattern: "synthetic_tensor_parallel_small_payload".to_string(),
             operation_family: "dense_projection".to_string(),
-            regime: "small_payload".to_string(),
+            regime: "single_component".to_string(),
             format: "f32".to_string(),
             status: "completed".to_string(),
             reason: None,
@@ -1675,41 +2004,21 @@ mod tests {
         let placement = run.to_placement_benchmark();
         placement.validate_basic().unwrap();
         assert_eq!(placement.schema, PLACEMENT_SCHEMA);
-        assert_eq!(placement.results.len(), 2);
-        assert_eq!(placement.results[0].kind, "single");
-        assert_eq!(placement.results[0].strategy, "single");
-        assert_eq!(placement.results[0].targets, ["gpu:a"]);
-        assert_eq!(placement.results[0].participants, 1);
-        assert_eq!(placement.results[0].payload_bytes, 1024);
-        assert_eq!(placement.results[0].shard_bytes, [1024]);
-        assert_eq!(placement.results[0].activation_bytes, 0);
-        assert_eq!(placement.results[0].output_bytes, 0);
-        assert_eq!(placement.results[0].ns, 12);
-        assert_eq!(placement.results[0].total_ns, 12);
-        assert_eq!(placement.results[0].iters, 1);
-        assert_eq!(placement.results[0].bytes, 128);
-        assert_eq!(placement.results[0].work_ops, 16);
-        assert!(placement.results[0].bps > 0.0);
-        assert!(placement.results[0].ops > 0.0);
-        assert_eq!(placement.results[0].transport, "none");
-        assert_eq!(placement.results[0].collective, "none");
-        assert_eq!(placement.results[1].kind, "pair");
-        assert_eq!(placement.results[1].strategy, "tp");
-        assert_eq!(placement.results[1].targets, ["gpu:a", "gpu:b"]);
-        assert_eq!(placement.results[1].participants, 2);
-        assert_eq!(placement.results[1].payload_bytes, 1024);
-        assert_eq!(placement.results[1].shard_bytes, [512, 512]);
-        assert_eq!(placement.results[1].activation_bytes, 1024);
-        assert_eq!(placement.results[1].output_bytes, 64);
-        assert_eq!(placement.results[1].ns, 25);
-        assert_eq!(placement.results[1].total_ns, 100);
-        assert_eq!(placement.results[1].iters, 4);
-        assert_eq!(placement.results[1].bytes, 150);
-        assert_eq!(placement.results[1].work_ops, 20);
-        assert!(placement.results[1].bps > 0.0);
-        assert!(placement.results[1].ops > 0.0);
-        assert_eq!(placement.results[1].transport, "host_staged");
-        assert_eq!(placement.results[1].collective, "all_reduce_output");
+        assert!(!placement.formats.contains_key("bf16"));
+        let ranking = &placement.formats["f32"].placements;
+        assert_eq!(ranking.len(), 2);
+        assert_eq!(ranking[0].rank, 1);
+        assert_eq!(ranking[0].mode, "single");
+        assert_eq!(ranking[0].targets, ["gpu:a"]);
+        assert_eq!(ranking[0].relative_cost, 1.0);
+        assert_eq!(ranking[0].owner, None);
+        assert_eq!(ranking[0].transport, None);
+        assert_eq!(ranking[1].rank, 2);
+        assert_eq!(ranking[1].mode, "tp");
+        assert_eq!(ranking[1].targets, ["gpu:a", "gpu:b"]);
+        assert_eq!(ranking[1].relative_cost, 2.083);
+        assert_eq!(ranking[1].owner.as_deref(), Some("gpu:a"));
+        assert_eq!(ranking[1].transport.as_deref(), Some("host_staged"));
 
         let encoded = placement.to_json().unwrap();
         assert!(!encoded.contains("discovered_targets"));
@@ -1721,27 +2030,114 @@ mod tests {
     }
 
     #[test]
+    fn ranking_collapses_tp_owners_and_treats_one_percent_as_a_tie() {
+        fn result(strategy: &str, targets: &[&str], ns: u128) -> PlacementResult {
+            PlacementResult {
+                kind: "test".to_string(),
+                strategy: strategy.to_string(),
+                targets: targets.iter().map(|target| (*target).to_string()).collect(),
+                workload: "dense_projection_decode".to_string(),
+                regime: "single_component".to_string(),
+                shape: BTreeMap::new(),
+                format: "fp8_e4m3".to_string(),
+                kernel: "test".to_string(),
+                participants: targets.len(),
+                payload_bytes: 1024,
+                shard_bytes: vec![1024 / targets.len(); targets.len()],
+                activation_bytes: 32,
+                output_bytes: 64,
+                iters: 1,
+                ns,
+                total_ns: ns,
+                bytes: 0,
+                work_ops: 0,
+                bps: 0.0,
+                ops: 0.0,
+                transport: "shared_host".to_string(),
+                collective: "shared_output_rows".to_string(),
+            }
+        }
+
+        let owners = rank_placements(
+            vec![
+                result("tp", &["gpu:a", "gpu:b"], 100),
+                result("tp", &["gpu:b", "gpu:a"], 90),
+            ],
+            true,
+        );
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].targets, ["gpu:a", "gpu:b"]);
+        assert_eq!(owners[0].owner.as_deref(), Some("gpu:b"));
+
+        let tied = rank_placements(
+            vec![
+                result("single", &["gpu:a"], 100),
+                result("single", &["gpu:b"], 101),
+                result("single", &["gpu:c"], 102),
+            ],
+            false,
+        );
+        assert_eq!(
+            tied.iter()
+                .map(|placement| placement.rank)
+                .collect::<Vec<_>>(),
+            [1, 1, 2]
+        );
+    }
+
+    #[test]
     fn placement_collectives_describe_strategy_and_workload() {
         assert_eq!(
             placement_collective("two_target_tensor_parallel", "dense_projection"),
-            "all_reduce_output"
+            "shared_output_rows"
         );
         assert_eq!(
             placement_collective("two_target_tensor_parallel", "moe_expert"),
-            "expert_activation_gather"
+            "shared_output_rows"
+        );
+        assert_eq!(
+            placement_collective("multi_target_tensor_parallel", "moe_expert"),
+            "shared_output_rows"
         );
         assert_eq!(
             placement_collective("three_target_tensor_parallel", "router_reduction"),
-            "router_score_reduce"
+            "unsupported"
         );
         assert_eq!(
             placement_collective("two_target_serial", "moe_expert"),
             "pipeline"
         );
         assert_eq!(
-            placement_transport("three_target_tensor_parallel"),
+            placement_transport("three_target_tensor_parallel", "tensor_parallel"),
             "host_staged"
         );
+        assert_eq!(placement_strategy("four_target_serial"), "serial");
+        assert_eq!(
+            placement_collective("four_target_tensor_parallel", "dense_projection"),
+            "shared_output_rows"
+        );
+    }
+
+    #[test]
+    fn placement_shape_exposes_moe_dimensions() {
+        let shape = placement_shape("moe_expert_decode", "single_component", 2048, 12_288, 1);
+        assert_eq!(shape["tokens"], 1);
+        assert_eq!(shape["input_width"], 1024);
+        assert_eq!(shape["output_width"], 6144);
+        assert_eq!(shape["selected_experts"], 6);
+        assert_eq!(shape["expert_width"], 1024);
+    }
+
+    #[test]
+    fn placement_shape_exposes_four_component_chain() {
+        let shape = placement_shape(
+            "dense_projection_decode",
+            "four_component_chain",
+            2048,
+            2048,
+            1,
+        );
+        assert_eq!(shape["components"], 4);
     }
 
     #[test]
@@ -1805,7 +2201,23 @@ mod tests {
             selected_target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
             skipped_targets: Vec::new(),
             workload_specs: Vec::new(),
-            comparison_sets: Vec::new(),
+            comparison_sets: vec![ComparisonSet {
+                comparison_id: "pair:a|b".to_string(),
+                comparison_group: "small_payload_placement_comparison".to_string(),
+                workload_class: "dense_projection".to_string(),
+                regime: "single_component".to_string(),
+                format: "f32".to_string(),
+                target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
+                candidates: vec![ComparisonCandidate {
+                    candidate_id: "pair:a|b:tp_owner_a".to_string(),
+                    placement_strategy: "two_target_tensor_parallel".to_string(),
+                    measurement_kind: "pair".to_string(),
+                    workload_id: "synthetic_tensor_parallel_small_payload:dense_projection:f32"
+                        .to_string(),
+                    target_ids: vec!["gpu:a".to_string(), "gpu:b".to_string()],
+                    notes: "test candidate".to_string(),
+                }],
+            }],
             measurements: Vec::new(),
             pair_measurements: Vec::new(),
             group_measurements: Vec::new(),
@@ -1825,6 +2237,8 @@ mod tests {
             reason: Some("backend missing".to_string()),
             payload_bytes: 1024,
             working_set_bytes: 1024,
+            activation_bytes: 0,
+            output_bytes: 0,
             samples: Vec::new(),
             summary: None,
         });
@@ -1901,6 +2315,8 @@ mod tests {
                 reason: None,
                 payload_bytes: 1024,
                 working_set_bytes: 1024,
+                activation_bytes: 0,
+                output_bytes: 0,
                 samples: Vec::new(),
                 summary: None,
             }],

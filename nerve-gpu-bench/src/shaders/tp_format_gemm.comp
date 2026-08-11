@@ -3,19 +3,24 @@
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(push_constant) uniform Params {
     uint m;
-    uint n;
+    uint local_n;
     uint k;
-    uint a_offset;
-    uint b_offset;
-    uint c_offset;
+    uint global_n;
+    uint output_column_offset;
     uint logical_per_word;
     uint format_kind;
     uint scale_offset;
     uint group_size;
 } params;
-layout(std430, binding = 0) buffer Data {
+layout(std430, binding = 0) readonly buffer Activations {
     uint words[];
-} data;
+} activations;
+layout(std430, binding = 1) readonly buffer Weights {
+    uint words[];
+} weights;
+layout(std430, binding = 2) writeonly buffer Outputs {
+    uint words[];
+} outputs;
 
 float bf16_lane(uint value, uint lane) {
     return uintBitsToFloat(((value >> ((lane & 1u) * 16u)) & 0xffffu) << 16u);
@@ -51,12 +56,12 @@ float e2m1_lane(uint value, uint lane) {
 }
 
 float bf16_scale(uint index) {
-    uint packed = data.words[params.scale_offset + (index >> 1u)];
+    uint packed = weights.words[params.scale_offset + (index >> 1u)];
     return bf16_lane(packed, index);
 }
 
 float e8m0_scale(uint index) {
-    uint packed = data.words[params.scale_offset + (index >> 2u)];
+    uint packed = weights.words[params.scale_offset + (index >> 2u)];
     uint scale_byte = (packed >> ((index & 3u) * 8u)) & 0xffu;
     return scale_byte == 0u
         ? uintBitsToFloat(0x00400000u)
@@ -66,10 +71,10 @@ float e8m0_scale(uint index) {
 float q8_0_weight(uint output_row, uint input_column) {
     uint blocks_per_row = (params.k + 31u) / 32u;
     uint block = output_row * blocks_per_row + input_column / 32u;
-    uint block_offset = params.b_offset + block * 9u;
-    float scale = bf16_lane(data.words[block_offset], 0u);
+    uint block_offset = block * 9u;
+    float scale = bf16_lane(weights.words[block_offset], 0u);
     uint byte_index = input_column & 31u;
-    uint packed = data.words[block_offset + 1u + (byte_index >> 2u)];
+    uint packed = weights.words[block_offset + 1u + (byte_index >> 2u)];
     uint byte_value = (packed >> ((byte_index & 3u) * 8u)) & 0xffu;
     int quantized = int(byte_value << 24u) >> 24;
     return float(quantized) * scale;
@@ -82,7 +87,10 @@ float weight_at(uint output_row, uint input_column) {
     uint logical_index = output_row * params.k + input_column;
     uint word_index = logical_index / params.logical_per_word;
     uint lane = logical_index - word_index * params.logical_per_word;
-    uint packed = data.words[params.b_offset + word_index];
+    uint packed = weights.words[word_index];
+    if (params.format_kind == 0u) {
+        return uintBitsToFloat(packed);
+    }
     if (params.format_kind == 17u) {
         return unpackHalf2x16(packed)[lane & 1u];
     }
@@ -115,31 +123,31 @@ float weight_at(uint output_row, uint input_column) {
     return float(int(byte_value << 24u) >> 24) / 127.0;
 }
 
-float activation_at(uint logical_index) {
-    uint packed = data.words[params.a_offset + (logical_index >> 1u)];
-    return bf16_lane(packed, logical_index);
-}
-
-uint f32_to_bf16(float value) {
-    uint bits = floatBitsToUint(value);
-    return (bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u;
-}
-
 void main() {
-    uint first_col = gl_GlobalInvocationID.x * 2u;
+    uint first_local_column = gl_GlobalInvocationID.x * 2u;
     uint row = gl_GlobalInvocationID.y;
-    if (row >= params.m || first_col >= params.n) {
+    if (row >= params.m || first_local_column >= params.local_n) {
         return;
     }
 
     vec2 accum = vec2(0.0);
     for (uint kk = 0u; kk < params.k; kk++) {
-        float activation = activation_at(row * params.k + kk);
-        accum.x = fma(activation, weight_at(first_col, kk), accum.x);
-        if (first_col + 1u < params.n) {
-            accum.y = fma(activation, weight_at(first_col + 1u, kk), accum.y);
+        uint activation_index = row * params.k + kk;
+        uint packed_activation = activations.words[activation_index >> 1u];
+        float activation = bf16_lane(packed_activation, activation_index);
+        accum.x = fma(activation, weight_at(first_local_column, kk), accum.x);
+        if (first_local_column + 1u < params.local_n) {
+            accum.y = fma(
+                activation,
+                weight_at(first_local_column + 1u, kk),
+                accum.y
+            );
         }
     }
-    data.words[params.c_offset + (row * params.n + first_col) / 2u] =
-        f32_to_bf16(accum.x) | (f32_to_bf16(accum.y) << 16u);
+    uint output_column = params.output_column_offset + first_local_column;
+    uint bits0 = floatBitsToUint(accum.x);
+    uint bits1 = floatBitsToUint(accum.y);
+    uint bf16_0 = (bits0 + 0x7fffu + ((bits0 >> 16u) & 1u)) >> 16u;
+    uint bf16_1 = (bits1 + 0x7fffu + ((bits1 >> 16u) & 1u)) >> 16u;
+    outputs.words[(row * params.global_n + output_column) / 2u] = bf16_0 | (bf16_1 << 16u);
 }

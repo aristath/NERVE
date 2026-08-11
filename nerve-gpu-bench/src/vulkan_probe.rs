@@ -5,6 +5,12 @@ use ash::{Entry, vk};
 use crate::model::{
     FormatCapability, Target, VulkanDeviceInfo, VulkanMemoryHeap, VulkanQueueFamily,
 };
+use crate::vulkan_features::{
+    EXTERNAL_MEMORY_DMA_BUF_FEATURE, EXTERNAL_MEMORY_HOST_FEATURE,
+    EXTERNAL_TIMELINE_SEMAPHORE_FEATURE, NATIVE_FP8_DOT_FEATURE,
+    extension_names_include_dma_buf_shared_memory, extension_names_include_host_shared_memory,
+    external_timeline_semaphore_supported, native_fp8_dot_supported,
+};
 
 pub fn discover_vulkan_targets() -> Vec<Target> {
     match try_discover_vulkan_targets() {
@@ -42,11 +48,13 @@ unsafe fn discover_physical_devices(instance: &ash::Instance) -> Result<Vec<Targ
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
         let queue_properties =
             unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
-        let feature_flags = unsafe { vulkan_feature_flags(instance, physical_device) };
         let extensions = unsafe { instance.enumerate_device_extension_properties(physical_device) }
             .map_err(|error| {
                 format!("could not enumerate Vulkan device extensions for index {index}: {error:?}")
             })?;
+        let extension_names = extension_names(&extensions);
+        let feature_flags =
+            unsafe { vulkan_feature_flags(instance, physical_device, &extension_names) };
         let pci_address = unsafe { vulkan_pci_address(instance, physical_device, &extensions) };
         targets.push(vulkan_target(
             index,
@@ -150,6 +158,7 @@ fn vulkan_target(
 unsafe fn vulkan_feature_flags(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
+    extension_names: &[String],
 ) -> Vec<String> {
     let mut shader_float16_int8 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
     let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut shader_float16_int8);
@@ -162,6 +171,19 @@ unsafe fn vulkan_feature_flags(
     }
     if shader_float16_int8.shader_int8 != 0 {
         flags.push("shader_int8".to_string());
+    }
+    if unsafe { native_fp8_dot_supported(instance, physical_device, extension_names) } {
+        flags.push(NATIVE_FP8_DOT_FEATURE.to_string());
+    }
+    if unsafe { external_timeline_semaphore_supported(instance, physical_device, extension_names) }
+    {
+        flags.push(EXTERNAL_TIMELINE_SEMAPHORE_FEATURE.to_string());
+    }
+    if extension_names_include_dma_buf_shared_memory(extension_names) {
+        flags.push(EXTERNAL_MEMORY_DMA_BUF_FEATURE.to_string());
+    }
+    if extension_names_include_host_shared_memory(extension_names) {
+        flags.push(EXTERNAL_MEMORY_HOST_FEATURE.to_string());
     }
     flags
 }
@@ -265,84 +287,83 @@ fn extension_names(extensions: &[vk::ExtensionProperties]) -> Vec<String> {
 }
 
 fn vulkan_format_capabilities(
-    extension_names: &[String],
+    _extension_names: &[String],
     feature_flags: &[String],
 ) -> Vec<FormatCapability> {
-    let supports_fp8 = extension_names
-        .iter()
-        .any(|extension| extension == "VK_EXT_shader_float8");
     let supports_f16 = feature_flags
         .iter()
         .any(|feature| feature == "shader_float16");
     let supports_int8 = feature_flags.iter().any(|feature| feature == "shader_int8");
+    let supports_native_fp8 = feature_flags
+        .iter()
+        .any(|feature| feature == NATIVE_FP8_DOT_FEATURE);
     vec![
         format_capability("f32", "native", "vulkan_core", "32-bit float shader path"),
         format_capability(
             "f16",
-            if supports_f16 {
-                "native"
-            } else {
-                "unsupported"
-            },
+            if supports_f16 { "native" } else { "fallback" },
             "vulkan_feature_chain",
             if supports_f16 {
                 "shaderFloat16 feature bit is set"
             } else {
-                "shaderFloat16 feature bit is not set"
+                "shaderFloat16 is unavailable; packed F16 is decoded into F32"
             },
         ),
         format_capability(
             "bf16",
-            "emulated",
+            "fallback",
             "vulkan_format_dequant_kernel",
             "BF16 storage is decoded by the format-specific dequant benchmark path",
         ),
-        fp8_format_capability("fp8_e4m3", supports_fp8),
-        fp8_format_capability("fp8_e5m2", supports_fp8),
+        fp8_format_capability("fp8_e4m3", supports_native_fp8),
+        fp8_format_capability("fp8_e5m2", false),
         format_capability(
             "int8",
-            if supports_int8 {
-                "native"
-            } else {
-                "unsupported"
-            },
+            "fallback",
             "vulkan_feature_chain",
             if supports_int8 {
-                "shaderInt8 feature bit is set"
+                "router reduction can use shaderInt8; dense and MoE paths decode packed INT8 into F32"
             } else {
-                "shaderInt8 feature bit is not set"
+                "packed INT8 is decoded into F32"
             },
         ),
         format_dequant_capability("int4"),
         format_dequant_capability("fp4"),
-        format_dequant_capability("mxfp4"),
-        format_dequant_capability("nvfp4"),
+        format_capability(
+            "mxfp4",
+            if supports_native_fp8 {
+                "native"
+            } else {
+                "fallback"
+            },
+            if supports_native_fp8 {
+                "vulkan_mixed_float_dot_product"
+            } else {
+                "vulkan_format_dequant_kernel"
+            },
+            if supports_native_fp8 {
+                "compact E2M1 values expand to E4M3 and use native FP8 dot products"
+            } else {
+                "compact E2M1 values and E8M0 scales are decoded into F32 arithmetic"
+            },
+        ),
         format_dequant_capability("q8_0"),
-        format_dequant_capability("q6_k"),
-        format_dequant_capability("q5_0"),
-        format_dequant_capability("q5_1"),
-        format_dequant_capability("q5_k"),
-        format_dequant_capability("q4_0"),
-        format_dequant_capability("q4_1"),
-        format_dequant_capability("q4_k"),
-        format_dequant_capability("q3_k"),
-        format_dequant_capability("q2_k"),
-        format_dequant_capability("iq4_nl"),
-        format_dequant_capability("iq4_xs"),
-        format_dequant_capability("iq3_s"),
-        format_dequant_capability("iq2_xs"),
     ]
 }
 
-fn fp8_format_capability(format: &str, supports_fp8: bool) -> FormatCapability {
+fn fp8_format_capability(format: &str, native: bool) -> FormatCapability {
     format_capability(
         format,
-        "emulated",
-        "vulkan_format_dequant_kernel",
-        if supports_fp8 {
-            "VK_EXT_shader_float8 advertised; benchmark currently uses a format-specific dequant path"
+        if native { "native" } else { "fallback" },
+        if native {
+            "vulkan_mixed_float_dot_product"
         } else {
-            "VK_EXT_shader_float8 not advertised; benchmark uses a format-specific dequant path"
+            "vulkan_format_dequant_kernel"
+        },
+        if native {
+            "block-scaled E4M3 weights use native FP8 dot products with F32 accumulation"
+        } else {
+            "block-scaled FP8 storage is decoded into F32 arithmetic by the measured path"
         },
     )
 }
@@ -350,7 +371,7 @@ fn fp8_format_capability(format: &str, supports_fp8: bool) -> FormatCapability {
 fn format_dequant_capability(format: &str) -> FormatCapability {
     format_capability(
         format,
-        "emulated",
+        "fallback",
         "vulkan_format_dequant_kernel",
         "format-specific dequant benchmark path can run",
     )
@@ -494,7 +515,7 @@ mod tests {
             .iter()
             .find(|capability| capability.format == "f16")
             .unwrap();
-        assert_eq!(f16.support, "unsupported");
+        assert_eq!(f16.support, "fallback");
     }
 
     #[test]
@@ -505,9 +526,27 @@ mod tests {
                 .iter()
                 .find(|capability| capability.format == format)
                 .unwrap();
-            assert_eq!(capability.support, "emulated");
+            assert_eq!(capability.support, "fallback");
             assert_eq!(capability.source, "vulkan_format_dequant_kernel");
         }
+    }
+
+    #[test]
+    fn native_fp8_dot_capability_selects_e4m3_and_mxfp4_native_paths() {
+        let capabilities = vulkan_format_capabilities(&[], &[NATIVE_FP8_DOT_FEATURE.to_string()]);
+        for format in ["fp8_e4m3", "mxfp4"] {
+            let capability = capabilities
+                .iter()
+                .find(|capability| capability.format == format)
+                .unwrap();
+            assert_eq!(capability.support, "native");
+            assert_eq!(capability.source, "vulkan_mixed_float_dot_product");
+        }
+        let e5m2 = capabilities
+            .iter()
+            .find(|capability| capability.format == "fp8_e5m2")
+            .unwrap();
+        assert_eq!(e5m2.support, "fallback");
     }
 
     #[test]
@@ -517,13 +556,25 @@ mod tests {
             .iter()
             .find(|capability| capability.format == "int4")
             .unwrap();
-        assert_eq!(int4.support, "emulated");
+        assert_eq!(int4.support, "fallback");
 
         let capabilities = vulkan_format_capabilities(&[], &[]);
         let int4 = capabilities
             .iter()
             .find(|capability| capability.format == "int4")
             .unwrap();
-        assert_eq!(int4.support, "emulated");
+        assert_eq!(int4.support, "fallback");
+    }
+
+    #[test]
+    fn int8_capability_does_not_overstate_router_only_native_support() {
+        let capabilities = vulkan_format_capabilities(&[], &["shader_int8".to_string()]);
+        let int8 = capabilities
+            .iter()
+            .find(|capability| capability.format == "int8")
+            .unwrap();
+        assert_eq!(int8.support, "fallback");
+        assert!(int8.notes.contains("router reduction"));
+        assert!(int8.notes.contains("dense and MoE"));
     }
 }

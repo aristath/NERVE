@@ -1,0 +1,135 @@
+#version 460
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_float_e4m3 : require
+#extension GL_EXT_spirv_intrinsics : require
+
+spirv_instruction(
+    extensions = ["SPV_VALVE_mixed_float_dot_product"],
+    capabilities = [6915],
+    id = 6918
+)
+float fp8_dot4_acc32(fe4m3vec4 a, fe4m3vec4 b, float accumulator);
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(push_constant) uniform Params {
+    uint m;
+    uint local_n;
+    uint k;
+    uint global_n;
+    uint output_column_offset;
+    uint logical_per_word;
+    uint format_kind;
+    uint scale_offset;
+    uint group_size;
+} params;
+layout(std430, binding = 0) readonly buffer Activations {
+    uint words[];
+} activations;
+layout(std430, binding = 1) readonly buffer Weights {
+    uint words[];
+} weights;
+layout(std430, binding = 2) writeonly buffer Outputs {
+    uint words[];
+} outputs;
+
+const uint E2M1_E4M3_BITS[8] = uint[8](
+    0x00u, 0x30u, 0x38u, 0x3cu, 0x40u, 0x44u, 0x48u, 0x4cu
+);
+
+float bf16_lane(uint value, uint lane) {
+    return uintBitsToFloat(((value >> ((lane & 1u) * 16u)) & 0xffffu) << 16u);
+}
+
+fe4m3vec4 activationx4(uint row, uint column) {
+    uint logical_index = row * params.k + column;
+    uint lo = activations.words[logical_index >> 1u];
+    uint hi = activations.words[(logical_index >> 1u) + 1u];
+    return fe4m3vec4(vec4(
+        bf16_lane(lo, 0u),
+        bf16_lane(lo, 1u),
+        bf16_lane(hi, 0u),
+        bf16_lane(hi, 1u)
+    ));
+}
+
+uint packed_nibble(uint logical_index) {
+    uint packed = weights.words[logical_index >> 3u];
+    return (packed >> ((logical_index & 7u) * 4u)) & 0x0fu;
+}
+
+uint e2m1_e4m3_bits(uint nibble) {
+    return E2M1_E4M3_BITS[nibble & 7u] | ((nibble & 8u) << 4u);
+}
+
+fe4m3vec4 weightx4(uint output_row, uint input_column) {
+    uint logical_index = output_row * params.k + input_column;
+    if (params.format_kind == 2u) {
+        uint packed = weights.words[logical_index >> 2u];
+        return uintBitsToFloate4m3EXT(u8vec4(
+            uint8_t(packed),
+            uint8_t(packed >> 8u),
+            uint8_t(packed >> 16u),
+            uint8_t(packed >> 24u)
+        ));
+    }
+    return uintBitsToFloate4m3EXT(u8vec4(
+        uint8_t(e2m1_e4m3_bits(packed_nibble(logical_index))),
+        uint8_t(e2m1_e4m3_bits(packed_nibble(logical_index + 1u))),
+        uint8_t(e2m1_e4m3_bits(packed_nibble(logical_index + 2u))),
+        uint8_t(e2m1_e4m3_bits(packed_nibble(logical_index + 3u)))
+    ));
+}
+
+float bf16_scale(uint index) {
+    uint packed = weights.words[params.scale_offset + (index >> 1u)];
+    return bf16_lane(packed, index);
+}
+
+float e8m0_scale(uint index) {
+    uint packed = weights.words[params.scale_offset + (index >> 2u)];
+    uint value = (packed >> ((index & 3u) * 8u)) & 0xffu;
+    return value == 0u ? uintBitsToFloat(0x00400000u) : uintBitsToFloat(value << 23u);
+}
+
+float weight_scale(uint output_row, uint input_column) {
+    if (params.format_kind == 4u) {
+        return 1.0;
+    }
+    uint groups_per_row = (params.k + params.group_size - 1u) / params.group_size;
+    uint index = output_row * groups_per_row + input_column / params.group_size;
+    return params.format_kind == 5u ? e8m0_scale(index) : bf16_scale(index);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    return (bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u;
+}
+
+void main() {
+    uint first_local_column = gl_GlobalInvocationID.x * 2u;
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= params.m || first_local_column >= params.local_n) {
+        return;
+    }
+
+    vec2 accum = vec2(0.0);
+    for (uint column = 0u; column < params.k; column += 4u) {
+        fe4m3vec4 activation = activationx4(row, column);
+        accum.x = fma(
+            fp8_dot4_acc32(activation, weightx4(first_local_column, column), 0.0),
+            weight_scale(first_local_column, column),
+            accum.x
+        );
+        if (first_local_column + 1u < params.local_n) {
+            accum.y = fma(
+                fp8_dot4_acc32(activation, weightx4(first_local_column + 1u, column), 0.0),
+                weight_scale(first_local_column + 1u, column),
+                accum.y
+            );
+        }
+    }
+    uint output_column = params.output_column_offset + first_local_column;
+    outputs.words[(row * params.global_n + output_column) / 2u] =
+        f32_to_bf16(accum.x) | (f32_to_bf16(accum.y) << 16u);
+}

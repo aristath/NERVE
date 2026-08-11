@@ -2,20 +2,40 @@
 
 layout(local_size_x = 64) in;
 layout(push_constant) uniform Params {
-    uint elements;
+    uint tokens;
+    uint experts;
+    uint input_offset;
+    uint output_offset;
+    uint logical_per_word;
+    uint format_kind;
 } params;
 layout(std430, binding = 0) buffer Data {
     float values[];
 } data;
 
+shared float partial_max[64];
+
 void main() {
-    uint index = gl_GlobalInvocationID.x;
-    if (index >= params.elements) {
+    uint token = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (token >= params.tokens) {
         return;
     }
-    float x = data.values[index];
-    float neighbor = data.values[(index * 17u + 13u) % params.elements];
-    float score = max(x, neighbor);
-    float normalized = score / (1.0 + abs(x - neighbor));
-    data.values[index] = fma(normalized, 0.5, score * 0.5);
+
+    float maximum = -3.402823466e+38;
+    for (uint expert = lane; expert < params.experts; expert += 64u) {
+        maximum = max(maximum, data.values[params.input_offset + token * params.experts + expert]);
+    }
+    partial_max[lane] = maximum;
+    barrier();
+
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            partial_max[lane] = max(partial_max[lane], partial_max[lane + stride]);
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        data.values[params.output_offset + token] = partial_max[0];
+    }
 }

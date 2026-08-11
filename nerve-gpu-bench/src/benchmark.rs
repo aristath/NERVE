@@ -1,62 +1,86 @@
 use std::collections::BTreeSet;
-use std::hint::black_box;
-use std::time::Instant;
 
 use crate::model::{
-    BenchmarkPlan, BenchmarkRun, ComparisonCandidate, ComparisonSet, Implementation, Measurement,
-    PLAN_SCHEMA, RUN_SCHEMA, RunPolicy, Sample, Selection, Summary, Target, WorkloadSpec,
-    now_unix_ms,
+    BenchmarkPlan, BenchmarkRun, ComparisonSet, Implementation, MAX_PLACEMENT_GROUP_SIZE,
+    Measurement, PLAN_SCHEMA, RUN_SCHEMA, RunPolicy, Selection, Target, WorkloadSpec, now_unix_ms,
+};
+use crate::vulkan_features::{
+    EXTERNAL_MEMORY_DMA_BUF_FEATURE, EXTERNAL_MEMORY_HOST_FEATURE,
+    EXTERNAL_TIMELINE_SEMAPHORE_FEATURE,
 };
 
 const SMALL_PAYLOAD_COMPARISON_GROUP: &str = "small_payload_placement_comparison";
+pub(crate) const MULTI_TARGET_TENSOR_PARALLEL_STRATEGY: &str = "multi_target_tensor_parallel";
 
 pub fn plan_benchmarks(
     discovered_targets: Vec<Target>,
     selection: Selection,
-    policy: RunPolicy,
+    mut policy: RunPolicy,
 ) -> BenchmarkPlan {
-    let selected_count = selection.selected_target_ids.len();
+    policy.max_group_size = policy.max_group_size.clamp(1, MAX_PLACEMENT_GROUP_SIZE);
     let format_count = policy.benchmark_formats.len();
     let workload_count = policy.benchmark_workloads.len();
     let payload_bytes = policy.payload_bytes;
     let requested_axis_count = format_count * workload_count;
+    let executable_vulkan_axis_count = policy
+        .benchmark_formats
+        .iter()
+        .flat_map(|format| {
+            policy
+                .benchmark_workloads
+                .iter()
+                .filter(move |workload| benchmark_axis_supported(format, workload))
+        })
+        .count();
+    let tensor_parallel_axis_count = policy
+        .benchmark_formats
+        .iter()
+        .flat_map(|format| {
+            policy.benchmark_workloads.iter().filter(move |workload| {
+                benchmark_axis_supported(format, workload)
+                    && benchmark_supports_tensor_parallel(workload)
+            })
+        })
+        .count();
+    let component_chain_axis_count = policy
+        .benchmark_formats
+        .iter()
+        .flat_map(|format| {
+            policy.benchmark_workloads.iter().filter(move |workload| {
+                benchmark_axis_supported(format, workload)
+                    && benchmark_supports_component_chain(workload)
+            })
+        })
+        .count();
     let selected = selection
         .selected_target_ids
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let selected_cpu_count = discovered_targets
+    let selected_vulkan_targets = discovered_targets
         .iter()
-        .filter(|target| selected.contains(&target.stable_target_id) && target.kind == "cpu")
-        .count();
-    let selected_non_cpu_count = selected_count.saturating_sub(selected_cpu_count);
-    let estimated_single_measurement_count = selected_cpu_count * (5 + requested_axis_count)
-        + selected_non_cpu_count * requested_axis_count;
+        .filter(|target| selected.contains(&target.stable_target_id) && target.backend == "vulkan")
+        .collect::<Vec<_>>();
+    let selected_vulkan_count = selected_vulkan_targets.len();
+    let eligible_pair_count = tensor_parallel_combination_count(&selected_vulkan_targets, 2);
+    let estimated_single_measurement_count =
+        selected_vulkan_count * (executable_vulkan_axis_count + component_chain_axis_count);
     let estimated_pair_measurement_count = if policy.pair_measurements && policy.max_group_size >= 2
     {
-        let ordered_activation_transfers = selected_count * selected_count.saturating_sub(1);
-        let unordered_pairs = combinations(selected_count, 2);
-        requested_axis_count * (ordered_activation_transfers + unordered_pairs * 3)
+        let ordered_routes = selected_vulkan_count * selected_vulkan_count.saturating_sub(1);
+        let eligible_ordered_pairs = eligible_pair_count * 2;
+        ordered_routes * component_chain_axis_count
+            + eligible_ordered_pairs * tensor_parallel_axis_count
     } else {
         0
     };
-    let estimated_group_measurement_count =
-        if policy.pair_measurements && policy.max_group_size >= 3 {
-            requested_axis_count * combinations(selected_count, 3) * 2
-        } else {
-            0
-        };
-    let estimated_comparison_set_count = if policy.pair_measurements && policy.max_group_size >= 2 {
-        let pair_sets = combinations(selected_count, 2);
-        let group_sets = if policy.max_group_size >= 3 {
-            combinations(selected_count, 3)
-        } else {
-            0
-        };
-        requested_axis_count * (pair_sets + group_sets)
-    } else {
-        0
-    };
+    let estimated_group_measurement_count = expected_group_measurement_count(
+        &selected_vulkan_targets,
+        &policy,
+        tensor_parallel_axis_count,
+        component_chain_axis_count,
+    );
+    let estimated_comparison_set_count = 0;
     let estimated_measurement_count = estimated_single_measurement_count
         + estimated_pair_measurement_count
         + estimated_group_measurement_count;
@@ -87,8 +111,9 @@ pub fn plan_benchmarks(
 pub fn run_benchmarks(
     discovered_targets: Vec<Target>,
     selection: Selection,
-    policy: RunPolicy,
+    mut policy: RunPolicy,
 ) -> BenchmarkRun {
+    policy.max_group_size = policy.max_group_size.clamp(1, MAX_PLACEMENT_GROUP_SIZE);
     let started_at_unix_ms = now_unix_ms();
     let selected = selection
         .selected_target_ids
@@ -101,70 +126,221 @@ pub fn run_benchmarks(
         .collect::<Vec<_>>();
 
     let mut measurements = Vec::new();
-    for target in &selected_targets {
-        if target.kind == "cpu" {
-            measurements.extend(run_cpu_measurements(
-                &target.stable_target_id,
-                policy.payload_bytes,
-                policy.samples,
-                &policy.benchmark_formats,
-                &policy.benchmark_workloads,
-            ));
-        } else {
-            measurements.extend(run_device_single_target_measurements(
-                target,
-                policy.payload_bytes,
-                policy.samples,
-                &policy.benchmark_formats,
-                &policy.benchmark_workloads,
-                policy.execute,
-            ));
-        }
-    }
-
-    let pair_measurements =
-        if policy.execute && policy.pair_measurements && policy.max_group_size >= 2 {
-            run_vulkan_pair_measurements(
-                &selected_targets,
-                policy.payload_bytes,
-                policy.samples,
-                &policy.benchmark_formats,
-                &policy.benchmark_workloads,
-            )
-        } else {
-            Vec::new()
-        };
-    let group_measurements =
-        if policy.execute && policy.pair_measurements && policy.max_group_size >= 3 {
-            run_vulkan_group_measurements(
-                &selected_targets,
-                policy.payload_bytes,
-                policy.samples,
-                &policy.benchmark_formats,
-                &policy.benchmark_workloads,
-            )
-        } else {
-            Vec::new()
-        };
+    let vulkan_targets = selected_targets
+        .iter()
+        .copied()
+        .filter(|target| target.backend == "vulkan")
+        .collect::<Vec<_>>();
     let workload_specs = build_workload_specs(
         policy.payload_bytes,
         &policy.benchmark_formats,
         &policy.benchmark_workloads,
         policy.max_group_size,
     );
-    let comparison_sets = build_comparison_sets(
-        &selected_targets,
-        policy.pair_measurements,
-        &policy.benchmark_formats,
-        &policy.benchmark_workloads,
-        policy.max_group_size,
-    );
+    let comparison_sets = Vec::new();
+    let vulkan = policy.execute.then(|| {
+        crate::vulkan_exec::run_vulkan_benchmarks(
+            &vulkan_targets,
+            policy.payload_bytes,
+            policy.samples,
+            &policy.benchmark_formats,
+            &policy.benchmark_workloads,
+            policy
+                .pair_measurements
+                .then_some(policy.max_group_size)
+                .unwrap_or(1),
+        )
+    });
+    if let Some(vulkan) = vulkan {
+        measurements.extend(vulkan.measurements);
+        let pair_measurements = vulkan.pair_measurements;
+        let group_measurements = vulkan.group_measurements;
+        return finish_benchmark_run(
+            started_at_unix_ms,
+            discovered_targets,
+            selection,
+            policy,
+            workload_specs,
+            comparison_sets,
+            measurements,
+            pair_measurements,
+            group_measurements,
+        );
+    }
 
-    let mut diagnostics = selection.diagnostics.clone();
-    diagnostics.push(
-        "GPU execution is opt-in; missing backend paths are omitted from measurements and reported through comparison coverage."
-            .to_string(),
+    finish_benchmark_run(
+        started_at_unix_ms,
+        discovered_targets,
+        selection,
+        policy,
+        workload_specs,
+        comparison_sets,
+        measurements,
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+pub fn validate_execution_coverage(run: &BenchmarkRun) -> Result<(), String> {
+    if !run.policy.execute {
+        return Ok(());
+    }
+    let selected = run
+        .selected_target_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let vulkan_targets = run
+        .discovered_targets
+        .iter()
+        .filter(|target| target.backend == "vulkan" && selected.contains(&target.stable_target_id))
+        .collect::<Vec<_>>();
+    let vulkan_ids = vulkan_targets
+        .iter()
+        .map(|target| target.stable_target_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let selected_non_vulkan = run
+        .discovered_targets
+        .iter()
+        .filter(|target| selected.contains(&target.stable_target_id) && target.backend != "vulkan")
+        .map(|target| target.stable_target_id.as_str())
+        .collect::<Vec<_>>();
+    let executable_axes = run
+        .policy
+        .benchmark_formats
+        .iter()
+        .flat_map(|format| {
+            run.policy
+                .benchmark_workloads
+                .iter()
+                .filter(move |workload| benchmark_axis_supported(format, workload))
+        })
+        .count();
+    let tensor_parallel_axes =
+        benchmark_axis_count(&run.policy, benchmark_supports_tensor_parallel);
+    let component_chain_axes =
+        benchmark_axis_count(&run.policy, benchmark_supports_component_chain);
+    let expected_single = vulkan_ids.len() * (executable_axes + component_chain_axes);
+    let actual_single = run
+        .measurements
+        .iter()
+        .filter(|measurement| vulkan_ids.contains(measurement.target_id.as_str()))
+        .count();
+    let ordered_pairs = vulkan_ids.len() * vulkan_ids.len().saturating_sub(1);
+    let eligible_pairs = tensor_parallel_combination_count(&vulkan_targets, 2);
+    let expected_pairs = if run.policy.pair_measurements && run.policy.max_group_size >= 2 {
+        ordered_pairs * component_chain_axes + eligible_pairs * 2 * tensor_parallel_axes
+    } else {
+        0
+    };
+    let expected_groups = expected_group_measurement_count(
+        &vulkan_targets,
+        &run.policy,
+        tensor_parallel_axes,
+        component_chain_axes,
     );
+    let expected_comparison_sets = 0;
+    let mut errors = Vec::new();
+    if vulkan_ids.is_empty() {
+        errors.push("no executable Vulkan target was selected".to_string());
+    }
+    for target_id in selected_non_vulkan {
+        errors.push(format!(
+            "selected target {target_id} has no Vulkan execution backend"
+        ));
+    }
+    for (label, actual, expected) in [
+        ("single", actual_single, expected_single),
+        ("pair", run.pair_measurements.len(), expected_pairs),
+        ("group", run.group_measurements.len(), expected_groups),
+        (
+            "comparison-set",
+            run.comparison_sets.len(),
+            expected_comparison_sets,
+        ),
+    ] {
+        if actual != expected {
+            errors.push(format!(
+                "{label} coverage has {actual} rows but requires {expected}"
+            ));
+        }
+    }
+    for (identity, status, reason, sample_count) in run
+        .measurements
+        .iter()
+        .filter(|measurement| vulkan_ids.contains(measurement.target_id.as_str()))
+        .map(|measurement| {
+            (
+                format!(
+                    "single:{}:{}",
+                    measurement.target_id, measurement.workload_id
+                ),
+                measurement.status.as_str(),
+                measurement.reason.as_deref(),
+                measurement.samples.len(),
+            )
+        })
+        .chain(run.pair_measurements.iter().map(|measurement| {
+            (
+                format!(
+                    "pair:{}->{}:{}",
+                    measurement.source_target_id,
+                    measurement.destination_target_id,
+                    measurement.workload_id
+                ),
+                measurement.status.as_str(),
+                measurement.reason.as_deref(),
+                measurement.samples.len(),
+            )
+        }))
+        .chain(run.group_measurements.iter().map(|measurement| {
+            (
+                format!(
+                    "group:{}:{}",
+                    measurement.target_ids.join("->"),
+                    measurement.workload_id
+                ),
+                measurement.status.as_str(),
+                measurement.reason.as_deref(),
+                measurement.samples.len(),
+            )
+        }))
+    {
+        if status == "completed" && sample_count != run.policy.samples {
+            errors.push(format!(
+                "{identity} has {sample_count} samples but requires {}",
+                run.policy.samples
+            ));
+        } else if status != "completed" && reason.is_none_or(str::is_empty) {
+            errors.push(format!("{identity} is {status} without a reason"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        let omitted = errors.len().saturating_sub(8);
+        errors.truncate(8);
+        let mut message = format!("benchmark coverage is incomplete: {}", errors.join("; "));
+        if omitted > 0 {
+            message.push_str(&format!("; and {omitted} more failures"));
+        }
+        Err(message)
+    }
+}
+
+fn finish_benchmark_run(
+    started_at_unix_ms: u128,
+    discovered_targets: Vec<Target>,
+    selection: Selection,
+    policy: RunPolicy,
+    workload_specs: Vec<WorkloadSpec>,
+    comparison_sets: Vec<ComparisonSet>,
+    measurements: Vec<Measurement>,
+    pair_measurements: Vec<crate::model::PairMeasurement>,
+    group_measurements: Vec<crate::model::GroupMeasurement>,
+) -> BenchmarkRun {
+    let mut diagnostics = selection.diagnostics.clone();
+    diagnostics.push("Only real Vulkan execution rows can become placement evidence.".to_string());
     diagnostics.push(format!(
         "Each synthetic workload is capped to {} payload bytes.",
         policy.payload_bytes
@@ -189,592 +365,144 @@ pub fn run_benchmarks(
 }
 
 fn combinations(count: usize, choose: usize) -> usize {
-    match choose {
-        2 if count >= 2 => count * (count - 1) / 2,
-        3 if count >= 3 => count * (count - 1) * (count - 2) / 6,
-        _ => 0,
+    if choose > count {
+        return 0;
     }
-}
-
-fn run_cpu_measurements(
-    target_id: &str,
-    payload_bytes: usize,
-    samples: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<Measurement> {
-    let mut measurements = vec![
-        run_cpu_copy(target_id, payload_bytes, samples),
-        run_cpu_f32_dot(target_id, payload_bytes, samples),
-    ];
-    measurements.extend(run_cpu_requested_single_target_measurements(
-        target_id,
-        payload_bytes,
-        samples,
-        formats,
-        workloads,
-    ));
-    measurements.extend(run_cpu_compound_reference(
-        target_id,
-        payload_bytes,
-        samples,
-    ));
-    measurements
-}
-
-fn run_cpu_requested_single_target_measurements(
-    target_id: &str,
-    payload_bytes: usize,
-    samples: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<Measurement> {
-    let mut measurements = Vec::new();
-    for format in formats {
-        for workload in workloads {
-            if format == "f32" {
-                measurements.push(run_cpu_f32_requested_workload(
-                    target_id,
-                    payload_bytes,
-                    samples,
-                    workload,
-                ));
-            } else {
-                measurements.push(unsupported_cpu_requested_workload(
-                    target_id,
-                    payload_bytes,
-                    workload,
-                    format,
-                ));
-            }
-        }
-    }
-    measurements
-}
-
-fn run_cpu_f32_requested_workload(
-    target_id: &str,
-    payload_bytes: usize,
-    samples: usize,
-    workload_class: &str,
-) -> Measurement {
-    let elements = (payload_bytes / (2 * std::mem::size_of::<f32>())).max(1);
-    let left = (0..elements)
-        .map(|index| ((index % 1024) as f32) * 0.001)
-        .collect::<Vec<_>>();
-    let right = (0..elements)
-        .map(|index| (((index * 17) % 1024) as f32) * 0.001)
-        .collect::<Vec<_>>();
-
-    black_box(cpu_f32_workload(workload_class, &left, &right));
-
-    let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
-        let started = Instant::now();
-        let value = cpu_f32_workload(workload_class, &left, &right);
-        black_box(value);
-        let duration = started.elapsed();
-        measured_samples.push(Sample {
-            sample_index,
-            duration_ns: duration.as_nanos(),
-            iterations: 1,
-            bytes_read: (elements * 2 * std::mem::size_of::<f32>()) as u64,
-            bytes_written: std::mem::size_of::<f32>() as u64,
-            operations: cpu_f32_workload_operations(workload_class, elements),
-        });
-    }
-
-    Measurement {
-        workload_id: format_workload_id("single_target_small_payload", workload_class, "f32"),
-        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-        workload_class: workload_class.to_string(),
-        placement_strategy: "single_target_serial".to_string(),
-        target_id: target_id.to_string(),
-        pattern: "single_target_compute".to_string(),
-        operation_family: workload_class.to_string(),
-        regime: "small_payload".to_string(),
-        format: "f32".to_string(),
-        status: "completed".to_string(),
-        reason: None,
-        payload_bytes,
-        working_set_bytes: elements * 2 * std::mem::size_of::<f32>(),
-        summary: summarize(&measured_samples),
-        samples: measured_samples,
-    }
-}
-
-fn unsupported_cpu_requested_workload(
-    target_id: &str,
-    payload_bytes: usize,
-    workload_class: &str,
-    format: &str,
-) -> Measurement {
-    Measurement {
-        workload_id: format_workload_id("single_target_small_payload", workload_class, format),
-        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-        workload_class: workload_class.to_string(),
-        placement_strategy: "single_target_serial".to_string(),
-        target_id: target_id.to_string(),
-        pattern: "single_target_compute".to_string(),
-        operation_family: workload_class.to_string(),
-        regime: "small_payload".to_string(),
-        format: format.to_string(),
-        status: "unsupported".to_string(),
-        reason: Some("cpu_format_backend_not_implemented".to_string()),
-        payload_bytes,
-        working_set_bytes: payload_bytes,
-        samples: Vec::new(),
-        summary: None,
-    }
-}
-
-fn cpu_f32_workload(workload_class: &str, left: &[f32], right: &[f32]) -> f32 {
-    match workload_class {
-        "dense_projection" => left
-            .iter()
-            .zip(right.iter())
-            .fold(0.0_f32, |sum, (left, right)| {
-                (sum + left.mul_add(*right, 0.125)).mul_add(0.999_999, 0.000_001)
-            }),
-        "moe_expert" => left
-            .iter()
-            .zip(right.iter())
-            .fold(0.0_f32, |sum, (left, right)| {
-                let gate = if *left > *right { *left } else { *right };
-                sum + gate * (left + right) * 0.5
-            }),
-        "router_reduction" => dot_product(left, right),
-        _ => dot_product(left, right),
-    }
-}
-
-fn cpu_f32_workload_operations(workload_class: &str, elements: usize) -> u64 {
-    let operations_per_element = match workload_class {
-        "dense_projection" => 5,
-        "moe_expert" => 6,
-        "router_reduction" => 2,
-        _ => 2,
-    };
-    elements as u64 * operations_per_element
-}
-
-fn run_cpu_copy(target_id: &str, payload_bytes: usize, samples: usize) -> Measurement {
-    let mut source = vec![0_u8; payload_bytes];
-    let mut destination = vec![0_u8; payload_bytes];
-    for (index, value) in source.iter_mut().enumerate() {
-        *value = (index & 0xff) as u8;
-    }
-
-    destination.copy_from_slice(&source);
-    black_box(&destination);
-
-    let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
-        let started = Instant::now();
-        destination.copy_from_slice(&source);
-        black_box(&destination);
-        let duration = started.elapsed();
-        measured_samples.push(Sample {
-            sample_index,
-            duration_ns: duration.as_nanos(),
-            iterations: 1,
-            bytes_read: payload_bytes as u64,
-            bytes_written: payload_bytes as u64,
-            operations: 0,
-        });
-    }
-
-    Measurement {
-        workload_id: "single_cpu_u8_copy".to_string(),
-        comparison_group: "single_target_primitives".to_string(),
-        workload_class: "memory_copy".to_string(),
-        placement_strategy: "single_target_serial".to_string(),
-        target_id: target_id.to_string(),
-        pattern: "single_target_copy".to_string(),
-        operation_family: "memory_copy".to_string(),
-        regime: "small_payload".to_string(),
-        format: "u8".to_string(),
-        status: "completed".to_string(),
-        reason: None,
-        payload_bytes,
-        working_set_bytes: payload_bytes * 2,
-        summary: summarize(&measured_samples),
-        samples: measured_samples,
-    }
-}
-
-fn run_cpu_f32_dot(target_id: &str, payload_bytes: usize, samples: usize) -> Measurement {
-    let elements = (payload_bytes / (2 * std::mem::size_of::<f32>())).max(1);
-    let left = (0..elements)
-        .map(|index| ((index % 1024) as f32) * 0.001)
-        .collect::<Vec<_>>();
-    let right = (0..elements)
-        .map(|index| (((index * 17) % 1024) as f32) * 0.001)
-        .collect::<Vec<_>>();
-
-    black_box(dot_product(&left, &right));
-
-    let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
-        let started = Instant::now();
-        let value = dot_product(&left, &right);
-        black_box(value);
-        let duration = started.elapsed();
-        measured_samples.push(Sample {
-            sample_index,
-            duration_ns: duration.as_nanos(),
-            iterations: 1,
-            bytes_read: (elements * 2 * std::mem::size_of::<f32>()) as u64,
-            bytes_written: std::mem::size_of::<f32>() as u64,
-            operations: (elements as u64) * 2,
-        });
-    }
-
-    Measurement {
-        workload_id: "single_cpu_f32_dot".to_string(),
-        comparison_group: "single_target_primitives".to_string(),
-        workload_class: "router_reduction".to_string(),
-        placement_strategy: "single_target_serial".to_string(),
-        target_id: target_id.to_string(),
-        pattern: "single_target_reduction".to_string(),
-        operation_family: "dot_product_reduction".to_string(),
-        regime: "small_payload".to_string(),
-        format: "f32".to_string(),
-        status: "completed".to_string(),
-        reason: None,
-        payload_bytes,
-        working_set_bytes: elements * 2 * std::mem::size_of::<f32>(),
-        summary: summarize(&measured_samples),
-        samples: measured_samples,
-    }
-}
-
-fn dot_product(left: &[f32], right: &[f32]) -> f32 {
-    left.iter()
-        .zip(right.iter())
-        .fold(0.0_f32, |sum, (left, right)| sum + left * right)
-}
-
-fn run_cpu_compound_reference(
-    target_id: &str,
-    payload_bytes: usize,
-    samples: usize,
-) -> Vec<Measurement> {
-    vec![
-        run_cpu_compound_pattern(
-            target_id,
-            payload_bytes,
-            samples,
-            CpuCompoundPattern::Serialized,
-        ),
-        run_cpu_compound_pattern(
-            target_id,
-            payload_bytes,
-            samples,
-            CpuCompoundPattern::LayerSplit,
-        ),
-        run_cpu_compound_pattern(
-            target_id,
-            payload_bytes,
-            samples,
-            CpuCompoundPattern::TensorSplit,
-        ),
-    ]
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CpuCompoundPattern {
-    Serialized,
-    LayerSplit,
-    TensorSplit,
-}
-
-impl CpuCompoundPattern {
-    fn workload_id(self) -> &'static str {
-        match self {
-            Self::Serialized => "cpu_reference_serialized_small_payload",
-            Self::LayerSplit => "cpu_reference_layer_split_small_payload",
-            Self::TensorSplit => "cpu_reference_tensor_split_small_payload",
-        }
-    }
-
-    fn pattern(self) -> &'static str {
-        match self {
-            Self::Serialized => "serialized_small_payload",
-            Self::LayerSplit => "synthetic_layer_split_small_payload",
-            Self::TensorSplit => "synthetic_tensor_split_small_payload",
-        }
-    }
-
-    fn placement_strategy(self) -> &'static str {
-        match self {
-            Self::Serialized => "single_target_serial",
-            Self::LayerSplit => "two_stage_serial_reference",
-            Self::TensorSplit => "two_shard_parallel_reference",
-        }
-    }
-}
-
-fn run_cpu_compound_pattern(
-    target_id: &str,
-    payload_bytes: usize,
-    samples: usize,
-    pattern: CpuCompoundPattern,
-) -> Measurement {
-    let source = patterned_payload(payload_bytes);
-    let activation_bytes = activation_bytes_for_payload(payload_bytes);
-    let output_bytes = output_bytes_for_payload(payload_bytes);
-    let mut scratch = vec![0_u8; payload_bytes];
-    let mut activation = vec![0_u8; activation_bytes];
-    let mut output = vec![0_u8; output_bytes];
-
-    execute_cpu_compound_pattern(pattern, &source, &mut scratch, &mut activation, &mut output);
-    black_box(checksum(&output));
-
-    let mut measured_samples = Vec::with_capacity(samples);
-    for sample_index in 0..samples {
-        let started = Instant::now();
-        execute_cpu_compound_pattern(pattern, &source, &mut scratch, &mut activation, &mut output);
-        black_box(checksum(&output));
-        let duration = started.elapsed();
-        measured_samples.push(Sample {
-            sample_index,
-            duration_ns: duration.as_nanos(),
-            iterations: 1,
-            bytes_read: compound_bytes_read(payload_bytes, activation_bytes, pattern),
-            bytes_written: compound_bytes_written(payload_bytes, activation_bytes, output_bytes),
-            operations: compound_operations(payload_bytes, output_bytes, pattern),
-        });
-    }
-
-    Measurement {
-        workload_id: pattern.workload_id().to_string(),
-        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-        workload_class: "cpu_reference_compound".to_string(),
-        placement_strategy: pattern.placement_strategy().to_string(),
-        target_id: target_id.to_string(),
-        pattern: pattern.pattern().to_string(),
-        operation_family: "cpu_reference_compound".to_string(),
-        regime: "small_payload".to_string(),
-        format: "u8_synthetic".to_string(),
-        status: "completed".to_string(),
-        reason: None,
-        payload_bytes,
-        working_set_bytes: payload_bytes + scratch.len() + activation.len() + output.len(),
-        summary: summarize(&measured_samples),
-        samples: measured_samples,
-    }
-}
-
-fn execute_cpu_compound_pattern(
-    pattern: CpuCompoundPattern,
-    source: &[u8],
-    scratch: &mut [u8],
-    activation: &mut [u8],
-    output: &mut [u8],
-) {
-    match pattern {
-        CpuCompoundPattern::Serialized => {
-            transform_bytes(source, scratch, 17);
-            fill_activation_from_payload(scratch, activation);
-            fill_output_from_payload(scratch, activation, output);
-        }
-        CpuCompoundPattern::LayerSplit => {
-            let split = source.len() / 2;
-            transform_bytes(&source[..split], &mut scratch[..split], 29);
-            fill_activation_from_payload(&scratch[..split], activation);
-            transform_bytes(&source[split..], &mut scratch[split..], 43);
-            fill_output_from_payload(&scratch[split..], activation, output);
-        }
-        CpuCompoundPattern::TensorSplit => {
-            let split = source.len() / 2;
-            transform_bytes(&source[..split], &mut scratch[..split], 61);
-            transform_bytes(&source[split..], &mut scratch[split..], 79);
-            fill_activation_from_payload(scratch, activation);
-            fill_output_from_tensor_shards(
-                &scratch[..split],
-                &scratch[split..],
-                activation,
-                output,
-            );
-        }
-    }
-}
-
-fn patterned_payload(payload_bytes: usize) -> Vec<u8> {
-    (0..payload_bytes)
-        .map(|index| ((index.wrapping_mul(37).wrapping_add(11)) & 0xff) as u8)
-        .collect()
-}
-
-fn transform_bytes(source: &[u8], destination: &mut [u8], salt: u8) {
-    debug_assert_eq!(source.len(), destination.len());
-    for (index, (source, destination)) in source.iter().zip(destination.iter_mut()).enumerate() {
-        let index_byte = (index & 0xff) as u8;
-        *destination = source
-            .wrapping_mul(3)
-            .wrapping_add(salt)
-            .rotate_left((index_byte & 7) as u32);
-    }
-}
-
-fn fill_activation_from_payload(payload: &[u8], activation: &mut [u8]) {
-    if payload.is_empty() {
-        activation.fill(0);
-        return;
-    }
-    for (index, activation_byte) in activation.iter_mut().enumerate() {
-        let first = payload[index % payload.len()];
-        let second = payload[(index.wrapping_mul(17).wrapping_add(5)) % payload.len()];
-        *activation_byte = first ^ second.rotate_left((index & 7) as u32);
-    }
-}
-
-fn fill_output_from_payload(payload: &[u8], activation: &[u8], output: &mut [u8]) {
-    if payload.is_empty() || activation.is_empty() {
-        output.fill(0);
-        return;
-    }
-    for (index, output_byte) in output.iter_mut().enumerate() {
-        let value = payload[(index.wrapping_mul(13)) % payload.len()]
-            .wrapping_add(activation[index % activation.len()]);
-        *output_byte = value.rotate_right((index & 7) as u32);
-    }
-}
-
-fn fill_output_from_tensor_shards(left: &[u8], right: &[u8], activation: &[u8], output: &mut [u8]) {
-    if left.is_empty() || right.is_empty() || activation.is_empty() {
-        output.fill(0);
-        return;
-    }
-    for (index, output_byte) in output.iter_mut().enumerate() {
-        let left_value = left[(index.wrapping_mul(7)) % left.len()];
-        let right_value = right[(index.wrapping_mul(11)) % right.len()];
-        *output_byte = left_value
-            .wrapping_add(right_value)
-            .wrapping_add(activation[index % activation.len()])
-            .rotate_left((index & 7) as u32);
-    }
-}
-
-fn checksum(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0_u64, |sum, byte| {
-        sum.rotate_left(5).wrapping_add(u64::from(*byte))
+    let choose = choose.min(count - choose);
+    (0..choose).fold(1_usize, |result, index| {
+        result * (count - index) / (index + 1)
     })
 }
 
-fn compound_bytes_read(
-    payload_bytes: usize,
-    activation_bytes: usize,
-    pattern: CpuCompoundPattern,
-) -> u64 {
-    let output_bytes = output_bytes_for_payload(payload_bytes);
-    let payload_reads = match pattern {
-        CpuCompoundPattern::Serialized => payload_bytes * 3,
-        CpuCompoundPattern::LayerSplit => payload_bytes * 2,
-        CpuCompoundPattern::TensorSplit => payload_bytes * 3,
-    };
-    (payload_reads + activation_bytes + output_bytes) as u64
-}
-
-fn compound_bytes_written(
-    payload_bytes: usize,
-    activation_bytes: usize,
-    output_bytes: usize,
-) -> u64 {
-    (payload_bytes + activation_bytes + output_bytes) as u64
-}
-
-fn compound_operations(
-    payload_bytes: usize,
-    output_bytes: usize,
-    pattern: CpuCompoundPattern,
-) -> u64 {
-    let transform_operations = payload_bytes as u64 * 4;
-    let output_operations = output_bytes as u64
-        * match pattern {
-            CpuCompoundPattern::Serialized | CpuCompoundPattern::LayerSplit => 3,
-            CpuCompoundPattern::TensorSplit => 5,
-        };
-    transform_operations + output_operations
-}
-
-fn run_device_single_target_measurements(
-    target: &Target,
-    payload_bytes: usize,
-    samples: usize,
-    formats: &[String],
-    workloads: &[String],
-    execute: bool,
-) -> Vec<Measurement> {
-    if execute && target.backend == "vulkan" {
-        return run_vulkan_single_target_measurements(
-            target,
-            payload_bytes,
-            samples,
-            formats,
-            workloads,
-        );
+pub(crate) fn target_index_combinations(count: usize, choose: usize) -> Vec<Vec<usize>> {
+    fn extend(
+        count: usize,
+        start: usize,
+        remaining: usize,
+        current: &mut Vec<usize>,
+        result: &mut Vec<Vec<usize>>,
+    ) {
+        if remaining == 0 {
+            result.push(current.clone());
+            return;
+        }
+        for index in start..=count - remaining {
+            current.push(index);
+            extend(count, index + 1, remaining - 1, current, result);
+            current.pop();
+        }
     }
-    Vec::new()
+
+    if choose == 0 {
+        return vec![Vec::new()];
+    }
+    if choose > count {
+        return Vec::new();
+    }
+    let mut result = Vec::with_capacity(combinations(count, choose));
+    extend(
+        count,
+        0,
+        choose,
+        &mut Vec::with_capacity(choose),
+        &mut result,
+    );
+    result
 }
 
-fn run_vulkan_single_target_measurements(
-    target: &Target,
-    payload_bytes: usize,
-    samples: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<Measurement> {
-    crate::vulkan_exec::run_vulkan_single_target_measurements(
-        target,
-        payload_bytes,
-        samples,
-        formats,
-        workloads,
-    )
+pub(crate) fn targets_support_tensor_parallel(targets: &[&Target]) -> bool {
+    !targets.is_empty()
+        && targets
+            .iter()
+            .all(|target| target_has_vulkan_feature(target, EXTERNAL_TIMELINE_SEMAPHORE_FEATURE))
+        && (targets
+            .iter()
+            .all(|target| target_has_vulkan_feature(target, EXTERNAL_MEMORY_DMA_BUF_FEATURE))
+            || targets
+                .iter()
+                .all(|target| target_has_vulkan_feature(target, EXTERNAL_MEMORY_HOST_FEATURE)))
 }
 
-fn run_vulkan_pair_measurements(
+fn target_has_vulkan_feature(target: &Target, feature: &str) -> bool {
+    target
+        .vulkan
+        .as_ref()
+        .is_some_and(|vulkan| vulkan.feature_flags.iter().any(|item| item == feature))
+}
+
+fn tensor_parallel_combination_count(targets: &[&Target], choose: usize) -> usize {
+    target_index_combinations(targets.len(), choose)
+        .into_iter()
+        .filter(|indices| {
+            let group = indices
+                .iter()
+                .map(|index| targets[*index])
+                .collect::<Vec<_>>();
+            targets_support_tensor_parallel(&group)
+        })
+        .count()
+}
+
+fn expected_group_measurement_count(
     targets: &[&Target],
-    payload_bytes: usize,
-    samples: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<crate::model::PairMeasurement> {
-    let vulkan_targets = targets
-        .iter()
-        .copied()
-        .filter(|target| target.backend == "vulkan")
-        .collect::<Vec<_>>();
-    crate::vulkan_exec::run_vulkan_pair_measurements(
-        &vulkan_targets,
-        payload_bytes,
-        samples,
-        formats,
-        workloads,
+    policy: &RunPolicy,
+    tensor_parallel_axis_count: usize,
+    _component_chain_axis_count: usize,
+) -> usize {
+    if !policy.pair_measurements || policy.max_group_size < 3 {
+        return 0;
+    }
+    let max_group_size = policy
+        .max_group_size
+        .min(MAX_PLACEMENT_GROUP_SIZE)
+        .min(targets.len());
+    (3..=max_group_size)
+        .map(|group_size| {
+            let compatible_groups = tensor_parallel_combination_count(targets, group_size);
+            compatible_groups * tensor_parallel_axis_count * group_size
+        })
+        .sum()
+}
+
+fn benchmark_workload_family(workload: &str) -> &str {
+    for family in [
+        "dense_projection",
+        "moe_expert",
+        "kv_cache",
+        "router_reduction",
+    ] {
+        if workload == family || workload.starts_with(&format!("{family}_")) {
+            return family;
+        }
+    }
+    workload
+}
+
+fn benchmark_supports_tensor_parallel(workload: &str) -> bool {
+    matches!(
+        benchmark_workload_family(workload),
+        "dense_projection" | "moe_expert"
     )
 }
 
-fn run_vulkan_group_measurements(
-    targets: &[&Target],
-    payload_bytes: usize,
-    samples: usize,
-    formats: &[String],
-    workloads: &[String],
-) -> Vec<crate::model::GroupMeasurement> {
-    let vulkan_targets = targets
+fn benchmark_supports_component_chain(workload: &str) -> bool {
+    benchmark_workload_family(workload) == "dense_projection"
+}
+
+fn benchmark_axis_count(policy: &RunPolicy, predicate: fn(&str) -> bool) -> usize {
+    policy
+        .benchmark_formats
         .iter()
-        .copied()
-        .filter(|target| target.backend == "vulkan")
-        .collect::<Vec<_>>();
-    crate::vulkan_exec::run_vulkan_group_measurements(
-        &vulkan_targets,
-        payload_bytes,
-        samples,
-        formats,
-        workloads,
-    )
+        .flat_map(|format| {
+            policy.benchmark_workloads.iter().filter(move |workload| {
+                benchmark_axis_supported(format, workload) && predicate(workload)
+            })
+        })
+        .count()
+}
+
+fn benchmark_axis_supported(format: &str, workload: &str) -> bool {
+    benchmark_workload_family(workload) != "kv_cache" || format == "bf16"
 }
 
 pub(crate) fn single_target_status_measurements(
@@ -824,219 +552,40 @@ pub(crate) fn single_target_status_measurement(
         reason: Some(reason.to_string()),
         payload_bytes,
         working_set_bytes: payload_bytes,
+        activation_bytes: activation_bytes_for_payload(payload_bytes),
+        output_bytes: output_bytes_for_payload(payload_bytes),
         samples: Vec::new(),
         summary: None,
     }
 }
 
-fn build_comparison_sets(
-    targets: &[&Target],
-    pair_measurements: bool,
-    formats: &[String],
-    workloads: &[String],
-    max_group_size: usize,
-) -> Vec<ComparisonSet> {
-    if !pair_measurements || max_group_size < 2 {
-        return Vec::new();
+const TWO_COMPONENT_CHAIN_REGIME: &str = "two_component_chain";
+const THREE_COMPONENT_CHAIN_REGIME: &str = "three_component_chain";
+const FOUR_COMPONENT_CHAIN_REGIME: &str = "four_component_chain";
+
+pub(crate) fn component_chain_regime(participant_count: usize) -> &'static str {
+    match participant_count {
+        2 => TWO_COMPONENT_CHAIN_REGIME,
+        3 => THREE_COMPONENT_CHAIN_REGIME,
+        4 => FOUR_COMPONENT_CHAIN_REGIME,
+        _ => panic!("component chain participant count must be between 2 and 4"),
     }
-    let mut comparisons = Vec::new();
-    for format in formats {
-        for workload in workloads {
-            for left_index in 0..targets.len() {
-                for right_index in (left_index + 1)..targets.len() {
-                    let left = &targets[left_index].stable_target_id;
-                    let right = &targets[right_index].stable_target_id;
-                    let comparison_id = format!(
-                        "{SMALL_PAYLOAD_COMPARISON_GROUP}:{workload}:{format}:{left}|{right}"
-                    );
-                    comparisons.push(ComparisonSet {
-                        comparison_id: comparison_id.clone(),
-                        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-                        workload_class: workload.clone(),
-                        regime: "small_payload".to_string(),
-                        format: format.clone(),
-                        target_ids: vec![left.clone(), right.clone()],
-                        candidates: vec![
-                            comparison_candidate(
-                                &comparison_id,
-                                "single_left",
-                                "single_target_serial",
-                                "single",
-                                &format_workload_id(
-                                    "single_target_small_payload",
-                                    workload,
-                                    format,
-                                ),
-                                vec![left.clone()],
-                                "Run the whole payload on the first target only.",
-                            ),
-                            comparison_candidate(
-                                &comparison_id,
-                                "single_right",
-                                "single_target_serial",
-                                "single",
-                                &format_workload_id(
-                                    "single_target_small_payload",
-                                    workload,
-                                    format,
-                                ),
-                                vec![right.clone()],
-                                "Run the whole payload on the second target only.",
-                            ),
-                            comparison_candidate(
-                                &comparison_id,
-                                "serial_left_to_right",
-                                "two_target_serial",
-                                "pair",
-                                &format_workload_id(
-                                    "synthetic_layer_split_small_payload",
-                                    workload,
-                                    format,
-                                ),
-                                vec![left.clone(), right.clone()],
-                                "Run the first stage on the first target, then transfer activation to the second target.",
-                            ),
-                            comparison_candidate(
-                                &comparison_id,
-                                "serial_right_to_left",
-                                "two_target_serial",
-                                "pair",
-                                &format_workload_id(
-                                    "synthetic_layer_split_small_payload",
-                                    workload,
-                                    format,
-                                ),
-                                vec![right.clone(), left.clone()],
-                                "Run the first stage on the second target, then transfer activation to the first target.",
-                            ),
-                            comparison_candidate(
-                                &comparison_id,
-                                "tensor_parallel_pair",
-                                "two_target_tensor_parallel",
-                                "pair",
-                                &format_workload_id(
-                                    "synthetic_tensor_parallel_small_payload",
-                                    workload,
-                                    format,
-                                ),
-                                vec![left.clone(), right.clone()],
-                                "Split the same logical payload across both targets with per-layer tensor-parallel exchange.",
-                            ),
-                        ],
-                    });
-                }
-            }
-            if max_group_size >= 3 {
-                for first_index in 0..targets.len() {
-                    for second_index in (first_index + 1)..targets.len() {
-                        for third_index in (second_index + 1)..targets.len() {
-                            let first = &targets[first_index].stable_target_id;
-                            let second = &targets[second_index].stable_target_id;
-                            let third = &targets[third_index].stable_target_id;
-                            let comparison_id = format!(
-                                "{SMALL_PAYLOAD_COMPARISON_GROUP}:{workload}:{format}:{first}|{second}|{third}"
-                            );
-                            comparisons.push(ComparisonSet {
-                                comparison_id: comparison_id.clone(),
-                                comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-                                workload_class: workload.clone(),
-                                regime: "small_payload".to_string(),
-                                format: format.clone(),
-                                target_ids: vec![first.clone(), second.clone(), third.clone()],
-                                candidates: vec![
-                                    comparison_candidate(
-                                        &comparison_id,
-                                        "single_first",
-                                        "single_target_serial",
-                                        "single",
-                                        &format_workload_id(
-                                            "single_target_small_payload",
-                                            workload,
-                                            format,
-                                        ),
-                                        vec![first.clone()],
-                                        "Run the whole payload on the first target only.",
-                                    ),
-                                    comparison_candidate(
-                                        &comparison_id,
-                                        "single_second",
-                                        "single_target_serial",
-                                        "single",
-                                        &format_workload_id(
-                                            "single_target_small_payload",
-                                            workload,
-                                            format,
-                                        ),
-                                        vec![second.clone()],
-                                        "Run the whole payload on the second target only.",
-                                    ),
-                                    comparison_candidate(
-                                        &comparison_id,
-                                        "single_third",
-                                        "single_target_serial",
-                                        "single",
-                                        &format_workload_id(
-                                            "single_target_small_payload",
-                                            workload,
-                                            format,
-                                        ),
-                                        vec![third.clone()],
-                                        "Run the whole payload on the third target only.",
-                                    ),
-                                    comparison_candidate(
-                                        &comparison_id,
-                                        "serial_triplet",
-                                        "three_target_serial",
-                                        "group",
-                                        &format_workload_id(
-                                            "synthetic_layer_split_group_small_payload",
-                                            workload,
-                                            format,
-                                        ),
-                                        vec![first.clone(), second.clone(), third.clone()],
-                                        "Run thirds of the payload as ordered stages across the three targets.",
-                                    ),
-                                    comparison_candidate(
-                                        &comparison_id,
-                                        "tensor_parallel_triplet",
-                                        "three_target_tensor_parallel",
-                                        "group",
-                                        &format_workload_id(
-                                            "synthetic_tensor_parallel_group_small_payload",
-                                            workload,
-                                            format,
-                                        ),
-                                        vec![first.clone(), second.clone(), third.clone()],
-                                        "Split the same logical payload across all three targets with per-layer tensor-parallel exchange.",
-                                    ),
-                                ],
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-    comparisons
 }
 
-fn comparison_candidate(
-    comparison_id: &str,
-    candidate_suffix: &str,
-    placement_strategy: &str,
-    measurement_kind: &str,
-    workload_id: &str,
-    target_ids: Vec<String>,
-    notes: &str,
-) -> ComparisonCandidate {
-    ComparisonCandidate {
-        candidate_id: format!("{comparison_id}:{candidate_suffix}"),
-        placement_strategy: placement_strategy.to_string(),
-        measurement_kind: measurement_kind.to_string(),
-        workload_id: workload_id.to_string(),
-        target_ids,
-        notes: notes.to_string(),
-    }
+pub(crate) fn tensor_parallel_group_workload_id(
+    participant_count: usize,
+    workload_class: &str,
+    format: &str,
+) -> String {
+    format_workload_id(
+        &tensor_parallel_group_pattern(participant_count),
+        workload_class,
+        format,
+    )
+}
+
+pub(crate) fn tensor_parallel_group_pattern(participant_count: usize) -> String {
+    format!("synthetic_tensor_parallel_group_{participant_count}_small_payload")
 }
 
 fn build_workload_specs(
@@ -1045,55 +594,14 @@ fn build_workload_specs(
     workloads: &[String],
     max_group_size: usize,
 ) -> Vec<WorkloadSpec> {
-    let half_payload = payload_bytes / 2;
     let activation_bytes = activation_bytes_for_payload(payload_bytes);
     let output_bytes = output_bytes_for_payload(payload_bytes);
-    let mut specs = vec![
-        WorkloadSpec {
-            workload_id: "cpu_reference_serialized_small_payload".to_string(),
-            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-            workload_class: "cpu_reference_compound".to_string(),
-            placement_strategy: "single_target_serial".to_string(),
-            pattern: "serialized_small_payload".to_string(),
-            format: "u8_synthetic".to_string(),
-            participant_count: 1,
-            payload_bytes,
-            parameter_bytes_per_participant: payload_bytes,
-            activation_bytes,
-            output_bytes,
-            description: "Run the full small logical payload through the CPU reference serialized dataflow.".to_string(),
-        },
-        WorkloadSpec {
-            workload_id: "cpu_reference_layer_split_small_payload".to_string(),
-            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-            workload_class: "cpu_reference_compound".to_string(),
-            placement_strategy: "two_stage_serial_reference".to_string(),
-            pattern: "synthetic_layer_split_small_payload".to_string(),
-            format: "u8_synthetic".to_string(),
-            participant_count: 1,
-            payload_bytes,
-            parameter_bytes_per_participant: half_payload,
-            activation_bytes,
-            output_bytes,
-            description: "Run the same small logical payload through the CPU reference layer-split dataflow.".to_string(),
-        },
-        WorkloadSpec {
-            workload_id: "cpu_reference_tensor_split_small_payload".to_string(),
-            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-            workload_class: "cpu_reference_compound".to_string(),
-            placement_strategy: "two_shard_parallel_reference".to_string(),
-            pattern: "synthetic_tensor_split_small_payload".to_string(),
-            format: "u8_synthetic".to_string(),
-            participant_count: 1,
-            payload_bytes,
-            parameter_bytes_per_participant: half_payload,
-            activation_bytes,
-            output_bytes,
-            description: "Run the same small logical payload through the CPU reference tensor-split dataflow.".to_string(),
-        },
-    ];
+    let mut specs = Vec::new();
     for format in formats {
         for workload in workloads {
+            if !benchmark_axis_supported(format, workload) {
+                continue;
+            }
             specs.push(WorkloadSpec {
                 workload_id: format_workload_id("single_target_small_payload", workload, format),
                 comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
@@ -1106,82 +614,74 @@ fn build_workload_specs(
                 parameter_bytes_per_participant: payload_bytes,
                 activation_bytes,
                 output_bytes,
-                description: format!(
-                    "Run the full {workload} small logical payload on one target using {format}."
-                ),
+                description: format!("Run the comparison projection on one target using {format}."),
             });
-            specs.push(WorkloadSpec {
-                workload_id: format_workload_id("ordered_activation_transfer", workload, format),
-                comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-                workload_class: workload.clone(),
-                placement_strategy: "activation_transfer_only".to_string(),
-                pattern: "ordered_activation_transfer".to_string(),
-                format: format.clone(),
-                participant_count: 2,
-                payload_bytes,
-                parameter_bytes_per_participant: 0,
-                activation_bytes,
-                output_bytes: 0,
-                description: format!("Move one activation-sized {format} payload for {workload} from source to destination."),
-            });
-            specs.push(WorkloadSpec {
-                workload_id: format_workload_id("synthetic_layer_split_small_payload", workload, format),
-                comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-                workload_class: workload.clone(),
-                placement_strategy: "two_target_serial".to_string(),
-                pattern: "synthetic_layer_split_small_payload".to_string(),
-                format: format.clone(),
-                participant_count: 2,
-                payload_bytes,
-                parameter_bytes_per_participant: half_payload,
-                activation_bytes,
-                output_bytes,
-                description: format!("Run half the {workload} logical payload using {format} on the first target, transfer activation, then run the other half on the second target."),
-            });
-            specs.push(WorkloadSpec {
-                workload_id: format_workload_id("synthetic_tensor_parallel_small_payload", workload, format),
-                comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-                workload_class: workload.clone(),
-                placement_strategy: "two_target_tensor_parallel".to_string(),
-                pattern: "synthetic_tensor_parallel_small_payload".to_string(),
-                format: format.clone(),
-                participant_count: 2,
-                payload_bytes,
-                parameter_bytes_per_participant: half_payload,
-                activation_bytes,
-                output_bytes,
-                description: format!("Split the same {workload} logical {format} payload across two targets, repeatedly broadcast activation, compute shards, reduce partial outputs, and broadcast the next activation."),
-            });
-            if max_group_size >= 3 {
-                let third_payload = payload_bytes / 3;
+            if benchmark_supports_component_chain(workload) {
+                specs.extend([
+                    WorkloadSpec {
+                        workload_id: format!("single_target_2_component_chain:{workload}:{format}"),
+                        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+                        workload_class: workload.clone(),
+                        placement_strategy: "single_target_serial".to_string(),
+                        pattern: "direct_two_component_chain".to_string(),
+                        format: format.clone(),
+                        participant_count: 1,
+                        payload_bytes,
+                        parameter_bytes_per_participant: payload_bytes,
+                        activation_bytes,
+                        output_bytes,
+                        description: format!("Run the two-stage serial baseline on one target using {format}."),
+                    },
+                    WorkloadSpec {
+                        workload_id: format_workload_id("synthetic_layer_split_small_payload", workload, format),
+                        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+                        workload_class: workload.clone(),
+                        placement_strategy: "two_target_serial".to_string(),
+                        pattern: "synthetic_layer_split_small_payload".to_string(),
+                        format: format.clone(),
+                        participant_count: 2,
+                        payload_bytes,
+                        parameter_bytes_per_participant: payload_bytes / 2,
+                        activation_bytes,
+                        output_bytes,
+                        description: format!("Run the equivalent two-stage serial path across two targets using {format}."),
+                    },
+                ]);
+            }
+            if benchmark_supports_tensor_parallel(workload) {
                 specs.push(WorkloadSpec {
-                    workload_id: format_workload_id("synthetic_layer_split_group_small_payload", workload, format),
+                    workload_id: format_workload_id("synthetic_tensor_parallel_small_payload", workload, format),
                     comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
                     workload_class: workload.clone(),
-                    placement_strategy: "three_target_serial".to_string(),
-                    pattern: "synthetic_layer_split_group_small_payload".to_string(),
+                    placement_strategy: "two_target_tensor_parallel".to_string(),
+                    pattern: "synthetic_tensor_parallel_small_payload".to_string(),
                     format: format.clone(),
-                    participant_count: 3,
+                    participant_count: 2,
                     payload_bytes,
-                    parameter_bytes_per_participant: third_payload,
+                    parameter_bytes_per_participant: payload_bytes / 2,
                     activation_bytes,
                     output_bytes,
-                    description: format!("Run thirds of the {workload} logical {format} payload across three ordered targets with activation movement between stages."),
+                    description: format!("Run the comparison projection tensor-parallel across two targets using {format}."),
                 });
-                specs.push(WorkloadSpec {
-                    workload_id: format_workload_id("synthetic_tensor_parallel_group_small_payload", workload, format),
-                    comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-                    workload_class: workload.clone(),
-                    placement_strategy: "three_target_tensor_parallel".to_string(),
-                    pattern: "synthetic_tensor_parallel_group_small_payload".to_string(),
-                    format: format.clone(),
-                    participant_count: 3,
-                    payload_bytes,
-                    parameter_bytes_per_participant: third_payload,
-                    activation_bytes,
-                    output_bytes,
-                    description: format!("Split the same {workload} logical {format} payload across three targets, repeatedly broadcast activation, compute shards, reduce partial outputs, and broadcast the next activation."),
-                });
+            }
+            if max_group_size >= 3 && benchmark_supports_tensor_parallel(workload) {
+                for participant_count in 3..=max_group_size.min(MAX_PLACEMENT_GROUP_SIZE) {
+                    let pattern = tensor_parallel_group_pattern(participant_count);
+                    specs.push(WorkloadSpec {
+                        workload_id: format_workload_id(&pattern, workload, format),
+                        pattern,
+                        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+                        workload_class: workload.clone(),
+                        placement_strategy: MULTI_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
+                        format: format.clone(),
+                        participant_count,
+                        payload_bytes,
+                        parameter_bytes_per_participant: payload_bytes / participant_count,
+                        activation_bytes,
+                        output_bytes,
+                        description: format!("Run the comparison projection tensor-parallel across {participant_count} targets using {format}."),
+                    });
+                }
             }
         }
     }
@@ -1193,68 +693,23 @@ pub(crate) fn format_workload_id(base: &str, workload_class: &str, format: &str)
 }
 
 pub(crate) fn activation_bytes_for_payload(payload_bytes: usize) -> usize {
-    payload_bytes.clamp(4 * 1024, 256 * 1024)
+    payload_bytes.min(256 * 1024).max(4)
 }
 
 pub(crate) fn output_bytes_for_payload(payload_bytes: usize) -> usize {
-    (payload_bytes / 16).clamp(4 * 1024, 512 * 1024)
-}
-
-fn summarize(samples: &[Sample]) -> Option<Summary> {
-    if samples.is_empty() {
-        return None;
-    }
-    let mut durations = samples
-        .iter()
-        .map(|sample| sample.duration_ns)
-        .collect::<Vec<_>>();
-    durations.sort_unstable();
-    let median = durations[durations.len() / 2];
-    let min = durations[0];
-    let total_bytes = samples
-        .iter()
-        .map(|sample| sample.bytes_read + sample.bytes_written)
-        .sum::<u64>() as f64;
-    let total_operations = samples.iter().map(|sample| sample.operations).sum::<u64>() as f64;
-    let total_seconds = samples
-        .iter()
-        .map(|sample| sample.duration_ns as f64 / 1_000_000_000.0)
-        .sum::<f64>();
-    Some(Summary {
-        min_duration_ns: min,
-        median_duration_ns: median,
-        bytes_per_second: total_bytes / total_seconds.max(f64::EPSILON),
-        operations_per_second: total_operations / total_seconds.max(f64::EPSILON),
-    })
+    (payload_bytes / 16).clamp(4, 512 * 1024)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::VulkanDeviceInfo;
 
-    fn formats() -> Vec<String> {
-        vec!["f32".to_string()]
-    }
-
-    fn model_storage_formats() -> Vec<String> {
-        vec![
-            "mxfp4".to_string(),
-            "nvfp4".to_string(),
-            "fp8_e4m3".to_string(),
-            "q4_k".to_string(),
-            "iq2_xs".to_string(),
-        ]
-    }
-
-    fn workloads() -> Vec<String> {
-        vec!["dense_projection".to_string()]
-    }
-
-    fn target(id: &str, kind: &str) -> Target {
+    fn target(id: &str) -> Target {
         Target {
             stable_target_id: id.to_string(),
-            backend: "test".to_string(),
-            kind: kind.to_string(),
+            backend: "vulkan".to_string(),
+            kind: "discrete_gpu".to_string(),
             name: id.to_string(),
             vendor_id: None,
             vendor_name: None,
@@ -1264,193 +719,47 @@ mod tests {
             numa_node: None,
             boot_vga: None,
             pci_link: None,
-            vulkan: None,
+            vulkan: Some(VulkanDeviceInfo {
+                physical_device_index: 0,
+                device_name: id.to_string(),
+                device_type: "discrete_gpu".to_string(),
+                api_version: "1.3".to_string(),
+                driver_version: 1,
+                vendor_id: "0x1002".to_string(),
+                device_id: "0x0001".to_string(),
+                memory_heaps: Vec::new(),
+                queue_families: Vec::new(),
+                extension_names: Vec::new(),
+                feature_flags: vec![
+                    EXTERNAL_TIMELINE_SEMAPHORE_FEATURE.to_string(),
+                    EXTERNAL_MEMORY_HOST_FEATURE.to_string(),
+                ],
+            }),
             capabilities: Vec::new(),
             format_capabilities: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
 
-    #[test]
-    fn summarizes_samples() {
-        let samples = [
-            Sample {
-                sample_index: 0,
-                duration_ns: 30,
-                iterations: 1,
-                bytes_read: 10,
-                bytes_written: 10,
-                operations: 2,
-            },
-            Sample {
-                sample_index: 1,
-                duration_ns: 10,
-                iterations: 1,
-                bytes_read: 10,
-                bytes_written: 10,
-                operations: 2,
-            },
-            Sample {
-                sample_index: 2,
-                duration_ns: 20,
-                iterations: 1,
-                bytes_read: 10,
-                bytes_written: 10,
-                operations: 2,
-            },
-        ];
-        let summary = summarize(&samples).unwrap();
-        assert_eq!(summary.min_duration_ns, 10);
-        assert_eq!(summary.median_duration_ns, 20);
-    }
-
-    #[test]
-    fn workload_specs_describe_small_split_patterns() {
-        let formats = formats();
-        let workloads = workloads();
-        let specs = build_workload_specs(5 * 1024 * 1024, &formats, &workloads, 2);
-        let ids = specs
-            .iter()
-            .map(|spec| spec.workload_id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            [
-                "cpu_reference_serialized_small_payload",
-                "cpu_reference_layer_split_small_payload",
-                "cpu_reference_tensor_split_small_payload",
-                "single_target_small_payload:dense_projection:f32",
-                "ordered_activation_transfer:dense_projection:f32",
-                "synthetic_layer_split_small_payload:dense_projection:f32",
-                "synthetic_tensor_parallel_small_payload:dense_projection:f32",
-            ]
-        );
-        let layer = specs
-            .iter()
-            .find(|spec| {
-                spec.workload_id == "synthetic_layer_split_small_payload:dense_projection:f32"
-            })
-            .unwrap();
-        assert_eq!(layer.participant_count, 2);
-        assert_eq!(layer.comparison_group, SMALL_PAYLOAD_COMPARISON_GROUP);
-        assert_eq!(layer.placement_strategy, "two_target_serial");
-        assert_eq!(layer.parameter_bytes_per_participant, 2_621_440);
-        assert!(layer.activation_bytes <= 256 * 1024);
-
-        let strategies = specs
-            .iter()
-            .map(|spec| spec.placement_strategy.as_str())
-            .collect::<BTreeSet<_>>();
-        assert!(strategies.contains("single_target_serial"));
-        assert!(strategies.contains("two_target_serial"));
-        assert!(strategies.contains("two_target_tensor_parallel"));
-    }
-
-    #[test]
-    fn cpu_compound_reference_runs_all_small_patterns() {
-        let measurements = run_cpu_compound_reference("cpu:host", 64 * 1024, 1);
-        let ids = measurements
-            .iter()
-            .map(|measurement| measurement.workload_id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            [
-                "cpu_reference_serialized_small_payload",
-                "cpu_reference_layer_split_small_payload",
-                "cpu_reference_tensor_split_small_payload",
-            ]
-        );
-        assert!(
-            measurements
-                .iter()
-                .all(|measurement| measurement.status == "completed")
-        );
-        assert!(
-            measurements
-                .iter()
-                .all(|measurement| measurement.summary.is_some())
-        );
-    }
-
-    #[test]
-    fn group_specs_describe_triplet_patterns() {
-        let formats = formats();
-        let workloads = workloads();
-        let specs = build_workload_specs(5 * 1024 * 1024, &formats, &workloads, 3);
-        let ids = specs
-            .iter()
-            .map(|spec| spec.workload_id.as_str())
-            .collect::<Vec<_>>();
-        assert!(ids.contains(&"synthetic_layer_split_group_small_payload:dense_projection:f32"));
-        assert!(
-            ids.contains(&"synthetic_tensor_parallel_group_small_payload:dense_projection:f32")
-        );
-        let triplet_specs = specs
-            .iter()
-            .filter(|spec| spec.participant_count == 3)
-            .collect::<Vec<_>>();
-        assert!(
-            triplet_specs
-                .iter()
-                .all(|spec| spec.parameter_bytes_per_participant == (5 * 1024 * 1024) / 3)
-        );
-    }
-
-    #[test]
-    fn model_storage_formats_are_workload_and_comparison_axes() {
-        let formats = model_storage_formats();
-        let workloads = vec![
-            "dense_projection".to_string(),
-            "router_reduction".to_string(),
-        ];
-        let specs = build_workload_specs(5 * 1024 * 1024, &formats, &workloads, 3);
-        for format in &formats {
-            assert!(specs.iter().any(|spec| {
-                spec.workload_id
-                    == format_workload_id("single_target_small_payload", "dense_projection", format)
-                    && spec.format == *format
-                    && spec.placement_strategy == "single_target_serial"
-            }));
-            assert!(specs.iter().any(|spec| {
-                spec.workload_id
-                    == format_workload_id(
-                        "synthetic_tensor_parallel_group_small_payload",
-                        "router_reduction",
-                        format,
-                    )
-                    && spec.format == *format
-                    && spec.placement_strategy == "three_target_tensor_parallel"
-            }));
+    fn policy() -> RunPolicy {
+        RunPolicy {
+            payload_bytes: 5 * 1024 * 1024,
+            samples: 1,
+            benchmark_formats: vec!["f16".to_string(), "fp8_e4m3".to_string()],
+            benchmark_workloads: vec!["dense_projection_decode".to_string()],
+            include_targets: Vec::new(),
+            exclude_targets: Vec::new(),
+            exclude_pci: Vec::new(),
+            exclude_kinds: Vec::new(),
+            pair_measurements: true,
+            max_group_size: 3,
+            execute: false,
         }
-
-        let targets = vec![
-            target("gpu:a", "discrete_gpu"),
-            target("gpu:b", "discrete_gpu"),
-        ];
-        let target_refs = targets.iter().collect::<Vec<_>>();
-        let comparison_sets = build_comparison_sets(&target_refs, true, &formats, &workloads, 2);
-        assert_eq!(comparison_sets.len(), formats.len() * workloads.len());
-        let mxfp4 = comparison_sets
-            .iter()
-            .find(|comparison| {
-                comparison.workload_class == "dense_projection" && comparison.format == "mxfp4"
-            })
-            .unwrap();
-        assert!(mxfp4.candidates.iter().any(|candidate| {
-            candidate.placement_strategy == "two_target_tensor_parallel"
-                && candidate.workload_id
-                    == "synthetic_tensor_parallel_small_payload:dense_projection:mxfp4"
-        }));
     }
 
     #[test]
-    fn run_omits_pair_and_group_measurements_without_backend_access() {
-        let targets = vec![
-            target("gpu:a", "discrete_gpu"),
-            target("gpu:b", "discrete_gpu"),
-            target("gpu:c", "discrete_gpu"),
-        ];
+    fn compact_plan_counts_only_comparison_candidates() {
+        let targets = vec![target("gpu:a"), target("gpu:b"), target("gpu:c")];
         let selection = Selection {
             selected_target_ids: targets
                 .iter()
@@ -1459,227 +768,36 @@ mod tests {
             skipped_targets: Vec::new(),
             diagnostics: Vec::new(),
         };
-        let policy = RunPolicy {
-            payload_bytes: 5 * 1024 * 1024,
-            samples: 1,
-            benchmark_formats: formats(),
-            benchmark_workloads: workloads(),
-            include_targets: Vec::new(),
-            exclude_targets: Vec::new(),
-            exclude_pci: Vec::new(),
-            exclude_kinds: Vec::new(),
-            pair_measurements: true,
-            max_group_size: 3,
-            execute: false,
-        };
-        let run = run_benchmarks(targets, selection, policy);
-        assert!(run.measurements.is_empty());
-        assert!(run.pair_measurements.is_empty());
-        assert!(run.group_measurements.is_empty());
-        assert!(run.summary().candidate_statuses.iter().any(|candidate| {
-            candidate.placement_strategy == "three_target_tensor_parallel"
-                && candidate.measurement_kind == "group"
-                && candidate.status == "missing"
-                && candidate.matched_measurement_count == 0
-        }));
+        let plan = plan_benchmarks(targets, selection, policy());
+        assert_eq!(plan.estimated_single_measurement_count, 12);
+        assert_eq!(plan.estimated_pair_measurement_count, 24);
+        assert_eq!(plan.estimated_group_measurement_count, 6);
+        assert_eq!(plan.estimated_comparison_set_count, 0);
+        assert_eq!(plan.estimated_measurement_count, 42);
     }
 
     #[test]
-    fn dry_plan_counts_selected_matrix_without_running_measurements() {
-        let targets = vec![target("cpu:host", "cpu"), target("gpu:a", "discrete_gpu")];
-        let selection = Selection {
-            selected_target_ids: targets
-                .iter()
-                .map(|target| target.stable_target_id.clone())
-                .collect(),
-            skipped_targets: Vec::new(),
-            diagnostics: Vec::new(),
-        };
-        let policy = RunPolicy {
-            payload_bytes: 5 * 1024 * 1024,
-            samples: 1,
-            benchmark_formats: vec!["f32".to_string(), "fp8_e4m3".to_string()],
-            benchmark_workloads: workloads(),
-            include_targets: Vec::new(),
-            exclude_targets: Vec::new(),
-            exclude_pci: Vec::new(),
-            exclude_kinds: Vec::new(),
-            pair_measurements: true,
-            max_group_size: 2,
-            execute: false,
-        };
-        let plan = plan_benchmarks(targets, selection, policy);
-        assert_eq!(plan.schema, PLAN_SCHEMA);
-        assert_eq!(plan.requested_format_count, 2);
-        assert_eq!(plan.requested_workload_count, 1);
-        assert_eq!(plan.estimated_single_measurement_count, 9);
-        assert_eq!(plan.estimated_pair_measurement_count, 10);
-        assert_eq!(plan.estimated_group_measurement_count, 0);
-        assert_eq!(plan.estimated_comparison_set_count, 2);
-        assert_eq!(plan.estimated_measurement_count, 19);
-    }
-
-    #[test]
-    fn pair_comparison_sets_include_single_serial_and_tensor_parallel_candidates() {
-        let targets = vec![
-            target("gpu:a", "discrete_gpu"),
-            target("gpu:b", "discrete_gpu"),
-        ];
-        let selection = Selection {
-            selected_target_ids: targets
-                .iter()
-                .map(|target| target.stable_target_id.clone())
-                .collect(),
-            skipped_targets: Vec::new(),
-            diagnostics: Vec::new(),
-        };
-        let policy = RunPolicy {
-            payload_bytes: 5 * 1024 * 1024,
-            samples: 1,
-            benchmark_formats: formats(),
-            benchmark_workloads: workloads(),
-            include_targets: Vec::new(),
-            exclude_targets: Vec::new(),
-            exclude_pci: Vec::new(),
-            exclude_kinds: Vec::new(),
-            pair_measurements: true,
-            max_group_size: 2,
-            execute: false,
-        };
-        let run = run_benchmarks(targets, selection, policy);
-        assert_eq!(run.comparison_sets.len(), 1);
-        let strategies = run.comparison_sets[0]
-            .candidates
-            .iter()
-            .map(|candidate| candidate.placement_strategy.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            strategies,
-            [
-                "single_target_serial",
-                "single_target_serial",
-                "two_target_serial",
-                "two_target_serial",
-                "two_target_tensor_parallel",
-            ]
+    fn workload_specs_have_no_exhaustive_phase_or_chain_axes() {
+        let policy = policy();
+        let specs = build_workload_specs(
+            policy.payload_bytes,
+            &policy.benchmark_formats,
+            &policy.benchmark_workloads,
+            policy.max_group_size,
         );
-        assert!(run.pair_measurements.is_empty());
-        assert!(run.summary().candidate_statuses.iter().any(|candidate| {
-            candidate.placement_strategy == "two_target_tensor_parallel"
-                && candidate.measurement_kind == "pair"
-                && candidate.status == "missing"
-                && candidate.matched_measurement_count == 0
+        assert_eq!(specs.len(), policy.benchmark_formats.len() * 5);
+        assert!(specs.iter().all(|spec| {
+            !spec.pattern.contains("three_component_chain")
+                && !spec.pattern.contains("layer_split_group")
+                && !spec.pattern.contains("resource_load")
         }));
     }
 
     #[test]
-    fn triplet_comparison_sets_include_single_serial_and_tensor_parallel_candidates() {
-        let targets = vec![
-            target("gpu:a", "discrete_gpu"),
-            target("gpu:b", "discrete_gpu"),
-            target("gpu:c", "discrete_gpu"),
-        ];
-        let selection = Selection {
-            selected_target_ids: targets
-                .iter()
-                .map(|target| target.stable_target_id.clone())
-                .collect(),
-            skipped_targets: Vec::new(),
-            diagnostics: Vec::new(),
-        };
-        let policy = RunPolicy {
-            payload_bytes: 5 * 1024 * 1024,
-            samples: 1,
-            benchmark_formats: formats(),
-            benchmark_workloads: workloads(),
-            include_targets: Vec::new(),
-            exclude_targets: Vec::new(),
-            exclude_pci: Vec::new(),
-            exclude_kinds: Vec::new(),
-            pair_measurements: true,
-            max_group_size: 3,
-            execute: false,
-        };
-        let run = run_benchmarks(targets, selection, policy);
-        assert_eq!(run.comparison_sets.len(), 4);
-        let triplet = run
-            .comparison_sets
-            .iter()
-            .find(|comparison| comparison.target_ids.len() == 3)
-            .unwrap();
-        let strategies = triplet
-            .candidates
-            .iter()
-            .map(|candidate| candidate.placement_strategy.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            strategies,
-            [
-                "single_target_serial",
-                "single_target_serial",
-                "single_target_serial",
-                "three_target_serial",
-                "three_target_tensor_parallel",
-            ]
-        );
-        let summary = run.summary();
-        assert!(summary.candidate_statuses.iter().any(|candidate| {
-            candidate.comparison_id == triplet.comparison_id
-                && candidate.placement_strategy == "three_target_tensor_parallel"
-                && candidate.measurement_kind == "group"
-                && candidate.status == "missing"
-                && candidate.matched_measurement_count == 0
-        }));
-    }
-
-    #[test]
-    fn cpu_requested_single_target_measurements_match_comparison_candidates() {
-        let targets = vec![target("cpu:host", "cpu"), target("gpu:a", "discrete_gpu")];
-        let selection = Selection {
-            selected_target_ids: targets
-                .iter()
-                .map(|target| target.stable_target_id.clone())
-                .collect(),
-            skipped_targets: Vec::new(),
-            diagnostics: Vec::new(),
-        };
-        let policy = RunPolicy {
-            payload_bytes: 64 * 1024,
-            samples: 1,
-            benchmark_formats: vec!["f32".to_string(), "fp8_e4m3".to_string()],
-            benchmark_workloads: workloads(),
-            include_targets: Vec::new(),
-            exclude_targets: Vec::new(),
-            exclude_pci: Vec::new(),
-            exclude_kinds: Vec::new(),
-            pair_measurements: true,
-            max_group_size: 2,
-            execute: false,
-        };
-        let run = run_benchmarks(targets, selection, policy);
-        assert!(run.measurements.iter().any(|measurement| {
-            measurement.target_id == "cpu:host"
-                && measurement.workload_id == "single_target_small_payload:dense_projection:f32"
-                && measurement.status == "completed"
-        }));
-        assert!(run.measurements.iter().any(|measurement| {
-            measurement.target_id == "cpu:host"
-                && measurement.workload_id
-                    == "single_target_small_payload:dense_projection:fp8_e4m3"
-                && measurement.status == "unsupported"
-        }));
-
-        let summary = run.summary();
-        let completed_cpu_candidate = summary
-            .candidate_statuses
-            .iter()
-            .find(|candidate| {
-                candidate.workload_class == "dense_projection"
-                    && candidate.format == "f32"
-                    && candidate.placement_strategy == "single_target_serial"
-                    && candidate.status == "completed"
-            })
-            .unwrap();
-        assert!(completed_cpu_candidate.best_median_duration_ns.is_some());
+    fn combinations_cover_each_tp_group_once() {
+        assert_eq!(target_index_combinations(5, 1).len(), 5);
+        assert_eq!(target_index_combinations(5, 2).len(), 10);
+        assert_eq!(target_index_combinations(5, 3).len(), 10);
+        assert_eq!(target_index_combinations(5, 4).len(), 5);
     }
 }

@@ -3,36 +3,46 @@
 
 layout(local_size_x = 64) in;
 layout(push_constant) uniform Params {
-    uint elements;
+    uint tokens;
+    uint experts;
+    uint input_offset;
+    uint output_offset;
+    uint logical_per_word;
+    uint format_kind;
 } params;
 layout(std430, binding = 0) buffer Data {
-    uint packed_values[];
+    uint words[];
 } data;
 
-uint8_t lane(uint value, uint shift) {
-    return uint8_t((value >> shift) & 0xffu);
-}
+shared int partial_max[64];
 
-uint8_t reduce_lane(uint8_t value, uint8_t neighbor) {
-    uint8_t high = value > neighbor ? value : neighbor;
-    uint8_t low = value > neighbor ? neighbor : value;
-    return high - low + uint8_t(19);
-}
-
-uint pack_lanes(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-    return uint(a) | (uint(b) << 8) | (uint(c) << 16) | (uint(d) << 24);
+int score_at(uint logical_index) {
+    uint word = data.words[params.input_offset + logical_index / 4u];
+    uint bits = (word >> ((logical_index & 3u) * 8u)) & 0xffu;
+    return int(bits << 24u) >> 24;
 }
 
 void main() {
-    uint index = gl_GlobalInvocationID.x;
-    if (index >= params.elements) {
+    uint token = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (token >= params.tokens) {
         return;
     }
-    uint value = data.packed_values[index];
-    uint neighbor = data.packed_values[(index * 17u + 13u) % params.elements];
-    uint8_t a = reduce_lane(lane(value, 0u), lane(neighbor, 24u));
-    uint8_t b = reduce_lane(lane(value, 8u), lane(neighbor, 16u));
-    uint8_t c = reduce_lane(lane(value, 16u), lane(neighbor, 8u));
-    uint8_t d = reduce_lane(lane(value, 24u), lane(neighbor, 0u));
-    data.packed_values[index] = pack_lanes(a, b, c, d);
+
+    int maximum = -128;
+    for (uint expert = lane; expert < params.experts; expert += 64u) {
+        maximum = max(maximum, score_at(token * params.experts + expert));
+    }
+    partial_max[lane] = maximum;
+    barrier();
+
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            partial_max[lane] = max(partial_max[lane], partial_max[lane + stride]);
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        data.words[params.output_offset + token] = floatBitsToUint(float(partial_max[0]));
+    }
 }

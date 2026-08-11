@@ -1,0 +1,46 @@
+#version 450
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Params {
+    uint width;
+    uint context_tokens;
+    uint query_tokens;
+    uint output_offset;
+} params;
+layout(std430, binding = 0) buffer State {
+    uint words[];
+} state;
+
+float bf16_lane(uint packed, uint lane) {
+    return uintBitsToFloat(((packed >> ((lane & 1u) * 16u)) & 0xffffu) << 16u);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    return (bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u;
+}
+
+void main() {
+    uint lane_pair = gl_GlobalInvocationID.x;
+    uint query = gl_GlobalInvocationID.y;
+    uint first_lane = lane_pair * 2u;
+    if (query >= params.query_tokens || first_lane >= params.width) {
+        return;
+    }
+
+    vec2 accum = vec2(0.0);
+    for (uint token = 0u; token < params.context_tokens; token++) {
+        uint logical_index = token * params.width + first_lane;
+        uint packed = state.words[logical_index >> 1u];
+        float coefficient = 1.0 / (1.0 + float((token + query) & 31u));
+        accum.x = fma(bf16_lane(packed, logical_index), coefficient, accum.x);
+        if (first_lane + 1u < params.width) {
+            accum.y = fma(bf16_lane(packed, logical_index + 1u), coefficient, accum.y);
+        }
+    }
+    float normalization = 1.0 / float(max(params.context_tokens, 1u));
+    uint output_word = params.output_offset + (query * params.width + first_lane) / 2u;
+    state.words[output_word] =
+        f32_to_bf16(accum.x * normalization)
+        | (f32_to_bf16(accum.y * normalization) << 16u);
+}
