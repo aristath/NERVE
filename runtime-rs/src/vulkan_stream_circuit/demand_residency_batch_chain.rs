@@ -620,6 +620,7 @@ impl VulkanDemandResidencyBatchChain {
                     selection_index_shift: spec.selection_index_shift,
                     selection_index_mask: spec.selection_index_mask,
                     address_mapping,
+                    owned_resource_indices: None,
                 },
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;

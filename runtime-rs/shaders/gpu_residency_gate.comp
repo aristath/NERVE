@@ -69,6 +69,17 @@ uint missing_resource_word_offset() {
     return seen_resource_word_offset() + seen_resource_word_count();
 }
 
+bool resource_is_owned(uint resource_index) {
+    uint ownership_word_count = configuration.words[10];
+    if (ownership_word_count == 0u) return true;
+    uint ownership_word = resource_index / 32u;
+    if (ownership_word >= ownership_word_count) return false;
+    uint ownership_offset = configuration.words[9];
+    uint ownership_bit = 1u << (resource_index % 32u);
+    return (configuration.words[ownership_offset + ownership_word]
+        & ownership_bit) != 0u;
+}
+
 bool address_slot_is_resident(uint slot) {
     uint record = slot * ADDRESS_RECORD_WORDS;
     uint address_nonzero = address_table.words[record]
@@ -156,6 +167,7 @@ void main() {
             atomicOr(resolved_addresses.words[4], 1u);
             continue;
         }
+        if (!resource_is_owned(resource_index)) continue;
         uint seen_word = resource_index / 32u;
         uint seen_bit = 1u << (resource_index % 32u);
         uint previous_seen = atomicOr(

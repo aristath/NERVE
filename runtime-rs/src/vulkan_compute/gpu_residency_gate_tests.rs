@@ -16,6 +16,7 @@ fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
             resource_address_slots: vec![0, 1, 2, 3],
             resource_address_slot_offsets: vec![0, 2, 4],
         },
+        owned_resource_indices: None,
     };
     assert!(valid.validate(8, 4, 4).is_ok());
 
@@ -49,6 +50,14 @@ fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
     let mut invalid = valid.clone();
     invalid.selection_index_mask = 0;
     assert!(invalid.validate(8, 4, 4).is_err());
+
+    let mut owned_subset = valid.clone();
+    owned_subset.owned_resource_indices = Some(BTreeSet::from([1]));
+    assert!(owned_subset.validate(8, 4, 4).is_ok());
+    owned_subset.owned_resource_indices = Some(BTreeSet::new());
+    assert!(owned_subset.validate(8, 4, 4).is_err());
+    owned_subset.owned_resource_indices = Some(BTreeSet::from([2]));
+    assert!(owned_subset.validate(8, 4, 4).is_err());
 
     let mut invalid = valid.clone();
     invalid.selection_index_mask = 0x1;
@@ -210,6 +219,7 @@ fn gpu_residency_gate_keeps_hits_on_device_and_publishes_only_real_misses() {
                     member_slot_bases: vec![0],
                     resource_count: 2,
                 },
+            owned_resource_indices: None,
         },
     )
     .unwrap();
@@ -499,6 +509,7 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
                     resource_address_slots: vec![0],
                     resource_address_slot_offsets: vec![0, 1],
                 },
+            owned_resource_indices: None,
         },
     )
     .unwrap();
@@ -521,6 +532,7 @@ fn gpu_residency_gate_chain_resumes_at_first_blocked_gate_without_replaying_pref
                     resource_address_slots: vec![1],
                     resource_address_slot_offsets: vec![0, 1],
                 },
+            owned_resource_indices: None,
         },
     )
     .unwrap();
@@ -759,6 +771,7 @@ fn gpu_residency_gate_warm_path_is_measured_against_eager_dispatch() {
                     resource_address_slots: vec![0],
                     resource_address_slot_offsets: vec![0, 1],
                 },
+            owned_resource_indices: None,
         },
     )
     .unwrap();

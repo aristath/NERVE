@@ -4,7 +4,7 @@ const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_MISS_HEADER_WORD_COUNT: usize = 4;
 const VULKAN_GPU_RESIDENCY_GATE_MISS_RECORD_WORD_COUNT: usize = 2;
-const VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT: usize = 9;
+const VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT: usize = 11;
 const VULKAN_GPU_RESIDENCY_GATE_GROUP_TABLE_MAPPING: u32 = 0;
 const VULKAN_GPU_RESIDENCY_GATE_PARTITIONED_MAPPING: u32 = 1;
 
@@ -28,6 +28,7 @@ pub struct VulkanGpuResidencyGateConfig {
     pub selection_index_shift: u32,
     pub selection_index_mask: u32,
     pub address_mapping: VulkanGpuResidencyAddressMapping,
+    pub owned_resource_indices: Option<BTreeSet<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +119,13 @@ impl VulkanGpuResidencyGateConfig {
         let resource_count = self
             .address_mapping
             .validate(address_table_slot_count)?;
+        if self.owned_resource_indices.as_ref().is_some_and(|indices| {
+            indices.is_empty() || indices.iter().any(|index| *index >= resource_count)
+        }) {
+            return Err(VulkanError(format!(
+                "GPU residency gate resource ownership is empty or exceeds {resource_count} resources"
+            )));
+        }
         let maximum_resource_index = resource_count - 1;
         if u32::try_from(maximum_resource_index).map_or(true, |index| {
             index & self.selection_index_mask != index
@@ -387,7 +395,19 @@ impl VulkanGpuResidencyGate {
             partition_member_count,
         ) = config.address_mapping.gpu_tables()?;
         let resource_count = config.address_mapping.resource_count();
-        let configuration_words = vec![
+        let ownership_words = config
+            .owned_resource_indices
+            .as_ref()
+            .map(|indices| {
+                let mut words = vec![0u32; resource_count.div_ceil(u32::BITS as usize)];
+                for index in indices {
+                    words[*index / u32::BITS as usize] |=
+                        1u32 << (*index % u32::BITS as usize);
+                }
+                words
+            })
+            .unwrap_or_default();
+        let mut configuration_words = vec![
             config.selection_index_shift,
             config.selection_index_mask,
             u32::try_from(resource_count).map_err(|_| {
@@ -407,11 +427,18 @@ impl VulkanGpuResidencyGate {
             })?,
             mapping_kind,
             partition_member_count,
+            u32::try_from(VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT).map_err(|_| {
+                VulkanError("GPU residency ownership offset exceeds u32".to_string())
+            })?,
+            u32::try_from(ownership_words.len()).map_err(|_| {
+                VulkanError("GPU residency ownership word count exceeds u32".to_string())
+            })?,
         ];
         debug_assert_eq!(
             configuration_words.len(),
             VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT
         );
+        configuration_words.extend(ownership_words);
         let configuration = Arc::new(
             device.create_resident_buffer(words_byte_count(configuration_words.len())?)?,
         );
@@ -605,6 +632,14 @@ impl VulkanGpuResidencyGate {
                     return Err(VulkanError(format!(
                         "GPU residency selection index {resource_index} exceeds {resource_count} resources"
                     )));
+                }
+                if self
+                    .config
+                    .owned_resource_indices
+                    .as_ref()
+                    .is_some_and(|indices| !indices.contains(&resource_index))
+                {
+                    continue;
                 }
                 selected.insert(resource_index);
             }

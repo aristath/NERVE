@@ -2214,6 +2214,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
                 resource_address_slots: resource_address_slots.clone(),
                 resource_address_slot_offsets: resource_address_slot_offsets.clone(),
             },
+            owned_resource_indices: None,
         },
     )
     .unwrap();
