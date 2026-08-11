@@ -176,6 +176,164 @@ mod tests {
     }
 
     #[test]
+    fn phase_activation_plans_union_private_capacity_without_multiplying_alternatives() {
+        let plan = |owner_bytes, helper_bytes| VulkanDistributedActivationBufferPlan {
+            allocations: Vec::new(),
+            reduction_allocations: Vec::new(),
+            private_intermediate_allocations: vec![
+                VulkanDistributedPrivateIntermediateBufferAllocation {
+                    producer_dispatch_index: 7,
+                    consumer_dispatch_index: 8,
+                    component_id: "component".to_string(),
+                    signal_id: "activated".to_string(),
+                    devices: vec![
+                        VulkanDistributedPrivateIntermediateDeviceAllocation {
+                            device_id: "owner".to_string(),
+                            byte_capacity: owner_bytes,
+                        },
+                        VulkanDistributedPrivateIntermediateDeviceAllocation {
+                            device_id: "helper".to_string(),
+                            byte_capacity: helper_bytes,
+                        },
+                    ],
+                },
+            ],
+            allocation_count: 2,
+            import_count: 0,
+            reference_count: 4,
+            total_shared_byte_capacity: 0,
+            total_private_byte_capacity: owner_bytes + helper_bytes,
+            route: VulkanSharedResidentBufferRoute::SharedHost,
+        };
+
+        let merged = VulkanDistributedActivationBufferPlan::merged_for_alternatives(&[
+            plan(64, 64),
+            plan(32, 96),
+            plan(48, 80),
+        ])
+        .unwrap();
+
+        assert_eq!(merged.allocation_count, 2);
+        assert_eq!(merged.reference_count, 4);
+        assert_eq!(merged.total_private_byte_capacity, 160);
+        assert_eq!(
+            merged.private_intermediate_allocations[0].devices,
+            [
+                VulkanDistributedPrivateIntermediateDeviceAllocation {
+                    device_id: "helper".to_string(),
+                    byte_capacity: 96,
+                },
+                VulkanDistributedPrivateIntermediateDeviceAllocation {
+                    device_id: "owner".to_string(),
+                    byte_capacity: 64,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn phase_activation_plan_union_rejects_a_different_private_device_set() {
+        let private = |device_id: &str| VulkanDistributedActivationBufferPlan {
+            allocations: Vec::new(),
+            reduction_allocations: Vec::new(),
+            private_intermediate_allocations: vec![
+                VulkanDistributedPrivateIntermediateBufferAllocation {
+                    producer_dispatch_index: 7,
+                    consumer_dispatch_index: 8,
+                    component_id: "component".to_string(),
+                    signal_id: "activated".to_string(),
+                    devices: vec![VulkanDistributedPrivateIntermediateDeviceAllocation {
+                        device_id: device_id.to_string(),
+                        byte_capacity: 64,
+                    }],
+                },
+            ],
+            allocation_count: 1,
+            import_count: 0,
+            reference_count: 2,
+            total_shared_byte_capacity: 0,
+            total_private_byte_capacity: 64,
+            route: VulkanSharedResidentBufferRoute::SharedHost,
+        };
+
+        let error = VulkanDistributedActivationBufferPlan::merged_for_alternatives(&[
+            private("owner"),
+            private("helper"),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("different private intermediate devices"));
+    }
+
+    #[test]
+    fn phase_activation_plans_union_reduction_planes_without_duplicate_storage() {
+        let plan = |plane_byte_capacity| VulkanDistributedActivationBufferPlan {
+            allocations: Vec::new(),
+            reduction_allocations: vec![VulkanDistributedReductionBufferAllocation {
+                owner_device_id: "owner".to_string(),
+                dispatch_index: 8,
+                component_id: "component".to_string(),
+                node_id: "down".to_string(),
+                plane_byte_capacity,
+                byte_capacity: plane_byte_capacity * 2,
+                device_ids: vec!["owner".to_string(), "helper".to_string()],
+            }],
+            private_intermediate_allocations: Vec::new(),
+            allocation_count: 1,
+            import_count: 2,
+            reference_count: 3,
+            total_shared_byte_capacity: plane_byte_capacity * 2,
+            total_private_byte_capacity: 0,
+            route: VulkanSharedResidentBufferRoute::SharedHost,
+        };
+
+        let merged = VulkanDistributedActivationBufferPlan::merged_for_alternatives(&[
+            plan(48),
+            plan(64),
+            plan(56),
+        ])
+        .unwrap();
+
+        assert_eq!(merged.allocation_count, 1);
+        assert_eq!(merged.import_count, 2);
+        assert_eq!(merged.reference_count, 3);
+        assert_eq!(merged.total_shared_byte_capacity, 128);
+        assert_eq!(merged.reduction_allocations[0].plane_byte_capacity, 64);
+        assert_eq!(merged.reduction_allocations[0].byte_capacity, 128);
+    }
+
+    #[test]
+    fn phase_activation_plan_union_rejects_different_reduction_participants() {
+        let plan = |device_ids: &[&str]| VulkanDistributedActivationBufferPlan {
+            allocations: Vec::new(),
+            reduction_allocations: vec![VulkanDistributedReductionBufferAllocation {
+                owner_device_id: "owner".to_string(),
+                dispatch_index: 8,
+                component_id: "component".to_string(),
+                node_id: "down".to_string(),
+                plane_byte_capacity: 48,
+                byte_capacity: 48 * device_ids.len(),
+                device_ids: device_ids.iter().map(|id| (*id).to_string()).collect(),
+            }],
+            private_intermediate_allocations: Vec::new(),
+            allocation_count: 1,
+            import_count: device_ids.len(),
+            reference_count: device_ids.len() + 1,
+            total_shared_byte_capacity: 48 * device_ids.len(),
+            total_private_byte_capacity: 0,
+            route: VulkanSharedResidentBufferRoute::SharedHost,
+        };
+
+        let error = VulkanDistributedActivationBufferPlan::merged_for_alternatives(&[
+            plan(&["owner", "helper"]),
+            plan(&["owner", "other"]),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("different reduction participants"));
+    }
+
+    #[test]
     fn execution_plan_set_owns_consistent_phase_and_shape_resources() {
         let mut prepared_plan = fixture_prepared_plan();
         prepared_plan.dispatches[0].physical_execution_contracts[0].phases =

@@ -35,17 +35,281 @@ impl VulkanDistributedActivationBufferPlan {
     pub fn from_execution_plan_set(
         plans: &VulkanDistributedExecutionPlanSet,
     ) -> Result<Self, VulkanDistributedPlanError> {
-        let decode = Self::from_execution_plan(&plans.decode)?;
-        for plan in [&plans.decode_batch, &plans.prefill] {
-            let candidate = Self::from_execution_plan(plan)?;
-            if !decode.has_same_shared_activation_interface(&candidate) {
+        let alternatives = plans
+            .all()
+            .into_iter()
+            .map(Self::from_execution_plan)
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::merged_for_alternatives(&alternatives)
+    }
+
+    fn merged_for_alternatives(
+        plans: &[VulkanDistributedActivationBufferPlan],
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        let Some(first) = plans.first() else {
+            return Err(VulkanDistributedPlanError(
+                "distributed activation alternatives must not be empty".to_string(),
+            ));
+        };
+        for candidate in &plans[1..] {
+            if !first.has_same_shared_activation_interface(candidate) {
                 return Err(VulkanDistributedPlanError(
                     "single-lane decode, multi-lane decode, and multi-lane prefill require different shared activation interfaces"
                         .to_string(),
                 ));
             }
         }
-        Ok(decode)
+
+        let reduction_key = |allocation: &VulkanDistributedReductionBufferAllocation| {
+            (
+                allocation.owner_device_id.clone(),
+                allocation.dispatch_index,
+                allocation.component_id.clone(),
+                allocation.node_id.clone(),
+            )
+        };
+        let mut reduction_allocations = BTreeMap::<
+            (String, usize, String, String),
+            VulkanDistributedReductionBufferAllocation,
+        >::new();
+        let mut expected_reduction_keys = None;
+        for plan in plans {
+            let mut plan_keys = BTreeSet::new();
+            for allocation in &plan.reduction_allocations {
+                let expected_bytes = allocation
+                    .plane_byte_capacity
+                    .checked_mul(allocation.device_ids.len())
+                    .ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "distributed alternative reduction capacity overflowed".to_string(),
+                        )
+                    })?;
+                if allocation.plane_byte_capacity == 0
+                    || allocation.device_ids.is_empty()
+                    || allocation.byte_capacity != expected_bytes
+                    || allocation.device_ids.iter().collect::<BTreeSet<_>>().len()
+                        != allocation.device_ids.len()
+                {
+                    return Err(VulkanDistributedPlanError(
+                        "distributed alternative has an invalid reduction allocation".to_string(),
+                    ));
+                }
+                let key = reduction_key(allocation);
+                if !plan_keys.insert(key.clone()) {
+                    return Err(VulkanDistributedPlanError(
+                        "distributed alternative repeats a reduction allocation".to_string(),
+                    ));
+                }
+                if let Some(merged) = reduction_allocations.get_mut(&key) {
+                    if merged.device_ids != allocation.device_ids {
+                        return Err(VulkanDistributedPlanError(
+                            "distributed alternatives use different reduction participants"
+                                .to_string(),
+                        ));
+                    }
+                    merged.plane_byte_capacity = merged
+                        .plane_byte_capacity
+                        .max(allocation.plane_byte_capacity);
+                    merged.byte_capacity = merged
+                        .plane_byte_capacity
+                        .checked_mul(merged.device_ids.len())
+                        .ok_or_else(|| {
+                            VulkanDistributedPlanError(
+                                "merged distributed reduction capacity overflowed".to_string(),
+                            )
+                        })?;
+                } else {
+                    reduction_allocations.insert(key, allocation.clone());
+                }
+            }
+            if let Some(expected) = &expected_reduction_keys {
+                if expected != &plan_keys {
+                    return Err(VulkanDistributedPlanError(
+                        "distributed alternatives require different reduction allocations"
+                            .to_string(),
+                    ));
+                }
+            } else {
+                expected_reduction_keys = Some(plan_keys);
+            }
+        }
+
+        let private_key = |allocation: &VulkanDistributedPrivateIntermediateBufferAllocation| {
+            (
+                allocation.producer_dispatch_index,
+                allocation.consumer_dispatch_index,
+                allocation.component_id.clone(),
+                allocation.signal_id.clone(),
+            )
+        };
+        let mut private_capacities = BTreeMap::<
+            (usize, usize, String, String),
+            BTreeMap<String, usize>,
+        >::new();
+        let mut expected_private_keys = None;
+        for plan in plans {
+            let mut plan_keys = BTreeSet::new();
+            for allocation in &plan.private_intermediate_allocations {
+                let key = private_key(allocation);
+                if allocation.devices.is_empty() || !plan_keys.insert(key.clone()) {
+                    return Err(VulkanDistributedPlanError(
+                        "distributed alternative has an empty or repeated private intermediate"
+                            .to_string(),
+                    ));
+                }
+                let candidate_devices = allocation
+                    .devices
+                    .iter()
+                    .map(|device| (device.device_id.clone(), device.byte_capacity))
+                    .collect::<BTreeMap<_, _>>();
+                if candidate_devices.len() != allocation.devices.len()
+                    || candidate_devices
+                        .iter()
+                        .any(|(device_id, byte_capacity)| {
+                            device_id.is_empty() || *byte_capacity == 0
+                        })
+                {
+                    return Err(VulkanDistributedPlanError(
+                        "distributed alternative has an invalid private intermediate allocation"
+                            .to_string(),
+                    ));
+                }
+                if let Some(merged_devices) = private_capacities.get_mut(&key) {
+                    if merged_devices.keys().collect::<BTreeSet<_>>()
+                        != candidate_devices.keys().collect::<BTreeSet<_>>()
+                    {
+                        return Err(VulkanDistributedPlanError(
+                            "distributed alternatives use different private intermediate devices"
+                                .to_string(),
+                        ));
+                    }
+                    for (device_id, byte_capacity) in candidate_devices {
+                        let merged = merged_devices
+                            .get_mut(&device_id)
+                            .expect("private device sets were checked above");
+                        *merged = (*merged).max(byte_capacity);
+                    }
+                } else {
+                    private_capacities.insert(key, candidate_devices);
+                }
+            }
+            if let Some(expected) = &expected_private_keys {
+                if expected != &plan_keys {
+                    return Err(VulkanDistributedPlanError(
+                        "distributed alternatives require different private intermediates"
+                            .to_string(),
+                    ));
+                }
+            } else {
+                expected_private_keys = Some(plan_keys);
+            }
+        }
+        let private_intermediate_allocations = private_capacities
+            .into_iter()
+            .map(
+                |(
+                    (
+                        producer_dispatch_index,
+                        consumer_dispatch_index,
+                        component_id,
+                        signal_id,
+                    ),
+                    devices,
+                )| VulkanDistributedPrivateIntermediateBufferAllocation {
+                    producer_dispatch_index,
+                    consumer_dispatch_index,
+                    component_id,
+                    signal_id,
+                    devices: devices
+                        .into_iter()
+                        .map(|(device_id, byte_capacity)| {
+                            VulkanDistributedPrivateIntermediateDeviceAllocation {
+                                device_id,
+                                byte_capacity,
+                            }
+                        })
+                        .collect(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let reduction_allocations = reduction_allocations.into_values().collect::<Vec<_>>();
+        let import_count = first
+            .allocations
+            .iter()
+            .map(|allocation| allocation.device_ids.len())
+            .chain(
+                reduction_allocations
+                    .iter()
+                    .map(|allocation| allocation.device_ids.len()),
+            )
+            .try_fold(0usize, |total, count| total.checked_add(count))
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "merged distributed activation import count overflowed".to_string(),
+                )
+            })?;
+        let total_shared_byte_capacity = first
+            .allocations
+            .iter()
+            .map(|allocation| allocation.byte_capacity)
+            .chain(
+                reduction_allocations
+                    .iter()
+                    .map(|allocation| allocation.byte_capacity),
+            )
+            .try_fold(0usize, |total, count| total.checked_add(count))
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "merged distributed shared activation capacity overflowed".to_string(),
+                )
+            })?;
+        let total_private_byte_capacity = private_intermediate_allocations
+            .iter()
+            .flat_map(|allocation| &allocation.devices)
+            .try_fold(0usize, |total, device| {
+                total.checked_add(device.byte_capacity)
+            })
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "merged distributed private activation capacity overflowed".to_string(),
+                )
+            })?;
+        let private_allocation_count = private_intermediate_allocations
+            .iter()
+            .try_fold(0usize, |total, allocation| {
+                total.checked_add(allocation.devices.len())
+            })
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "merged distributed activation allocation count overflowed".to_string(),
+                )
+            })?;
+        let allocation_count = first
+            .allocations
+            .len()
+            .checked_add(reduction_allocations.len())
+            .and_then(|count| count.checked_add(private_allocation_count))
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "merged distributed activation allocation count overflowed".to_string(),
+                )
+            })?;
+
+        Ok(Self {
+            allocations: first.allocations.clone(),
+            reduction_allocations,
+            private_intermediate_allocations,
+            allocation_count,
+            import_count,
+            reference_count: plans
+                .iter()
+                .map(|plan| plan.reference_count)
+                .max()
+                .unwrap_or(0),
+            total_shared_byte_capacity,
+            total_private_byte_capacity,
+            route: first.route,
+        })
     }
 
     pub fn from_execution_plan(
