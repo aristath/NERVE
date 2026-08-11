@@ -117,7 +117,25 @@ fn plan_compiled_resource_store_residency(
     maximum_group_byte_count: usize,
     upload_alignment: usize,
 ) -> Result<VulkanCompiledResourceStoreResidencyBytes, VulkanRuntimeResidencyPlanError> {
-    if allowed_selector_ids.is_empty() || maximum_group_byte_count == 0 {
+    let ownership = VulkanCompiledResourceSelectorOwnership::all(contract, allowed_selector_ids)?;
+    plan_compiled_resource_store_residency_for_ownership(
+        contract,
+        layout,
+        &ownership,
+        maximum_group_byte_count,
+        upload_alignment,
+    )
+}
+
+fn plan_compiled_resource_store_residency_for_ownership(
+    contract: &CompiledResourceResidencyContract,
+    layout: &VulkanCompiledResourceAddressLayout,
+    ownership: &VulkanCompiledResourceSelectorOwnership,
+    maximum_group_byte_count: usize,
+    upload_alignment: usize,
+) -> Result<VulkanCompiledResourceStoreResidencyBytes, VulkanRuntimeResidencyPlanError> {
+    let allowed_selector_ids = ownership.selector_ids();
+    if maximum_group_byte_count == 0 {
         return Err(VulkanRuntimeResidencyPlanError(
             "compiled resource store residency requires selectors and a nonempty atomic group"
                 .to_string(),
@@ -141,7 +159,17 @@ fn plan_compiled_resource_store_residency(
     }
     let maximum_load_wave_group_count = selected
         .iter()
-        .map(|selector| selector.encoding.selection_count_per_activation)
+        .map(|selector| {
+            selector
+                .encoding
+                .selection_count_per_activation
+                .min(
+                    ownership
+                        .resources(&selector.id)
+                        .map(BTreeSet::len)
+                        .unwrap_or(0),
+                )
+        })
         .max()
         .ok_or_else(|| {
             VulkanRuntimeResidencyPlanError(
@@ -154,7 +182,7 @@ fn plan_compiled_resource_store_residency(
         ));
     }
     let components_by_scope =
-        compiled_resource_store_components_by_scope(contract, allowed_selector_ids)?;
+        compiled_resource_store_components_by_scope(contract, &allowed_selector_ids)?;
     let parameter_slot_table_device_bytes = components_by_scope.iter().try_fold(
         0usize,
         |total, (scope, component_ids)| {
@@ -189,7 +217,7 @@ fn plan_compiled_resource_store_residency(
         "compiled resource transfer staging bytes",
     )?;
     let addressable_resource_count = layout
-        .addressable_slot_count_for_selectors(allowed_selector_ids)
+        .addressable_slot_count_for_ownership(ownership)
         .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     let maximum_dynamic_allocation_padding_bytes = checked_residency_mul(
         addressable_resource_count,

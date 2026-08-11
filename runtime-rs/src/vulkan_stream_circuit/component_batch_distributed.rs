@@ -256,6 +256,7 @@ impl VulkanDistributedComponentBatchRunners {
         batch_slices: &[VulkanResidentComponentBatchSliceRunner],
         execution_plan: &VulkanDistributedExecutionPlan,
         parameter_buffers: &VulkanDistributedParameterBuffers,
+        dynamic_resource_buffers: &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
@@ -538,7 +539,9 @@ impl VulkanDistributedComponentBatchRunners {
                     }
                 };
                 let mut bindings = Vec::with_capacity(
-                    2 + planned.auxiliary_input_activations.len() + shard.parameters.len(),
+                    2 + planned.auxiliary_input_activations.len()
+                        + shard.parameters.len()
+                        + 2 * planned.selected_resource_partitions.len(),
                 );
                 let (input_byte_offset, input_byte_capacity) =
                     distributed_batch_shard_binding_range(
@@ -644,6 +647,65 @@ impl VulkanDistributedComponentBatchRunners {
                                 ))
                             })?
                             .with_access(VulkanResidentKernelBufferAccess::Read),
+                    );
+                }
+                for partition in &planned.selected_resource_partitions {
+                    let resources = dynamic_resource_buffers
+                        .get(&shard.device_id)
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                format!(
+                                    "distributed component batch {}.{} has no dynamic resource buffers on {:?}",
+                                    planned.component_id, planned.node_id, shard.device_id
+                                ),
+                            ))
+                        })?;
+                    let parameter_slots = resources
+                        .parameter_slots(
+                            &planned.component_id,
+                            &planned.node_id,
+                            &partition.selection_signal,
+                        )
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                format!(
+                                    "distributed component batch {}.{} has no parameter slots for selector {:?} on {:?}",
+                                    planned.component_id,
+                                    planned.node_id,
+                                    partition.selector_id,
+                                    shard.device_id
+                                ),
+                            ))
+                        })?;
+                    bindings.push(
+                        VulkanResidentKernelBufferBinding::new(
+                            u32::try_from(partition.address_table_binding).map_err(|_| {
+                                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                    VulkanError(
+                                        "distributed dynamic address-table binding exceeds u32"
+                                            .to_string(),
+                                    ),
+                                )
+                            })?,
+                            resources.address_table(),
+                            resources.address_table().byte_capacity(),
+                        )
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    );
+                    bindings.push(
+                        VulkanResidentKernelBufferBinding::new(
+                            u32::try_from(partition.parameter_slots_binding).map_err(|_| {
+                                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                    VulkanError(
+                                        "distributed dynamic parameter-slot binding exceeds u32"
+                                            .to_string(),
+                                    ),
+                                )
+                            })?,
+                            parameter_slots,
+                            parameter_slots.byte_capacity(),
+                        )
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
                     );
                 }
                 let mut resident_dispatches = Vec::with_capacity(artifact.stages.len());

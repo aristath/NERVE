@@ -22,6 +22,7 @@ use crate::vulkan_stream_circuit::{
     CompiledResourceBindingMapping, CompiledResourceLifetime,
     CompiledResourceResidencyContract, CompiledResourceSelectorMapping,
     VulkanActivationSlotBufferOverride, VulkanDescriptorResourceAddress,
+    VulkanDynamicResourceBuffers,
     VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
     VulkanLoadedPhysicalKernelArtifact, VulkanLoadedKernelArtifactCatalog,
     VulkanModelBoundaryBufferOverride, VulkanModelBoundaryDirection,

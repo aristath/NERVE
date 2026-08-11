@@ -1030,6 +1030,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                 VulkanDistributedDispatchRunners::create(
                     &distributed_execution_plan,
                     &distributed_parameter_buffers,
+                    &BTreeMap::new(),
                     &distributed_activation_buffers,
                     &loaded_manifest,
                     |device_id| {
@@ -1213,6 +1214,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                         true,
                         &distributed_execution_plan,
                         &distributed_parameter_buffers,
+                        &BTreeMap::new(),
                     )
                     .map_err(|error| {
                         distributed_calibration_error_value(error.to_string())

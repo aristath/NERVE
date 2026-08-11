@@ -103,6 +103,7 @@ fn run_fixture_layer_00_causal_batch(
         true,
         &distributed_execution_plan,
         &distributed_parameter_buffers,
+        &BTreeMap::new(),
     )
     .unwrap();
     let input = runner.slices[0]

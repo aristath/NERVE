@@ -194,7 +194,67 @@ fn plan_compiled_parameter_residency(
         .collect()
 }
 
-fn plan_compiled_parameter_residency_for_device_set(
+fn compiled_resource_selector_ownership_for_device_set(
+    runtime_model: &VulkanResidentRuntimeModel,
+    contract: &CompiledResourceResidencyContract,
+    input_device_id: &str,
+    output_device_id: &str,
+    device_ids: &BTreeSet<String>,
+    mount_speculative_decoders: bool,
+    distributed: &VulkanDistributedSelectedResourceStorePlan,
+) -> Result<Option<VulkanCompiledResourceSelectorOwnership>, VulkanRuntimeResidencyPlanError> {
+    let distributed_selector_ids = distributed
+        .devices
+        .iter()
+        .flat_map(|device| device.selectors.iter())
+        .map(|selector| selector.selector_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut resources_by_selector = BTreeMap::<String, BTreeSet<usize>>::new();
+    for selector in &contract.selectors {
+        if distributed_selector_ids.contains(selector.id.as_str()) {
+            continue;
+        }
+        let Some(device_id) = resource_component_device(
+            runtime_model,
+            &selector.execution_scope,
+            &selector.component_id,
+            input_device_id,
+            output_device_id,
+            mount_speculative_decoders,
+        )?
+        else {
+            continue;
+        };
+        if device_ids.contains(device_id) {
+            resources_by_selector.insert(
+                selector.id.clone(),
+                (0..selector.resource_count).collect(),
+            );
+        }
+    }
+    for device in &distributed.devices {
+        if !device_ids.contains(&device.device_id) {
+            continue;
+        }
+        for selector in &device.selectors {
+            resources_by_selector
+                .entry(selector.selector_id.clone())
+                .or_default()
+                .extend(selector.owned_resource_indices.iter().copied());
+        }
+    }
+    if resources_by_selector.is_empty() {
+        Ok(None)
+    } else {
+        VulkanCompiledResourceSelectorOwnership::from_resource_indices(
+            contract,
+            resources_by_selector,
+        )
+        .map(Some)
+    }
+}
+
+fn plan_compiled_parameter_residency_for_device_set_with_selector_ownership(
     runtime_model: &VulkanResidentRuntimeModel,
     contract: &CompiledResourceResidencyContract,
     input_device_id: &str,
@@ -202,11 +262,46 @@ fn plan_compiled_parameter_residency_for_device_set(
     device_ids: &BTreeSet<String>,
     mount_speculative_decoders: bool,
     policy: ResourceResidencyPolicy,
+    selector_ownership: &VulkanCompiledResourceSelectorOwnership,
 ) -> Result<VulkanRuntimeParameterResidencyBytes, VulkanRuntimeResidencyPlanError> {
     let contract_index = CompiledResourceContractIndex::new(contract)
         .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     let mut selected = DeviceResourceSelection::default();
     for binding in &contract.bindings {
+        if let CompiledResourceBindingMapping::SelectedAtomicGroup {
+            selection_signal,
+            selector_index,
+            ..
+        } = &binding.mapping
+        {
+            let matching = contract
+                .selectors
+                .iter()
+                .filter(|selector| {
+                    selector.execution_scope == binding.execution_scope
+                        && selector.component_id == binding.component_id
+                        && selector.selection_signal == *selection_signal
+                })
+                .collect::<Vec<_>>();
+            let [selector] = matching.as_slice() else {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "selected resource binding {}.{} signal {:?} resolves {} selectors",
+                    binding.component_id,
+                    binding.node_id,
+                    selection_signal,
+                    matching.len()
+                )));
+            };
+            if selector_ownership.owns(&selector.id, *selector_index) {
+                accumulate_compiled_resource_binding(
+                    &mut selected,
+                    binding,
+                    contract,
+                    &contract_index,
+                )?;
+            }
+            continue;
+        }
         let Some(device_id) = resource_binding_device(
             runtime_model,
             binding,
@@ -217,15 +312,14 @@ fn plan_compiled_parameter_residency_for_device_set(
         else {
             continue;
         };
-        if !device_ids.contains(device_id) {
-            continue;
+        if device_ids.contains(device_id) {
+            accumulate_compiled_resource_binding(
+                &mut selected,
+                binding,
+                contract,
+                &contract_index,
+            )?;
         }
-        accumulate_compiled_resource_binding(
-            &mut selected,
-            binding,
-            contract,
-            &contract_index,
-        )?;
     }
     compiled_parameter_residency_bytes(contract, &contract_index, &selected, policy)
 }

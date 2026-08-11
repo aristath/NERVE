@@ -130,6 +130,7 @@ include!("vulkan_stream_circuit/edge_buffers.rs");
 include!("vulkan_stream_circuit/edge_transport.rs");
 include!("vulkan_stream_circuit/circuit_binding.rs");
 include!("vulkan_stream_circuit/dynamic_resource_buffers.rs");
+include!("vulkan_stream_circuit/compiled_resource_selector_ownership.rs");
 include!("vulkan_stream_circuit/compiled_resource_address_layout.rs");
 include!("vulkan_stream_circuit/circuit_mount.rs");
 include!("vulkan_stream_circuit/input_transducer.rs");

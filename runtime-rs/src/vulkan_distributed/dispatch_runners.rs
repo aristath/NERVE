@@ -72,6 +72,7 @@ fn create_distributed_resident_dispatch(
     planned_shard: &VulkanDistributedDispatchShard,
     shard_index: usize,
     parameter_buffers: &VulkanDistributedParameterBuffers,
+    dynamic_resource_buffers: &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
     activation_buffers: &VulkanDistributedActivationBuffers,
     artifact: &VulkanLoadedPhysicalKernelArtifact,
     private_input: Option<&Arc<VulkanResidentBuffer>>,
@@ -158,7 +159,9 @@ fn create_distributed_resident_dispatch(
             )
         };
     let mut bindings = Vec::with_capacity(
-        2 + planned_dispatch.auxiliary_input_activations.len() + planned_shard.parameters.len(),
+        2 + planned_dispatch.auxiliary_input_activations.len()
+            + planned_shard.parameters.len()
+            + 2 * planned_dispatch.selected_resource_partitions.len(),
     );
     bindings.push(
         VulkanResidentKernelBufferBinding::new(
@@ -272,6 +275,57 @@ fn create_distributed_resident_dispatch(
                 .with_access(VulkanResidentKernelBufferAccess::Read),
         );
     }
+    for partition in &planned_dispatch.selected_resource_partitions {
+        let resources = dynamic_resource_buffers
+            .get(&planned_shard.device_id)
+            .ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "distributed dispatch {}.{} has no dynamic resource buffers on {:?}",
+                    planned_dispatch.component_id,
+                    planned_dispatch.node_id,
+                    planned_shard.device_id
+                ))
+            })?;
+        let parameter_slots = resources
+            .parameter_slots(
+                &planned_dispatch.component_id,
+                &planned_dispatch.node_id,
+                &partition.selection_signal,
+            )
+            .ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "distributed dispatch {}.{} has no parameter slots for selector {:?} on {:?}",
+                    planned_dispatch.component_id,
+                    planned_dispatch.node_id,
+                    partition.selector_id,
+                    planned_shard.device_id
+                ))
+            })?;
+        bindings.push(
+            VulkanResidentKernelBufferBinding::new(
+                u32::try_from(partition.address_table_binding).map_err(|_| {
+                    VulkanDistributedDispatchRunnerError(
+                        "distributed dynamic address-table binding exceeds u32".to_string(),
+                    )
+                })?,
+                resources.address_table(),
+                resources.address_table().byte_capacity(),
+            )
+            .with_access(VulkanResidentKernelBufferAccess::Read),
+        );
+        bindings.push(
+            VulkanResidentKernelBufferBinding::new(
+                u32::try_from(partition.parameter_slots_binding).map_err(|_| {
+                    VulkanDistributedDispatchRunnerError(
+                        "distributed dynamic parameter-slot binding exceeds u32".to_string(),
+                    )
+                })?,
+                parameter_slots,
+                parameter_slots.byte_capacity(),
+            )
+            .with_access(VulkanResidentKernelBufferAccess::Read),
+        );
+    }
     let push_constant_bytes = distributed_shard_push_constants(planned_dispatch, planned_shard)?;
     device
         .create_resident_kernel_dispatch_2d_with_base_z(
@@ -305,6 +359,7 @@ impl VulkanDistributedDispatchRunners {
     pub fn create<'a, F, E>(
         execution_plan: &VulkanDistributedExecutionPlan,
         parameter_buffers: &VulkanDistributedParameterBuffers,
+        dynamic_resource_buffers: &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
         activation_buffers: &VulkanDistributedActivationBuffers,
         loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         mut device_for: F,
@@ -430,6 +485,7 @@ impl VulkanDistributedDispatchRunners {
                         planned_shard,
                         shard_index,
                         parameter_buffers,
+                        dynamic_resource_buffers,
                         activation_buffers,
                         artifact,
                         private_input,

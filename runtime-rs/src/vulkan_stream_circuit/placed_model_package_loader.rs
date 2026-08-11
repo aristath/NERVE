@@ -595,33 +595,20 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 VulkanResidentTokenModelPackageError::new(error.to_string()),
             )
         })?;
-        let logical_devices = device_slices
+        let logical_devices = device_ids
             .iter()
-            .map(|package_slice| {
-                device_for(&package_slice.device_id)
-                    .map(|device| (package_slice.device_id.clone(), device))
+            .map(|device_id| {
+                device_for(device_id)
+                    .map(|device| (device_id.clone(), device))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let physical_slice_groups =
+        let physical_device_groups =
             group_compiled_resource_logical_devices_by_physical(&logical_devices)
                 .map_err(|error| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
                         VulkanResidentTokenModelPackageError::new(error.to_string()),
                     )
-                })?
-                .into_iter()
-                .map(|logical_device_ids| {
-                    logical_device_ids
-                        .iter()
-                        .map(|logical_device_id| {
-                            device_slices
-                                .iter()
-                                .position(|slice| slice.device_id == *logical_device_id)
-                                .expect("grouped logical device must have a package slice")
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
+                })?;
 
         let mut compiled_resource_device_stores = BTreeMap::new();
         let mut compiled_resource_physical_placements = Vec::new();
@@ -637,19 +624,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )
             })?
             .flatten();
-        for slice_indices in physical_slice_groups {
-            let logical_device_ids = slice_indices
-                .iter()
-                .map(|slice_index| device_slices[*slice_index].device_id.clone())
-                .collect::<BTreeSet<_>>();
-            let physical_parameters = plan_compiled_parameter_residency_for_device_set(
+        let mut distributed_dynamic_resource_buffers = BTreeMap::new();
+        for logical_device_id_list in physical_device_groups {
+            let logical_device_ids = logical_device_id_list.iter().cloned().collect::<BTreeSet<_>>();
+            let Some(selector_ownership) = compiled_resource_selector_ownership_for_device_set(
                 &runtime_model,
                 &compiled_resource_contract,
                 &input_device_id,
                 &output_device_id,
                 &logical_device_ids,
                 mount_speculative_decoders,
-                resource_residency_policy,
+                &distributed_selected_resource_store_plan,
             )
             .map_err(|error| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(
@@ -657,7 +642,28 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         "failed to plan physical compiled-resource ownership: {error}"
                     )),
                 )
-            })?;
+            })?
+            else {
+                continue;
+            };
+            let physical_parameters =
+                plan_compiled_parameter_residency_for_device_set_with_selector_ownership(
+                    &runtime_model,
+                    &compiled_resource_contract,
+                    &input_device_id,
+                    &output_device_id,
+                    &logical_device_ids,
+                    mount_speculative_decoders,
+                    resource_residency_policy,
+                    &selector_ownership,
+                )
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "failed to size physical compiled-resource ownership: {error}"
+                        )),
+                    )
+                })?;
             let maximum_dynamic_bytes = physical_parameters
                 .maximum_addressable_bytes
                 .checked_sub(physical_parameters.always_resident_bytes)
@@ -678,42 +684,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )),
                 ));
             }
-            let allowed_selector_ids = compiled_resource_selector_ids_for_device_set(
-                &runtime_model,
-                &compiled_resource_contract,
-                &input_device_id,
-                &output_device_id,
-                &logical_device_ids,
-                mount_speculative_decoders,
-            )
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to plan physical selector ownership: {error}"
-                    )),
-                )
-            })?;
-            if allowed_selector_ids.is_empty() {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(
-                        "physical dynamic residency has no owned selectors",
-                    ),
-                ));
-            }
+            let allowed_selector_ids = selector_ownership.selector_ids();
             let working_set_bytes = logical_device_ids.iter().try_fold(
                 0usize,
                 |total, device_id| {
-                    let plan = residency_plan
+                    let Some(plan) = residency_plan
                         .device_plans
                         .iter()
                         .find(|plan| plan.device_id == *device_id)
-                        .ok_or_else(|| {
-                            VulkanResidentInProcessPlacedRuntimeError::Package(
-                                VulkanResidentTokenModelPackageError::new(format!(
-                                    "{resource_residency_policy:?} residency plan omitted logical device {device_id:?}"
-                                )),
-                            )
-                        })?;
+                    else {
+                        return Ok(total);
+                    };
                     plan.working_set
                         .transient_state_bytes
                         .checked_add(
@@ -729,7 +710,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         })
                 },
             )?;
-            let representative_device_id = device_slices[slice_indices[0]].device_id.clone();
+            let representative_device_id = logical_device_id_list[0].clone();
             let physical_device = device_for(&representative_device_id)?;
             let physical_device_id = physical_device.physical_device_id().to_string();
             let upload_alignment =
@@ -739,10 +720,10 @@ impl VulkanResidentInProcessPlacedModelPackage {
                             VulkanResidentTokenModelPackageError::new(error.to_string()),
                         )
                     })?;
-            let store_residency = plan_compiled_resource_store_residency(
+            let store_residency = plan_compiled_resource_store_residency_for_ownership(
                 &compiled_resource_contract,
                 &compiled_resource_layout,
-                &allowed_selector_ids,
+                &selector_ownership,
                 physical_parameters.staging_headroom_bytes,
                 upload_alignment,
             )
@@ -796,7 +777,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         manifest_dir,
                         &compiled_resource_contract,
                         &compiled_resource_layout,
-                        &allowed_selector_ids,
+                        &selector_ownership,
                         physical_parameters.staging_headroom_bytes,
                         maximum_ranges_per_group,
                         physical_parameters.always_resident_bytes,
@@ -842,7 +823,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 let safe_dynamic_bytes =
                     usize::try_from(admission.allocatable_bytes).unwrap_or(usize::MAX);
                 let addressable_slot_count = compiled_resource_layout
-                    .addressable_slot_count_for_selectors(&allowed_selector_ids)
+                    .addressable_slot_count_for_ownership(&selector_ownership)
                     .map_err(|error| {
                         VulkanResidentInProcessPlacedRuntimeError::Package(
                             VulkanResidentTokenModelPackageError::new(error.to_string()),
@@ -954,7 +935,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     (resident_payload_capacity, resident_payload_capacity, 0, None)
                 };
                 let store = Arc::new(
-                    VulkanCompiledResourceDeviceStore::new_tiered(
+                    VulkanCompiledResourceDeviceStore::new_tiered_with_selector_ownership(
                         physical_device,
                         resource_residency_policy,
                         store_id.clone(),
@@ -963,7 +944,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         manifest_dir,
                         Arc::clone(&compiled_resource_contract),
                         Arc::clone(&compiled_resource_layout),
-                        allowed_selector_ids.clone(),
+                        selector_ownership.clone(),
                         store_payload_capacity,
                         device_payload_capacity,
                         host_visible_payload_capacity,
@@ -1003,47 +984,72 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     })?;
                 (store, false)
             };
-            for slice_index in &slice_indices {
-                let package_slice = &mut device_slices[*slice_index];
-                let selected_tensors = package_slice
-                    .placed_plan
-                    .binding_plan
-                    .selected_parameter_tensors()
-                    .map_err(|error| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "failed to inspect selected parameters for device {:?}: {error}",
-                                package_slice.device_id
-                            )),
-                        )
-                    })?;
-                if selected_tensors.is_empty() {
-                    continue;
-                }
-                let component_ids = package_slice
-                    .placed_plan
-                    .binding_plan
-                    .circuits
-                    .iter()
-                    .map(|circuit| circuit.component_id.clone())
+            for logical_device_id in &logical_device_id_list {
+                let mut component_ids = distributed_selected_resource_store_plan
+                    .device(logical_device_id)
+                    .into_iter()
+                    .flat_map(|device| device.selectors.iter())
+                    .map(|selector| selector.component_id.clone())
                     .collect::<BTreeSet<_>>();
-                let slice_device = device_for(&package_slice.device_id)?;
-                package_slice.dynamic_resource_buffers = Some(
-                    store
-                        .dynamic_buffers_for_components(
-                            slice_device,
-                            &execution_scope,
-                            &component_ids,
-                        )
+                let owner_slice_index = device_slices
+                    .iter()
+                    .position(|slice| slice.device_id == *logical_device_id);
+                if let Some(slice_index) = owner_slice_index {
+                    let package_slice = &device_slices[slice_index];
+                    if !package_slice
+                        .placed_plan
+                        .binding_plan
+                        .selected_parameter_tensors()
                         .map_err(|error| {
                             VulkanResidentInProcessPlacedRuntimeError::Package(
                                 VulkanResidentTokenModelPackageError::new(format!(
-                                    "failed to bind dynamic resources for device {:?}: {error}",
+                                    "failed to inspect selected parameters for device {:?}: {error}",
                                     package_slice.device_id
                                 )),
                             )
-                        })?,
-                );
+                        })?
+                        .is_empty()
+                    {
+                        component_ids.extend(
+                            package_slice
+                                .placed_plan
+                                .binding_plan
+                                .circuits
+                                .iter()
+                                .map(|circuit| circuit.component_id.clone()),
+                        );
+                    }
+                }
+                if component_ids.is_empty() {
+                    continue;
+                }
+                let logical_device = device_for(logical_device_id)?;
+                let dynamic_buffers = store
+                    .dynamic_buffers_for_components(
+                        logical_device,
+                        &execution_scope,
+                        &component_ids,
+                    )
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to bind dynamic resources for device {logical_device_id:?}: {error}"
+                            )),
+                        )
+                    })?;
+                if distributed_dynamic_resource_buffers
+                    .insert(logical_device_id.clone(), Arc::clone(&dynamic_buffers))
+                    .is_some()
+                {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "dynamic resource buffers for logical device {logical_device_id:?} were assigned twice"
+                        )),
+                    ));
+                }
+                if let Some(slice_index) = owner_slice_index {
+                    device_slices[slice_index].dynamic_resource_buffers = Some(dynamic_buffers);
+                }
             }
             if !reused_store && resource_residency_policy == ResourceResidencyPolicy::Eager {
                 let owner = DeviceResourceResidencyOwnerId::new(format!("{store_id}:eager"))
@@ -1284,6 +1290,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             distributed_selected_resource_store_plan,
             distributed_loaded_manifest,
             distributed_parameter_buffers,
+            distributed_dynamic_resource_buffers,
             compiled_resource_device_stores,
             compiled_resource_physical_placements,
             runtime_component_instances,
@@ -1526,6 +1533,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         let mut distributed_dispatch_runners = VulkanDistributedDispatchRunners::create(
             &self.distributed_execution_plans.decode,
             &self.distributed_parameter_buffers,
+            &self.distributed_dynamic_resource_buffers,
             &distributed_activation_buffers,
             &self.distributed_loaded_manifest,
             |device_id| device_for(device_id),

@@ -724,6 +724,36 @@ impl VulkanCompiledResourceAddressLayout {
         Ok(total)
     }
 
+    pub fn addressable_slot_count_for_ownership(
+        &self,
+        ownership: &VulkanCompiledResourceSelectorOwnership,
+    ) -> Result<usize, VulkanCompiledResourceAddressLayoutError> {
+        let mut slots = BTreeSet::new();
+        for (selector_id, resource_indices) in ownership.iter() {
+            let selector = self
+                .selectors
+                .iter()
+                .find(|selector| selector.selector_id == selector_id)
+                .ok_or_else(|| {
+                    VulkanCompiledResourceAddressLayoutError(format!(
+                        "compiled ownership selector {selector_id:?} has no address layout"
+                    ))
+                })?;
+            for resource_index in resource_indices {
+                let resource_slots = selector
+                    .mapping
+                    .resource_slots(*resource_index)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceAddressLayoutError(format!(
+                            "compiled ownership selector {selector_id:?} resource {resource_index} has no address slots"
+                        ))
+                    })?;
+                slots.extend(resource_slots);
+            }
+        }
+        Ok(slots.len())
+    }
+
     pub fn selector(
         &self,
         execution_scope: &str,

@@ -478,6 +478,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             capture_causal_state_snapshots,
             self.model.prefill_distributed_execution_plan(),
             &self.model.distributed_parameter_buffers,
+            &self.model.distributed_dynamic_resource_buffers,
         )?;
         let input_device = devices.get(&self.model.input_device_id).ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {

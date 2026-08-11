@@ -101,6 +101,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             buffers: Vec::new(),
             total_byte_capacity: 0,
         };
+        let distributed_dynamic_resource_buffers = BTreeMap::new();
         let lane_mounteds = vec![&slice.mounted; lane_capacity];
         let pipeline_continuation_predicate = if execution_mode
             == VulkanComponentBatchExecutionMode::CausalSequence
@@ -140,6 +141,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             &slices,
             &distributed_execution_plan,
             &distributed_parameter_buffers,
+            &distributed_dynamic_resource_buffers,
             lane_capacity,
             execution_mode,
         )?;
@@ -168,6 +170,8 @@ impl VulkanResidentPlacedComponentBatchRunner {
         capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         distributed_parameter_buffers: &VulkanDistributedParameterBuffers,
+        distributed_dynamic_resource_buffers:
+            &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         let lane_mounteds_by_slice = placed_slices
             .iter()
@@ -185,6 +189,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             capture_causal_state_snapshots,
             distributed_execution_plan,
             distributed_parameter_buffers,
+            distributed_dynamic_resource_buffers,
             &VulkanComponentBatchExecutionScope::all(),
         )
     }
@@ -237,6 +242,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             false,
             first.model.decode_batch_distributed_execution_plan(),
             &first.model.distributed_parameter_buffers,
+            &first.model.distributed_dynamic_resource_buffers,
             &VulkanComponentBatchExecutionScope::all(),
         )
     }
@@ -258,6 +264,8 @@ impl VulkanResidentPlacedComponentBatchRunner {
         capture_causal_state_snapshots: bool,
         distributed_execution_plan: &VulkanDistributedExecutionPlan,
         distributed_parameter_buffers: &VulkanDistributedParameterBuffers,
+        distributed_dynamic_resource_buffers:
+            &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
         execution_scope: &VulkanComponentBatchExecutionScope,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         if lane_mounteds_by_slice.len() != placed_slices.len() {
@@ -376,6 +384,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             &slices,
             &phase_execution_plan,
             distributed_parameter_buffers,
+            distributed_dynamic_resource_buffers,
             lane_capacity,
             execution_mode,
         )?;

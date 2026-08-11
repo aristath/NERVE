@@ -35,6 +35,8 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     distributed_selected_resource_store_plan: VulkanDistributedSelectedResourceStorePlan,
     distributed_loaded_manifest: VulkanLoadedKernelArtifactCatalog,
     distributed_parameter_buffers: Arc<VulkanDistributedParameterBuffers>,
+    distributed_dynamic_resource_buffers:
+        BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
     compiled_resource_device_stores:
         BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
     compiled_resource_physical_placements:

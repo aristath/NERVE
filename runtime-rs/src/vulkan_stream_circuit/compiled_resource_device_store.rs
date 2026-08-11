@@ -538,6 +538,7 @@ pub struct VulkanCompiledResourceDeviceStore {
     physical_device_id: String,
     logical_device_ids: Vec<String>,
     allowed_selector_ids: BTreeSet<String>,
+    selector_ownership: VulkanCompiledResourceSelectorOwnership,
     package_root: PathBuf,
     contract: Arc<CompiledResourceResidencyContract>,
     contract_index: CompiledResourceContractIndex,
@@ -650,8 +651,59 @@ impl VulkanCompiledResourceDeviceStore {
         metadata_device_bytes: usize,
         shared_host_cache: Option<Arc<VulkanCompiledResourceSharedHostCache>>,
     ) -> Result<Self, VulkanCompiledResourceDeviceStoreError> {
+        let selector_ownership = VulkanCompiledResourceSelectorOwnership::all(
+            &contract,
+            &allowed_selector_ids,
+        )
+        .map_err(|error| VulkanCompiledResourceDeviceStoreError::new(error.to_string()))?;
+        Self::new_tiered_with_selector_ownership(
+            device,
+            residency_policy,
+            device_id,
+            physical_device_id,
+            logical_device_ids,
+            package_root,
+            contract,
+            layout,
+            selector_ownership,
+            maximum_dynamic_payload_bytes,
+            maximum_dynamic_device_payload_bytes,
+            maximum_dynamic_host_visible_payload_bytes,
+            available_dynamic_device_bytes,
+            maximum_group_byte_count,
+            maximum_ranges_per_group,
+            always_resident_parameter_bytes,
+            runtime_working_set_device_bytes,
+            metadata_device_bytes,
+            shared_host_cache,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_tiered_with_selector_ownership(
+        device: &VulkanComputeDevice,
+        residency_policy: ResourceResidencyPolicy,
+        device_id: impl Into<String>,
+        physical_device_id: impl Into<String>,
+        logical_device_ids: Vec<String>,
+        package_root: impl Into<PathBuf>,
+        contract: Arc<CompiledResourceResidencyContract>,
+        layout: Arc<VulkanCompiledResourceAddressLayout>,
+        selector_ownership: VulkanCompiledResourceSelectorOwnership,
+        maximum_dynamic_payload_bytes: usize,
+        maximum_dynamic_device_payload_bytes: usize,
+        maximum_dynamic_host_visible_payload_bytes: usize,
+        available_dynamic_device_bytes: usize,
+        maximum_group_byte_count: usize,
+        maximum_ranges_per_group: usize,
+        always_resident_parameter_bytes: usize,
+        runtime_working_set_device_bytes: usize,
+        metadata_device_bytes: usize,
+        shared_host_cache: Option<Arc<VulkanCompiledResourceSharedHostCache>>,
+    ) -> Result<Self, VulkanCompiledResourceDeviceStoreError> {
         let device_id = device_id.into();
         let physical_device_id = physical_device_id.into();
+        let allowed_selector_ids = selector_ownership.selector_ids();
         if device_id.trim().is_empty()
             || physical_device_id.trim().is_empty()
             || logical_device_ids.is_empty()
@@ -679,10 +731,10 @@ impl VulkanCompiledResourceDeviceStore {
             ))
         })?;
         let upload_alignment = compiled_resource_upload_alignment(&contract, device)?;
-        let store_residency = plan_compiled_resource_store_residency(
+        let store_residency = plan_compiled_resource_store_residency_for_ownership(
             &contract,
             &layout,
-            &allowed_selector_ids,
+            &selector_ownership,
             maximum_group_byte_count,
             upload_alignment,
         )
@@ -695,7 +747,7 @@ impl VulkanCompiledResourceDeviceStore {
         }
         let maximum_load_wave_group_count = store_residency.maximum_load_wave_group_count;
         let maximum_addressable_resource_count = layout
-            .addressable_slot_count_for_selectors(&allowed_selector_ids)
+            .addressable_slot_count_for_ownership(&selector_ownership)
             .map_err(|error| {
                 VulkanCompiledResourceDeviceStoreError::new(format!(
                     "compiled resource address layout is invalid: {error}"
@@ -739,14 +791,14 @@ impl VulkanCompiledResourceDeviceStore {
             &contract,
             &contract_index,
             &layout,
-            &allowed_selector_ids,
+            &selector_ownership,
             CompiledResourceRepresentation::Source,
         )?;
         let representation_group_layouts = compiled_resource_sparse_group_layouts(
             &contract,
             &contract_index,
             &layout,
-            &allowed_selector_ids,
+            &selector_ownership,
             CompiledResourceRepresentation::ResidentDerivation,
         )?;
         let preferred_device_slab_byte_capacity =
@@ -788,7 +840,7 @@ impl VulkanCompiledResourceDeviceStore {
         let package_root = package_root.into();
         let selector_cache_policy = compiled_resource_selector_cache_policy(
             &contract,
-            &allowed_selector_ids,
+            &selector_ownership,
             maximum_dynamic_payload_bytes,
         )?;
         let memory_plan = if maximum_dynamic_host_visible_payload_bytes == 0 {
@@ -944,6 +996,7 @@ impl VulkanCompiledResourceDeviceStore {
             physical_device_id,
             logical_device_ids,
             allowed_selector_ids,
+            selector_ownership,
             package_root,
             contract,
             contract_index,
@@ -1069,7 +1122,7 @@ impl VulkanCompiledResourceDeviceStore {
         package_root: &Path,
         contract: &CompiledResourceResidencyContract,
         layout: &VulkanCompiledResourceAddressLayout,
-        allowed_selector_ids: &BTreeSet<String>,
+        selector_ownership: &VulkanCompiledResourceSelectorOwnership,
         maximum_group_byte_count: usize,
         maximum_ranges_per_group: usize,
         always_resident_parameter_bytes: usize,
@@ -1089,7 +1142,7 @@ impl VulkanCompiledResourceDeviceStore {
             && self.package_root == package_root
             && self.contract.as_ref() == contract
             && self.layout.as_ref() == layout
-            && self.allowed_selector_ids == *allowed_selector_ids
+            && self.selector_ownership == *selector_ownership
             && self.maximum_group_byte_count == maximum_group_byte_count
             && self.maximum_ranges_per_group == maximum_ranges_per_group
             && self.always_resident_parameter_bytes == always_resident_parameter_bytes
@@ -1326,7 +1379,11 @@ impl VulkanCompiledResourceDeviceStore {
                     && self.allowed_selector_ids.contains(&selector.id)
             })
             .flat_map(|selector| {
-                (0..selector.resource_count)
+                self.selector_ownership
+                    .resources(&selector.id)
+                    .into_iter()
+                    .flatten()
+                    .copied()
                     .map(move |resource_index| (selector.id.clone(), resource_index))
             })
             .collect::<Vec<_>>();
@@ -1361,7 +1418,11 @@ impl VulkanCompiledResourceDeviceStore {
             .iter()
             .filter(|selector| self.allowed_selector_ids.contains(&selector.id))
             .flat_map(|selector| {
-                (0..selector.resource_count)
+                self.selector_ownership
+                    .resources(&selector.id)
+                    .into_iter()
+                    .flatten()
+                    .copied()
                     .map(move |resource_index| (selector.id.clone(), resource_index))
             })
             .collect::<Vec<_>>();
@@ -2210,6 +2271,12 @@ impl VulkanCompiledResourceDeviceStore {
                 selector.resource_count
             )));
         }
+        if !self.selector_ownership.owns(selector_id, resource_index) {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource selector {selector_id:?} index {resource_index} is outside store {:?} ownership",
+                self.device_id
+            )));
+        }
         match &selector.mapping {
             CompiledResourceSelectorMapping::GroupTable { atomic_group_ids } => {
                 self.contract_index
@@ -2293,7 +2360,7 @@ fn compiled_resource_upload_alignment(
 
 fn compiled_resource_selector_cache_policy(
     contract: &CompiledResourceResidencyContract,
-    allowed_selector_ids: &BTreeSet<String>,
+    selector_ownership: &VulkanCompiledResourceSelectorOwnership,
     maximum_dynamic_payload_bytes: usize,
 ) -> Result<VulkanCompiledResourceSelectorCachePolicy, VulkanCompiledResourceDeviceStoreError> {
     let resource_payload_bytes = contract
@@ -2348,7 +2415,7 @@ fn compiled_resource_selector_cache_policy(
     for selector in contract
         .selectors
         .iter()
-        .filter(|selector| allowed_selector_ids.contains(&selector.id))
+        .filter(|selector| selector_ownership.resources(&selector.id).is_some())
     {
         let groups = match &selector.mapping {
             CompiledResourceSelectorMapping::GroupTable { atomic_group_ids } => {
@@ -2425,6 +2492,9 @@ fn compiled_resource_selector_cache_policy(
             }
         };
         for (resource_index, (group_id, byte_count)) in groups.into_iter().enumerate() {
+            if !selector_ownership.owns(&selector.id, resource_index) {
+                continue;
+            }
             group_owners
                 .entry(group_id.clone())
                 .or_default()
@@ -2447,9 +2517,9 @@ fn compiled_resource_selector_cache_policy(
         ));
     }
     let mut group_selector_ids = BTreeMap::new();
-    let mut selector_addressable_payload_bytes = allowed_selector_ids
+    let mut selector_addressable_payload_bytes = selector_ownership
         .iter()
-        .map(|selector_id| (selector_id.clone(), 0usize))
+        .map(|(selector_id, _)| (selector_id.to_string(), 0usize))
         .collect::<BTreeMap<_, _>>();
     let mut total_addressable_payload_bytes = 0usize;
     for (group_id, owners) in group_owners {
@@ -2540,7 +2610,7 @@ fn compiled_resource_sparse_group_layouts(
     contract: &CompiledResourceResidencyContract,
     contract_index: &CompiledResourceContractIndex,
     layout: &VulkanCompiledResourceAddressLayout,
-    allowed_selector_ids: &BTreeSet<String>,
+    selector_ownership: &VulkanCompiledResourceSelectorOwnership,
     representation: CompiledResourceRepresentation,
 ) -> Result<Vec<VulkanStableResourceGroupLayout>, VulkanCompiledResourceDeviceStoreError> {
     let resource_byte_count = |resource: &CompiledImmutableResource,
@@ -2563,7 +2633,7 @@ fn compiled_resource_sparse_group_layouts(
     for selector_layout in layout
         .selectors
         .iter()
-        .filter(|selector| allowed_selector_ids.contains(&selector.selector_id))
+        .filter(|selector| selector_ownership.resources(&selector.selector_id).is_some())
     {
         let selector = contract_index
             .selector(contract, &selector_layout.selector_id)
@@ -2578,6 +2648,9 @@ fn compiled_resource_sparse_group_layouts(
                 VulkanCompiledSelectorAddressMapping::GroupTable { .. },
             ) => {
                 for (resource_index, group_id) in atomic_group_ids.iter().enumerate() {
+                    if !selector_ownership.owns(&selector.id, resource_index) {
+                        continue;
+                    }
                     let group = contract_index
                         .atomic_group(contract, group_id)
                         .ok_or_else(|| {
