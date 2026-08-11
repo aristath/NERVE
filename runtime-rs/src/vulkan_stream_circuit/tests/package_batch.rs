@@ -2024,6 +2024,23 @@ fn distributed_batch_output_binding_repeats_the_full_lane_stride() {
 }
 
 #[test]
+fn distributed_batch_sharded_input_binding_preserves_full_frame_lane_stride() {
+    let range = VulkanDistributedActivationRange {
+        byte_offset: 2_048,
+        byte_count: 2_048,
+    };
+    let (offset, byte_capacity) =
+        distributed_batch_shard_binding_range(8_192, 4, &range).unwrap();
+
+    assert_eq!(offset, range.byte_offset);
+    assert_eq!(byte_capacity, 3 * 8_192 + range.byte_count);
+    for lane in 0..4 {
+        let lane_start = offset + lane * 8_192;
+        assert!(lane_start + range.byte_count <= offset + byte_capacity);
+    }
+}
+
+#[test]
 fn distributed_batch_output_binding_rejects_a_shard_past_the_frame() {
     let error = distributed_batch_shard_output_binding_range(8_192, 4, 7_168, 2_048).unwrap_err();
 

@@ -441,15 +441,23 @@ def test_physical_shader_is_part_of_the_required_shader_set() -> None:
 def test_input_column_physical_shaders_render_and_compile(tmp_path: Path) -> None:
     source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
-        "linear_residual_input_columns_bf16_b128_256x4.comp",
-        "linear_residual_input_columns_fp8_e4m3_b2x128_256x4.comp",
+        "linear_residual_input_columns_bf16_b128_256x4.comp": (
+            "batch_index * TOTAL_INPUT_WORDS"
+        ),
+        "linear_residual_input_columns_fp8_e4m3_b2x128_256x4.comp": (
+            "batch_index * (TOTAL_INPUT_SIZE / 2u)"
+        ),
     }
     copy_shader_templates(source_dir, tmp_path, shader_files)
-    for shader_file in shader_files:
+    for shader_file, full_frame_stride in shader_files.items():
         source = (tmp_path / shader_file).read_text()
         assert "PartitionControl" in source
         assert "binding = 2, std430" in source
         assert "gl_WorkGroupID.y" in source
+        # Every participant owns a full-frame-strided private buffer. Its
+        # descriptor starts at the shard offset, while successive lanes remain
+        # separated by the complete logical activation width.
+        assert full_frame_stride in source
         assert "batch_index * OUTPUT_SIZE" in source
         assert "{{" not in source
 
