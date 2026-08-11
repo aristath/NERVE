@@ -47,8 +47,7 @@ float read_bf16_word(uint packed, uint index) {
 }
 
 vec4 read_inputx4(uint batch_index, uint column) {
-    const uint offset =
-        batch_index * (partition_control.input_count / 2u) + (column >> 1u);
+    const uint offset = batch_index * (TOTAL_INPUT_SIZE / 2u) + (column >> 1u);
     const uint lo = input_frame.words[offset];
     const uint hi = input_frame.words[offset + 1u];
     return vec4(
