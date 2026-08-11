@@ -1208,6 +1208,7 @@ fn selected_distributed_component_batch_artifact<'a>(
         lane_capacity,
         |artifact| {
             artifact.batch_mode == VulkanResidentComponentKernelBatchMode::WeightShared
+                && distributed_component_batch_artifact_preserves_partition(planned, artifact)
                 && planned.shards.iter().all(|shard| {
                     devices
                         .get(&shard.device_id)
@@ -1215,6 +1216,50 @@ fn selected_distributed_component_batch_artifact<'a>(
                 })
         },
     )
+}
+
+fn distributed_component_batch_artifact_preserves_partition(
+    planned: &VulkanDistributedDispatchPlan,
+    artifact: &VulkanResidentComponentBatchKernelArtifact,
+) -> bool {
+    let [stage] = artifact.stages.as_slice() else {
+        return false;
+    };
+    match planned.distribution {
+        VulkanDistributedDispatchDistribution::OutputRows => {
+            distributed_batch_output_partition_is_compatible(
+                planned.output_rows,
+                planned.row_alignment,
+                planned
+                    .shards
+                    .iter()
+                    .map(|shard| (shard.row_start, shard.row_count)),
+                stage.workgroup_count_x,
+            )
+        }
+        VulkanDistributedDispatchDistribution::ExpertRange => true,
+        VulkanDistributedDispatchDistribution::InputColumns => false,
+    }
+}
+
+fn distributed_batch_output_partition_is_compatible(
+    output_rows: usize,
+    planned_row_alignment: usize,
+    shard_ranges: impl IntoIterator<Item = (usize, usize)>,
+    full_workgroup_count_x: u32,
+) -> bool {
+    let Ok(full_workgroup_count_x) = usize::try_from(full_workgroup_count_x) else {
+        return false;
+    };
+    if full_workgroup_count_x == 0 || !output_rows.is_multiple_of(full_workgroup_count_x) {
+        return false;
+    }
+    let rows_per_workgroup = output_rows / full_workgroup_count_x;
+    planned_row_alignment.is_multiple_of(rows_per_workgroup)
+        && shard_ranges.into_iter().all(|(row_start, row_count)| {
+            row_start.is_multiple_of(rows_per_workgroup)
+                && row_count.is_multiple_of(rows_per_workgroup)
+        })
 }
 
 fn distributed_component_batch_control_payload_bytes(

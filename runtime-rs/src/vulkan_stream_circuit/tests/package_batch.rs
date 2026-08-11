@@ -2065,3 +2065,27 @@ fn distributed_batch_workgroups_preserve_the_compiled_row_granularity() {
             .contains("cannot partition 32769 rows across 512 workgroups")
     );
 }
+
+#[test]
+fn distributed_batch_variants_must_preserve_the_planned_partition() {
+    let shards = [(0, 128), (128, 128)];
+
+    assert!(distributed_batch_output_partition_is_compatible(
+        256,
+        64,
+        shards,
+        16,
+    ));
+    assert!(!distributed_batch_output_partition_is_compatible(
+        256,
+        64,
+        shards,
+        6,
+    ));
+    assert!(!distributed_batch_output_partition_is_compatible(
+        256,
+        32,
+        [(0, 96), (96, 160)],
+        4,
+    ));
+}
