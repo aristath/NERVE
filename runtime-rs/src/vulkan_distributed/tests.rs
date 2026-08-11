@@ -346,7 +346,7 @@ mod tests {
         let output_rows = fixture_plan("row_major").dispatches.remove(0);
         let bytes =
             distributed_shard_push_constants(&output_rows, &output_rows.shards[1]).unwrap();
-        assert_eq!(bytes, 0u32.to_le_bytes());
+        assert!(bytes.is_empty());
     }
 
     #[test]

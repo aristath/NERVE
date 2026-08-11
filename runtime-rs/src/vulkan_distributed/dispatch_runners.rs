@@ -32,16 +32,20 @@ fn distributed_shard_push_constants(
     planned_dispatch: &VulkanDistributedDispatchPlan,
     planned_shard: &VulkanDistributedDispatchShard,
 ) -> Result<Vec<u8>, VulkanDistributedDispatchRunnerError> {
-    let mut bytes = planned_shard.base_workgroup_z.to_le_bytes().to_vec();
-    if planned_dispatch.distribution != VulkanDistributedDispatchDistribution::OutputRows {
-        let partition_count = u32::try_from(planned_shard.row_count).map_err(|_| {
-            VulkanDistributedDispatchRunnerError(
-                "distributed repeated partition count exceeds u32".to_string(),
-            )
-        })?;
-        bytes.extend_from_slice(&partition_count.to_le_bytes());
+    match planned_dispatch.distribution {
+        VulkanDistributedDispatchDistribution::OutputRows => Ok(Vec::new()),
+        VulkanDistributedDispatchDistribution::InputColumns
+        | VulkanDistributedDispatchDistribution::ExpertRange => {
+            let mut bytes = planned_shard.base_workgroup_z.to_le_bytes().to_vec();
+            let partition_count = u32::try_from(planned_shard.row_count).map_err(|_| {
+                VulkanDistributedDispatchRunnerError(
+                    "distributed repeated partition count exceeds u32".to_string(),
+                )
+            })?;
+            bytes.extend_from_slice(&partition_count.to_le_bytes());
+            Ok(bytes)
+        }
     }
-    Ok(bytes)
 }
 
 fn create_distributed_resident_dispatch(
