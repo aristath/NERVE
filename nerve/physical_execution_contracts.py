@@ -102,6 +102,12 @@ class OutputContract(TypedDict, total=False):
 class ReductionContract(TypedDict):
     operation: ReductionOperation
     dimension_name: str
+    finalization: ReductionFinalization
+
+
+class ReductionFinalization(TypedDict, total=False):
+    kind: Literal["store_f32", "add_bf16_residual_to_bf16"]
+    residual_binding: int
 
 
 class LocalIntermediateContract(TypedDict):
@@ -978,7 +984,7 @@ def validate_physical_execution_contract(value: object) -> None:
     inputs = _list(contract["inputs"], "contract.inputs")
     outputs = _list(contract["outputs"], "contract.outputs")
     _validate_inputs(inputs)
-    _validate_outputs(outputs, dimensions, formats["accumulation"])
+    _validate_outputs(outputs, inputs, dimensions, formats["accumulation"])
     intermediates = _list(
         contract.get("local_intermediates", []), "contract.local_intermediates"
     )
@@ -1079,7 +1085,10 @@ def _validate_inputs(values: list[object]) -> None:
 
 
 def _validate_outputs(
-    values: list[object], dimensions: dict[str, object], accumulation: object
+    values: list[object],
+    inputs: list[object],
+    dimensions: dict[str, object],
+    accumulation: object,
 ) -> None:
     if not values:
         _invalid("contract.outputs must not be empty")
@@ -1111,8 +1120,8 @@ def _validate_outputs(
             reduction = _mapping(item["reduction"], f"{path}.reduction")
             _keys(
                 reduction,
-                {"operation", "dimension_name"},
-                {"operation", "dimension_name"},
+                {"operation", "dimension_name", "finalization"},
+                {"operation", "dimension_name", "finalization"},
                 f"{path}.reduction",
             )
             operation = _enum(
@@ -1130,6 +1139,44 @@ def _validate_outputs(
                 )
             if operation == "sum_f32" and accumulation != "f32":
                 _invalid("sum_f32 reduction requires f32 accumulation")
+            finalization = _mapping(
+                reduction["finalization"], f"{path}.reduction.finalization"
+            )
+            kind = _enum(
+                finalization.get("kind"),
+                {"store_f32", "add_bf16_residual_to_bf16"},
+                f"{path}.reduction.finalization.kind",
+            )
+            required = (
+                {"kind", "residual_binding"}
+                if kind == "add_bf16_residual_to_bf16"
+                else {"kind"}
+            )
+            _keys(finalization, required, required, f"{path}.reduction.finalization")
+            if kind == "add_bf16_residual_to_bf16":
+                if int(dimensions[dimension_name]) % 2:
+                    _invalid(
+                        "BF16 residual finalization requires an even element count"
+                    )
+                residual_binding = _non_negative_int(
+                    finalization["residual_binding"],
+                    f"{path}.reduction.finalization.residual_binding",
+                )
+                residual = next(
+                    (
+                        _mapping(value, "contract input")
+                        for value in inputs
+                        if _mapping(value, "contract input").get("binding")
+                        == residual_binding
+                    ),
+                    None,
+                )
+                if residual is None:
+                    _invalid(
+                        "BF16 residual finalization binding must name a contract input"
+                    )
+                if residual["distribution"] != "replicated":
+                    _invalid("BF16 residual finalization input must be replicated")
 
 
 def _validate_intermediates(values: list[object]) -> None:

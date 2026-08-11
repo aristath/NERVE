@@ -6,18 +6,51 @@ struct VulkanDistributedReductionRunner {
     sequence: VulkanResidentKernelSequence,
 }
 
-fn distributed_sum_f32_spirv_words(
+fn embedded_distributed_reduction_spirv_words(
+    bytes: &[u8],
+    label: &str,
 ) -> Result<Vec<u32>, VulkanDistributedDispatchRunnerError> {
-    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/distributed_sum_f32.spv"));
     if bytes.is_empty() || !bytes.len().is_multiple_of(size_of::<u32>()) {
-        return Err(VulkanDistributedDispatchRunnerError(
-            "embedded distributed sum_f32 SPIR-V is empty or misaligned".to_string(),
-        ));
+        return Err(VulkanDistributedDispatchRunnerError(format!(
+            "embedded distributed {label} SPIR-V is empty or misaligned"
+        )));
     }
     Ok(bytes
         .chunks_exact(size_of::<u32>())
         .map(|word| u32::from_le_bytes(word.try_into().expect("SPIR-V word is four bytes")))
         .collect())
+}
+
+fn distributed_sum_f32_spirv_words(
+) -> Result<Vec<u32>, VulkanDistributedDispatchRunnerError> {
+    embedded_distributed_reduction_spirv_words(
+        include_bytes!(concat!(env!("OUT_DIR"), "/distributed_sum_f32.spv")),
+        "sum_f32",
+    )
+}
+
+fn distributed_sum_f32_add_bf16_residual_spirv_words(
+) -> Result<Vec<u32>, VulkanDistributedDispatchRunnerError> {
+    embedded_distributed_reduction_spirv_words(
+        include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/distributed_sum_f32_add_bf16_residual.spv"
+        )),
+        "sum_f32_add_bf16_residual",
+    )
+}
+
+fn distributed_reduction_input_activation(
+    planned_dispatch: &VulkanDistributedDispatchPlan,
+    input_index: usize,
+) -> Option<&VulkanDistributedActivationSlot> {
+    if input_index == 0 {
+        Some(&planned_dispatch.input_activation)
+    } else {
+        planned_dispatch
+            .auxiliary_input_activations
+            .get(input_index - 1)
+    }
 }
 
 fn distributed_sum_f32_push_constants(
@@ -100,21 +133,11 @@ fn create_distributed_reduction_runner(
                 "distributed reduction plane capacity overflowed".to_string(),
             )
         })?;
-    let workgroup_count_x = reduction
-        .element_count
-        .checked_add(DISTRIBUTED_SUM_F32_LOCAL_SIZE_X - 1)
-        .and_then(|count| count.checked_div(DISTRIBUTED_SUM_F32_LOCAL_SIZE_X))
-        .and_then(|count| u32::try_from(count).ok())
-        .ok_or_else(|| {
-            VulkanDistributedDispatchRunnerError(
-                "distributed reduction workgroup count overflowed".to_string(),
-            )
-        })?;
-    let spirv = distributed_sum_f32_spirv_words()?;
-    let resident_dispatch = device
-        .create_resident_kernel_dispatch_labeled(
-            &spirv,
-            &[
+    let (spirv, work_item_count, bindings) = match &reduction.finalization {
+        VulkanDistributedReductionFinalizationPlan::StoreF32 => (
+            distributed_sum_f32_spirv_words()?,
+            reduction.element_count,
+            vec![
                 VulkanResidentKernelBufferBinding::new(0, partials, partial_byte_capacity)
                     .with_access(VulkanResidentKernelBufferAccess::Read),
                 VulkanResidentKernelBufferBinding::new(
@@ -124,6 +147,68 @@ fn create_distributed_reduction_runner(
                 )
                 .with_access(VulkanResidentKernelBufferAccess::Write),
             ],
+        ),
+        VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
+            residual_input_index,
+        } => {
+            let residual_activation = distributed_reduction_input_activation(
+                planned_dispatch,
+                *residual_input_index,
+            )
+            .ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "distributed dispatch {}.{} has no residual input {}",
+                    planned_dispatch.component_id,
+                    planned_dispatch.node_id,
+                    residual_input_index
+                ))
+            })?;
+            let residual = activation_buffers
+                .activation_buffer(
+                    &planned_dispatch.owner_device_id,
+                    residual_activation,
+                    &planned_dispatch.owner_device_id,
+                )
+                .ok_or_else(|| {
+                    VulkanDistributedDispatchRunnerError(format!(
+                        "distributed dispatch {}.{} has no owner residual input {}",
+                        planned_dispatch.component_id,
+                        planned_dispatch.node_id,
+                        residual_activation.signal_id
+                    ))
+                })?;
+            let bf16_byte_capacity = reduction.element_count.checked_mul(2).ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(
+                    "distributed BF16 reduction capacity overflowed".to_string(),
+                )
+            })?;
+            (
+                distributed_sum_f32_add_bf16_residual_spirv_words()?,
+                reduction.element_count / 2,
+                vec![
+                    VulkanResidentKernelBufferBinding::new(0, partials, partial_byte_capacity)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(1, residual, bf16_byte_capacity)
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    VulkanResidentKernelBufferBinding::new(2, output, bf16_byte_capacity)
+                        .with_access(VulkanResidentKernelBufferAccess::Write),
+                ],
+            )
+        }
+    };
+    let workgroup_count_x = work_item_count
+        .checked_add(DISTRIBUTED_SUM_F32_LOCAL_SIZE_X - 1)
+        .and_then(|count| count.checked_div(DISTRIBUTED_SUM_F32_LOCAL_SIZE_X))
+        .and_then(|count| u32::try_from(count).ok())
+        .ok_or_else(|| {
+            VulkanDistributedDispatchRunnerError(
+                "distributed reduction workgroup count overflowed".to_string(),
+            )
+        })?;
+    let resident_dispatch = device
+        .create_resident_kernel_dispatch_labeled(
+            &spirv,
+            &bindings,
             workgroup_count_x,
             u32::try_from(DISTRIBUTED_SUM_F32_LOCAL_SIZE_X)
                 .expect("distributed reduction local size fits u32"),

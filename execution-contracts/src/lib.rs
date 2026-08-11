@@ -95,10 +95,18 @@ pub enum ReductionOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReductionFinalization {
+    StoreF32,
+    AddBf16ResidualToBf16 { residual_binding: u32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReductionContract {
     pub operation: ReductionOperation,
     pub dimension_name: String,
+    pub finalization: ReductionFinalization,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,6 +478,27 @@ fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), Contrac
                 && contract.formats.accumulation != "f32"
             {
                 return invalid("sum_f32 reduction requires f32 accumulation");
+            }
+            if let ReductionFinalization::AddBf16ResidualToBf16 { residual_binding } =
+                &reduction.finalization
+            {
+                let elements = contract.geometry.dimensions[&reduction.dimension_name];
+                if !elements.is_multiple_of(2) {
+                    return invalid("BF16 residual finalization requires an even element count");
+                }
+                let residual = contract
+                    .inputs
+                    .iter()
+                    .find(|input| input.binding == *residual_binding)
+                    .ok_or_else(|| {
+                        ContractError(
+                            "BF16 residual finalization binding must name a contract input"
+                                .to_string(),
+                        )
+                    })?;
+                if residual.distribution != InputDistribution::Replicated {
+                    return invalid("BF16 residual finalization input must be replicated");
+                }
             }
         }
     }
@@ -846,6 +875,7 @@ mod tests {
             reduction: Some(ReductionContract {
                 operation: ReductionOperation::SumF32,
                 dimension_name: "output_rows".to_string(),
+                finalization: ReductionFinalization::StoreF32,
             }),
         };
         contract.partition_launch = Some(PartitionLaunch {
@@ -855,6 +885,71 @@ mod tests {
             count_push_constant: Some("input_count".to_string()),
         });
         contract.validate().unwrap();
+
+        contract.inputs.push(InputContract {
+            binding: 3,
+            distribution: InputDistribution::Replicated,
+            dimension: None,
+            alignment_elements: None,
+        });
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::AddBf16ResidualToBf16 {
+                residual_binding: 3,
+            };
+        contract.validate().unwrap();
+
+        contract.inputs[1].distribution = InputDistribution::Sharded;
+        contract.inputs[1].dimension = Some(0);
+        contract.inputs[1].alignment_elements = Some(128);
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("must be replicated")
+        );
+
+        contract.inputs[1] = InputContract {
+            binding: 3,
+            distribution: InputDistribution::Replicated,
+            dimension: None,
+            alignment_elements: None,
+        };
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::AddBf16ResidualToBf16 {
+                residual_binding: 99,
+            };
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("must name a contract input")
+        );
+
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::AddBf16ResidualToBf16 {
+                residual_binding: 3,
+            };
+        contract
+            .geometry
+            .dimensions
+            .insert("output_rows".to_string(), 11_007);
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("even element count")
+        );
+
+        contract.inputs.pop();
+        contract
+            .geometry
+            .dimensions
+            .insert("output_rows".to_string(), 11_008);
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::StoreF32;
 
         contract.inputs[0] = InputContract {
             binding: 0,
@@ -953,7 +1048,8 @@ mod tests {
             "collection": "reduced",
             "reduction": {
                 "operation": "vendor_magic",
-                "dimension_name": "output_rows"
+                "dimension_name": "output_rows",
+                "finalization": {"kind": "store_f32"}
             },
         });
         assert!(serde_json::from_value::<PhysicalExecutionContract>(value).is_err());

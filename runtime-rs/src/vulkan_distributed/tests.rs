@@ -12,8 +12,8 @@ mod tests {
         ExecutionGeometry, ExecutionPhase, ExecutionStrategy, InputContract,
         InputDistribution, OutputCollection, OutputContract, ParameterPartition,
         ParameterPartitionKind, PartitionExtent, PartitionLaunch, PartitionOrigin,
-        PhysicalExecutionContract, PhysicalFormats, ReductionContract, ReductionOperation,
-        WorkgroupXMapping,
+        PhysicalExecutionContract, PhysicalFormats, ReductionContract,
+        ReductionFinalization, ReductionOperation, WorkgroupXMapping,
         PHYSICAL_EXECUTION_CONTRACT_SCHEMA,
     };
 
@@ -350,10 +350,13 @@ mod tests {
     fn embedded_distributed_sum_has_exact_typed_control() {
         let words = distributed_sum_f32_spirv_words().unwrap();
         assert_eq!(words.first().copied(), Some(0x0723_0203));
+        let bf16_words = distributed_sum_f32_add_bf16_residual_spirv_words().unwrap();
+        assert_eq!(bf16_words.first().copied(), Some(0x0723_0203));
         let reduction = VulkanDistributedReductionPlan {
             operation: ReductionOperation::SumF32,
             element_count: 4096,
             partial_byte_capacity: 4096 * 4,
+            finalization: VulkanDistributedReductionFinalizationPlan::StoreF32,
         };
         let bytes = distributed_sum_f32_push_constants(&reduction, 5, 3).unwrap();
         assert_eq!(bytes.len(), 12);
@@ -404,6 +407,7 @@ mod tests {
                 reduction: Some(ReductionContract {
                     operation: ReductionOperation::SumF32,
                     dimension_name: "output_elements".to_string(),
+                    finalization: ReductionFinalization::StoreF32,
                 }),
             },
         );
@@ -511,8 +515,66 @@ mod tests {
                 operation: ReductionOperation::SumF32,
                 element_count: 4,
                 partial_byte_capacity: 16,
+                finalization: VulkanDistributedReductionFinalizationPlan::StoreF32,
             })
         );
+
+        let mut residual_finalized = prepared.clone();
+        let residual_contract =
+            &mut residual_finalized.dispatches[0].physical_execution_contracts[0];
+        residual_contract
+            .inputs
+            .push(test_input(3, InputDistribution::Replicated, None));
+        residual_contract.outputs[0]
+            .reduction
+            .as_mut()
+            .unwrap()
+            .finalization = ReductionFinalization::AddBf16ResidualToBf16 {
+            residual_binding: 3,
+        };
+        let VulkanDescriptorResourceAddress::ActivationSlot {
+            byte_capacity,
+            signal_byte_capacity,
+            ..
+        } = &mut residual_finalized.dispatches[0].descriptors[1].resource
+        else {
+            panic!("fixture output is an activation slot");
+        };
+        *byte_capacity = 8;
+        *signal_byte_capacity = 8;
+        residual_finalized.dispatches[0].descriptors.push(activation(
+            3,
+            VulkanKernelDescriptorUsage::InputSignal,
+            "residual",
+            8,
+        ));
+        residual_finalized.total_descriptor_count = 4;
+        let residual_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &residual_finalized)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a"]),
+            &[],
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            residual_plan.dispatches[0].reduction,
+            Some(VulkanDistributedReductionPlan {
+                operation: ReductionOperation::SumF32,
+                element_count: 4,
+                partial_byte_capacity: 16,
+                finalization:
+                    VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
+                        residual_input_index: 1,
+                    },
+            })
+        );
+        assert_eq!(
+            residual_plan.dispatches[0].auxiliary_input_activations[0].signal_id,
+            "residual"
+        );
+
         let buffer_plan =
             VulkanDistributedActivationBufferPlan::from_execution_plan(&plan).unwrap();
         assert_eq!(buffer_plan.allocation_count, 3);

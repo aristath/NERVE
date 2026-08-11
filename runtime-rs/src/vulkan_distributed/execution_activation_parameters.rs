@@ -1207,6 +1207,13 @@ pub struct VulkanDistributedReductionPlan {
     pub operation: ReductionOperation,
     pub element_count: usize,
     pub partial_byte_capacity: usize,
+    pub finalization: VulkanDistributedReductionFinalizationPlan,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VulkanDistributedReductionFinalizationPlan {
+    StoreF32,
+    AddBf16ResidualToBf16 { residual_input_index: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

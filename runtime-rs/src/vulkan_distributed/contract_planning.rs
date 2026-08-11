@@ -1,7 +1,7 @@
 use nerve_execution_contracts::{
     ExecutionForm, ExecutionPhase, InputDistribution, OutputCollection,
     ParameterPartitionKind, PartitionOrigin, PhysicalExecutionContract,
-    ReductionOperation, WorkgroupXMapping,
+    ReductionFinalization, ReductionOperation, WorkgroupXMapping,
 };
 
 struct ContractParameterSlice<'a> {
@@ -287,19 +287,60 @@ fn plan_contract_dispatch(
             let partial_byte_capacity = element_count.checked_mul(size_of::<f32>()).ok_or_else(|| {
                 dispatch_error(dispatch, "reduction partial byte capacity overflowed".to_string())
             })?;
-            if output_activation.signal_byte_capacity != partial_byte_capacity {
-                return Err(dispatch_error(
-                    dispatch,
-                    format!(
-                        "sum_f32 reduction produces {partial_byte_capacity} bytes but output signal {} has {} bytes",
-                        output_activation.signal_id, output_activation.signal_byte_capacity
-                    ),
-                ));
-            }
+            let finalization = match &reduction.finalization {
+                ReductionFinalization::StoreF32 => {
+                    if output_activation.signal_byte_capacity != partial_byte_capacity {
+                        return Err(dispatch_error(
+                            dispatch,
+                            format!(
+                                "sum_f32 reduction produces {partial_byte_capacity} bytes but output signal {} has {} bytes",
+                                output_activation.signal_id,
+                                output_activation.signal_byte_capacity
+                            ),
+                        ));
+                    }
+                    VulkanDistributedReductionFinalizationPlan::StoreF32
+                }
+                ReductionFinalization::AddBf16ResidualToBf16 { residual_binding } => {
+                    let residual_input_index = contract
+                        .inputs
+                        .iter()
+                        .position(|input| input.binding == *residual_binding)
+                        .ok_or_else(|| {
+                            dispatch_error(
+                                dispatch,
+                                "BF16 reduction residual binding is absent".to_string(),
+                            )
+                        })?;
+                    let bf16_byte_capacity = element_count.checked_mul(2).ok_or_else(|| {
+                        dispatch_error(
+                            dispatch,
+                            "BF16 reduction output capacity overflowed".to_string(),
+                        )
+                    })?;
+                    let residual_activation = &inputs[residual_input_index].1;
+                    if residual_activation.signal_byte_capacity != bf16_byte_capacity
+                        || output_activation.signal_byte_capacity != bf16_byte_capacity
+                    {
+                        return Err(dispatch_error(
+                            dispatch,
+                            format!(
+                                "BF16 reduction finalization requires {bf16_byte_capacity} residual and output bytes, found {} and {}",
+                                residual_activation.signal_byte_capacity,
+                                output_activation.signal_byte_capacity
+                            ),
+                        ));
+                    }
+                    VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
+                        residual_input_index,
+                    }
+                }
+            };
             Ok(VulkanDistributedReductionPlan {
                 operation: reduction.operation,
                 element_count,
                 partial_byte_capacity,
+                finalization,
             })
         })
         .transpose()?;

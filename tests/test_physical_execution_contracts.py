@@ -72,6 +72,7 @@ def partial_output_contract() -> dict[str, object]:
         "reduction": {
             "operation": "sum_f32",
             "dimension_name": "output_rows",
+            "finalization": {"kind": "store_f32"},
         },
     }
     contract["partition_extent"] = {
@@ -95,6 +96,7 @@ def test_partial_output_requires_typed_f32_sum_reduction() -> None:
     contract["outputs"][0]["reduction"] = {
         "operation": "vendor_magic",
         "dimension_name": "output_rows",
+        "finalization": {"kind": "store_f32"},
     }
     with pytest.raises(PhysicalExecutionContractError, match="reduction"):
         validate_physical_execution_contract(contract)
@@ -107,6 +109,51 @@ def test_partial_output_requires_typed_f32_sum_reduction() -> None:
     contract = partial_output_contract()
     contract["outputs"][0]["reduction"]["dimension_name"] = "missing"
     with pytest.raises(PhysicalExecutionContractError, match="geometry dimension"):
+        validate_physical_execution_contract(contract)
+
+
+def test_bf16_residual_reduction_finalization_is_typed_and_replicated() -> None:
+    contract = partial_output_contract()
+    contract["inputs"].append({"binding": 3, "distribution": "replicated"})
+    contract["outputs"][0]["reduction"]["finalization"] = {
+        "kind": "add_bf16_residual_to_bf16",
+        "residual_binding": 3,
+    }
+    validate_physical_execution_contract(contract)
+
+    contract["inputs"][1] = {
+        "binding": 3,
+        "distribution": "sharded",
+        "dimension": 0,
+        "alignment_elements": 128,
+    }
+    with pytest.raises(PhysicalExecutionContractError, match="must be replicated"):
+        validate_physical_execution_contract(contract)
+
+    contract = partial_output_contract()
+    contract["outputs"][0]["reduction"]["finalization"] = {
+        "kind": "add_bf16_residual_to_bf16",
+        "residual_binding": 99,
+    }
+    with pytest.raises(PhysicalExecutionContractError, match="contract input"):
+        validate_physical_execution_contract(contract)
+
+    contract = partial_output_contract()
+    contract["inputs"].append({"binding": 3, "distribution": "replicated"})
+    contract["outputs"][0]["reduction"]["finalization"] = {
+        "kind": "add_bf16_residual_to_bf16",
+        "residual_binding": 3,
+    }
+    contract["geometry"]["dimensions"]["output_rows"] -= 1
+    with pytest.raises(PhysicalExecutionContractError, match="even element count"):
+        validate_physical_execution_contract(contract)
+
+    contract = partial_output_contract()
+    contract["outputs"][0]["reduction"]["finalization"] = {
+        "kind": "store_f32",
+        "residual_binding": 3,
+    }
+    with pytest.raises(PhysicalExecutionContractError, match="unknown fields"):
         validate_physical_execution_contract(contract)
 
 
