@@ -1975,6 +1975,7 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
         vec![
             VulkanDistributedDispatchShard {
                 device_id: "gpu0".to_string(),
+                selected_resource_indices: BTreeMap::new(),
                 row_start: 0,
                 row_count: 128,
                 workgroup_count_x: 8,
@@ -1990,6 +1991,7 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
             },
             VulkanDistributedDispatchShard {
                 device_id: "gpu1".to_string(),
+                selected_resource_indices: BTreeMap::new(),
                 row_start: 128,
                 row_count: 128,
                 workgroup_count_x: 8,

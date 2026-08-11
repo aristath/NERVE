@@ -35,6 +35,8 @@ pub struct VulkanDistributedSelectedResourceOwnership {
 struct VulkanDistributedSelectedResourceSelectorIdentity {
     execution_scope: String,
     component_id: String,
+    node_id: String,
+    domain_id: String,
     selection_signal: String,
     resource_count: usize,
     selection_count_per_activation: usize,
@@ -81,6 +83,8 @@ impl VulkanDistributedSelectedResourceStorePlan {
                 let identity = VulkanDistributedSelectedResourceSelectorIdentity {
                     execution_scope: partition.execution_scope.clone(),
                     component_id: dispatch.component_id.clone(),
+                    node_id: partition.node_id.clone(),
+                    domain_id: partition.domain_id.clone(),
                     selection_signal: partition.selection_signal.clone(),
                     resource_count: partition.resource_count,
                     selection_count_per_activation: partition.selection_count_per_activation,
@@ -104,29 +108,38 @@ impl VulkanDistributedSelectedResourceStorePlan {
                             dispatch.component_id, dispatch.node_id, shard.device_id
                         )));
                     }
-                    let end = shard.row_start.checked_add(shard.row_count).ok_or_else(|| {
-                        VulkanDistributedPlanError(
-                            "selected resource shard range overflowed".to_string(),
-                        )
-                    })?;
-                    if shard.row_count == 0 || end > partition.resource_count {
+                    let resource_indices = shard
+                        .selected_resource_indices
+                        .get(&partition.selector_id)
+                        .ok_or_else(|| {
+                            VulkanDistributedPlanError(format!(
+                                "selected resource shard on {:?} has no exact ownership for selector {:?}",
+                                shard.device_id, partition.selector_id,
+                            ))
+                        })?;
+                    if resource_indices.is_empty()
+                        || resource_indices.windows(2).any(|pair| pair[0] >= pair[1])
+                        || resource_indices
+                            .iter()
+                            .any(|index| *index >= partition.resource_count)
+                    {
                         return Err(VulkanDistributedPlanError(format!(
-                            "selected resource shard {}..{} exceeds selector {:?} resource count {}",
-                            shard.row_start, end, partition.selector_id, partition.resource_count
+                            "selected resource shard on {:?} has invalid ownership for selector {:?}",
+                            shard.device_id, partition.selector_id,
                         )));
                     }
                     let owned = resources_by_device_selector
                         .entry((shard.device_id.clone(), partition.selector_id.clone()))
                         .or_default();
-                    for resource_index in shard.row_start..end {
-                        coverage[resource_index] = coverage[resource_index]
+                    for resource_index in resource_indices {
+                        coverage[*resource_index] = coverage[*resource_index]
                             .checked_add(1)
                             .ok_or_else(|| {
                                 VulkanDistributedPlanError(
                                     "selected resource coverage count overflowed".to_string(),
                                 )
                             })?;
-                        let group_id = partition.atomic_group_ids[resource_index].clone();
+                        let group_id = partition.atomic_group_ids[*resource_index].clone();
                         let group_key = (partition.selector_id.clone(), group_id.clone());
                         if let Some(existing_device) =
                             group_devices.insert(group_key, shard.device_id.clone())
@@ -137,7 +150,7 @@ impl VulkanDistributedSelectedResourceStorePlan {
                                 shard.device_id
                             )));
                         }
-                        owned.insert(resource_index);
+                        owned.insert(*resource_index);
                     }
                 }
                 if coverage.iter().any(|count| *count != 1) {

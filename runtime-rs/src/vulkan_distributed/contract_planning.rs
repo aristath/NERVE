@@ -569,6 +569,21 @@ fn plan_contract_dispatch(
             };
             Ok(VulkanDistributedDispatchShard {
                 device_id: device_id.to_string(),
+                selected_resource_indices: if distribution
+                    == VulkanDistributedDispatchDistribution::ExpertRange
+                {
+                    selected_resource_partitions
+                        .iter()
+                        .map(|partition| {
+                            (
+                                partition.selector_id.clone(),
+                                (logical_start..logical_start + logical_count).collect(),
+                            )
+                        })
+                        .collect()
+                } else {
+                    BTreeMap::new()
+                },
                 row_start: logical_start,
                 row_count: logical_count,
                 workgroup_count_x,
@@ -832,6 +847,8 @@ fn resolve_selected_resource_partitions(
             Ok(VulkanDistributedSelectedResourcePartitionPlan {
                 execution_scope: execution_scope.to_string(),
                 selector_id: selector.id.clone(),
+                node_id: selector.node_id.clone(),
+                domain_id: selector.domain_id.clone(),
                 selection_signal: partition.selection_signal.clone(),
                 address_table_binding: usize::try_from(partition.address_table_binding)
                     .map_err(|_| dispatch_error(dispatch, "dynamic binding exceeds usize".to_string()))?,

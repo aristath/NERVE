@@ -1,6 +1,9 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanDistributedDispatchShard {
     pub device_id: String,
+    /// Exact selector-local resources owned by this shard. An empty map means
+    /// the dispatch uses ordinary contiguous tensor partitioning.
+    pub selected_resource_indices: BTreeMap<String, Vec<usize>>,
     pub row_start: usize,
     pub row_count: usize,
     pub workgroup_count_x: u32,

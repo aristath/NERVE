@@ -1,5 +1,5 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v2";
+    "nerve.vulkan_placement_calibration_catalog.v3";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -115,6 +115,7 @@ pub struct VulkanPlacementShardIdentity {
     pub distribution: String,
     pub logical_start: usize,
     pub logical_count: usize,
+    pub selected_resource_indices: BTreeMap<String, Vec<usize>>,
     pub parameter_bytes: usize,
 }
 
@@ -548,8 +549,13 @@ fn validate_observation(
         || case.shards.iter().any(|shard| {
             !devices.contains(shard.physical_device_id.as_str())
                 || shard.logical_count == 0
-                || shard.parameter_bytes == 0
+                || (shard.parameter_bytes == 0 && shard.selected_resource_indices.is_empty())
                 || shard.distribution.is_empty()
+                || shard.selected_resource_indices.iter().any(|(selector_id, indices)| {
+                    selector_id.is_empty()
+                        || indices.is_empty()
+                        || indices.windows(2).any(|pair| pair[0] >= pair[1])
+                })
         })
         || case.transports.iter().any(|route| {
             !devices.contains(route.source_physical_device_id.as_str())
@@ -673,6 +679,7 @@ mod placement_calibration_catalog_tests {
                     distribution: "output_rows".to_string(),
                     logical_start: 0,
                     logical_count: 8,
+                    selected_resource_indices: BTreeMap::new(),
                     parameter_bytes: 16,
                 }],
                 input_physical_device_id: "gpu0".to_string(),
@@ -715,6 +722,36 @@ mod placement_calibration_catalog_tests {
             })
             .unwrap();
         catalog
+    }
+
+    #[test]
+    fn selected_resource_shard_identity_is_exact_and_allows_dynamic_parameters() {
+        let mut selected = observation(behavior(), "gpu0", "gpu0", 100, 16);
+        selected.execution_case.shards[0].distribution = "expert_range".to_string();
+        selected.execution_case.shards[0].parameter_bytes = 0;
+        selected.execution_case.shards[0].selected_resource_indices = BTreeMap::from([(
+            "selector".to_string(),
+            vec![0, 2, 4, 6],
+        )]);
+        let mut catalog = catalog_with_reference();
+        catalog.record_observation(selected.clone()).unwrap();
+
+        let mut different_ownership = selected.clone();
+        *different_ownership.execution_case.shards[0]
+            .selected_resource_indices
+            .get_mut("selector")
+            .unwrap() = vec![1, 3, 5, 7];
+        assert_ne!(
+            selected.execution_case,
+            different_ownership.execution_case
+        );
+
+        let mut malformed = selected;
+        *malformed.execution_case.shards[0]
+            .selected_resource_indices
+            .get_mut("selector")
+            .unwrap() = vec![2, 1];
+        assert!(catalog.record_observation(malformed).is_err());
     }
 
     #[test]

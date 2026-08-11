@@ -677,6 +677,16 @@ fn merged_distributed_dispatch_shard(
     };
     Ok(VulkanDistributedDispatchShard {
         device_id: first.device_id.clone(),
+        selected_resource_indices: dispatch
+            .selected_resource_partitions
+            .iter()
+            .map(|partition| {
+                (
+                    partition.selector_id.clone(),
+                    (0..partition.resource_count).collect(),
+                )
+            })
+            .collect(),
         row_start: first.row_start,
         row_count,
         workgroup_count_x,
@@ -816,6 +826,7 @@ fn sampled_distributed_dispatch_shard(
         .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
     Ok(VulkanDistributedDispatchShard {
         device_id: device_id.to_string(),
+        selected_resource_indices: source.selected_resource_indices.clone(),
         row_start: source.row_start,
         row_count,
         workgroup_count_x,
@@ -1526,6 +1537,8 @@ pub struct VulkanDistributedDispatchPlan {
 pub struct VulkanDistributedSelectedResourcePartitionPlan {
     pub execution_scope: String,
     pub selector_id: String,
+    pub node_id: String,
+    pub domain_id: String,
     pub selection_signal: String,
     pub address_table_binding: usize,
     pub parameter_slots_binding: usize,

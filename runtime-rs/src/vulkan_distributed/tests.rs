@@ -1810,6 +1810,52 @@ mod tests {
             ownership.device("helper").unwrap().selectors[0].owned_resource_indices,
             vec![4, 5, 6, 7]
         );
+        let mut rewired = plans.clone();
+        rewired
+            .apply_selected_resource_placements(&[VulkanSelectedResourcePlacementPlan {
+                selector_id: "routed-experts".to_string(),
+                assignments: (0..8)
+                    .map(|resource_index| VulkanSelectedResourceAssignment {
+                        resource_index,
+                        device_id: if resource_index % 2 == 0 {
+                            "owner".to_string()
+                        } else {
+                            "helper".to_string()
+                        },
+                    })
+                    .collect(),
+                device_loads: Vec::new(),
+                maximum_first_moment_ns: 0,
+                maximum_second_moment_ns2: 0,
+            }])
+            .unwrap();
+        let rewired_ownership =
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&rewired)
+                .unwrap();
+        assert_eq!(
+            rewired_ownership
+                .device("owner")
+                .unwrap()
+                .selectors[0]
+                .owned_resource_indices,
+            vec![0, 2, 4, 6]
+        );
+        assert_eq!(
+            rewired_ownership
+                .device("helper")
+                .unwrap()
+                .selectors[0]
+                .owned_resource_indices,
+            vec![1, 3, 5, 7]
+        );
+        assert_eq!(
+            distributed_shard_push_constants(
+                &rewired.decode.dispatches[0],
+                &rewired.decode.dispatches[0].shards[0],
+            )
+            .unwrap(),
+            [0u32.to_le_bytes(), 8u32.to_le_bytes()].concat(),
+        );
         let exclusions = VulkanDistributedParameterExclusionPlan::from_execution_plan_set(
             &plans,
             &[("owner", &prepared)],
@@ -1829,8 +1875,11 @@ mod tests {
         assert!(phase_error.to_string().contains("assign different selected resources"));
 
         let mut incomplete = plan.clone();
-        incomplete.dispatches[0].shards[1].row_start = 5;
-        incomplete.dispatches[0].shards[1].row_count = 3;
+        incomplete.dispatches[0].shards[1]
+            .selected_resource_indices
+            .get_mut("routed-experts")
+            .unwrap()
+            .remove(0);
         let coverage_error =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&incomplete)
                 .unwrap_err();

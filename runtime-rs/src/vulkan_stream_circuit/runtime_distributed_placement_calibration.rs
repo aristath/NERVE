@@ -407,6 +407,7 @@ fn distributed_calibration_execution_case(
                 .to_string(),
                 logical_start: shard.row_start,
                 logical_count: shard.row_count,
+                selected_resource_indices: shard.selected_resource_indices.clone(),
                 parameter_bytes,
             });
         }

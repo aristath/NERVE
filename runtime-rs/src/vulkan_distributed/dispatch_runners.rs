@@ -93,8 +93,41 @@ pub(crate) fn distributed_shard_push_constants(
         VulkanDistributedDispatchDistribution::OutputRows => Ok(Vec::new()),
         VulkanDistributedDispatchDistribution::InputColumns
         | VulkanDistributedDispatchDistribution::ExpertRange => {
-            let mut bytes = planned_shard.base_workgroup_z.to_le_bytes().to_vec();
-            let partition_count = u32::try_from(planned_shard.row_count).map_err(|_| {
+            let (partition_start, partition_count) = if planned_shard
+                .selected_resource_indices
+                .is_empty()
+            {
+                (planned_shard.base_workgroup_z, planned_shard.row_count)
+            } else {
+                let resource_counts = planned_dispatch
+                    .selected_resource_partitions
+                    .iter()
+                    .map(|partition| partition.resource_count)
+                    .collect::<BTreeSet<_>>();
+                let [resource_count] = resource_counts.iter().copied().collect::<Vec<_>>()[..]
+                else {
+                    return Err(VulkanDistributedDispatchRunnerError(format!(
+                        "distributed selected-resource dispatch {}.{} has incompatible selector extents",
+                        planned_dispatch.component_id, planned_dispatch.node_id,
+                    )));
+                };
+                if planned_dispatch.selected_resource_partitions.len()
+                    != planned_shard.selected_resource_indices.len()
+                    || planned_dispatch.selected_resource_partitions.iter().any(|partition| {
+                        !planned_shard
+                            .selected_resource_indices
+                            .contains_key(&partition.selector_id)
+                    })
+                {
+                    return Err(VulkanDistributedDispatchRunnerError(format!(
+                        "distributed selected-resource dispatch {}.{} has incomplete shard ownership",
+                        planned_dispatch.component_id, planned_dispatch.node_id,
+                    )));
+                }
+                (0, resource_count)
+            };
+            let mut bytes = partition_start.to_le_bytes().to_vec();
+            let partition_count = u32::try_from(partition_count).map_err(|_| {
                 VulkanDistributedDispatchRunnerError(
                     "distributed repeated partition count exceeds u32".to_string(),
                 )
