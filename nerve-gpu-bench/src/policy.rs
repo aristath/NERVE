@@ -168,8 +168,7 @@ mod tests {
                 .skipped_targets
                 .iter()
                 .find(|target| {
-                    target.stable_target_id
-                        == "vulkan-uuid:22222222222222222222222222222222"
+                    target.stable_target_id == "vulkan-uuid:22222222222222222222222222222222"
                 })
                 .unwrap()
                 .reason,
