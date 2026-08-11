@@ -234,6 +234,56 @@ fn runtime_placement_calibration_groups_identical_complete_decode_transactions()
     );
 }
 
+#[test]
+fn runtime_placement_calibration_resolves_the_requested_component_phase_exactly() {
+    let mut runtime_model = fixture_model_runtime_model();
+    let execution = runtime_model.component_executions.first_mut().unwrap();
+    let component_id = execution.component_id.clone();
+    let decode_terminal = execution.kernels.last().unwrap().node_id.clone();
+    let mut prefill_terminal = execution.kernels.last().unwrap().clone();
+    prefill_terminal.execution_index += 1;
+    prefill_terminal.node_id = "fixture_prefill_terminal".to_string();
+    prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
+    execution.kernels.push(prefill_terminal);
+
+    let decode = vulkan_runtime_placement_calibration_target_for_component(
+        &runtime_model,
+        &component_id,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+    let prefill = vulkan_runtime_placement_calibration_target_for_component(
+        &runtime_model,
+        &component_id,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 64,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(decode.component_id, component_id);
+    assert_eq!(decode.component_ids, [component_id.clone()]);
+    assert_eq!(decode.terminal_node_id, decode_terminal);
+    assert_eq!(prefill.component_id, component_id);
+    assert_eq!(prefill.terminal_node_id, "fixture_prefill_terminal");
+    assert_ne!(decode.signature_id, prefill.signature_id);
+}
+
+#[test]
+fn runtime_placement_calibration_rejects_zero_width_prefill_target() {
+    let runtime_model = fixture_model_runtime_model();
+    let component_id = runtime_model.component_executions[0].component_id.clone();
+    let error = vulkan_runtime_placement_calibration_target_for_component(
+        &runtime_model,
+        &component_id,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 0,
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("positive prefill batch width"));
+}
+
 fn fixture_placement_costs(costs: &[(&str, &str, u64)]) -> VulkanRuntimePlacementCostModel {
     VulkanRuntimePlacementCostModel {
         component_execution: costs

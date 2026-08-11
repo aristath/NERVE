@@ -12,7 +12,6 @@ pub struct VulkanRuntimePlacementCalibrationTarget {
     pub component_ids: Vec<String>,
     pub terminal_node_id: String,
     pub implementation: String,
-    pub estimated_decode_work_units: u64,
     pub planned_resident_parameter_bytes: usize,
 }
 
@@ -231,6 +230,65 @@ impl VulkanRuntimePlacementCalibrationSuite {
 pub fn vulkan_runtime_placement_calibration_targets(
     runtime_model: &VulkanResidentRuntimeModel,
 ) -> Result<Vec<VulkanRuntimePlacementCalibrationTarget>, VulkanRuntimeResidencyPlanError> {
+    vulkan_runtime_placement_calibration_targets_for_phase(
+        runtime_model,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+}
+
+/// Resolves the exact compiler-emitted execution for one component and phase.
+/// This deliberately does not substitute a representative from a decode-only
+/// equivalence class: two components may share decode kernels while using
+/// different prefill artifacts or terminal dispatches.
+pub fn vulkan_runtime_placement_calibration_target_for_component(
+    runtime_model: &VulkanResidentRuntimeModel,
+    component_id: &str,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<VulkanRuntimePlacementCalibrationTarget, VulkanRuntimeResidencyPlanError> {
+    if component_id.is_empty() {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "runtime placement calibration requires a component ID".to_string(),
+        ));
+    }
+    if matches!(
+        phase,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 0
+        }
+    ) {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "runtime placement calibration requires a positive prefill batch width".to_string(),
+        ));
+    }
+    if !runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .any(|component| {
+            component.component_id == component_id
+                && component.runtime_role.is_signal_processor()
+        })
+    {
+        return Err(VulkanRuntimeResidencyPlanError(format!(
+            "runtime placement calibration found no signal processor {component_id:?}",
+        )));
+    }
+    let execution = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == component_id)
+        .ok_or_else(|| {
+            VulkanRuntimeResidencyPlanError(format!(
+                "runtime placement calibration found no execution for signal processor {component_id:?}",
+            ))
+        })?;
+    vulkan_runtime_placement_calibration_target_from_execution(component_id, execution, phase)
+}
+
+fn vulkan_runtime_placement_calibration_targets_for_phase(
+    runtime_model: &VulkanResidentRuntimeModel,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<Vec<VulkanRuntimePlacementCalibrationTarget>, VulkanRuntimeResidencyPlanError> {
     let signal_component_ids = runtime_model
         .circuit_graph
         .components
@@ -243,79 +301,90 @@ pub fn vulkan_runtime_placement_calibration_targets(
             "runtime placement calibration found no signal processor".to_string(),
         ));
     }
-    let executions = runtime_model
-        .component_executions
-        .iter()
-        .map(|execution| (execution.component_id.as_str(), execution))
-        .collect::<BTreeMap<_, _>>();
     let mut signature_target_indices = BTreeMap::<String, usize>::new();
     let mut targets = Vec::<VulkanRuntimePlacementCalibrationTarget>::new();
 
     for component_id in signal_component_ids {
-        let execution = executions.get(component_id.as_str()).ok_or_else(|| {
-            VulkanRuntimeResidencyPlanError(format!(
-                "runtime placement calibration found no execution for signal processor {component_id:?}",
-            ))
-        })?;
-        let mut decode_kernels = execution
-            .kernels
-            .iter()
-            .filter(|kernel| kernel.execution_domain.supports_decode())
-            .collect::<Vec<_>>();
-        decode_kernels.sort_by_key(|kernel| kernel.execution_index);
-        let terminal = decode_kernels.last().ok_or_else(|| {
-            VulkanRuntimeResidencyPlanError(format!(
-                "runtime placement calibration found no decode kernel for signal processor {component_id:?}",
-            ))
-        })?;
-        let signature_payload = serde_json::to_vec(&(
-            execution.operator_type.as_str(),
-            execution.implementation.as_str(),
-            decode_kernels
-                .iter()
-                .map(|kernel| {
-                    (
-                        kernel.execution_index,
-                        kernel.op.as_str(),
-                        &kernel.execution_domain,
-                        kernel.stream_control_binding,
-                        kernel.shader_path.as_str(),
-                        kernel.local_size_x,
-                        kernel.workgroup_count_x,
-                        &kernel.batch_mode,
-                        &kernel.batch_implementations,
-                        &kernel.resource_representation_dispatch,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        ))
-        .map_err(|error| {
-            VulkanRuntimeResidencyPlanError(format!(
-                "runtime placement calibration could not encode execution signature for {component_id:?}: {error}",
-            ))
-        })?;
-        let signature_id = format!("{:x}", Sha256::digest(&signature_payload));
-        if let Some(target_index) = signature_target_indices.get(&signature_id).copied() {
+        let target = vulkan_runtime_placement_calibration_target_for_component(
+            runtime_model,
+            &component_id,
+            phase,
+        )?;
+        if let Some(target_index) = signature_target_indices
+            .get(&target.signature_id)
+            .copied()
+        {
             targets[target_index].component_ids.push(component_id);
             continue;
         }
-        let estimated_decode_work_units = decode_kernels.iter().fold(0u64, |total, kernel| {
-            total.saturating_add(
-                u64::from(kernel.local_size_x).saturating_mul(u64::from(kernel.workgroup_count_x)),
-            )
-        });
-        signature_target_indices.insert(signature_id.clone(), targets.len());
-        targets.push(VulkanRuntimePlacementCalibrationTarget {
-            signature_id,
-            component_id: component_id.clone(),
-            component_ids: vec![component_id],
-            terminal_node_id: terminal.node_id.clone(),
-            implementation: execution.implementation.clone(),
-            estimated_decode_work_units,
-            planned_resident_parameter_bytes: 0,
-        });
+        signature_target_indices.insert(target.signature_id.clone(), targets.len());
+        targets.push(target);
     }
     Ok(targets)
+}
+
+fn vulkan_runtime_placement_calibration_target_from_execution(
+    component_id: &str,
+    execution: &VulkanResidentComponentExecutionSpec,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<VulkanRuntimePlacementCalibrationTarget, VulkanRuntimeResidencyPlanError> {
+    let mut kernels = execution
+        .kernels
+        .iter()
+        .filter(|kernel| match phase {
+            VulkanTargetedComponentExecutionPhase::Decode => {
+                kernel.execution_domain.supports_decode()
+            }
+            VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+                kernel.execution_domain.supports_prefill()
+            }
+        })
+        .collect::<Vec<_>>();
+    kernels.sort_by_key(|kernel| kernel.execution_index);
+    let phase_name = match phase {
+        VulkanTargetedComponentExecutionPhase::Decode => "decode",
+        VulkanTargetedComponentExecutionPhase::Prefill { .. } => "prefill",
+    };
+    let terminal = kernels.last().ok_or_else(|| {
+        VulkanRuntimeResidencyPlanError(format!(
+            "runtime placement calibration found no {phase_name} kernel for signal processor {component_id:?}",
+        ))
+    })?;
+    let signature_payload = serde_json::to_vec(&(
+        phase_name,
+        execution.operator_type.as_str(),
+        execution.implementation.as_str(),
+        kernels
+            .iter()
+            .map(|kernel| {
+                (
+                    kernel.execution_index,
+                    kernel.op.as_str(),
+                    &kernel.execution_domain,
+                    kernel.stream_control_binding,
+                    kernel.shader_path.as_str(),
+                    kernel.local_size_x,
+                    kernel.workgroup_count_x,
+                    &kernel.batch_mode,
+                    &kernel.batch_implementations,
+                    &kernel.resource_representation_dispatch,
+                )
+            })
+            .collect::<Vec<_>>(),
+    ))
+    .map_err(|error| {
+        VulkanRuntimeResidencyPlanError(format!(
+            "runtime placement calibration could not encode {phase_name} execution signature for {component_id:?}: {error}",
+        ))
+    })?;
+    Ok(VulkanRuntimePlacementCalibrationTarget {
+        signature_id: format!("{:x}", Sha256::digest(&signature_payload)),
+        component_id: component_id.to_string(),
+        component_ids: vec![component_id.to_string()],
+        terminal_node_id: terminal.node_id.clone(),
+        implementation: execution.implementation.clone(),
+        planned_resident_parameter_bytes: 0,
+    })
 }
 
 /// Measures every distinct compiled decode transaction on one physical device
