@@ -1,6 +1,7 @@
 use nerve_execution_contracts::{
-    ExecutionPhase, InputDistribution, OutputCollection, ParameterPartitionKind,
-    PartitionOrigin, PhysicalExecutionContract, WorkgroupXMapping,
+    ExecutionForm, ExecutionPhase, InputDistribution, OutputCollection,
+    ParameterPartitionKind, PartitionOrigin, PhysicalExecutionContract,
+    ReductionOperation, WorkgroupXMapping,
 };
 
 struct ContractParameterSlice<'a> {
@@ -236,12 +237,6 @@ fn plan_contract_dispatch(
             "distributed contract marks its output as local".to_string(),
         ));
     }
-    if output_contract.collection == OutputCollection::Reduced {
-        return Err(dispatch_error(
-            dispatch,
-            "partial-output reduction is not implemented for this contract".to_string(),
-        ));
-    }
     let output_binding = usize::try_from(output_contract.binding)
         .map_err(|_| dispatch_error(dispatch, "output binding exceeds usize".to_string()))?;
     let output_activation = distributed_activation(
@@ -257,6 +252,48 @@ fn plan_contract_dispatch(
             format!("output binding {output_binding} cannot be distributed"),
         )
     })?;
+    let reduction = output_contract
+        .reduction
+        .as_ref()
+        .map(|reduction| {
+            if contract.formats.accumulation != "f32" {
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "reduced output requires f32 accumulation, contract declares {:?}",
+                        contract.formats.accumulation
+                    ),
+                ));
+            }
+            let element_count = contract
+                .geometry
+                .dimensions
+                .get(&reduction.dimension_name)
+                .copied()
+                .ok_or_else(|| {
+                    dispatch_error(
+                        dispatch,
+                        format!(
+                            "reduction dimension {:?} is not declared",
+                            reduction.dimension_name
+                        ),
+                    )
+                })
+                .and_then(|elements| {
+                    usize::try_from(elements).map_err(|_| {
+                        dispatch_error(dispatch, "reduction element count exceeds usize".to_string())
+                    })
+                })?;
+            let partial_byte_capacity = element_count.checked_mul(size_of::<f32>()).ok_or_else(|| {
+                dispatch_error(dispatch, "reduction partial byte capacity overflowed".to_string())
+            })?;
+            Ok(VulkanDistributedReductionPlan {
+                operation: reduction.operation,
+                element_count,
+                partial_byte_capacity,
+            })
+        })
+        .transpose()?;
     if output_contract.collection == OutputCollection::Concatenated {
         logical_alignment = aligned_activation_partition(
             dispatch,
@@ -275,8 +312,8 @@ fn plan_contract_dispatch(
         logical_extent,
         &mut logical_alignment,
     )?;
-    let (distribution, workgroup_elements) = match launch.workgroup_x {
-        WorkgroupXMapping::Proportional => {
+    let (distribution, workgroup_elements) = match contract.execution_form {
+        ExecutionForm::ReplicatedInputPartitionedOutput => {
             let artifact_groups = usize::try_from(artifact.workgroup_count_x).map_err(|_| {
                 dispatch_error(dispatch, "artifact workgroup count exceeds usize".to_string())
             })?;
@@ -299,10 +336,15 @@ fn plan_contract_dispatch(
                 workgroup_elements,
             )
         }
-        WorkgroupXMapping::Repeated => (
+        ExecutionForm::PartitionedInputPartialOutput => (
+            VulkanDistributedDispatchDistribution::InputColumns,
+            1,
+        ),
+        ExecutionForm::WholeExpertOwnership => (
             VulkanDistributedDispatchDistribution::ExpertRange,
             1,
         ),
+        ExecutionForm::Local => unreachable!("distributed contract validation rejects local form"),
     };
     let raw_shards = distribute_rows(
         logical_extent,
@@ -377,22 +419,29 @@ fn plan_contract_dispatch(
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let shard_output_byte_capacity = reduction
+                .as_ref()
+                .map(|reduction| reduction.partial_byte_capacity)
+                .unwrap_or(output_activation.signal_byte_capacity);
             let output_range = contract_output_range(
                 dispatch,
                 output_contract.collection,
-                output_activation.signal_byte_capacity,
+                shard_output_byte_capacity,
                 logical_extent,
                 logical_start,
                 logical_count,
             )?;
-            let workgroup_count_x = match launch.workgroup_x {
-                WorkgroupXMapping::Proportional => u32::try_from(
+            let workgroup_count_x = match distribution {
+                VulkanDistributedDispatchDistribution::OutputRows => u32::try_from(
                     logical_count / workgroup_elements,
                 )
                 .map_err(|_| {
                     dispatch_error(dispatch, "shard workgroup count exceeds u32".to_string())
                 })?,
-                WorkgroupXMapping::Repeated => artifact.workgroup_count_x,
+                VulkanDistributedDispatchDistribution::InputColumns
+                | VulkanDistributedDispatchDistribution::ExpertRange => {
+                    artifact.workgroup_count_x
+                }
             };
             let base_workgroup_z = match launch.origin {
                 PartitionOrigin::LocalZero => 0,
@@ -444,12 +493,21 @@ fn plan_contract_dispatch(
         input_width,
         row_alignment: logical_alignment,
         input_activation: primary_input.clone(),
+        input_distribution: contract.inputs[0].distribution,
         auxiliary_input_activations: inputs
             .into_iter()
             .skip(1)
             .map(|(_, activation)| activation)
             .collect(),
+        auxiliary_input_distributions: contract
+            .inputs
+            .iter()
+            .skip(1)
+            .map(|input| input.distribution)
+            .collect(),
         output_activation,
+        output_collection: output_contract.collection,
+        reduction,
         distribution,
         distributed_parameter_byte_count,
         shards,
@@ -764,13 +822,13 @@ fn contract_output_range(
             logical_count,
             "output",
         ),
-        OutputCollection::Routed | OutputCollection::Retained => {
+        OutputCollection::Reduced | OutputCollection::Routed | OutputCollection::Retained => {
             Ok(VulkanDistributedActivationRange {
                 byte_offset: 0,
                 byte_count: byte_capacity,
             })
         }
-        OutputCollection::Local | OutputCollection::Reduced => {
+        OutputCollection::Local => {
             unreachable!("unsupported output collection was rejected before planning")
         }
     }

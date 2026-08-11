@@ -69,7 +69,15 @@ def partial_output_contract() -> dict[str, object]:
     contract["outputs"][0] = {
         "binding": 1,
         "collection": "reduced",
-        "reduction": "sum_f32",
+        "reduction": {
+            "operation": "sum_f32",
+            "dimension_name": "output_rows",
+        },
+    }
+    contract["partition_extent"] = {
+        "dimension_name": "input_width",
+        "elements": contract["geometry"]["dimensions"]["input_width"],
+        "alignment_elements": 128,
     }
     contract["partition_launch"] = {
         "workgroup_x": "repeated",
@@ -84,8 +92,21 @@ def test_partial_output_requires_typed_f32_sum_reduction() -> None:
     contract = partial_output_contract()
     validate_physical_execution_contract(contract)
 
-    contract["outputs"][0]["reduction"] = "vendor_magic"
+    contract["outputs"][0]["reduction"] = {
+        "operation": "vendor_magic",
+        "dimension_name": "output_rows",
+    }
     with pytest.raises(PhysicalExecutionContractError, match="reduction"):
+        validate_physical_execution_contract(contract)
+
+    contract = partial_output_contract()
+    contract["formats"]["accumulation"] = "bf16"
+    with pytest.raises(PhysicalExecutionContractError, match="f32 accumulation"):
+        validate_physical_execution_contract(contract)
+
+    contract = partial_output_contract()
+    contract["outputs"][0]["reduction"]["dimension_name"] = "missing"
+    with pytest.raises(PhysicalExecutionContractError, match="geometry dimension"):
         validate_physical_execution_contract(contract)
 
 

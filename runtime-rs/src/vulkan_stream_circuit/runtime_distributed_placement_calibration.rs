@@ -505,14 +505,16 @@ fn distributed_calibration_execution_strategy(
         );
     }
     let mut saw_output_rows = false;
+    let mut saw_input_columns = false;
     let mut saw_expert_range = false;
     for distribution in distributions {
         match distribution {
             VulkanDistributedDispatchDistribution::OutputRows => saw_output_rows = true,
+            VulkanDistributedDispatchDistribution::InputColumns => saw_input_columns = true,
             VulkanDistributedDispatchDistribution::ExpertRange => saw_expert_range = true,
         }
     }
-    if !saw_output_rows && !saw_expert_range {
+    if !saw_output_rows && !saw_input_columns && !saw_expert_range {
         return distributed_calibration_error(
             "distributed calibration strategy requires at least one partitioned dispatch",
         );
@@ -520,7 +522,8 @@ fn distributed_calibration_execution_strategy(
     if device_count == 1 {
         return Ok(VulkanPlacementExecutionStrategy::SingleDevice);
     }
-    match (saw_output_rows, saw_expert_range) {
+    let saw_tensor_parallel = saw_output_rows || saw_input_columns;
+    match (saw_tensor_parallel, saw_expert_range) {
         (true, false) => Ok(VulkanPlacementExecutionStrategy::TensorParallel),
         (false, true) => Ok(VulkanPlacementExecutionStrategy::WholeExpertParallel),
         (true, true) => Ok(VulkanPlacementExecutionStrategy::Hybrid),
@@ -533,6 +536,7 @@ fn distributed_calibration_distribution_name(
 ) -> &'static str {
     match distribution {
         VulkanDistributedDispatchDistribution::OutputRows => "output_rows",
+        VulkanDistributedDispatchDistribution::InputColumns => "input_columns",
         VulkanDistributedDispatchDistribution::ExpertRange => "expert_range",
     }
 }
@@ -1893,6 +1897,14 @@ mod runtime_distributed_placement_calibration_strategy_tests {
             distributed_calibration_execution_strategy(
                 2,
                 [VulkanDistributedDispatchDistribution::OutputRows],
+            )
+            .unwrap(),
+            VulkanPlacementExecutionStrategy::TensorParallel,
+        );
+        assert_eq!(
+            distributed_calibration_execution_strategy(
+                2,
+                [VulkanDistributedDispatchDistribution::InputColumns],
             )
             .unwrap(),
             VulkanPlacementExecutionStrategy::TensorParallel,

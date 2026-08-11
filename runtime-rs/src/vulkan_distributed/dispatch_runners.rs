@@ -9,13 +9,13 @@ fn distributed_shard_push_constants(
     planned_shard: &VulkanDistributedDispatchShard,
 ) -> Result<Vec<u8>, VulkanDistributedDispatchRunnerError> {
     let mut bytes = planned_shard.base_workgroup_z.to_le_bytes().to_vec();
-    if planned_dispatch.distribution == VulkanDistributedDispatchDistribution::ExpertRange {
-        let expert_count = u32::try_from(planned_shard.row_count).map_err(|_| {
+    if planned_dispatch.distribution != VulkanDistributedDispatchDistribution::OutputRows {
+        let partition_count = u32::try_from(planned_shard.row_count).map_err(|_| {
             VulkanDistributedDispatchRunnerError(
-                "distributed expert shard count exceeds u32".to_string(),
+                "distributed repeated partition count exceeds u32".to_string(),
             )
         })?;
-        bytes.extend_from_slice(&expert_count.to_le_bytes());
+        bytes.extend_from_slice(&partition_count.to_le_bytes());
     }
     Ok(bytes)
 }
@@ -199,6 +199,14 @@ impl VulkanDistributedDispatchRunners {
         F: FnMut(&str) -> Result<&'a VulkanComputeDevice, E>,
         E: Display,
     {
+        if let Some(planned) = execution_plan.dispatches.iter().find(|planned| {
+            planned.distribution == VulkanDistributedDispatchDistribution::InputColumns
+        }) {
+            return Err(VulkanDistributedDispatchRunnerError(format!(
+                "distributed dispatch {}.{} requires partial-output collection before scalar execution",
+                planned.component_id, planned.node_id
+            )));
+        }
         let mut dispatches = Vec::with_capacity(execution_plan.execution_islands.len());
         let mut shard_count = 0usize;
         for planned_island in &execution_plan.execution_islands {

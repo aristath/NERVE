@@ -12,7 +12,8 @@ mod tests {
         ExecutionGeometry, ExecutionPhase, ExecutionStrategy, InputContract,
         InputDistribution, OutputCollection, OutputContract, ParameterPartition,
         ParameterPartitionKind, PartitionExtent, PartitionLaunch, PartitionOrigin,
-        PhysicalExecutionContract, PhysicalFormats, WorkgroupXMapping,
+        PhysicalExecutionContract, PhysicalFormats, ReductionContract, ReductionOperation,
+        WorkgroupXMapping,
         PHYSICAL_EXECUTION_CONTRACT_SCHEMA,
     };
 
@@ -343,6 +344,228 @@ mod tests {
         let bytes =
             distributed_shard_push_constants(&output_rows, &output_rows.shards[1]).unwrap();
         assert_eq!(bytes, 0u32.to_le_bytes());
+    }
+
+    #[test]
+    fn plans_input_column_partials_with_typed_f32_reduction() {
+        let activation = |binding, usage, signal: &str, bytes| VulkanResolvedDescriptorBinding {
+            binding,
+            usage,
+            name: signal.to_string(),
+            resource: VulkanDescriptorResourceAddress::ActivationSlot {
+                component_id: "component".to_string(),
+                signal_id: signal.to_string(),
+                slot: binding,
+                byte_capacity: bytes,
+                signal_byte_capacity: bytes,
+            },
+        };
+        let mut contract = test_physical_contract(
+            "linear_partial",
+            "down-partial",
+            "down-partial.spv",
+            ExecutionStrategy::TensorParallel,
+            ExecutionForm::PartitionedInputPartialOutput,
+            12,
+            2,
+            2,
+            WorkgroupXMapping::Repeated,
+            PartitionOrigin::PushConstantU32,
+            Some("input_start"),
+            Some("input_count"),
+            vec![test_partition(
+                2,
+                ParameterPartitionKind::Contiguous,
+                2,
+                1,
+            )],
+            vec![test_input(0, InputDistribution::Sharded, Some(2))],
+            OutputContract {
+                binding: 1,
+                collection: OutputCollection::Reduced,
+                dimension: None,
+                alignment_elements: None,
+                reduction: Some(ReductionContract {
+                    operation: ReductionOperation::SumF32,
+                    dimension_name: "output_elements".to_string(),
+                }),
+            },
+        );
+        contract
+            .geometry
+            .dimensions
+            .insert("output_elements".to_string(), 4);
+        let dispatch = VulkanPreparedDispatch {
+            dispatch_index: 3,
+            kernel_id: "component.down-partial".to_string(),
+            component_id: "component".to_string(),
+            circuit_id: "circuit".to_string(),
+            node_index: 2,
+            node_id: "down-partial".to_string(),
+            op: "linear_partial".to_string(),
+            reusable_family_id: "down-partial-family".to_string(),
+            artifact_path: "down-partial.spv".to_string(),
+            entry_point: "main".to_string(),
+            local_size_x: 64,
+            descriptors: vec![
+                activation(0, VulkanKernelDescriptorUsage::InputSignal, "input", 24),
+                activation(1, VulkanKernelDescriptorUsage::OutputSignal, "output", 8),
+                VulkanResolvedDescriptorBinding {
+                    binding: 2,
+                    usage: VulkanKernelDescriptorUsage::Parameter,
+                    name: "down-input-major".to_string(),
+                    resource: VulkanDescriptorResourceAddress::PermanentParameter {
+                        param_id: "down-input-major".to_string(),
+                        tensor: "down-input-major".to_string(),
+                        byte_count: Some(96),
+                    },
+                },
+            ],
+            push_constants: vec![
+                VulkanKernelScalarBinding {
+                    name: "input_start".to_string(),
+                    scalar_type: "u32".to_string(),
+                    source: VulkanKernelScalarSource::PushConstant,
+                },
+                VulkanKernelScalarBinding {
+                    name: "input_count".to_string(),
+                    scalar_type: "u32".to_string(),
+                    source: VulkanKernelScalarSource::PushConstant,
+                },
+            ],
+            stream_control_binding: None,
+            physical_execution_contracts: vec![contract.clone()],
+        };
+        let prepared = VulkanPreparedDispatchPlan {
+            backend_id: "vulkan_stream_circuit".to_string(),
+            reusable_family_count: 1,
+            dispatches: vec![dispatch.clone()],
+            total_descriptor_count: 3,
+        };
+        let tensor_index = TensorIndex {
+            schema: "nerve.tensor_index.v1".to_string(),
+            tensors: BTreeMap::from([(
+                "down-input-major".to_string(),
+                TensorMetadata {
+                    dtype: "BF16".to_string(),
+                    shape: vec![12, 4],
+                    logical_shape: Some(vec![4, 12]),
+                    parameter_count: Some(48),
+                    byte_count: Some(96),
+                    data_offsets: Some(vec![0, 96]),
+                    source_file: Some("weights.safetensors".to_string()),
+                    data_sha256: None,
+                    layout: Some("row_major".to_string()),
+                },
+            )]),
+        };
+        let artifact = VulkanReusableKernelArtifact {
+            family_id: "down-partial-family".to_string(),
+            op: "linear_partial".to_string(),
+            path: "down-partial.spv".to_string(),
+            entry_point: "main".to_string(),
+            local_size_x: 64,
+            workgroup_count_x: 2,
+            descriptor_signature: Vec::new(),
+            push_constants: dispatch.push_constants.clone(),
+            stream_control_binding: None,
+        };
+        let artifacts = VulkanReusableKernelArtifactManifest::new(vec![artifact.clone()]);
+        let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a", "helper-b"]),
+            &[],
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(plan.distributed_parameter_byte_count, 96);
+        let planned = &plan.dispatches[0];
+        assert_eq!(
+            planned.distribution,
+            VulkanDistributedDispatchDistribution::InputColumns
+        );
+        assert_eq!(planned.input_distribution, InputDistribution::Sharded);
+        assert_eq!(planned.output_collection, OutputCollection::Reduced);
+        assert_eq!(
+            planned.reduction,
+            Some(VulkanDistributedReductionPlan {
+                operation: ReductionOperation::SumF32,
+                element_count: 4,
+                partial_byte_capacity: 16,
+            })
+        );
+        assert_eq!(
+            planned
+                .shards
+                .iter()
+                .map(|shard| (
+                    shard.device_id.as_str(),
+                    shard.row_start,
+                    shard.row_count,
+                    shard.workgroup_count_x,
+                    shard.input_range.byte_offset,
+                    shard.input_range.byte_count,
+                    shard.output_byte_offset,
+                    shard.output_byte_count,
+                    shard.parameters[0].byte_offset,
+                    shard.parameters[0].byte_count,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("owner", 0, 4, 2, 0, 8, 0, 16, 0, 32),
+                ("helper-a", 4, 4, 2, 8, 8, 0, 16, 32, 32),
+                ("helper-b", 8, 4, 2, 16, 8, 0, 16, 64, 32),
+            ]
+        );
+        let push = distributed_shard_push_constants(planned, &planned.shards[2]).unwrap();
+        assert_eq!(u32::from_le_bytes(push[..4].try_into().unwrap()), 8);
+        assert_eq!(u32::from_le_bytes(push[4..].try_into().unwrap()), 4);
+
+        let mut invalid_accumulation = prepared.clone();
+        invalid_accumulation.dispatches[0].physical_execution_contracts[0]
+            .formats
+            .accumulation = "bf16".to_string();
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &invalid_accumulation)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires f32 accumulation"));
+
+        let mut wrong_abi = prepared.clone();
+        wrong_abi.dispatches[0].push_constants.pop();
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &wrong_abi)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exact push-constant ABI"));
+
+        let mut strided_partition = prepared;
+        strided_partition.dispatches[0].physical_execution_contracts[0]
+            .parameter_partitions[0]
+            .dimension = 1;
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &strided_partition)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unsupported dimension 1"));
     }
 
     #[test]

@@ -96,7 +96,12 @@ class OutputContract(TypedDict, total=False):
     collection: OutputCollection
     dimension: int
     alignment_elements: int
-    reduction: ReductionOperation
+    reduction: ReductionContract
+
+
+class ReductionContract(TypedDict):
+    operation: ReductionOperation
+    dimension_name: str
 
 
 class LocalIntermediateContract(TypedDict):
@@ -973,7 +978,7 @@ def validate_physical_execution_contract(value: object) -> None:
     inputs = _list(contract["inputs"], "contract.inputs")
     outputs = _list(contract["outputs"], "contract.outputs")
     _validate_inputs(inputs)
-    _validate_outputs(outputs)
+    _validate_outputs(outputs, dimensions, formats["accumulation"])
     intermediates = _list(
         contract.get("local_intermediates", []), "contract.local_intermediates"
     )
@@ -1073,7 +1078,9 @@ def _validate_inputs(values: list[object]) -> None:
             _positive_int(item["alignment_elements"], f"{path}.alignment_elements")
 
 
-def _validate_outputs(values: list[object]) -> None:
+def _validate_outputs(
+    values: list[object], dimensions: dict[str, object], accumulation: object
+) -> None:
     if not values:
         _invalid("contract.outputs must not be empty")
     bindings: set[int] = set()
@@ -1101,7 +1108,28 @@ def _validate_outputs(values: list[object]) -> None:
         if (collection == "reduced") != ("reduction" in item):
             _invalid("only reduced outputs require a reduction operation")
         if "reduction" in item:
-            _enum(item["reduction"], _REDUCTION_OPERATIONS, f"{path}.reduction")
+            reduction = _mapping(item["reduction"], f"{path}.reduction")
+            _keys(
+                reduction,
+                {"operation", "dimension_name"},
+                {"operation", "dimension_name"},
+                f"{path}.reduction",
+            )
+            operation = _enum(
+                reduction["operation"],
+                _REDUCTION_OPERATIONS,
+                f"{path}.reduction.operation",
+            )
+            dimension_name = _non_empty_string(
+                reduction["dimension_name"],
+                f"{path}.reduction.dimension_name",
+            )
+            if dimension_name not in dimensions:
+                _invalid(
+                    "reduced output dimension must name a declared geometry dimension"
+                )
+            if operation == "sum_f32" and accumulation != "f32":
+                _invalid("sum_f32 reduction requires f32 accumulation")
 
 
 def _validate_intermediates(values: list[object]) -> None:

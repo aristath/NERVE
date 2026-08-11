@@ -94,6 +94,13 @@ pub enum ReductionOperation {
     SumF32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReductionContract {
+    pub operation: ReductionOperation,
+    pub dimension_name: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
@@ -203,7 +210,7 @@ pub struct OutputContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment_elements: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reduction: Option<ReductionOperation>,
+    pub reduction: Option<ReductionContract>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,6 +453,24 @@ fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), Contrac
         }
         if (output.collection == OutputCollection::Reduced) != output.reduction.is_some() {
             return invalid("only reduced outputs require a reduction operation");
+        }
+        if let Some(reduction) = &output.reduction {
+            require_non_empty(
+                &reduction.dimension_name,
+                "outputs.reduction.dimension_name",
+            )?;
+            if !contract
+                .geometry
+                .dimensions
+                .contains_key(&reduction.dimension_name)
+            {
+                return invalid("reduced output dimension must name a declared geometry dimension");
+            }
+            if reduction.operation == ReductionOperation::SumF32
+                && contract.formats.accumulation != "f32"
+            {
+                return invalid("sum_f32 reduction requires f32 accumulation");
+            }
         }
     }
     if contract.inputs.is_empty() || contract.outputs.is_empty() {
@@ -802,6 +827,11 @@ mod tests {
     fn partial_output_contract_requires_typed_f32_sum_reduction() {
         let mut contract = valid_contract();
         contract.execution_form = ExecutionForm::PartitionedInputPartialOutput;
+        contract.partition_extent = Some(PartitionExtent {
+            dimension_name: "input_width".to_string(),
+            elements: 4096,
+            alignment_elements: 128,
+        });
         contract.inputs[0] = InputContract {
             binding: 0,
             distribution: InputDistribution::Sharded,
@@ -813,7 +843,10 @@ mod tests {
             collection: OutputCollection::Reduced,
             dimension: None,
             alignment_elements: None,
-            reduction: Some(ReductionOperation::SumF32),
+            reduction: Some(ReductionContract {
+                operation: ReductionOperation::SumF32,
+                dimension_name: "output_rows".to_string(),
+            }),
         };
         contract.partition_launch = Some(PartitionLaunch {
             workgroup_x: WorkgroupXMapping::Repeated,
@@ -849,6 +882,23 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("reduced outputs require that execution form")
+        );
+
+        contract.execution_form = ExecutionForm::PartitionedInputPartialOutput;
+        contract
+            .outputs
+            .first_mut()
+            .unwrap()
+            .reduction
+            .as_mut()
+            .unwrap()
+            .dimension_name = "missing_dimension".to_string();
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("declared geometry dimension")
         );
     }
 
@@ -901,7 +951,10 @@ mod tests {
         value["outputs"][0] = serde_json::json!({
             "binding": 1,
             "collection": "reduced",
-            "reduction": "vendor_magic",
+            "reduction": {
+                "operation": "vendor_magic",
+                "dimension_name": "output_rows"
+            },
         });
         assert!(serde_json::from_value::<PhysicalExecutionContract>(value).is_err());
     }

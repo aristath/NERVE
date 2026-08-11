@@ -455,7 +455,8 @@ fn merged_distributed_dispatch_shard(
                 })
             })?,
         ),
-        VulkanDistributedDispatchDistribution::ExpertRange => (
+        VulkanDistributedDispatchDistribution::InputColumns
+        | VulkanDistributedDispatchDistribution::ExpertRange => (
             first.workgroup_count_x,
             first.output_byte_offset,
             first.output_byte_count,
@@ -524,6 +525,43 @@ fn sampled_distributed_dispatch_shard(
                 ))
             })
     };
+    let scaled_activation_range =
+        |range: &VulkanDistributedActivationRange,
+         distribution: InputDistribution,
+         label: &str| {
+            if distribution == InputDistribution::Sharded {
+                Ok(VulkanDistributedActivationRange {
+                    byte_offset: range.byte_offset,
+                    byte_count: scale(range.byte_count, label)?,
+                })
+            } else {
+                Ok(range.clone())
+            }
+        };
+    let input_range = scaled_activation_range(
+        &source.input_range,
+        dispatch.input_distribution,
+        "primary input range",
+    )?;
+    if source.auxiliary_input_ranges.len() != dispatch.auxiliary_input_distributions.len() {
+        return Err(VulkanDistributedPlanError(format!(
+            "distributed dispatch {}.{} has {} sampled auxiliary ranges for {} declared distributions",
+            dispatch.component_id,
+            dispatch.node_id,
+            source.auxiliary_input_ranges.len(),
+            dispatch.auxiliary_input_distributions.len(),
+        )));
+    }
+    let scaled_auxiliary_input_ranges = || {
+        source
+            .auxiliary_input_ranges
+            .iter()
+            .zip(&dispatch.auxiliary_input_distributions)
+            .map(|(range, distribution)| {
+                scaled_activation_range(range, *distribution, "auxiliary input range")
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
     let (workgroup_count_x, output_byte_count, auxiliary_input_ranges) =
         match dispatch.distribution {
             VulkanDistributedDispatchDistribution::OutputRows => {
@@ -537,24 +575,14 @@ fn sampled_distributed_dispatch_shard(
                         "sampled distributed workgroup count exceeds u32".to_string(),
                     )
                 })?;
-                let auxiliary = source
-                    .auxiliary_input_ranges
-                    .iter()
-                    .map(|range| {
-                        if range.byte_offset == source.output_byte_offset
-                            && range.byte_count == source.output_byte_count
-                        {
-                            VulkanDistributedActivationRange {
-                                byte_offset: range.byte_offset,
-                                byte_count: output_byte_count,
-                            }
-                        } else {
-                            range.clone()
-                        }
-                    })
-                    .collect();
+                let auxiliary = scaled_auxiliary_input_ranges()?;
                 (workgroup_count_x, output_byte_count, auxiliary)
             }
+            VulkanDistributedDispatchDistribution::InputColumns => (
+                source.workgroup_count_x,
+                source.output_byte_count,
+                scaled_auxiliary_input_ranges()?,
+            ),
             VulkanDistributedDispatchDistribution::ExpertRange => (
                 source.workgroup_count_x,
                 source.output_byte_count,
@@ -579,7 +607,7 @@ fn sampled_distributed_dispatch_shard(
         row_count,
         workgroup_count_x,
         base_workgroup_z: source.base_workgroup_z,
-        input_range: source.input_range.clone(),
+        input_range,
         auxiliary_input_ranges,
         output_byte_offset: source.output_byte_offset,
         output_byte_count,
@@ -1163,16 +1191,28 @@ pub struct VulkanDistributedDispatchPlan {
     pub input_width: usize,
     pub row_alignment: usize,
     pub input_activation: VulkanDistributedActivationSlot,
+    pub input_distribution: InputDistribution,
     pub auxiliary_input_activations: Vec<VulkanDistributedActivationSlot>,
+    pub auxiliary_input_distributions: Vec<InputDistribution>,
     pub output_activation: VulkanDistributedActivationSlot,
+    pub output_collection: OutputCollection,
+    pub reduction: Option<VulkanDistributedReductionPlan>,
     pub distribution: VulkanDistributedDispatchDistribution,
     pub distributed_parameter_byte_count: usize,
     pub shards: Vec<VulkanDistributedDispatchShard>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedReductionPlan {
+    pub operation: ReductionOperation,
+    pub element_count: usize,
+    pub partial_byte_capacity: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VulkanDistributedDispatchDistribution {
     OutputRows,
+    InputColumns,
     ExpertRange,
 }
 

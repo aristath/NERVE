@@ -239,6 +239,16 @@ impl VulkanDistributedComponentBatchRunners {
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        if let Some(planned) = execution_plan.dispatches.iter().find(|planned| {
+            planned.distribution == VulkanDistributedDispatchDistribution::InputColumns
+        }) {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "distributed component batch {}.{} requires partial-output collection",
+                    planned.component_id, planned.node_id
+                )),
+            ));
+        }
         let private_activation_specs =
             distributed_component_batch_private_activation_specs(execution_plan);
         let mut private_activation_buffers = BTreeMap::new();
@@ -454,6 +464,9 @@ impl VulkanDistributedComponentBatchRunners {
                                 ))
                             })?,
                     ),
+                    VulkanDistributedDispatchDistribution::InputColumns => {
+                        unreachable!("input-column component batches were rejected before allocation")
+                    }
                 };
                 let mut bindings = Vec::with_capacity(
                     2 + planned.auxiliary_input_activations.len() + shard.parameters.len(),
@@ -607,6 +620,9 @@ impl VulkanDistributedComponentBatchRunners {
                                         .to_string(),
                                 ))
                             })?
+                        }
+                        VulkanDistributedDispatchDistribution::InputColumns => {
+                            unreachable!("input-column component batches were rejected before allocation")
                         }
                     };
                     // Expert range is a parameter-space offset, not an
