@@ -341,6 +341,7 @@ def build_kernel_physical_execution_contracts(
         for implementation in kernel.get("physical_implementations", [])
     )
 
+    distributed_batch_candidates: list[PhysicalExecutionContract] = []
     for implementation in kernel.get("batch_implementations", []):
         stages = implementation.get("stages", [])
         if not stages:
@@ -398,7 +399,18 @@ def build_kernel_physical_execution_contracts(
                 ),
             )
             if distributed_batch is not None:
-                contracts.append(distributed_batch)
+                distributed_batch_candidates.append(distributed_batch)
+
+    if distributed_batch_candidates:
+        contracts.append(
+            sorted(
+                distributed_batch_candidates,
+                key=lambda contract: (
+                    -int(contract["partition_extent"]["alignment_elements"]),
+                    contract["artifacts"][0]["path"],
+                ),
+            )[0]
+        )
 
     by_id = {contract["contract_id"]: contract for contract in contracts}
     if len(by_id) != len(contracts):

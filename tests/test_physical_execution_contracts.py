@@ -393,6 +393,46 @@ def test_compiler_does_not_guess_distribution_for_unsupported_storage(tmp_path: 
     assert {contract["strategy"] for contract in contracts} == {"single_device"}
 
 
+def test_prefill_distribution_uses_one_strongest_compatible_batch_partition(
+    tmp_path: Path,
+) -> None:
+    node, circuit, tensor_index, kernel = projection_compiler_fixture(tmp_path)
+    original = kernel["batch_implementations"][0]
+    alternative_path = tmp_path / "batch-fine.spv"
+    alternative_path.write_bytes(b"fine batch spirv")
+    kernel["batch_implementations"].append(
+        {
+            **original,
+            "lane_tile_width": 4,
+            "stages": [
+                {
+                    **original["stages"][0],
+                    "shader_path": alternative_path.name,
+                    "workgroup_count_x": 8,
+                }
+            ],
+        }
+    )
+
+    contracts = build_kernel_physical_execution_contracts(
+        node=node,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        kernel=kernel,
+        package_dir=tmp_path,
+    )
+    distributed_prefill = [
+        contract
+        for contract in contracts
+        if contract["strategy"] == "tensor_parallel"
+        and contract["phases"] == ["prefill"]
+    ]
+    assert len(distributed_prefill) == 1
+    assert distributed_prefill[0]["partition_extent"]["alignment_elements"] == 32
+    assert distributed_prefill[0]["geometry"]["dimensions"]["workgroup_count_x"] == 8
+    assert distributed_prefill[0]["artifacts"][0]["path"] == alternative_path.name
+
+
 def test_compiler_declares_the_exact_sparse_expert_range_abi(tmp_path: Path) -> None:
     shader = tmp_path / "shaders" / "sparse_moe_down.spv"
     shader.parent.mkdir()
