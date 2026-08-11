@@ -70,7 +70,7 @@ pub fn plan_benchmarks(
         let ordered_routes = selected_vulkan_count * selected_vulkan_count.saturating_sub(1);
         let eligible_ordered_pairs = eligible_pair_count * 2;
         ordered_routes * component_chain_axis_count
-            + eligible_ordered_pairs * tensor_parallel_axis_count
+            + eligible_ordered_pairs * tensor_parallel_axis_count * 2
     } else {
         0
     };
@@ -229,7 +229,7 @@ pub fn validate_execution_coverage(run: &BenchmarkRun) -> Result<(), String> {
     let ordered_pairs = vulkan_ids.len() * vulkan_ids.len().saturating_sub(1);
     let eligible_pairs = tensor_parallel_combination_count(&vulkan_targets, 2);
     let expected_pairs = if run.policy.pair_measurements && run.policy.max_group_size >= 2 {
-        ordered_pairs * component_chain_axes + eligible_pairs * 2 * tensor_parallel_axes
+        ordered_pairs * component_chain_axes + eligible_pairs * 2 * tensor_parallel_axes * 2
     } else {
         0
     };
@@ -447,7 +447,7 @@ fn expected_group_measurement_count(
     targets: &[&Target],
     policy: &RunPolicy,
     tensor_parallel_axis_count: usize,
-    _component_chain_axis_count: usize,
+    component_chain_axis_count: usize,
 ) -> usize {
     if !policy.pair_measurements || policy.max_group_size < 3 {
         return 0;
@@ -459,7 +459,8 @@ fn expected_group_measurement_count(
     (3..=max_group_size)
         .map(|group_size| {
             let compatible_groups = tensor_parallel_combination_count(targets, group_size);
-            compatible_groups * tensor_parallel_axis_count * group_size
+            compatible_groups
+                * (tensor_parallel_axis_count * group_size * 2 + component_chain_axis_count)
         })
         .sum()
 }
@@ -649,38 +650,84 @@ fn build_workload_specs(
                 ]);
             }
             if benchmark_supports_tensor_parallel(workload) {
-                specs.push(WorkloadSpec {
-                    workload_id: format_workload_id("synthetic_tensor_parallel_small_payload", workload, format),
-                    comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-                    workload_class: workload.clone(),
-                    placement_strategy: "two_target_tensor_parallel".to_string(),
-                    pattern: "synthetic_tensor_parallel_small_payload".to_string(),
-                    format: format.clone(),
-                    participant_count: 2,
-                    payload_bytes,
-                    parameter_bytes_per_participant: payload_bytes / 2,
-                    activation_bytes,
-                    output_bytes,
-                    description: format!("Run the comparison projection tensor-parallel across two targets using {format}."),
-                });
+                specs.extend([
+                    WorkloadSpec {
+                        workload_id: format_workload_id("synthetic_tensor_parallel_small_payload", workload, format),
+                        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+                        workload_class: workload.clone(),
+                        placement_strategy: "two_target_tensor_parallel".to_string(),
+                        pattern: "synthetic_tensor_parallel_small_payload".to_string(),
+                        format: format.clone(),
+                        participant_count: 2,
+                        payload_bytes,
+                        parameter_bytes_per_participant: payload_bytes / 2,
+                        activation_bytes,
+                        output_bytes,
+                        description: format!("Run the comparison projection tensor-parallel across two targets using {format}."),
+                    },
+                    WorkloadSpec {
+                        workload_id: format_workload_id("synthetic_tensor_parallel_forced_split_2", workload, format),
+                        comparison_group: "forced_split_tp_vs_serialized".to_string(),
+                        workload_class: workload.clone(),
+                        placement_strategy: "two_target_tensor_parallel".to_string(),
+                        pattern: "synthetic_tensor_parallel_forced_split_2".to_string(),
+                        format: format.clone(),
+                        participant_count: 2,
+                        payload_bytes,
+                        parameter_bytes_per_participant: payload_bytes / 2,
+                        activation_bytes,
+                        output_bytes,
+                        description: format!("Compare an equivalent two-stage TP path against serialization using {format}."),
+                    },
+                ]);
             }
             if max_group_size >= 3 && benchmark_supports_tensor_parallel(workload) {
                 for participant_count in 3..=max_group_size.min(MAX_PLACEMENT_GROUP_SIZE) {
                     let pattern = tensor_parallel_group_pattern(participant_count);
-                    specs.push(WorkloadSpec {
-                        workload_id: format_workload_id(&pattern, workload, format),
-                        pattern,
-                        comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
-                        workload_class: workload.clone(),
-                        placement_strategy: MULTI_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
-                        format: format.clone(),
-                        participant_count,
-                        payload_bytes,
-                        parameter_bytes_per_participant: payload_bytes / participant_count,
-                        activation_bytes,
-                        output_bytes,
-                        description: format!("Run the comparison projection tensor-parallel across {participant_count} targets using {format}."),
-                    });
+                    specs.extend([
+                        WorkloadSpec {
+                            workload_id: format_workload_id(&pattern, workload, format),
+                            pattern,
+                            comparison_group: SMALL_PAYLOAD_COMPARISON_GROUP.to_string(),
+                            workload_class: workload.clone(),
+                            placement_strategy: MULTI_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
+                            format: format.clone(),
+                            participant_count,
+                            payload_bytes,
+                            parameter_bytes_per_participant: payload_bytes / participant_count,
+                            activation_bytes,
+                            output_bytes,
+                            description: format!("Run the comparison projection tensor-parallel across {participant_count} targets using {format}."),
+                        },
+                        WorkloadSpec {
+                            workload_id: format_workload_id(&format!("synthetic_serialized_forced_split_{participant_count}"), workload, format),
+                            pattern: format!("synthetic_serialized_forced_split_{participant_count}"),
+                            comparison_group: "forced_split_tp_vs_serialized".to_string(),
+                            workload_class: workload.clone(),
+                            placement_strategy: "multi_target_serial".to_string(),
+                            format: format.clone(),
+                            participant_count,
+                            payload_bytes,
+                            parameter_bytes_per_participant: payload_bytes / participant_count,
+                            activation_bytes,
+                            output_bytes,
+                            description: format!("Run the selected serialized {participant_count}-target forced split using {format}."),
+                        },
+                        WorkloadSpec {
+                            workload_id: format_workload_id(&format!("synthetic_tensor_parallel_forced_split_{participant_count}"), workload, format),
+                            pattern: format!("synthetic_tensor_parallel_forced_split_{participant_count}"),
+                            comparison_group: "forced_split_tp_vs_serialized".to_string(),
+                            workload_class: workload.clone(),
+                            placement_strategy: MULTI_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
+                            format: format.clone(),
+                            participant_count,
+                            payload_bytes,
+                            parameter_bytes_per_participant: payload_bytes / participant_count,
+                            activation_bytes,
+                            output_bytes,
+                            description: format!("Run the equivalent {participant_count}-stage TP forced split using {format}."),
+                        },
+                    ]);
                 }
             }
         }
@@ -770,10 +817,10 @@ mod tests {
         };
         let plan = plan_benchmarks(targets, selection, policy());
         assert_eq!(plan.estimated_single_measurement_count, 12);
-        assert_eq!(plan.estimated_pair_measurement_count, 24);
-        assert_eq!(plan.estimated_group_measurement_count, 6);
+        assert_eq!(plan.estimated_pair_measurement_count, 36);
+        assert_eq!(plan.estimated_group_measurement_count, 14);
         assert_eq!(plan.estimated_comparison_set_count, 0);
-        assert_eq!(plan.estimated_measurement_count, 42);
+        assert_eq!(plan.estimated_measurement_count, 62);
     }
 
     #[test]
@@ -785,7 +832,15 @@ mod tests {
             &policy.benchmark_workloads,
             policy.max_group_size,
         );
-        assert_eq!(specs.len(), policy.benchmark_formats.len() * 5);
+        assert_eq!(specs.len(), policy.benchmark_formats.len() * 8);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.workload_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            specs.len()
+        );
         assert!(specs.iter().all(|spec| {
             !spec.pattern.contains("three_component_chain")
                 && !spec.pattern.contains("layer_split_group")

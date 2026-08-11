@@ -12,5 +12,9 @@ lowered/
 packages/
 transpiled/
 compiled_models/
+.tmp-*/
 
 .DS_Store
+
+nerve-gpu-bench-results.json
+nerve-gpu-bench/placement-benchmark*.json

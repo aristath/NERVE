@@ -10,42 +10,62 @@
     "fp8_e4m3": {
       "placements": [
         {
-          "rank": 1,
           "mode": "single",
           "targets": ["vulkan:pci:0000:03:00.0"],
-          "relative_cost": 1.0
+          "duration_ns": 382941
         },
         {
-          "rank": 2,
           "mode": "tp",
           "targets": [
             "vulkan:pci:0000:03:00.0",
             "vulkan:pci:0000:07:00.0"
           ],
-          "relative_cost": 1.18,
+          "duration_ns": 451870,
           "owner": "vulkan:pci:0000:03:00.0",
           "transport": "shared_host"
         }
       ],
       "serial": [
         {
-          "rank": 1,
           "mode": "single",
           "targets": ["vulkan:pci:0000:03:00.0"],
-          "relative_cost": 1.0
+          "duration_ns": 718522
         },
         {
-          "rank": 2,
           "mode": "serial",
           "targets": [
             "vulkan:pci:0000:03:00.0",
             "vulkan:pci:0000:07:00.0"
           ],
-          "relative_cost": 1.27,
+          "duration_ns": 912523,
           "transport": "external_device_local"
         }
       ]
     }
+  },
+  "combinations": {
+    "fp8_e4m3": [
+      {
+        "targets": [
+          "vulkan:pci:0000:03:00.0",
+          "vulkan:pci:0000:07:00.0"
+        ],
+        "split": [1, 1],
+        "serialized": {
+          "duration_ns": 491205,
+          "order": [
+            "vulkan:pci:0000:03:00.0",
+            "vulkan:pci:0000:07:00.0"
+          ],
+          "transport": "external_device_local"
+        },
+        "tp": {
+          "duration_ns": 382941,
+          "owner": "vulkan:pci:0000:03:00.0",
+          "transport": "shared_host"
+        }
+      }
+    ]
   }
 }
 ```
@@ -64,10 +84,23 @@
 - `serial` contains two targets in execution order, so `A -> B` and `B -> A`
   are distinct candidates.
 
-Within each list, `relative_cost` is the candidate's elapsed cost divided by
-the fastest candidate's cost. The fastest value is `1.0`; smaller is better.
-Results within one percent share a rank. Ordering within a tied rank remains
-deterministic.
+Within each list, candidates are ordered by measured median `duration_ns`.
+Smaller is faster. The measured duration is retained without normalization or
+threshold-based grouping.
+
+`combinations` answers the forced-split question for each viable target set:
+
+- `split` is the relative parameter residency on the sorted targets; `[1, 1]`,
+  `[1, 1, 1]`, and `[1, 1, 1, 1]` are balanced splits;
+- `serialized` is the fastest measured complete serial chain and preserves its
+  execution `order`;
+- `tp` is the fastest measured equal-work TP chain and records its owner; and
+- both paths retain their measured median `duration_ns`, allowing paths from
+  different target sets to be compared directly.
+
+Both paths use the same total parameter budget, stage count, activation/output
+shape, and operation count. A combination is omitted unless both complete,
+output-validated paths exist.
 
 Only completed and output-validated measurements appear. The formats and target
 combinations present in the rankings are the measured usable set; no separate

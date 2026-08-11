@@ -129,24 +129,43 @@ pub struct PlacementBenchmark {
     pub schema: String,
     pub payload_bytes: usize,
     pub formats: BTreeMap<String, FormatRanking>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub combinations: BTreeMap<String, Vec<CombinationComparison>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormatRanking {
-    pub placements: Vec<RankedPlacement>,
-    pub serial: Vec<RankedPlacement>,
+    pub placements: Vec<PlacementCandidate>,
+    pub serial: Vec<PlacementCandidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RankedPlacement {
-    pub rank: usize,
+pub struct PlacementCandidate {
     pub mode: String,
     pub targets: Vec<String>,
-    pub relative_cost: f64,
+    pub duration_ns: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CombinationComparison {
+    pub targets: Vec<String>,
+    pub split: Vec<u32>,
+    pub serialized: CombinationPath,
+    pub tp: CombinationPath,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CombinationPath {
+    pub duration_ns: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub transport: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -391,7 +410,7 @@ pub fn targets_to_json(targets: &[Target]) -> Result<String, serde_json::Error> 
 }
 
 impl BenchmarkRun {
-    pub fn to_placement_benchmark(&self) -> PlacementBenchmark {
+    pub fn to_placement_benchmark(&self) -> Result<PlacementBenchmark, String> {
         let mut results = Vec::new();
         results.extend(self.measurements.iter().filter_map(placement_single));
         results.extend(self.pair_measurements.iter().filter_map(placement_pair));
@@ -420,17 +439,19 @@ impl BenchmarkRun {
                     .cloned()
                     .collect();
                 let ranking = FormatRanking {
-                    placements: rank_placements(placements, true),
-                    serial: rank_placements(serial, false),
+                    placements: sort_placements(placements, true),
+                    serial: sort_placements(serial, false),
                 };
                 (!ranking.placements.is_empty()).then(|| (format.clone(), ranking))
             })
             .collect();
-        PlacementBenchmark {
+        let combinations = build_combination_comparisons(&results)?;
+        Ok(PlacementBenchmark {
             schema: PLACEMENT_SCHEMA.to_string(),
             payload_bytes: self.policy.payload_bytes,
             formats,
-        }
+            combinations,
+        })
     }
 
     pub fn validate_basic(&self) -> Result<(), String> {
@@ -818,10 +839,10 @@ impl BenchmarkRun {
     }
 }
 
-fn rank_placements(
+fn sort_placements(
     results: Vec<PlacementResult>,
     collapse_tensor_parallel_owners: bool,
-) -> Vec<RankedPlacement> {
+) -> Vec<PlacementCandidate> {
     let mut unique = BTreeMap::<(String, Vec<String>), PlacementResult>::new();
     for result in results {
         let mut identity_targets = result.targets.clone();
@@ -844,35 +865,154 @@ fn rank_placements(
             .then_with(|| left.strategy.cmp(&right.strategy))
             .then_with(|| left.targets.cmp(&right.targets))
     });
-    let Some(fastest) = results.first().map(|result| result.ns) else {
-        return Vec::new();
-    };
-
-    let mut rank = 1;
-    let mut rank_anchor = fastest;
     results
         .into_iter()
         .map(|result| {
-            if result.ns as f64 > rank_anchor as f64 * 1.01 {
-                rank += 1;
-                rank_anchor = result.ns;
-            }
             let owner = (result.strategy == "tp").then(|| result.targets[0].clone());
             let mut targets = result.targets;
             if result.strategy == "tp" {
                 targets.sort();
             }
-            let relative_cost = ((result.ns as f64 / fastest as f64) * 1_000.0).round() / 1_000.0;
-            RankedPlacement {
-                rank,
+            PlacementCandidate {
                 mode: result.strategy.clone(),
                 targets,
-                relative_cost,
+                duration_ns: result.ns,
                 owner,
                 transport: (result.strategy != "single").then_some(result.transport),
             }
         })
         .collect()
+}
+
+fn build_combination_comparisons(
+    results: &[PlacementResult],
+) -> Result<BTreeMap<String, Vec<CombinationComparison>>, String> {
+    let mut candidates =
+        BTreeMap::<(String, Vec<String>), (Vec<&PlacementResult>, Vec<&PlacementResult>)>::new();
+    for result in results {
+        let expected_regime = match result.participants {
+            2 => "two_component_chain",
+            3 => "three_component_chain",
+            4 => "four_component_chain",
+            _ => continue,
+        };
+        if result.regime != expected_regime || !matches!(result.strategy.as_str(), "serial" | "tp")
+        {
+            continue;
+        }
+        let mut targets = result.targets.clone();
+        targets.sort();
+        let entry = candidates
+            .entry((result.format.clone(), targets))
+            .or_default();
+        if result.strategy == "serial" {
+            entry.0.push(result);
+        } else {
+            entry.1.push(result);
+        }
+    }
+
+    let mut comparisons = BTreeMap::<String, Vec<CombinationComparison>>::new();
+    for ((format, targets), (serialized, tensor_parallel)) in candidates {
+        let (Some(serialized), Some(tensor_parallel)) = (
+            fastest_combination_candidate(serialized),
+            fastest_combination_candidate(tensor_parallel),
+        ) else {
+            continue;
+        };
+        validate_equivalent_combination_work(serialized, tensor_parallel)?;
+        comparisons
+            .entry(format)
+            .or_default()
+            .push(CombinationComparison {
+                split: vec![1; targets.len()],
+                targets,
+                serialized: CombinationPath {
+                    duration_ns: serialized.ns,
+                    order: Some(serialized.targets.clone()),
+                    owner: None,
+                    transport: serialized.transport.clone(),
+                },
+                tp: CombinationPath {
+                    duration_ns: tensor_parallel.ns,
+                    order: None,
+                    owner: tensor_parallel.targets.first().cloned(),
+                    transport: tensor_parallel.transport.clone(),
+                },
+            });
+    }
+    for format_comparisons in comparisons.values_mut() {
+        format_comparisons.sort_by(|left, right| left.targets.cmp(&right.targets));
+    }
+    Ok(comparisons)
+}
+
+fn fastest_combination_candidate(candidates: Vec<&PlacementResult>) -> Option<&PlacementResult> {
+    candidates.into_iter().min_by(|left, right| {
+        left.ns
+            .cmp(&right.ns)
+            .then_with(|| left.targets.cmp(&right.targets))
+    })
+}
+
+fn validate_equivalent_combination_work(
+    serialized: &PlacementResult,
+    tensor_parallel: &PlacementResult,
+) -> Result<(), String> {
+    if serialized.payload_bytes != tensor_parallel.payload_bytes
+        || serialized.participants != tensor_parallel.participants
+        || serialized.activation_bytes != tensor_parallel.activation_bytes
+        || serialized.output_bytes != tensor_parallel.output_bytes
+        || serialized.work_ops != tensor_parallel.work_ops
+    {
+        return Err(format!(
+            "serialized and TP candidates do not perform equivalent work for format {:?} targets {:?}",
+            serialized.format, serialized.targets
+        ));
+    }
+    if serialized.shard_bytes.len() != serialized.participants
+        || tensor_parallel.shard_bytes.len() != tensor_parallel.participants
+    {
+        return Err("forced-split candidate has an invalid residency vector".to_string());
+    }
+    let serialized_residency = sorted_residency(serialized);
+    let tp_residency = sorted_residency(tensor_parallel);
+    let serialized_total = serialized_residency
+        .iter()
+        .map(|(_, bytes)| *bytes as u128)
+        .sum::<u128>();
+    let tp_total = tp_residency
+        .iter()
+        .map(|(_, bytes)| *bytes as u128)
+        .sum::<u128>();
+    if serialized_total == 0 || tp_total == 0 {
+        return Err("forced-split candidate has no parameter residency".to_string());
+    }
+    for ((serialized_target, serialized_bytes), (tp_target, tp_bytes)) in
+        serialized_residency.iter().zip(&tp_residency)
+    {
+        let serialized_share = *serialized_bytes as u128 * tp_total;
+        let tp_share = *tp_bytes as u128 * serialized_total;
+        let difference = serialized_share.abs_diff(tp_share);
+        if serialized_target != tp_target || difference * 100 > serialized_share.max(tp_share) {
+            return Err(format!(
+                "serialized and TP candidates do not have equivalent residency for format {:?} targets {:?}",
+                serialized.format, serialized.targets
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sorted_residency(result: &PlacementResult) -> Vec<(&str, usize)> {
+    let mut residency = result
+        .targets
+        .iter()
+        .zip(&result.shard_bytes)
+        .map(|(target, bytes)| (target.as_str(), *bytes))
+        .collect::<Vec<_>>();
+    residency.sort_by_key(|(target, _)| *target);
+    residency
 }
 
 impl PlacementBenchmark {
@@ -900,8 +1040,24 @@ impl PlacementBenchmark {
             if ranking.placements.is_empty() {
                 return Err(format!("format {format:?} has no placement ranking"));
             }
-            validate_ranked_placements(&ranking.placements, false)?;
-            validate_ranked_placements(&ranking.serial, true)?;
+            validate_placement_candidates(&ranking.placements, false)?;
+            validate_placement_candidates(&ranking.serial, true)?;
+        }
+        for (format, comparisons) in &self.combinations {
+            if !self.formats.contains_key(format) {
+                return Err(format!(
+                    "combination format {format:?} has no placement ranking"
+                ));
+            }
+            let mut target_sets = BTreeSet::new();
+            for comparison in comparisons {
+                validate_combination_comparison(comparison)?;
+                if !target_sets.insert(&comparison.targets) {
+                    return Err(format!(
+                        "combination format {format:?} contains duplicate target sets"
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1274,7 +1430,10 @@ fn placement_strategy(strategy: &str) -> &str {
         "activation_transfer_only"
         | "activation_transfer_external_device_local"
         | "activation_transfer_shared_host" => "transfer",
-        "two_target_serial" | "three_target_serial" | "four_target_serial" => "serial",
+        "two_target_serial"
+        | "three_target_serial"
+        | "four_target_serial"
+        | "multi_target_serial" => "serial",
         "two_target_tensor_parallel"
         | "three_target_tensor_parallel"
         | "four_target_tensor_parallel"
@@ -1319,6 +1478,7 @@ fn placement_transport(strategy: &str, pattern: &str) -> &'static str {
         | "two_target_serial"
         | "three_target_serial"
         | "four_target_serial"
+        | "multi_target_serial"
         | "two_target_tensor_parallel"
         | "three_target_tensor_parallel"
         | "four_target_tensor_parallel"
@@ -1338,7 +1498,10 @@ fn placement_collective(strategy: &str, workload: &str) -> &'static str {
         "activation_transfer_only"
         | "activation_transfer_external_device_local"
         | "activation_transfer_shared_host" => "copy",
-        "two_target_serial" | "three_target_serial" | "four_target_serial" => "pipeline",
+        "two_target_serial"
+        | "three_target_serial"
+        | "four_target_serial"
+        | "multi_target_serial" => "pipeline",
         "two_target_tensor_parallel"
         | "three_target_tensor_parallel"
         | "four_target_tensor_parallel"
@@ -1359,11 +1522,13 @@ fn tensor_parallel_collective_name(workload: &str) -> &'static str {
     }
 }
 
-fn validate_ranked_placements(results: &[RankedPlacement], serial: bool) -> Result<(), String> {
-    let mut previous_rank = 0;
-    let mut previous_cost = 0.0;
+fn validate_placement_candidates(
+    results: &[PlacementCandidate],
+    serial: bool,
+) -> Result<(), String> {
+    let mut previous_duration_ns = 0;
     let mut identities = BTreeSet::new();
-    for (index, result) in results.iter().enumerate() {
+    for result in results {
         let valid_mode = if serial {
             matches!(result.mode.as_str(), "single" | "serial")
         } else {
@@ -1371,24 +1536,15 @@ fn validate_ranked_placements(results: &[RankedPlacement], serial: bool) -> Resu
         };
         if !valid_mode {
             return Err(format!(
-                "ranked placement has invalid mode {:?}",
+                "placement candidate has invalid mode {:?}",
                 result.mode
             ));
         }
         if result.targets.is_empty() || result.targets.len() > MAX_PLACEMENT_GROUP_SIZE {
-            return Err("ranked placement has an invalid target count".to_string());
+            return Err("placement candidate has an invalid target count".to_string());
         }
-        if result.rank == 0 || result.rank < previous_rank {
-            return Err("placement ranks must be positive and ordered".to_string());
-        }
-        if !result.relative_cost.is_finite()
-            || result.relative_cost < 1.0
-            || result.relative_cost < previous_cost
-        {
-            return Err("relative placement costs must be finite and ordered".to_string());
-        }
-        if index == 0 && (result.relative_cost - 1.0).abs() > f64::EPSILON {
-            return Err("the fastest placement must have relative_cost 1.0".to_string());
+        if result.duration_ns == 0 || result.duration_ns < previous_duration_ns {
+            return Err("placement durations must be positive and ordered".to_string());
         }
         match result.mode.as_str() {
             "tp" => {
@@ -1420,10 +1576,52 @@ fn validate_ranked_placements(results: &[RankedPlacement], serial: bool) -> Resu
             _ => unreachable!(),
         }
         if !identities.insert((result.mode.as_str(), &result.targets)) {
-            return Err("placement ranking contains duplicate candidates".to_string());
+            return Err("placement candidates contain duplicates".to_string());
         }
-        previous_rank = result.rank;
-        previous_cost = result.relative_cost;
+        previous_duration_ns = result.duration_ns;
+    }
+    Ok(())
+}
+
+fn validate_combination_comparison(comparison: &CombinationComparison) -> Result<(), String> {
+    if !(2..=MAX_PLACEMENT_GROUP_SIZE).contains(&comparison.targets.len())
+        || comparison.split.len() != comparison.targets.len()
+        || comparison.split.contains(&0)
+    {
+        return Err("combination comparison has an invalid target split".to_string());
+    }
+    let mut sorted_targets = comparison.targets.clone();
+    sorted_targets.sort();
+    sorted_targets.dedup();
+    if sorted_targets != comparison.targets {
+        return Err("combination targets must be unique and sorted".to_string());
+    }
+    let order = comparison
+        .serialized
+        .order
+        .as_ref()
+        .ok_or_else(|| "serialized combination is missing its execution order".to_string())?;
+    let mut sorted_order = order.clone();
+    sorted_order.sort();
+    if sorted_order != comparison.targets
+        || comparison.serialized.owner.is_some()
+        || comparison.serialized.transport.is_empty()
+    {
+        return Err("serialized combination has invalid path metadata".to_string());
+    }
+    let owner = comparison
+        .tp
+        .owner
+        .as_ref()
+        .ok_or_else(|| "TP combination is missing its owner".to_string())?;
+    if !comparison.targets.contains(owner)
+        || comparison.tp.order.is_some()
+        || comparison.tp.transport.is_empty()
+    {
+        return Err("TP combination has invalid path metadata".to_string());
+    }
+    if comparison.serialized.duration_ns == 0 || comparison.tp.duration_ns == 0 {
+        return Err("combination durations must be positive".to_string());
     }
     Ok(())
 }
@@ -1888,7 +2086,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_benchmark_contains_only_completed_rankable_results() {
+    fn placement_benchmark_contains_only_completed_candidates() {
         let mut run = BenchmarkRun {
             schema: RUN_SCHEMA.to_string(),
             started_at_unix_ms: 1,
@@ -2001,22 +2199,20 @@ mod tests {
             }),
         });
 
-        let placement = run.to_placement_benchmark();
+        let placement = run.to_placement_benchmark().unwrap();
         placement.validate_basic().unwrap();
         assert_eq!(placement.schema, PLACEMENT_SCHEMA);
         assert!(!placement.formats.contains_key("bf16"));
         let ranking = &placement.formats["f32"].placements;
         assert_eq!(ranking.len(), 2);
-        assert_eq!(ranking[0].rank, 1);
         assert_eq!(ranking[0].mode, "single");
         assert_eq!(ranking[0].targets, ["gpu:a"]);
-        assert_eq!(ranking[0].relative_cost, 1.0);
+        assert_eq!(ranking[0].duration_ns, 12);
         assert_eq!(ranking[0].owner, None);
         assert_eq!(ranking[0].transport, None);
-        assert_eq!(ranking[1].rank, 2);
         assert_eq!(ranking[1].mode, "tp");
         assert_eq!(ranking[1].targets, ["gpu:a", "gpu:b"]);
-        assert_eq!(ranking[1].relative_cost, 2.083);
+        assert_eq!(ranking[1].duration_ns, 25);
         assert_eq!(ranking[1].owner.as_deref(), Some("gpu:a"));
         assert_eq!(ranking[1].transport.as_deref(), Some("host_staged"));
 
@@ -2030,7 +2226,7 @@ mod tests {
     }
 
     #[test]
-    fn ranking_collapses_tp_owners_and_treats_one_percent_as_a_tie() {
+    fn placement_sorting_collapses_tp_owners_and_preserves_duration_order() {
         fn result(strategy: &str, targets: &[&str], ns: u128) -> PlacementResult {
             PlacementResult {
                 kind: "test".to_string(),
@@ -2058,7 +2254,7 @@ mod tests {
             }
         }
 
-        let owners = rank_placements(
+        let owners = sort_placements(
             vec![
                 result("tp", &["gpu:a", "gpu:b"], 100),
                 result("tp", &["gpu:b", "gpu:a"], 90),
@@ -2069,7 +2265,7 @@ mod tests {
         assert_eq!(owners[0].targets, ["gpu:a", "gpu:b"]);
         assert_eq!(owners[0].owner.as_deref(), Some("gpu:b"));
 
-        let tied = rank_placements(
+        let ordered = sort_placements(
             vec![
                 result("single", &["gpu:a"], 100),
                 result("single", &["gpu:b"], 101),
@@ -2078,11 +2274,67 @@ mod tests {
             false,
         );
         assert_eq!(
-            tied.iter()
-                .map(|placement| placement.rank)
+            ordered
+                .iter()
+                .map(|placement| placement.duration_ns)
                 .collect::<Vec<_>>(),
-            [1, 1, 2]
+            [100, 101, 102]
         );
+    }
+
+    #[test]
+    fn forced_split_comparison_selects_best_serial_order_and_tp_owner() {
+        fn result(strategy: &str, targets: &[&str], ns: u128, work_ops: u64) -> PlacementResult {
+            PlacementResult {
+                kind: "test".to_string(),
+                strategy: strategy.to_string(),
+                targets: targets.iter().map(|target| (*target).to_string()).collect(),
+                workload: "dense_projection_decode".to_string(),
+                regime: "two_component_chain".to_string(),
+                shape: BTreeMap::new(),
+                format: "fp8_e4m3".to_string(),
+                kernel: "test".to_string(),
+                participants: 2,
+                payload_bytes: 1024,
+                shard_bytes: vec![512, 512],
+                activation_bytes: 32,
+                output_bytes: 32,
+                iters: 1,
+                ns,
+                total_ns: ns,
+                bytes: 0,
+                work_ops,
+                bps: 0.0,
+                ops: 0.0,
+                transport: "shared_host".to_string(),
+                collective: "test".to_string(),
+            }
+        }
+
+        let comparisons = build_combination_comparisons(&[
+            result("serial", &["gpu:a", "gpu:b"], 120, 100),
+            result("serial", &["gpu:b", "gpu:a"], 130, 100),
+            result("tp", &["gpu:a", "gpu:b"], 110, 100),
+            result("tp", &["gpu:b", "gpu:a"], 100, 100),
+        ])
+        .unwrap();
+        let comparison = &comparisons["fp8_e4m3"][0];
+        assert_eq!(comparison.targets, ["gpu:a", "gpu:b"]);
+        assert_eq!(comparison.split, [1, 1]);
+        assert_eq!(
+            comparison.serialized.order.as_deref(),
+            Some(["gpu:a".to_string(), "gpu:b".to_string()].as_slice())
+        );
+        assert_eq!(comparison.serialized.duration_ns, 120);
+        assert_eq!(comparison.tp.owner.as_deref(), Some("gpu:b"));
+        assert_eq!(comparison.tp.duration_ns, 100);
+
+        let error = build_combination_comparisons(&[
+            result("serial", &["gpu:a", "gpu:b"], 120, 100),
+            result("tp", &["gpu:a", "gpu:b"], 100, 99),
+        ])
+        .unwrap_err();
+        assert!(error.contains("equivalent work"));
     }
 
     #[test]

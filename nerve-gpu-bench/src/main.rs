@@ -85,7 +85,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             } else {
                 let run = run_benchmarks(targets, selection, policy);
                 validate_execution_coverage(&run)?;
-                let placement = run.to_placement_benchmark();
+                let placement = run.to_placement_benchmark()?;
                 placement.validate_basic()?;
                 placement.to_json()?
             };
@@ -159,9 +159,10 @@ fn print_placement_summary(run: &model::PlacementBenchmark) -> Result<(), Box<dy
     writeln!(stdout, "payload_bytes: {}", run.payload_bytes)?;
     writeln!(stdout, "formats: {}", run.formats.len())?;
     for (format, ranking) in &run.formats {
+        let combination_count = run.combinations.get(format).map_or(0, Vec::len);
         writeln!(
             stdout,
-            "  {format}: placements={} serial={}",
+            "  {format}: placements={} serial={} combinations={combination_count}",
             ranking.placements.len(),
             ranking.serial.len()
         )?;

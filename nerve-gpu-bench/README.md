@@ -10,10 +10,13 @@ The output answers two questions for every supported weight format:
    projection fastest?
 2. Which target runs two equivalent stages fastest, and how do directed serial
    pairs such as `A -> B` and `B -> A` compare with that baseline?
+3. When a model region must span a particular target set, is an equivalent
+   serialized split or tensor-parallel split faster?
 
 The default logical parameter budget is 5 MiB. Parameters remain resident while
-the runner performs one untimed warmup and one timed execution. The artifact is
-a relative ranking, not a hardware characterization report.
+the runner performs one untimed warmup and one timed execution. The artifact
+retains the measured median duration for direct comparison; it is not a hardware
+characterization report.
 
 ## Comparison Matrix
 
@@ -31,6 +34,15 @@ participant computes disjoint output rows, and the timed path includes shared
 activation/output access and synchronization. Each group member is tried as the
 shared-buffer owner; only the fastest valid owner is retained in the final
 ranking.
+
+The forced-split comparison uses the same total parameters and logical stages
+on both sides. Serialization places one equal parameter share on each target
+and includes every inter-target activation boundary. TP shards every stage
+across the same targets and includes its synchronization and shared-output
+work. Pair comparisons measure both serial directions. For triplets and quads,
+the directed pair measurements select the lowest-cost serial order, which is
+then executed end to end; every TP owner is executed, and the fastest valid
+serial and TP paths are compared in the final `combinations` section.
 
 The group limit defaults to four. This bounds benchmark time and matches the
 current placement limit; it does not limit how many groups the inference engine

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::hint::black_box;
 use std::mem;
@@ -37,6 +38,7 @@ const NATIVE_FP8_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/native_fp8_gem
 const TP_NATIVE_FP8_GEMM_SHADER_SPV: &[u8] = include_bytes!("shaders/tp_native_fp8_gemm.spv");
 const MAX_VULKAN_WAIT_NS: u64 = 10_000_000_000;
 const TENSOR_PARALLEL_PAIR_PATTERN: &str = "synthetic_tensor_parallel_small_payload";
+const TENSOR_PARALLEL_CHAIN_PATTERN: &str = "synthetic_tensor_parallel_forced_split_2";
 const TWO_TARGET_TENSOR_PARALLEL_STRATEGY: &str = "two_target_tensor_parallel";
 const SINGLE_COMPONENT_REGIME: &str = "single_component";
 const TWO_COMPONENT_CHAIN_REGIME: &str = "two_component_chain";
@@ -535,6 +537,102 @@ pub struct VulkanBenchmarkResults {
     pub group_measurements: Vec<GroupMeasurement>,
 }
 
+fn measured_serial_edge_costs(
+    measurements: &[Measurement],
+    pair_measurements: &[PairMeasurement],
+    format: &str,
+    workload: &str,
+) -> BTreeMap<(String, String), u128> {
+    let local_stage_costs = measurements
+        .iter()
+        .filter(|measurement| {
+            measurement.status == "completed"
+                && measurement.regime == TWO_COMPONENT_CHAIN_REGIME
+                && measurement.format == format
+                && measurement.workload_class == workload
+        })
+        .filter_map(|measurement| {
+            measurement.summary.as_ref().map(|summary| {
+                (
+                    measurement.target_id.clone(),
+                    summary.median_duration_ns / 2,
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    pair_measurements
+        .iter()
+        .filter(|measurement| {
+            measurement.status == "completed"
+                && measurement.placement_strategy == "two_target_serial"
+                && measurement.regime == TWO_COMPONENT_CHAIN_REGIME
+                && measurement.format == format
+                && measurement.workload_class == workload
+        })
+        .filter_map(|measurement| {
+            let summary = measurement.summary.as_ref()?;
+            let source = local_stage_costs.get(&measurement.source_target_id)?;
+            let destination = local_stage_costs.get(&measurement.destination_target_id)?;
+            Some((
+                (
+                    measurement.source_target_id.clone(),
+                    measurement.destination_target_id.clone(),
+                ),
+                summary
+                    .median_duration_ns
+                    .saturating_sub(*source)
+                    .saturating_sub(*destination),
+            ))
+        })
+        .collect()
+}
+
+fn best_serial_order(
+    target_ids: &[String],
+    edge_costs: &BTreeMap<(String, String), u128>,
+) -> Vec<String> {
+    let mut orders = Vec::new();
+    extend_target_orders(target_ids, &mut Vec::new(), &mut orders);
+    orders
+        .into_iter()
+        .min_by(|left, right| {
+            serial_order_cost(left, edge_costs)
+                .cmp(&serial_order_cost(right, edge_costs))
+                .then_with(|| left.cmp(right))
+        })
+        .unwrap_or_default()
+}
+
+fn extend_target_orders(
+    target_ids: &[String],
+    current: &mut Vec<String>,
+    orders: &mut Vec<Vec<String>>,
+) {
+    if current.len() == target_ids.len() {
+        orders.push(current.clone());
+        return;
+    }
+    for target_id in target_ids {
+        if current.contains(target_id) {
+            continue;
+        }
+        current.push(target_id.clone());
+        extend_target_orders(target_ids, current, orders);
+        current.pop();
+    }
+}
+
+fn serial_order_cost(order: &[String], edge_costs: &BTreeMap<(String, String), u128>) -> u128 {
+    order
+        .windows(2)
+        .try_fold(0_u128, |cost, edge| {
+            edge_costs
+                .get(&(edge[0].clone(), edge[1].clone()))
+                .and_then(|edge_cost| cost.checked_add(*edge_cost))
+        })
+        .unwrap_or(u128::MAX)
+}
+
 pub fn run_vulkan_benchmarks(
     targets: &[&Target],
     payload_bytes: usize,
@@ -624,6 +722,18 @@ pub fn run_vulkan_benchmarks(
                                 formats,
                                 workloads,
                             ));
+                            pair_measurements.extend(
+                                opened_tensor_parallel_pair_chain_measurements(
+                                    source_device,
+                                    destination_device,
+                                    &source.stable_target_id,
+                                    &destination.stable_target_id,
+                                    payload_bytes,
+                                    samples,
+                                    formats,
+                                    workloads,
+                                ),
+                            );
                         }
                     }
                     (Err(message), _) | (_, Err(message)) => {
@@ -648,6 +758,24 @@ pub fn run_vulkan_benchmarks(
                                 workloads,
                                 message,
                             ));
+                            pair_measurements.extend(formats.iter().flat_map(|format| {
+                                workloads.iter().filter_map(|workload| {
+                                    supports_tensor_parallel(workload).then(|| {
+                                        dense_pair_status_measurement_for_regime(
+                                            &source.stable_target_id,
+                                            &destination.stable_target_id,
+                                            TENSOR_PARALLEL_CHAIN_PATTERN,
+                                            TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
+                                            TWO_COMPONENT_CHAIN_REGIME,
+                                            "failed",
+                                            payload_bytes,
+                                            workload,
+                                            format,
+                                            message,
+                                        )
+                                    })
+                                })
+                            }));
                         }
                     }
                 }
@@ -659,6 +787,22 @@ pub fn run_vulkan_benchmarks(
         .min(MAX_PLACEMENT_GROUP_SIZE)
         .min(targets.len());
     if max_group_size >= 3 {
+        let serial_edge_costs = formats
+            .iter()
+            .flat_map(|format| {
+                workloads.iter().map(|workload| {
+                    (
+                        (format.clone(), workload.clone()),
+                        measured_serial_edge_costs(
+                            &measurements,
+                            &pair_measurements,
+                            format,
+                            workload,
+                        ),
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
         drop(opened);
         for group_size in 3..=max_group_size {
             for indices in target_index_combinations(targets.len(), group_size) {
@@ -668,6 +812,39 @@ pub fn run_vulkan_benchmarks(
                     .collect::<Vec<_>>();
                 if !targets_support_tensor_parallel(&group) {
                     continue;
+                }
+                let group_target_ids = group
+                    .iter()
+                    .map(|target| target.stable_target_id.clone())
+                    .collect::<Vec<_>>();
+                for format in formats {
+                    for workload in workloads {
+                        let edge_costs = &serial_edge_costs[&(format.clone(), workload.clone())];
+                        let order = best_serial_order(&group_target_ids, edge_costs);
+                        let ordered_targets = order
+                            .iter()
+                            .map(|target_id| {
+                                *group
+                                    .iter()
+                                    .find(|target| target.stable_target_id == *target_id)
+                                    .expect("serial order must contain only group targets")
+                            })
+                            .collect::<Vec<_>>();
+                        let candidate_devices = ordered_targets
+                            .iter()
+                            .map(|target| open_compute_device(target))
+                            .collect::<Vec<_>>();
+                        if let Some(measurement) = opened_serial_group_measurement(
+                            &candidate_devices,
+                            &ordered_targets,
+                            payload_bytes,
+                            samples,
+                            format,
+                            workload,
+                        ) {
+                            group_measurements.push(measurement);
+                        }
+                    }
                 }
                 for owner in 0..group_size {
                     let mut ordered_targets = Vec::with_capacity(group_size);
@@ -688,6 +865,15 @@ pub fn run_vulkan_benchmarks(
                         .collect::<Vec<_>>();
                     let order = (0..group_size).collect::<Vec<_>>();
                     group_measurements.extend(opened_tensor_parallel_group_measurements(
+                        &candidate_devices,
+                        &ordered_targets,
+                        &order,
+                        payload_bytes,
+                        samples,
+                        formats,
+                        workloads,
+                    ));
+                    group_measurements.extend(opened_tensor_parallel_group_chain_measurements(
                         &candidate_devices,
                         &ordered_targets,
                         &order,
@@ -784,6 +970,38 @@ fn dense_pair_status_measurement(
     format: &str,
     reason: &str,
 ) -> PairMeasurement {
+    let regime = if placement_strategy == "two_target_serial" {
+        TWO_COMPONENT_CHAIN_REGIME
+    } else {
+        SINGLE_COMPONENT_REGIME
+    };
+    dense_pair_status_measurement_for_regime(
+        source_id,
+        destination_id,
+        workload_prefix,
+        placement_strategy,
+        regime,
+        status,
+        payload_bytes,
+        workload_class,
+        format,
+        reason,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dense_pair_status_measurement_for_regime(
+    source_id: &str,
+    destination_id: &str,
+    workload_prefix: &str,
+    placement_strategy: &str,
+    regime: &str,
+    status: &str,
+    payload_bytes: usize,
+    workload_class: &str,
+    format: &str,
+    reason: &str,
+) -> PairMeasurement {
     let source_payload_bytes = payload_bytes / 2;
     let destination_payload_bytes = payload_bytes - source_payload_bytes;
     PairMeasurement {
@@ -795,12 +1013,7 @@ fn dense_pair_status_measurement(
         destination_target_id: destination_id.to_string(),
         pattern: workload_prefix.to_string(),
         operation_family: workload_class.to_string(),
-        regime: if placement_strategy == "two_target_serial" {
-            TWO_COMPONENT_CHAIN_REGIME
-        } else {
-            SINGLE_COMPONENT_REGIME
-        }
-        .to_string(),
+        regime: regime.to_string(),
         format: format.to_string(),
         status: status.to_string(),
         reason: Some(reason.to_string()),
@@ -944,6 +1157,72 @@ fn opened_tensor_parallel_pair_measurements(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn opened_tensor_parallel_pair_chain_measurements(
+    left_device: &OpenVulkanComputeDevice,
+    right_device: &OpenVulkanComputeDevice,
+    left_id: &str,
+    right_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<PairMeasurement> {
+    formats
+        .iter()
+        .flat_map(|format| {
+            workloads.iter().filter_map(|workload| {
+                if !supports_tensor_parallel(workload) {
+                    return None;
+                }
+                workload_format_kernel_for_devices(workload, format, &[left_device, right_device])
+                    .map(|kernel| {
+                        if let Some(reason) =
+                            unsupported_kernel_reason(&kernel, &[left_device, right_device])
+                        {
+                            return dense_pair_status_measurement_for_regime(
+                                left_id,
+                                right_id,
+                                TENSOR_PARALLEL_CHAIN_PATTERN,
+                                TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
+                                TWO_COMPONENT_CHAIN_REGIME,
+                                "unsupported",
+                                payload_bytes,
+                                workload,
+                                format,
+                                &reason,
+                            );
+                        }
+                        run_vulkan_dense_tensor_parallel_pair_chain(
+                            left_device,
+                            right_device,
+                            left_id,
+                            right_id,
+                            payload_bytes,
+                            samples,
+                            workload,
+                            kernel,
+                        )
+                        .unwrap_or_else(|message| {
+                            dense_pair_status_measurement_for_regime(
+                                left_id,
+                                right_id,
+                                TENSOR_PARALLEL_CHAIN_PATTERN,
+                                TWO_TARGET_TENSOR_PARALLEL_STRATEGY,
+                                TWO_COMPONENT_CHAIN_REGIME,
+                                "failed",
+                                payload_bytes,
+                                workload,
+                                format,
+                                &message,
+                            )
+                        })
+                    })
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn opened_tensor_parallel_group_measurements(
     opened: &[Result<OpenVulkanComputeDevice, String>],
     targets: &[&Target],
@@ -1021,6 +1300,157 @@ fn opened_tensor_parallel_group_measurements(
             })
         })
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn opened_tensor_parallel_group_chain_measurements(
+    opened: &[Result<OpenVulkanComputeDevice, String>],
+    targets: &[&Target],
+    order: &[usize],
+    payload_bytes: usize,
+    samples: usize,
+    formats: &[String],
+    workloads: &[String],
+) -> Vec<GroupMeasurement> {
+    let target_ids = order
+        .iter()
+        .map(|index| targets[*index].stable_target_id.clone())
+        .collect::<Vec<_>>();
+    let mut devices = Vec::with_capacity(order.len());
+    let mut open_error = None;
+    for index in order {
+        match &opened[*index] {
+            Ok(device) => devices.push(device),
+            Err(message) => {
+                open_error = Some(message.as_str());
+                break;
+            }
+        }
+    }
+    formats
+        .iter()
+        .flat_map(|format| {
+            workloads.iter().filter_map(|workload| {
+                if !supports_tensor_parallel(workload) {
+                    return None;
+                }
+                if let Some(message) = open_error {
+                    return workload_format_kernel(workload, format).map(|_| {
+                        forced_split_group_status_measurement(
+                            &target_ids,
+                            MULTI_TARGET_TENSOR_PARALLEL_STRATEGY,
+                            "failed",
+                            payload_bytes,
+                            workload,
+                            format,
+                            message,
+                        )
+                    });
+                }
+                workload_format_kernel_for_devices(workload, format, &devices).map(|kernel| {
+                    if let Some(reason) = unsupported_kernel_reason(&kernel, &devices) {
+                        return forced_split_group_status_measurement(
+                            &target_ids,
+                            MULTI_TARGET_TENSOR_PARALLEL_STRATEGY,
+                            "unsupported",
+                            payload_bytes,
+                            workload,
+                            format,
+                            &reason,
+                        );
+                    }
+                    run_vulkan_dense_tensor_parallel_group_chain(
+                        &devices,
+                        &target_ids,
+                        payload_bytes,
+                        samples,
+                        workload,
+                        kernel,
+                    )
+                    .unwrap_or_else(|message| {
+                        forced_split_group_status_measurement(
+                            &target_ids,
+                            MULTI_TARGET_TENSOR_PARALLEL_STRATEGY,
+                            "failed",
+                            payload_bytes,
+                            workload,
+                            format,
+                            &message,
+                        )
+                    })
+                })
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn opened_serial_group_measurement(
+    opened: &[Result<OpenVulkanComputeDevice, String>],
+    targets: &[&Target],
+    payload_bytes: usize,
+    samples: usize,
+    format: &str,
+    workload: &str,
+) -> Option<GroupMeasurement> {
+    if !supports_component_chain(workload) {
+        return None;
+    }
+    let target_ids = targets
+        .iter()
+        .map(|target| target.stable_target_id.clone())
+        .collect::<Vec<_>>();
+    let mut devices = Vec::with_capacity(opened.len());
+    for device in opened {
+        match device {
+            Ok(device) => devices.push(device),
+            Err(message) => {
+                return workload_format_kernel(workload, format).map(|_| {
+                    forced_split_group_status_measurement(
+                        &target_ids,
+                        "multi_target_serial",
+                        "failed",
+                        payload_bytes,
+                        workload,
+                        format,
+                        message,
+                    )
+                });
+            }
+        }
+    }
+    workload_format_kernel_for_devices(workload, format, &devices).map(|kernel| {
+        if let Some(reason) = unsupported_kernel_reason(&kernel, &devices) {
+            return forced_split_group_status_measurement(
+                &target_ids,
+                "multi_target_serial",
+                "unsupported",
+                payload_bytes,
+                workload,
+                format,
+                &reason,
+            );
+        }
+        run_vulkan_dense_serial_group(
+            &devices,
+            &target_ids,
+            payload_bytes,
+            samples,
+            workload,
+            kernel,
+        )
+        .unwrap_or_else(|message| {
+            forced_split_group_status_measurement(
+                &target_ids,
+                "multi_target_serial",
+                "failed",
+                payload_bytes,
+                workload,
+                format,
+                &message,
+            )
+        })
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2461,8 +2891,7 @@ fn run_vulkan_dense_serial_pair(
                 summary,
             })
         }
-        Err(error) if error.starts_with(SERIAL_DIRECT_ROUTE_UNAVAILABLE) => {
-            run_vulkan_dense_serial_pair_staged(
+        Err(direct_error) => run_vulkan_dense_serial_pair_staged(
                 source_device,
                 destination_device,
                 source_id,
@@ -2472,8 +2901,11 @@ fn run_vulkan_dense_serial_pair(
                 workload_class,
                 kernel,
             )
-        }
-        Err(error) => Err(error),
+            .map_err(|staged_error| {
+                format!(
+                    "direct serial route failed ({direct_error}); staged serial route failed ({staged_error})"
+                )
+            }),
     }
 }
 
@@ -2632,6 +3064,96 @@ struct SerialChainRunResult {
     activation_bytes: usize,
     output_bytes: usize,
     transport: &'static str,
+}
+
+fn run_staged_serial_chain(
+    devices: &[&OpenVulkanComputeDevice],
+    payload_bytes: usize,
+    samples: usize,
+    kernel: &DenseFormatKernel,
+) -> Result<SerialChainRunResult, String> {
+    if devices.len() < 2 {
+        return Err("staged serial chain requires at least two devices".to_string());
+    }
+    let stage_payload = payload_bytes / devices.len();
+    let contexts = devices
+        .iter()
+        .map(|device| create_dense_compute_context(device, stage_payload, kernel.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let requested_activation_bytes = activation_bytes_for_payload(payload_bytes);
+    let mut transfers = (0..devices.len() - 1)
+        .map(|stage| {
+            create_compute_output_transfer(
+                devices[stage],
+                devices[stage + 1],
+                &contexts[stage],
+                &contexts[stage + 1],
+                requested_activation_bytes,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let transport = if transfers
+        .iter()
+        .map(ComputeOutputTransfer::route_name)
+        .all(|route| route == transfers[0].route_name())
+    {
+        transfers[0].route_name()
+    } else {
+        "mixed"
+    };
+    let mut measured_samples = Vec::with_capacity(samples);
+    for iteration in 0..=samples {
+        let sample_index = iteration.saturating_sub(1);
+        let started = Instant::now();
+        let mut bytes_read = 0_u64;
+        let mut bytes_written = 0_u64;
+        let mut operations = 0_u64;
+        for stage in 0..devices.len() {
+            let sample = submit_dense_compute_sample(
+                devices[stage],
+                &contexts[stage],
+                sample_index,
+                stage + 1 < devices.len() && transfers[stage].requires_compute_readback(),
+            )?;
+            bytes_read += sample.bytes_read;
+            bytes_written += sample.bytes_written;
+            operations += sample.operations;
+            if stage + 1 < devices.len() {
+                let transfer = transfer_compute_output_to_input(
+                    devices[stage],
+                    devices[stage + 1],
+                    &contexts[stage],
+                    &contexts[stage + 1],
+                    &mut transfers[stage],
+                    0,
+                )?;
+                bytes_read += transfer.bytes_read;
+                bytes_written += transfer.bytes_written;
+            }
+        }
+        if iteration == 0 {
+            continue;
+        }
+        measured_samples.push(Sample {
+            sample_index,
+            duration_ns: started.elapsed().as_nanos(),
+            iterations: 1,
+            bytes_read,
+            bytes_written,
+            operations,
+        });
+    }
+    validate_compute_output(devices[devices.len() - 1], &contexts[contexts.len() - 1])?;
+    Ok(SerialChainRunResult {
+        samples: measured_samples,
+        parameter_bytes_per_stage: contexts
+            .iter()
+            .map(|context| (context.plan.output_offset - context.plan.activation_size) as usize)
+            .collect(),
+        activation_bytes: transfers[0].size as usize,
+        output_bytes: contexts[contexts.len() - 1].plan.output_size as usize,
+        transport,
+    })
 }
 
 const SERIAL_DIRECT_ROUTE_UNAVAILABLE: &str = "serial direct route unavailable:";
@@ -3692,6 +4214,55 @@ fn run_direct_external_serial_chain(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_vulkan_dense_serial_group(
+    devices: &[&OpenVulkanComputeDevice],
+    target_ids: &[String],
+    payload_bytes: usize,
+    samples: usize,
+    workload_class: &str,
+    kernel: DenseFormatKernel,
+) -> Result<GroupMeasurement, String> {
+    let result = match run_direct_external_serial_chain(devices, payload_bytes, samples, &kernel) {
+        Ok(result) => result,
+        Err(direct_error) => run_staged_serial_chain(devices, payload_bytes, samples, &kernel)
+            .map_err(|staged_error| {
+                format!(
+                    "direct serial route failed ({direct_error}); staged serial route failed ({staged_error})"
+                )
+            })?,
+    };
+    let summary = summarize_samples(&result.samples);
+    Ok(GroupMeasurement {
+        workload_id: format_workload_id(
+            &format!("synthetic_serialized_forced_split_{}", devices.len()),
+            workload_class,
+            &kernel.format,
+        ),
+        comparison_group: "forced_split_tp_vs_serialized".to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: "multi_target_serial".to_string(),
+        target_ids: target_ids.to_vec(),
+        pattern: format!(
+            "{}:transport={}",
+            kernel_identity(&kernel),
+            result.transport
+        ),
+        operation_family: workload_class.to_string(),
+        regime: component_chain_regime(devices.len()).to_string(),
+        format: kernel.format,
+        status: "completed".to_string(),
+        reason: None,
+        participant_count: devices.len(),
+        payload_bytes,
+        payload_bytes_per_participant: result.parameter_bytes_per_stage,
+        activation_bytes: result.activation_bytes,
+        output_bytes: result.output_bytes,
+        samples: result.samples,
+        summary,
+    })
+}
+
 fn run_vulkan_dense_tensor_parallel_pair(
     left_device: &OpenVulkanComputeDevice,
     right_device: &OpenVulkanComputeDevice,
@@ -3728,6 +4299,56 @@ fn run_vulkan_dense_tensor_parallel_pair(
         ),
         operation_family: workload_class.to_string(),
         regime: SINGLE_COMPONENT_REGIME.to_string(),
+        format: kernel.format,
+        status: "completed".to_string(),
+        reason: None,
+        payload_bytes,
+        source_payload_bytes: result.parameter_bytes_per_participant[0],
+        destination_payload_bytes: result.parameter_bytes_per_participant[1],
+        activation_bytes: result.activation_bytes,
+        output_bytes: result.output_bytes,
+        samples: result.samples,
+        summary,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_vulkan_dense_tensor_parallel_pair_chain(
+    left_device: &OpenVulkanComputeDevice,
+    right_device: &OpenVulkanComputeDevice,
+    left_id: &str,
+    right_id: &str,
+    payload_bytes: usize,
+    samples: usize,
+    workload_class: &str,
+    kernel: DenseFormatKernel,
+) -> Result<PairMeasurement, String> {
+    let result = run_shared_tensor_parallel(
+        &[left_device, right_device],
+        payload_bytes,
+        samples,
+        &kernel,
+        2,
+    )?;
+    let summary = summarize_samples(&result.samples);
+    Ok(PairMeasurement {
+        workload_id: format_workload_id(
+            TENSOR_PARALLEL_CHAIN_PATTERN,
+            workload_class,
+            &kernel.format,
+        ),
+        comparison_group: "forced_split_tp_vs_serialized".to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: TWO_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
+        source_target_id: left_id.to_string(),
+        destination_target_id: right_id.to_string(),
+        pattern: format!(
+            "{}:shared_resident:transport={}",
+            kernel_identity(&kernel),
+            result.transport
+        ),
+        operation_family: workload_class.to_string(),
+        regime: TWO_COMPONENT_CHAIN_REGIME.to_string(),
         format: kernel.format,
         status: "completed".to_string(),
         reason: None,
@@ -3782,6 +4403,48 @@ fn run_vulkan_dense_tensor_parallel_group(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_vulkan_dense_tensor_parallel_group_chain(
+    devices: &[&OpenVulkanComputeDevice],
+    target_ids: &[String],
+    payload_bytes: usize,
+    samples: usize,
+    workload_class: &str,
+    kernel: DenseFormatKernel,
+) -> Result<GroupMeasurement, String> {
+    let result =
+        run_shared_tensor_parallel(devices, payload_bytes, samples, &kernel, devices.len())?;
+    let summary = summarize_samples(&result.samples);
+    Ok(GroupMeasurement {
+        workload_id: format_workload_id(
+            TENSOR_PARALLEL_CHAIN_PATTERN,
+            workload_class,
+            &kernel.format,
+        ),
+        comparison_group: "forced_split_tp_vs_serialized".to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: MULTI_TARGET_TENSOR_PARALLEL_STRATEGY.to_string(),
+        target_ids: target_ids.to_vec(),
+        pattern: format!(
+            "{}:shared_resident:transport={}",
+            kernel_identity(&kernel),
+            result.transport
+        ),
+        operation_family: workload_class.to_string(),
+        regime: component_chain_regime(devices.len()).to_string(),
+        format: kernel.format,
+        status: "completed".to_string(),
+        reason: None,
+        participant_count: devices.len(),
+        payload_bytes,
+        payload_bytes_per_participant: result.parameter_bytes_per_participant,
+        activation_bytes: result.activation_bytes,
+        output_bytes: result.output_bytes,
+        samples: result.samples,
+        summary,
+    })
+}
+
 fn tensor_parallel_group_status_measurement(
     target_ids: &[String],
     status: &str,
@@ -3799,6 +4462,46 @@ fn tensor_parallel_group_status_measurement(
         pattern: tensor_parallel_group_pattern(target_ids.len()),
         operation_family: workload_class.to_string(),
         regime: SINGLE_COMPONENT_REGIME.to_string(),
+        format: format.to_string(),
+        status: status.to_string(),
+        reason: Some(reason.to_string()),
+        participant_count: target_ids.len(),
+        payload_bytes,
+        payload_bytes_per_participant: split_payload_bytes(payload_bytes, target_ids.len()),
+        activation_bytes: activation_bytes_for_payload(payload_bytes),
+        output_bytes: output_bytes_for_payload(payload_bytes),
+        samples: Vec::new(),
+        summary: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forced_split_group_status_measurement(
+    target_ids: &[String],
+    placement_strategy: &str,
+    status: &str,
+    payload_bytes: usize,
+    workload_class: &str,
+    format: &str,
+    reason: &str,
+) -> GroupMeasurement {
+    let pattern = if placement_strategy == "multi_target_serial" {
+        format!("synthetic_serialized_forced_split_{}", target_ids.len())
+    } else {
+        format!(
+            "synthetic_tensor_parallel_forced_split_{}",
+            target_ids.len()
+        )
+    };
+    GroupMeasurement {
+        workload_id: format_workload_id(&pattern, workload_class, format),
+        comparison_group: "forced_split_tp_vs_serialized".to_string(),
+        workload_class: workload_class.to_string(),
+        placement_strategy: placement_strategy.to_string(),
+        target_ids: target_ids.to_vec(),
+        pattern,
+        operation_family: workload_class.to_string(),
+        regime: component_chain_regime(target_ids.len()).to_string(),
         format: format.to_string(),
         status: status.to_string(),
         reason: Some(reason.to_string()),
@@ -5503,6 +6206,31 @@ mod tests {
         assert_eq!(split_payload_bytes(11, 3), [4, 4, 3]);
         assert_eq!(split_payload_bytes(12, 3), [4, 4, 4]);
         assert_eq!(split_payload_bytes(10, 4), [3, 3, 2, 2]);
+    }
+
+    #[test]
+    fn serial_order_uses_measured_directed_edge_costs() {
+        let targets = vec![
+            "gpu:c".to_string(),
+            "gpu:a".to_string(),
+            "gpu:b".to_string(),
+        ];
+        let costs = BTreeMap::from([
+            (("gpu:a".to_string(), "gpu:b".to_string()), 10),
+            (("gpu:b".to_string(), "gpu:c".to_string()), 10),
+            (("gpu:a".to_string(), "gpu:c".to_string()), 50),
+            (("gpu:c".to_string(), "gpu:b".to_string()), 50),
+            (("gpu:b".to_string(), "gpu:a".to_string()), 50),
+            (("gpu:c".to_string(), "gpu:a".to_string()), 50),
+        ]);
+        assert_eq!(
+            best_serial_order(&targets, &costs),
+            ["gpu:a", "gpu:b", "gpu:c"]
+        );
+        assert_eq!(
+            best_serial_order(&targets, &BTreeMap::new()),
+            ["gpu:a", "gpu:b", "gpu:c"]
+        );
     }
 
     #[test]
