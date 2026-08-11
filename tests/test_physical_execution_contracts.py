@@ -208,6 +208,25 @@ def test_block_scaled_partition_requires_logically_aligned_slices() -> None:
         validate_physical_execution_contract(contract)
 
 
+def test_parameter_partition_names_its_exact_physical_resource() -> None:
+    contract = fixture_contract()
+    contract["parameter_partitions"][0]["resource"] = "missing"
+    with pytest.raises(
+        PhysicalExecutionContractError, match="exactly one declared parameter resource"
+    ):
+        validate_physical_execution_contract(contract)
+
+    contract = fixture_contract()
+    contract["resources"][0]["binding"] = 99
+    with pytest.raises(PhysicalExecutionContractError, match="binding must match"):
+        validate_physical_execution_contract(contract)
+
+    contract = fixture_contract()
+    del contract["parameter_partitions"][0]["resource"]
+    with pytest.raises(PhysicalExecutionContractError, match="missing fields"):
+        validate_physical_execution_contract(contract)
+
+
 def test_contract_sealing_is_deterministic_and_covers_semantics() -> None:
     contract = fixture_contract()
     contract.pop("contract_id")

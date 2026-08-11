@@ -172,6 +172,7 @@ pub struct ExecutionGeometry {
 #[serde(deny_unknown_fields)]
 pub struct ParameterPartition {
     pub binding: u32,
+    pub resource: String,
     pub dimension: u32,
     pub kind: ParameterPartitionKind,
     pub alignment_elements: u64,
@@ -391,9 +392,9 @@ impl PhysicalExecutionContract {
                 }
             }
         }
+        validate_resources(&self.resources)?;
         validate_bindings(self)?;
         validate_strategy(self)?;
-        validate_resources(&self.resources)?;
         validate_equivalence(&self.equivalence)?;
         Ok(())
     }
@@ -402,11 +403,33 @@ impl PhysicalExecutionContract {
 fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), ContractError> {
     let mut parameter_bindings = BTreeSet::new();
     for partition in &contract.parameter_partitions {
+        require_non_empty(&partition.resource, "parameter_partitions.resource")?;
         if partition.alignment_elements == 0
             || partition.logical_elements_per_index == 0
             || !parameter_bindings.insert(partition.binding)
         {
             return invalid("parameter partitions require unique bindings and positive alignment");
+        }
+        let matching_resources = contract
+            .resources
+            .iter()
+            .filter(|resource| resource.resource == partition.resource)
+            .collect::<Vec<_>>();
+        let [resource] = matching_resources.as_slice() else {
+            return invalid(
+                "each parameter partition must name exactly one declared parameter resource",
+            );
+        };
+        if !matches!(
+            resource.kind,
+            ResourceKind::PersistentParameter | ResourceKind::LazyResource
+        ) || resource
+            .binding
+            .is_some_and(|binding| binding != partition.binding)
+        {
+            return invalid(
+                "parameter partition resources must be parameters at the declared binding",
+            );
         }
         if let Some(extent) = &contract.partition_extent {
             let Some(logical_alignment) = partition
@@ -793,6 +816,7 @@ mod tests {
             }),
             parameter_partitions: vec![ParameterPartition {
                 binding: 2,
+                resource: "weight".to_string(),
                 dimension: 0,
                 kind: ParameterPartitionKind::Contiguous,
                 alignment_elements: 128,
@@ -850,6 +874,29 @@ mod tests {
         let mut contract = valid_contract();
         contract.parameter_partitions.clear();
         assert!(contract.validate().is_err());
+    }
+
+    #[test]
+    fn parameter_partition_must_name_its_declared_physical_resource() {
+        let mut contract = valid_contract();
+        contract.parameter_partitions[0].resource = "missing".to_string();
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one declared parameter resource")
+        );
+
+        contract.parameter_partitions[0].resource = "weight".to_string();
+        contract.resources[0].binding = Some(99);
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("declared binding")
+        );
     }
 
     #[test]

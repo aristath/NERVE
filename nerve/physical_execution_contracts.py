@@ -65,6 +65,7 @@ class ExecutionGeometry(TypedDict):
 
 class ParameterPartition(TypedDict):
     binding: int
+    resource: str
     dimension: int
     kind: ParameterPartitionKind
     alignment_elements: int
@@ -499,13 +500,17 @@ def _distributed_scalar_contract(
             parameter_partitions=[
                 {
                     "binding": binding,
+                    "resource": tensor,
                     "dimension": 0,
                     "kind": "contiguous",
                     "alignment_elements": alignment,
                     "logical_elements_per_index": logical_elements_per_index,
                 }
-                for binding, (alignment, logical_elements_per_index) in zip(
-                    parameter_bindings, partition_layouts, strict=True
+                for binding, (tensor, _), (alignment, logical_elements_per_index) in zip(
+                    parameter_bindings,
+                    parameter_metadata,
+                    partition_layouts,
+                    strict=True,
                 )
             ],
             inputs=[
@@ -550,6 +555,7 @@ def _distributed_scalar_contract(
             parameter_partitions=[
                 {
                     "binding": parameter_bindings[0],
+                    "resource": parameter_metadata[0][0],
                     "dimension": 0,
                     "kind": "contiguous",
                     "alignment_elements": max(artifact_alignment, block_rows),
@@ -557,6 +563,7 @@ def _distributed_scalar_contract(
                 },
                 {
                     "binding": parameter_bindings[1],
+                    "resource": parameter_metadata[1][0],
                     "dimension": 0,
                     "kind": "contiguous",
                     "alignment_elements": max(1, artifact_alignment // block_rows),
@@ -627,12 +634,15 @@ def _distributed_scalar_contract(
             parameter_partitions=[
                 {
                     "binding": binding,
+                    "resource": tensor,
                     "dimension": 0,
                     "kind": "expert_range",
                     "alignment_elements": 1,
                     "logical_elements_per_index": 1,
                 }
-                for binding in parameter_bindings
+                for binding, (tensor, _) in zip(
+                    parameter_bindings, parameter_metadata, strict=True
+                )
             ],
             inputs=inputs,
             outputs=[
@@ -977,10 +987,12 @@ def validate_physical_execution_contract(value: object) -> None:
             )
             if count_name == origin_name:
                 _invalid("partition launch origin and count push constants must differ")
+    resources = _list(contract["resources"], "contract.resources")
+    _validate_resources(resources)
     partitions = _list(
         contract["parameter_partitions"], "contract.parameter_partitions"
     )
-    _validate_parameter_partitions(partitions, partition_extent)
+    _validate_parameter_partitions(partitions, partition_extent, resources)
     inputs = _list(contract["inputs"], "contract.inputs")
     outputs = _list(contract["outputs"], "contract.outputs")
     _validate_inputs(inputs)
@@ -999,12 +1011,13 @@ def validate_physical_execution_contract(value: object) -> None:
         outputs,
         intermediates,
     )
-    _validate_resources(_list(contract["resources"], "contract.resources"))
     _validate_equivalence(contract["equivalence"])
 
 
 def _validate_parameter_partitions(
-    values: list[object], partition_extent: object | None
+    values: list[object],
+    partition_extent: object | None,
+    resources: list[object],
 ) -> None:
     extent = (
         _mapping(partition_extent, "contract.partition_extent")
@@ -1019,6 +1032,7 @@ def _validate_parameter_partitions(
             item,
             {
                 "binding",
+                "resource",
                 "dimension",
                 "kind",
                 "alignment_elements",
@@ -1026,6 +1040,7 @@ def _validate_parameter_partitions(
             },
             {
                 "binding",
+                "resource",
                 "dimension",
                 "kind",
                 "alignment_elements",
@@ -1037,6 +1052,23 @@ def _validate_parameter_partitions(
         if binding in bindings:
             _invalid("parameter partition bindings must be unique")
         bindings.add(binding)
+        resource_name = _non_empty_string(item["resource"], f"{path}.resource")
+        matches = [
+            _mapping(resource, "contract resource")
+            for resource in resources
+            if _mapping(resource, "contract resource").get("resource") == resource_name
+        ]
+        if len(matches) != 1:
+            _invalid(
+                "each parameter partition must name exactly one declared parameter resource"
+            )
+        resource = matches[0]
+        if resource.get("kind") not in {"persistent_parameter", "lazy_resource"}:
+            _invalid("parameter partition resources must be parameters")
+        if "binding" in resource and resource["binding"] != binding:
+            _invalid(
+                "parameter partition resource binding must match its partition binding"
+            )
         _non_negative_int(item["dimension"], f"{path}.dimension")
         _enum(item["kind"], _PARTITION_KINDS, f"{path}.kind")
         alignment = _positive_int(

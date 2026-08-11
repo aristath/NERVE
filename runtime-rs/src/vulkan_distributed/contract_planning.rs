@@ -673,7 +673,7 @@ fn validate_partition_origin(
 fn contract_parameter_slices<'a>(
     dispatch: &'a VulkanPreparedDispatch,
     tensor_index: &'a TensorIndex,
-    contract: &PhysicalExecutionContract,
+    contract: &'a PhysicalExecutionContract,
     logical_extent: usize,
     logical_alignment: &mut usize,
 ) -> Result<Vec<ContractParameterSlice<'a>>, VulkanDistributedPlanError> {
@@ -697,24 +697,7 @@ fn contract_parameter_slices<'a>(
         let binding = usize::try_from(partition.binding).map_err(|_| {
             dispatch_error(dispatch, "parameter binding exceeds usize".to_string())
         })?;
-        let tensor = dispatch
-            .descriptors
-            .iter()
-            .find(|descriptor| descriptor.binding == binding)
-            .and_then(|descriptor| match &descriptor.resource {
-                VulkanDescriptorResourceAddress::PermanentParameter { tensor, .. } => {
-                    Some(tensor.as_str())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| {
-                dispatch_error(
-                    dispatch,
-                    format!(
-                        "contract parameter binding {binding} is not a permanent parameter"
-                    ),
-                )
-            })?;
+        let tensor = partition.resource.as_str();
         let metadata = tensor_index.tensors.get(tensor).ok_or_else(|| {
             dispatch_error(dispatch, format!("has no tensor metadata for {tensor:?}"))
         })?;

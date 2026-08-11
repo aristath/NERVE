@@ -5403,7 +5403,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:699bfb26de8255bd1831880c98c4744c26d3313aec96efdaf679165b2dd1b53d",
+              "implementation_digest": "sha256:8d375a52e582499183ea9c9fc48b0af155d5a4562afb69eb6973fdadf1894201",
               "phases": [
                 "decode"
               ],
@@ -5429,6 +5429,7 @@
               "parameter_partitions": [
                 {
                   "binding": 2,
+                  "resource": "model.layers.0.mlp.gate_proj.weight",
                   "dimension": 0,
                   "kind": "contiguous",
                   "alignment_elements": 2,
@@ -5436,6 +5437,7 @@
                 },
                 {
                   "binding": 3,
+                  "resource": "model.layers.0.mlp.up_proj.weight",
                   "dimension": 0,
                   "kind": "contiguous",
                   "alignment_elements": 2,
@@ -5487,7 +5489,7 @@
                 "origin": "local_zero"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:2ec8df51cef3713941a2a59e5f27787956c8cf4f29dc695a7453b59e7d52dd7f"
+              "contract_id": "sha256:c19789a9208607785a4787b48d6f4f11afb1770260dd4318de2c5a2f10c7aece"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",

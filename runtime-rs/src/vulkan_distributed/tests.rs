@@ -13,7 +13,8 @@ mod tests {
         InputDistribution, OutputCollection, OutputContract, ParameterPartition,
         ParameterPartitionKind, PartitionExtent, PartitionLaunch, PartitionOrigin,
         PhysicalExecutionContract, PhysicalFormats, ReductionContract,
-        ReductionFinalization, ReductionOperation, WorkgroupXMapping,
+        ReductionFinalization, ReductionOperation, ResourceAccess, ResourceKind,
+        ResourceRequirement, ResidencyRequirement, WorkgroupXMapping,
         PHYSICAL_EXECUTION_CONTRACT_SCHEMA,
     };
 
@@ -393,6 +394,7 @@ mod tests {
             Some("input_start"),
             Some("input_count"),
             vec![test_partition(
+                "down-input-major",
                 2,
                 ParameterPartitionKind::Contiguous,
                 2,
@@ -436,7 +438,7 @@ mod tests {
                     name: "down-input-major".to_string(),
                     resource: VulkanDescriptorResourceAddress::PermanentParameter {
                         param_id: "down-input-major".to_string(),
-                        tensor: "down-input-major".to_string(),
+                        tensor: "canonical-down".to_string(),
                         byte_count: Some(96),
                     },
                 },
@@ -509,6 +511,10 @@ mod tests {
         );
         assert_eq!(planned.input_distribution, InputDistribution::Sharded);
         assert_eq!(planned.output_collection, OutputCollection::Reduced);
+        assert!(planned.shards.iter().all(|shard| {
+            shard.parameters.len() == 1
+                && shard.parameters[0].tensor == "down-input-major"
+        }));
         assert_eq!(
             planned.reduction,
             Some(VulkanDistributedReductionPlan {
@@ -646,6 +652,23 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("requires f32 accumulation"));
 
+        let missing_physical_resource = TensorIndex {
+            schema: tensor_index.schema.clone(),
+            tensors: BTreeMap::new(),
+        };
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared)],
+            &missing_physical_resource,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no tensor metadata for \"down-input-major\""));
+
         let mut wrong_output_size = prepared.clone();
         let VulkanDescriptorResourceAddress::ActivationSlot {
             byte_capacity,
@@ -774,8 +797,20 @@ mod tests {
                     Some("expert_start"),
                     Some("expert_count"),
                     vec![
-                        test_partition(3, ParameterPartitionKind::ExpertRange, 1, 1),
-                        test_partition(4, ParameterPartitionKind::ExpertRange, 1, 1),
+                        test_partition(
+                            "expert-weight",
+                            3,
+                            ParameterPartitionKind::ExpertRange,
+                            1,
+                            1,
+                        ),
+                        test_partition(
+                            "expert-scale",
+                            4,
+                            ParameterPartitionKind::ExpertRange,
+                            1,
+                            1,
+                        ),
                     ],
                     vec![
                         test_input(0, InputDistribution::Replicated, None),
@@ -933,8 +968,20 @@ mod tests {
                 Some("expert_start"),
                 Some("expert_count"),
                 vec![
-                    test_partition(4, ParameterPartitionKind::ExpertRange, 1, 1),
-                    test_partition(5, ParameterPartitionKind::ExpertRange, 1, 1),
+                    test_partition(
+                        "expert-weight",
+                        4,
+                        ParameterPartitionKind::ExpertRange,
+                        1,
+                        1,
+                    ),
+                    test_partition(
+                        "expert-scale",
+                        5,
+                        ParameterPartitionKind::ExpertRange,
+                        1,
+                        1,
+                    ),
                 ],
                 vec![
                     test_input(0, InputDistribution::Replicated, None),
@@ -1500,10 +1547,22 @@ mod tests {
                 None,
                 None,
                 vec![
-                    test_partition(3, ParameterPartitionKind::Contiguous, 4, 1),
-                    test_partition(4, ParameterPartitionKind::Contiguous, 1, 4),
-                    test_partition(5, ParameterPartitionKind::Contiguous, 4, 1),
-                    test_partition(6, ParameterPartitionKind::Contiguous, 1, 4),
+                    test_partition("gate", 3, ParameterPartitionKind::Contiguous, 4, 1),
+                    test_partition(
+                        "gate_scale",
+                        4,
+                        ParameterPartitionKind::Contiguous,
+                        1,
+                        4,
+                    ),
+                    test_partition("up", 5, ParameterPartitionKind::Contiguous, 4, 1),
+                    test_partition(
+                        "up_scale",
+                        6,
+                        ParameterPartitionKind::Contiguous,
+                        1,
+                        4,
+                    ),
                 ],
                 vec![
                     test_input(0, InputDistribution::Replicated, None),
@@ -1686,8 +1745,20 @@ mod tests {
                     None,
                     None,
                     vec![
-                        test_partition(4, ParameterPartitionKind::Contiguous, 4, 1),
-                        test_partition(5, ParameterPartitionKind::Contiguous, 1, 4),
+                        test_partition(
+                            "weight",
+                            4,
+                            ParameterPartitionKind::Contiguous,
+                            4,
+                            1,
+                        ),
+                        test_partition(
+                            "weight_scale",
+                            5,
+                            ParameterPartitionKind::Contiguous,
+                            1,
+                            4,
+                        ),
                     ],
                     vec![
                         test_input(0, InputDistribution::Replicated, None),
@@ -2006,8 +2077,8 @@ mod tests {
                     None,
                     None,
                     vec![
-                        test_partition(2, ParameterPartitionKind::Contiguous, 2, 1),
-                        test_partition(3, ParameterPartitionKind::Contiguous, 2, 1),
+                        test_partition("gate", 2, ParameterPartitionKind::Contiguous, 2, 1),
+                        test_partition("up", 3, ParameterPartitionKind::Contiguous, 2, 1),
                     ],
                     vec![test_input(0, InputDistribution::Replicated, None)],
                     test_output(1, OutputCollection::Concatenated, Some(2)),
@@ -2063,6 +2134,17 @@ mod tests {
         inputs: Vec<InputContract>,
         output: OutputContract,
     ) -> PhysicalExecutionContract {
+        let resources = parameter_partitions
+            .iter()
+            .map(|partition| ResourceRequirement {
+                resource: partition.resource.clone(),
+                kind: ResourceKind::PersistentParameter,
+                residency: ResidencyRequirement::Permanent,
+                access: ResourceAccess::Read,
+                binding: Some(partition.binding),
+                atomic_group: None,
+            })
+            .collect();
         PhysicalExecutionContract {
             schema: PHYSICAL_EXECUTION_CONTRACT_SCHEMA.to_string(),
             contract_id: format!("sha256:{}", "a".repeat(64)),
@@ -2106,7 +2188,7 @@ mod tests {
             inputs,
             outputs: vec![output],
             local_intermediates: Vec::new(),
-            resources: Vec::new(),
+            resources,
             equivalence: EquivalenceRequirement {
                 output: EquivalenceKind::BitExact,
                 state: EquivalenceKind::BitExact,
@@ -2117,6 +2199,7 @@ mod tests {
     }
 
     fn test_partition(
+        resource: &str,
         binding: u32,
         kind: ParameterPartitionKind,
         alignment_elements: u64,
@@ -2124,6 +2207,7 @@ mod tests {
     ) -> ParameterPartition {
         ParameterPartition {
             binding,
+            resource: resource.to_string(),
             dimension: 0,
             kind,
             alignment_elements,

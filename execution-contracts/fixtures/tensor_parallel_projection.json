@@ -45,6 +45,7 @@
   "parameter_partitions": [
     {
       "binding": 2,
+      "resource": "weight",
       "dimension": 0,
       "kind": "contiguous",
       "alignment_elements": 128,
