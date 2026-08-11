@@ -141,6 +141,7 @@ PHYSICAL_NODE_ATTRS = {
     "output_element_bytes",
     "physical_input_contract",
     "physical_input_provider_id",
+    "physical_input_source_node_ids",
     "physical_logical_inputs",
     "physical_passthrough_inputs",
     "physical_output_representations",
@@ -460,7 +461,25 @@ def _validate_physical_representation_providers(
             target_source_ids = target_attrs.get("compiled_from") or (
                 [target["id"]] if isinstance(target, dict) else []
             )
-            semantic_source_ids.extend(target_source_ids)
+            physical_input_source_node_ids = target_attrs.get(
+                "physical_input_source_node_ids"
+            )
+            if (
+                not isinstance(physical_input_source_node_ids, list)
+                or not physical_input_source_node_ids
+                or len(set(physical_input_source_node_ids))
+                != len(physical_input_source_node_ids)
+                or any(
+                    not isinstance(source_id, str)
+                    or source_id not in target_source_ids
+                    for source_id in physical_input_source_node_ids
+                )
+            ):
+                raise ModelCompileError(
+                    f"candidate circuit {component_id!r} has an invalid physical "
+                    f"representation helper {helper_id!r}"
+                )
+            semantic_source_ids.extend(physical_input_source_node_ids)
             if (
                 target is None
                 or target_id in target_ids
@@ -608,9 +627,24 @@ def _validate_physical_representation_providers(
                 passthrough_inputs = target_attrs.get(
                     "physical_passthrough_inputs", []
                 )
+                target_source_ids = target_attrs.get("compiled_from") or (
+                    [target["id"]] if isinstance(target, dict) else []
+                )
+                physical_input_source_node_ids = target_attrs.get(
+                    "physical_input_source_node_ids"
+                )
                 if (
                     target is None
                     or target_id in target_ids
+                    or not isinstance(physical_input_source_node_ids, list)
+                    or not physical_input_source_node_ids
+                    or len(set(physical_input_source_node_ids))
+                    != len(physical_input_source_node_ids)
+                    or any(
+                        not isinstance(source_id, str)
+                        or source_id not in target_source_ids
+                        for source_id in physical_input_source_node_ids
+                    )
                     or not isinstance(logical_inputs, list)
                     or not logical_inputs
                     or not isinstance(passthrough_inputs, list)

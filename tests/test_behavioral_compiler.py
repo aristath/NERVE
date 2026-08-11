@@ -623,6 +623,10 @@ def test_exact_candidate_gate_proves_fp8_parallel_linear_parameter_pairs() -> No
                 "physical_input_provider_id": (
                     "q_projection__k_projection__quantize_input"
                 ),
+                "physical_input_source_node_ids": [
+                    "q_projection",
+                    "k_projection",
+                ],
                 "physical_logical_inputs": ["x"],
                 "output_element_bytes": [2, 2],
             },
@@ -682,6 +686,7 @@ def test_exact_candidate_gate_accepts_fused_physical_representation_provider() -
         "output_element_bytes": [2],
         "physical_input_contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
         "physical_input_provider_id": "normalization",
+        "physical_input_source_node_ids": ["projection"],
         "physical_logical_inputs": ["normalized"],
         "physical_passthrough_inputs": ["normalized"],
     }
@@ -766,6 +771,7 @@ def test_exact_candidate_gate_accepts_route_aware_sparse_moe_representation() ->
             **candidate["nodes"][1]["attrs"],
             "physical_input_contract": contract,
             "physical_input_provider_id": "sparse_moe_gate_up",
+            "physical_input_source_node_ids": ["sparse_moe_down"],
             "physical_logical_inputs": [
                 "expert_intermediates",
                 "routes",
@@ -939,6 +945,7 @@ def test_hyper_connection_norm_transaction_has_a_strict_exactness_proof() -> Non
                 "physical_input_provider_id": (
                     "function__sinkhorn__reduce__norm"
                 ),
+                "physical_input_source_node_ids": ["projection"],
                 "physical_logical_inputs": ["normalized"],
             },
         }

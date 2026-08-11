@@ -512,6 +512,7 @@ def _lower_partitioned_attention(
             {
                 "physical_input_contract": ATTENTION_PARTIALS_CONTRACT,
                 "physical_input_provider_id": helper_id,
+                "physical_input_source_node_ids": _source_node_ids(node),
                 "physical_logical_inputs": deepcopy(inputs),
                 "physical_passthrough_inputs": deepcopy(inputs[1:]),
                 "attention_partition_count": partition_count,
@@ -687,6 +688,9 @@ def _fuse_mixed_precision_parallel_linears(
                     "physical_input_provider_id": first_attrs[
                         "physical_input_provider_id"
                     ],
+                    "physical_input_source_node_ids": deepcopy(
+                        first_attrs["physical_input_source_node_ids"]
+                    ),
                     "physical_logical_inputs": deepcopy(
                         first_attrs["physical_logical_inputs"]
                     ),
@@ -864,6 +868,7 @@ def _lower_prequantized_inputs(
         ]
         node_attrs["physical_input_contract"] = scope["contract"]
         node_attrs["physical_input_provider_id"] = scope["provider_id"]
+        node_attrs["physical_input_source_node_ids"] = _source_node_ids(node)
         node_attrs["physical_logical_inputs"] = inputs
         compiled.append(node)
     return compiled

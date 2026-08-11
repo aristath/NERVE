@@ -1696,6 +1696,10 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
             ["q", "k", "v", "kv_memory"],
             reduction["attrs"]["physical_logical_inputs"],
         )
+        self.assertEqual(
+            ["kv_memory_append", "attention_read"],
+            reduction["attrs"]["physical_input_source_node_ids"],
+        )
         self.assertEqual(8, reduction["attrs"]["attention_partition_count"])
 
     def test_fuses_contiguous_gate_up_projection_split_and_swiglu(self) -> None:
@@ -1810,6 +1814,67 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
         self.assertEqual(
             ["large_a", "large_b", "small_c", "small_d"],
             fused["attrs"]["compiled_from"],
+        )
+
+    def test_mixed_projection_preserves_physical_input_source_provenance(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "large_a",
+                    "op": "linear",
+                    "inputs": ["hidden"],
+                    "outputs": ["large_a_out"],
+                    "params": ["large_a", "large_a_scale"],
+                },
+                {
+                    "id": "large_b",
+                    "op": "linear",
+                    "inputs": ["hidden"],
+                    "outputs": ["large_b_out"],
+                    "params": ["large_b", "large_b_scale"],
+                },
+                {
+                    "id": "small_c",
+                    "op": "linear",
+                    "inputs": ["hidden"],
+                    "outputs": ["small_c_out"],
+                    "params": ["small_c"],
+                },
+                {
+                    "id": "small_d",
+                    "op": "linear",
+                    "inputs": ["hidden"],
+                    "outputs": ["small_d_out"],
+                    "params": ["small_d"],
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_parallel_linears=lambda nodes: len(nodes) == 2
+            and all(len(node["params"]) == len(nodes[0]["params"]) for node in nodes),
+            prequantization_spec=lambda node: (
+                {
+                    "contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
+                    "input_size": 5120,
+                    "block_columns": 128,
+                }
+                if node.get("id") == "large_a__large_b"
+                else None
+            ),
+            can_emit_representation=lambda _producer, _scope: False,
+            can_fuse_mixed_precision_parallel_linears=lambda _fp8, _bf16: True,
+        )
+
+        helper, fused = optimized["nodes"]
+        self.assertEqual(
+            ["large_a", "large_b"],
+            helper["attrs"]["semantic_source_node_ids"],
+        )
+        self.assertEqual(
+            ["large_a", "large_b"],
+            fused["attrs"]["physical_input_source_node_ids"],
         )
 
     def test_fuses_hyper_connection_pre_and_post_pre_regions(self) -> None:
