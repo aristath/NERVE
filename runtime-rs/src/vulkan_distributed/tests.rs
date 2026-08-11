@@ -347,6 +347,22 @@ mod tests {
     }
 
     #[test]
+    fn embedded_distributed_sum_has_exact_typed_control() {
+        let words = distributed_sum_f32_spirv_words().unwrap();
+        assert_eq!(words.first().copied(), Some(0x0723_0203));
+        let reduction = VulkanDistributedReductionPlan {
+            operation: ReductionOperation::SumF32,
+            element_count: 4096,
+            partial_byte_capacity: 4096 * 4,
+        };
+        let bytes = distributed_sum_f32_push_constants(&reduction, 5, 3).unwrap();
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 4096);
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 5);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 3);
+    }
+
+    #[test]
     fn plans_input_column_partials_with_typed_f32_reduction() {
         let activation = |binding, usage, signal: &str, bytes| VulkanResolvedDescriptorBinding {
             binding,
@@ -409,7 +425,7 @@ mod tests {
             local_size_x: 64,
             descriptors: vec![
                 activation(0, VulkanKernelDescriptorUsage::InputSignal, "input", 24),
-                activation(1, VulkanKernelDescriptorUsage::OutputSignal, "output", 8),
+                activation(1, VulkanKernelDescriptorUsage::OutputSignal, "output", 16),
                 VulkanResolvedDescriptorBinding {
                     binding: 2,
                     usage: VulkanKernelDescriptorUsage::Parameter,
@@ -502,7 +518,7 @@ mod tests {
         assert_eq!(buffer_plan.allocation_count, 3);
         assert_eq!(buffer_plan.import_count, 7);
         assert_eq!(buffer_plan.reference_count, 6);
-        assert_eq!(buffer_plan.total_shared_byte_capacity, 80);
+        assert_eq!(buffer_plan.total_shared_byte_capacity, 88);
         assert_eq!(
             buffer_plan
                 .allocation("owner", "component", 1)
@@ -567,6 +583,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("requires f32 accumulation"));
+
+        let mut wrong_output_size = prepared.clone();
+        let VulkanDescriptorResourceAddress::ActivationSlot {
+            byte_capacity,
+            signal_byte_capacity,
+            ..
+        } = &mut wrong_output_size.dispatches[0].descriptors[1].resource
+        else {
+            panic!("fixture output is an activation slot");
+        };
+        *byte_capacity = 8;
+        *signal_byte_capacity = 8;
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &wrong_output_size)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("produces 16 bytes"));
 
         let mut wrong_abi = prepared.clone();
         wrong_abi.dispatches[0].push_constants.pop();

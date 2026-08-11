@@ -287,6 +287,15 @@ fn plan_contract_dispatch(
             let partial_byte_capacity = element_count.checked_mul(size_of::<f32>()).ok_or_else(|| {
                 dispatch_error(dispatch, "reduction partial byte capacity overflowed".to_string())
             })?;
+            if output_activation.signal_byte_capacity != partial_byte_capacity {
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "sum_f32 reduction produces {partial_byte_capacity} bytes but output signal {} has {} bytes",
+                        output_activation.signal_id, output_activation.signal_byte_capacity
+                    ),
+                ));
+            }
             Ok(VulkanDistributedReductionPlan {
                 operation: reduction.operation,
                 element_count,

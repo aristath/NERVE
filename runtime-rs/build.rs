@@ -51,6 +51,11 @@ fn main() {
         &PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo provides OUT_DIR"))
             .join("gpu_residency_gate.spv"),
     );
+    compile_runtime_shader(
+        &manifest_dir.join("shaders/distributed_sum_f32.comp"),
+        &PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo provides OUT_DIR"))
+            .join("distributed_sum_f32.spv"),
+    );
     let hardware_discovery_sources = [
         "Cargo.lock",
         "Cargo.toml",
@@ -120,6 +125,7 @@ fn main() {
         "Cargo.lock",
         "Cargo.toml",
         "build.rs",
+        "shaders/distributed_sum_f32.comp",
         "shaders/gpu_residency_gate.comp",
     ]
     .into_iter()

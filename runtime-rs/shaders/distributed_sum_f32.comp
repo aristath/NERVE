@@ -1,0 +1,33 @@
+#version 460
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer PartialPlanes {
+    float values[];
+} partials;
+
+layout(set = 0, binding = 1, std430) writeonly buffer ReducedOutput {
+    float values[];
+} output_values;
+
+layout(push_constant) uniform ReductionControl {
+    uint element_count;
+    uint participant_count;
+    uint lane_count;
+} control;
+
+void main() {
+    const uint element = gl_GlobalInvocationID.x;
+    const uint lane = gl_GlobalInvocationID.y;
+    if (element >= control.element_count || lane >= control.lane_count) {
+        return;
+    }
+
+    float sum = 0.0;
+    for (uint participant = 0; participant < control.participant_count; ++participant) {
+        const uint partial_index =
+            ((participant * control.lane_count + lane) * control.element_count) + element;
+        sum += partials.values[partial_index];
+    }
+    output_values.values[(lane * control.element_count) + element] = sum;
+}
