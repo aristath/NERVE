@@ -158,5 +158,22 @@ publishes the catalog atomically only when outputs are canonical and NERVE's
 allocations and reservations have returned to the pre-run state. A missing,
 stale, unavailable, invalid, or unrestored candidate produces no catalog.
 
+Combine independently measured candidates without discarding alternative
+owners, exits, transports, or resource tradeoffs:
+
+```sh
+cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
+  merge-catalogs \
+  --input /path/to/owner-a.json \
+  --input /path/to/owner-b.json \
+  --output /path/to/merged-placement-catalog.json
+```
+
+Merging is transactional and order-independent. Distinct exact cases are
+retained. Repeated measurements of the same exact case must agree on behavior,
+resources, output, state, and call shape; the merge keeps the slower complete
+duration as conservative planning evidence. Conflicts fail without replacing
+an already published output.
+
 The final JSON contains completed, validated comparisons only. A missing target
 or combination was not a usable measured path.
