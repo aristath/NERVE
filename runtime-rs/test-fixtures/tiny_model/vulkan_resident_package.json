@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.vulkan_resident_model_package.v11",
+  "schema": "nerve.vulkan_resident_model_package.v12",
   "package_id": "model_d119caf1_vulkan_resident",
   "compiler_target": {
     "schema": "nerve.compiler_target.v2",
@@ -2039,7 +2039,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2100,10 +2100,10 @@
               },
               "region_family": "layer.token_mixer.normalization",
               "execution_shape": "single_lane",
-              "contract_id": "sha256:191d73f6610c5c4f2e9ca46bc23dbf0d95ebbbe41e95c3d46460e35a8a8f145d"
+              "contract_id": "sha256:45cc724749172da610a9df1d6fb6bba35b01b25d5a9e4ccc7abce3c66fbbe711"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2168,10 +2168,10 @@
               },
               "region_family": "layer.token_mixer.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:905ffb50c00c21920dec9e736293cb2e66e55ab42bdffa2bd7945f6fb8a2887f"
+              "contract_id": "sha256:9d427633be15be963dad5b20630f1669455c3e9e0d911e0d906757fed362df06"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2236,10 +2236,10 @@
               },
               "region_family": "layer.token_mixer.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:b634691a144b4e221f5ce98066cdaaf621fd7ba4679e248bbed35eb64fb274e8"
+              "contract_id": "sha256:0503e7cdf93e46f9fe35299628e972b0fab19ae57c85f58e62116997799c3f54"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2304,10 +2304,10 @@
               },
               "region_family": "layer.token_mixer.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:addcea9c51b422e3cd5936f73e0ec8f9ecb27922e5c17a6081e8709ac41579c9"
+              "contract_id": "sha256:43fe5e3cb0fd9095cdb971ca95985b986028c3fddcf2987b9a258f013c19a0e5"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2372,10 +2372,10 @@
               },
               "region_family": "layer.token_mixer.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:293a555deadd03fb60808751e803557b9f0e68c07df5fa03a713eb6f56d4f064"
+              "contract_id": "sha256:29ea9612d7dd19b094c722a86b73681464a32773926618c2f0ebfa13c33977dd"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "operator_norm"
@@ -2440,7 +2440,7 @@
               },
               "region_family": "layer.token_mixer.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:1b8e6b4217e479addd785369251a0c5352981faab5c2156f34839f6ac8b6f634"
+              "contract_id": "sha256:f929e0fd428be959af3473fcff1eeb1915cacbdbd8a0538e67051643c30ef70c"
             }
           ]
         },
@@ -2626,7 +2626,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -2717,10 +2717,10 @@
               },
               "region_family": "layer.token_mixer.input_projections",
               "execution_shape": "single_lane",
-              "contract_id": "sha256:37193e6c944416a63549b0bbfd5d5b61704ebd27f0fedee14c0240dcc48c64a6"
+              "contract_id": "sha256:6320c89038cee122cacfcd90018d8eb4d7e46458d7d755d4db16d5b04f828d19"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -2814,10 +2814,10 @@
               },
               "region_family": "layer.token_mixer.input_projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:07b1f43b217d532d0e135dd308ded91a7003bb6035b7f37605796ae513d6463a"
+              "contract_id": "sha256:527e3d1a88a09795cf055d022bad38dc8fd61947ad5549e0f674abd073fb0a87"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -2912,10 +2912,10 @@
               },
               "region_family": "layer.token_mixer.input_projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:fee5a1e2e90982309e28a95f1dee010766f4ae30d69517154b1bc2c1f5661a1f"
+              "contract_id": "sha256:24c23b2710194e304593743a0b8c5bdbd0f6da598adfef7dcc1c62c968536ee7"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -3010,10 +3010,10 @@
               },
               "region_family": "layer.token_mixer.input_projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:bdf1439569274b7ef2209ceb09af706625dab04fb7d63c048550972365c67056"
+              "contract_id": "sha256:a769ca18e9da100083dc2c2c4d916f45040f206250ce230247d51333a57f45fd"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -3108,10 +3108,10 @@
               },
               "region_family": "layer.token_mixer.input_projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:cd660a4d358247205772ea065a3c0f7ba51df1c36f4cf22b3aec9b40cafafe20"
+              "contract_id": "sha256:0485a9967ad0497f924a4a8a5f023d4de08acd0abdc4b6de548b558fb3157316"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_3way",
               "member_node_ids": [
                 "q_projection__k_projection__v_projection",
@@ -3206,7 +3206,7 @@
               },
               "region_family": "layer.token_mixer.input_projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:64412451d18f3610c6dd4a56032d4e0cd8b4c783a7fced63876957d3fac0b267"
+              "contract_id": "sha256:4dbdc42d03fe0e5c0ae12578cd03e5108d23c4438f0a3a7d99641e064154c091"
             }
           ]
         },
@@ -3256,7 +3256,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rotary_position_embedding",
               "member_node_ids": [
                 "q_rope"
@@ -3308,10 +3308,10 @@
               },
               "region_family": "layer.token_mixer.position",
               "execution_shape": "single_lane",
-              "contract_id": "sha256:a27df8d390586992e9fefc78a942d9e36e14eca136e16258d30a8048f392e2ae"
+              "contract_id": "sha256:b520d19554546793621d89f270e018e1f4254a62d9dba2cb8feebe8b05fcb20f"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rotary_position_embedding",
               "member_node_ids": [
                 "q_rope"
@@ -3366,7 +3366,7 @@
               },
               "region_family": "layer.token_mixer.position",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:31f487e746bb0fca0e5de548660fbf5c8a639feddbe04aa3bef9ea1e588dff01"
+              "contract_id": "sha256:b54f2942e3b71257ffb4c47a21a103256e50cb1ecddebd76feaa476f6e01e217"
             }
           ]
         },
@@ -3416,7 +3416,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rotary_position_embedding",
               "member_node_ids": [
                 "k_rope"
@@ -3468,10 +3468,10 @@
               },
               "region_family": "layer.token_mixer.position",
               "execution_shape": "single_lane",
-              "contract_id": "sha256:84961973a9504502c5cc2312673999600f191ba8b2eb4a62823d401e751597ec"
+              "contract_id": "sha256:85c9461b9e0c0671cab746e5bf0f38afa77e5521424df179594b1a3144cefa9a"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rotary_position_embedding",
               "member_node_ids": [
                 "k_rope"
@@ -3526,7 +3526,7 @@
               },
               "region_family": "layer.token_mixer.position",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:27154e6c8dd1afcc421806d77b3aefe0822cb44f1d3f7fc0de332d044e6ed52f"
+              "contract_id": "sha256:858947c5c2a1527381d441d5e814b7e9c96acb6b9217258243efb94ce95fef74"
             }
           ]
         },
@@ -3581,7 +3581,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "attention_partition_partials",
               "member_node_ids": [
                 "kv_memory_append__attention_read__partition_partials",
@@ -3654,10 +3654,10 @@
               },
               "region_family": "layer.token_mixer.attention_state",
               "execution_shape": "single_lane",
-              "contract_id": "sha256:33b4e8a1eb897adf988e7133bf08c121d839b1d1387758e60af8139c32107f31"
+              "contract_id": "sha256:49867ddb54357e40b218088c5b1a967293988d1eb818bb1e36b364ba17e4c1ee"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "attention_partition_partials",
               "member_node_ids": [
                 "kv_memory_append__attention_read__partition_partials",
@@ -3733,7 +3733,7 @@
               },
               "region_family": "layer.token_mixer.attention_state",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:3f8ca3e21f4e3b38c73efd34a87b1cbc03e225b64f1bcfe00e74f7dac0c41ff3"
+              "contract_id": "sha256:d0430eb527357f4ac4be288addf0d8ef2f288679033f0c8b4d4a36da66acca33"
             }
           ]
         },
@@ -3796,7 +3796,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "append_scaled_dot_product_attention",
               "member_node_ids": [
                 "kv_memory_append__attention_read",
@@ -3869,10 +3869,10 @@
               },
               "region_family": "layer.token_mixer.attention_state",
               "execution_shape": "single_lane",
-              "contract_id": "sha256:3b6549d082efa7795738cb3c3fe4bb8f392382b79caef08416ca550a036ad6f4"
+              "contract_id": "sha256:c96bf556e6018295b351d60593c42fb2c2f6a646c66846a2eae878fa162cc1b4"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "append_scaled_dot_product_attention",
               "member_node_ids": [
                 "kv_memory_append__attention_read",
@@ -3953,7 +3953,7 @@
               },
               "region_family": "layer.token_mixer.attention_state",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:feabf1287fcf41b00c3af645e8f975c2253d1a984a00ce9288bc6afa29e959fd"
+              "contract_id": "sha256:12816305a5c95899767487929601b3d1c6171084bbec1eb38889788ec7ccac0c"
             }
           ]
         },
@@ -4139,7 +4139,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4207,10 +4207,10 @@
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
               "execution_shape": "single_lane",
-              "contract_id": "sha256:99a2337898f682955e8e9129e8e5f1dc74b24178a15170f952272a1f4640a1af"
+              "contract_id": "sha256:9c76c7faa66927115d2027ded1787847920cb7cb4496b09276b7ec5a76fa6ae5"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4281,10 +4281,10 @@
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:a3664fa2ab2fd477025d93d11ff2f5a5ddaf86c98821f2e16b81e280b749322b"
+              "contract_id": "sha256:34de91ed135e6012fc4969e33f1e8610afb191c8affda5413e82aa72035286dd"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4356,10 +4356,10 @@
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:fa6fd4e1b7d4df32c1e4bf4b4b205d6dfd970cfc1fdf7f1df0cbccccf0a09004"
+              "contract_id": "sha256:6028a777c055f464826a6d0d640b37b2f6aa6b0b4dcad8d75d0d941ac7d23eb9"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4431,10 +4431,10 @@
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:517f0605ec3cdacadcdf8b9185e8378045a284a1a595731dccb0025c3c0777d9"
+              "contract_id": "sha256:7e321a0ebe29e6cdfa8eac412f73acdbd3ec72f811ccb5aafb175573f44b78fe"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4506,10 +4506,10 @@
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:a3aad6f2b6fc4c3d0a6b061f3ee7cac5d880c65eaa810728e784e8aee19b4edc"
+              "contract_id": "sha256:68829afb55023c06374758c777cc0174ed88757b4e716c061c3c43809af289c0"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "attention_out_projection__operator_residual",
@@ -4581,7 +4581,7 @@
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:223c6f88c00f9d3ecae79b5c07b9b889d41085fa9b3c54ac6c1966da3c780c19"
+              "contract_id": "sha256:cae41d364f6da18dfd4a3af1ce7295eb77d52197bf32896ac8b0ee8f2319881c"
             }
           ]
         },
@@ -4752,7 +4752,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -4813,10 +4813,10 @@
               },
               "region_family": "layer.feature_transform.normalization",
               "execution_shape": "single_lane",
-              "contract_id": "sha256:6f31f90d852b043276fb004822db5ae5a25cccda997e5ec8bd58efcfa22735fe"
+              "contract_id": "sha256:8e4536a0ec10f5b80f87246cf7553bc93c865c3c2f8c755e0cfc414c86017399"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -4881,10 +4881,10 @@
               },
               "region_family": "layer.feature_transform.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:666b06c87b70740dfd2c567a6cad6fec7e49b1b880f3c433252da62bc9585120"
+              "contract_id": "sha256:9e6247fb6db3e5de16a4e7ddeb39fb8ae12140af086833a5eeae10bee9aa4b5b"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -4949,10 +4949,10 @@
               },
               "region_family": "layer.feature_transform.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:aee6ac9a1f49399086b0df1bc020a39378763cc9790156492648e2808b422bf3"
+              "contract_id": "sha256:7cb4e73e79e3fb2d73d43ac611460ae6ebf22a6536643cd0c01543aca146601b"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -5017,10 +5017,10 @@
               },
               "region_family": "layer.feature_transform.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:f0485b9914b8941b7286e276c7b44c427a1e5a413eb6f268580661d9bdc42beb"
+              "contract_id": "sha256:22062936fc2b4edc2e631f745d547da7497cf3c28b2900283e3b41101c9a5590"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -5085,10 +5085,10 @@
               },
               "region_family": "layer.feature_transform.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:0bc0f919e6c44d031ced3f2157ab5e86adca395fc9762382407cd301ca2bf1c1"
+              "contract_id": "sha256:f092dfab5514a4eeadf89fa79f7c8373011a0581e401097976f07dafc69d49b6"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "rms_norm",
               "member_node_ids": [
                 "ffn_norm"
@@ -5153,7 +5153,7 @@
               },
               "region_family": "layer.feature_transform.normalization",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:b9aff28596c0dde0c46b7e4ee471b3d0f531870c3aab30cc92e5cf3c0781ce4a"
+              "contract_id": "sha256:e4cf9106864f10b71f68df2a75178013131a446257ba557a3c1cdbd534d03162"
             }
           ]
         },
@@ -5342,7 +5342,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5417,10 +5417,10 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:659f60df37e689e9184083d35c9f5b0452fc334e1fc995c2d7d91df6580729ba"
+              "contract_id": "sha256:c0f035dc13cad4a444b16c259c5290101089e39af7d60a2aa5689fbb5f9d7f0e"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5523,10 +5523,10 @@
                 "origin": "local_zero"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:113e2fd94491414f906984822e5014078252784d022fc2cf17866529be74627e"
+              "contract_id": "sha256:b01b207037fc77011d35dc288eb0d3946237e751f4649938ab26abf479d4aa7d"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5604,10 +5604,10 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:1604d2673cf7a54e5cf46d8f14a73baa9fbdfbd75eebfec4e60d20619440d30b"
+              "contract_id": "sha256:5017079d8e3bcd9f271f728f8760eea62c6b154fcdb7cdd0951e5320a6134b11"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5686,10 +5686,10 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:a9353d4a6313405c5dc55a0011370451d0e15f27bb59c2f148351542f5ddb260"
+              "contract_id": "sha256:32a06fff9548e4debd83502dc533976a10195d36d11156bec4255546106df04b"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5768,10 +5768,10 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:61e385ce39d2dc21b3e3da66b7a34c83881da845e8573ec5849858aff0c24a08"
+              "contract_id": "sha256:78e5c47295281f9283f5fe395edd640b2840c1412cf5168daed513b569d49aae"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5850,10 +5850,10 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:84f3ca903815919d965aafd0260e0e69ac692fbd810d052db890b57f6e3a72fb"
+              "contract_id": "sha256:c3dd4255ab6354d89cc83577e338963db28163ae00e32f38c66f4c2eb2fdcf1e"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -5932,10 +5932,10 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:01611aa7051f022de223cc66a8672cd9d8eeee3859495d1d10c6ddd89203e6b6"
+              "contract_id": "sha256:b2f0f0fcc50d682ec8fcd929fdc7a9eee524a926f2bf385c23cbf288f97de435"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -6041,10 +6041,10 @@
                 "origin": "local_zero"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:664e14ae8ab4103fd136fb670b3851ad6deb595b2260aba0c259127f5ce4bd84"
+              "contract_id": "sha256:7d6b9f5dcba19ed84ce17d53b70955aeb72ef1d2b2f1ab6e432f98cd32d573dd"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "parallel_linear_silu_multiply",
               "member_node_ids": [
                 "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
@@ -6150,7 +6150,7 @@
                 "origin": "local_zero"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:4170e213a152ae57504e5b34b08e97c2d9543082d2c77f0a3142e72c59310649"
+              "contract_id": "sha256:6162b40bb148aaf373a0234ead054d639fddc3a41cbd14bff457fa929caadbc7"
             }
           ]
         },
@@ -6336,7 +6336,7 @@
           ],
           "physical_execution_contracts": [
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6404,10 +6404,10 @@
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
               "execution_shape": "single_lane",
-              "contract_id": "sha256:c165c1bd3244e7571e6dc55857244a87a7b63bf73579d78dcdf2e91c1b8ab5a5"
+              "contract_id": "sha256:963d9e598f6ae05f2b7fea3e89d70e7584762a816fe9a70ab8f07e1b82c2b720"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6478,10 +6478,10 @@
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:3ea0384addd7c80938879dbe746aa4bf2283125f0c735270a15364864a606d05"
+              "contract_id": "sha256:2e84594c980c90a84c6bc7e2f3076b7b28f8e8ddc4a9df6401fe35377df64dee"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6553,10 +6553,10 @@
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:0546e6b8d636beda8c465fb0e003ae5cc682da21f4edc088b6c2b1e9d3a955c2"
+              "contract_id": "sha256:940923cbc3040d3dc65aa02bfa475025162582e5498f1670986dc452f71e4746"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6628,10 +6628,10 @@
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:b37580ad0c6ac34afa508c9050648a8cd0a8abbb9943ac06ac0b7f2025bea7e6"
+              "contract_id": "sha256:9bc290f31ce06b8eedc2670f5d459c30ee5ca2668d15a59b2a27284afb7eb8b4"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6703,10 +6703,10 @@
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:98efab0a8173ee235f258288762e249139c3cdc088779cbac874c421e7634c77"
+              "contract_id": "sha256:9a573dd407510768517c5e285438bd4886621e4c5c2654d70a9f9bab813c9b38"
             },
             {
-              "schema": "nerve.physical_execution_contract.v1",
+              "schema": "nerve.physical_execution_contract.v2",
               "operation_family": "linear_residual",
               "member_node_ids": [
                 "ffn_down_projection__ffn_residual",
@@ -6778,7 +6778,7 @@
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
               "execution_shape": "multi_lane",
-              "contract_id": "sha256:9ff92c1ed9f93882ff6bd6361fbd7edb9f8baaf0d883e55f4aa1e681d6465e6d"
+              "contract_id": "sha256:698248062c951a4be24baa31baf0cd8a5a1436332088a771b0b9a3f628922022"
             }
           ]
         }

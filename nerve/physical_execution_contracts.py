@@ -13,7 +13,7 @@ from nerve.model_package_physical_kernels import (
 
 Json = dict[str, Any]
 
-PHYSICAL_EXECUTION_CONTRACT_SCHEMA = "nerve.physical_execution_contract.v1"
+PHYSICAL_EXECUTION_CONTRACT_SCHEMA = "nerve.physical_execution_contract.v2"
 
 ExecutionPhase = Literal["decode", "prefill"]
 ExecutionShape = Literal["single_lane", "multi_lane", "single_and_multi_lane"]

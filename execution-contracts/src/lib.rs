@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub const PHYSICAL_EXECUTION_CONTRACT_SCHEMA: &str = "nerve.physical_execution_contract.v1";
+pub const PHYSICAL_EXECUTION_CONTRACT_SCHEMA: &str = "nerve.physical_execution_contract.v2";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContractError(pub String);

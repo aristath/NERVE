@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.physical_execution_contract.v1",
+  "schema": "nerve.physical_execution_contract.v2",
   "contract_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "operation_family": "parallel_projection",
   "region_family": "ffn_gate_up",
