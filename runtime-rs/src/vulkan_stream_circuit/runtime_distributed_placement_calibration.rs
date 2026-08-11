@@ -472,11 +472,13 @@ fn distributed_calibration_execution_case(
             shape,
             input_fixture_digest,
         },
-        strategy: if devices.len() == 1 {
-            VulkanPlacementExecutionStrategy::SingleDevice
-        } else {
-            VulkanPlacementExecutionStrategy::TensorParallel
-        },
+        strategy: distributed_calibration_execution_strategy(
+            devices.len(),
+            execution_plan
+                .dispatches
+                .iter()
+                .map(|dispatch| dispatch.distribution),
+        )?,
         devices,
         shards,
         input_physical_device_id,
@@ -484,6 +486,39 @@ fn distributed_calibration_execution_case(
         owner_physical_device_id,
         transports,
     })
+}
+
+fn distributed_calibration_execution_strategy(
+    device_count: usize,
+    distributions: impl IntoIterator<Item = VulkanDistributedDispatchDistribution>,
+) -> Result<VulkanPlacementExecutionStrategy, VulkanResidentTokenModelPackageError> {
+    if device_count == 0 {
+        return distributed_calibration_error(
+            "distributed calibration strategy requires at least one physical device",
+        );
+    }
+    let mut saw_output_rows = false;
+    let mut saw_expert_range = false;
+    for distribution in distributions {
+        match distribution {
+            VulkanDistributedDispatchDistribution::OutputRows => saw_output_rows = true,
+            VulkanDistributedDispatchDistribution::ExpertRange => saw_expert_range = true,
+        }
+    }
+    if !saw_output_rows && !saw_expert_range {
+        return distributed_calibration_error(
+            "distributed calibration strategy requires at least one partitioned dispatch",
+        );
+    }
+    if device_count == 1 {
+        return Ok(VulkanPlacementExecutionStrategy::SingleDevice);
+    }
+    match (saw_output_rows, saw_expert_range) {
+        (true, false) => Ok(VulkanPlacementExecutionStrategy::TensorParallel),
+        (false, true) => Ok(VulkanPlacementExecutionStrategy::WholeExpertParallel),
+        (true, true) => Ok(VulkanPlacementExecutionStrategy::Hybrid),
+        (false, false) => unreachable!("checked nonempty distributions above"),
+    }
 }
 
 fn distributed_calibration_distribution_name(
@@ -1801,4 +1836,62 @@ fn distributed_calibration_error_value(
     message: impl Into<String>,
 ) -> VulkanResidentTokenModelPackageError {
     VulkanResidentTokenModelPackageError::new(message.into())
+}
+
+#[cfg(test)]
+mod runtime_distributed_placement_calibration_strategy_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_physical_strategy_from_partition_contracts() {
+        assert_eq!(
+            distributed_calibration_execution_strategy(
+                1,
+                [VulkanDistributedDispatchDistribution::ExpertRange],
+            )
+            .unwrap(),
+            VulkanPlacementExecutionStrategy::SingleDevice,
+        );
+        assert_eq!(
+            distributed_calibration_execution_strategy(
+                2,
+                [VulkanDistributedDispatchDistribution::OutputRows],
+            )
+            .unwrap(),
+            VulkanPlacementExecutionStrategy::TensorParallel,
+        );
+        assert_eq!(
+            distributed_calibration_execution_strategy(
+                3,
+                [VulkanDistributedDispatchDistribution::ExpertRange],
+            )
+            .unwrap(),
+            VulkanPlacementExecutionStrategy::WholeExpertParallel,
+        );
+        assert_eq!(
+            distributed_calibration_execution_strategy(
+                4,
+                [
+                    VulkanDistributedDispatchDistribution::ExpertRange,
+                    VulkanDistributedDispatchDistribution::OutputRows,
+                ],
+            )
+            .unwrap(),
+            VulkanPlacementExecutionStrategy::Hybrid,
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_physical_strategy() {
+        let no_devices = distributed_calibration_execution_strategy(
+            0,
+            [VulkanDistributedDispatchDistribution::OutputRows],
+        )
+        .unwrap_err();
+        assert!(no_devices.to_string().contains("physical device"));
+
+        let no_dispatches =
+            distributed_calibration_execution_strategy(1, std::iter::empty()).unwrap_err();
+        assert!(no_dispatches.to_string().contains("partitioned dispatch"));
+    }
 }
