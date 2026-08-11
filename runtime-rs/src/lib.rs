@@ -7,6 +7,7 @@ pub mod execution_schedule;
 pub mod hardware_calibration;
 pub mod hardware_profile;
 pub mod implementation_selection;
+pub use nerve_execution_contracts as execution_contracts;
 pub mod representation_graph;
 pub mod stream_circuit;
 pub mod stream_plan;

@@ -32,6 +32,15 @@ pub enum ExecutionStrategy {
     TensorParallelExpert,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionForm {
+    Local,
+    ReplicatedInputPartitionedOutput,
+    PartitionedInputPartialOutput,
+    WholeExpertOwnership,
+}
+
 impl ExecutionStrategy {
     pub fn is_distributed(self) -> bool {
         self != Self::SingleDevice
@@ -44,6 +53,20 @@ pub enum ParameterPartitionKind {
     Contiguous,
     BlockCyclic,
     ExpertRange,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkgroupXMapping {
+    Proportional,
+    Repeated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartitionOrigin {
+    LocalZero,
+    PushConstantU32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +154,24 @@ pub struct ParameterPartition {
     pub dimension: u32,
     pub kind: ParameterPartitionKind,
     pub alignment_elements: u64,
+    pub logical_elements_per_index: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartitionExtent {
+    pub dimension_name: String,
+    pub elements: u64,
+    pub alignment_elements: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartitionLaunch {
+    pub workgroup_x: WorkgroupXMapping,
+    pub origin: PartitionOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_push_constant: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,12 +240,17 @@ pub struct PhysicalExecutionContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region_family: Option<String>,
     pub member_node_ids: Vec<String>,
-    pub artifact: ArtifactIdentity,
+    pub artifacts: Vec<ArtifactIdentity>,
     pub implementation_digest: String,
     pub phases: Vec<ExecutionPhase>,
     pub formats: PhysicalFormats,
     pub geometry: ExecutionGeometry,
     pub strategy: ExecutionStrategy,
+    pub execution_form: ExecutionForm,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_extent: Option<PartitionExtent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_launch: Option<PartitionLaunch>,
     pub parameter_partitions: Vec<ParameterPartition>,
     pub inputs: Vec<InputContract>,
     pub outputs: Vec<OutputContract>,
@@ -224,17 +270,26 @@ impl PhysicalExecutionContract {
         }
         require_digest(&self.contract_id, "contract_id")?;
         require_digest(&self.implementation_digest, "implementation_digest")?;
-        require_digest(&self.artifact.sha256, "artifact.sha256")?;
         for (path, value) in [
             ("operation_family", self.operation_family.as_str()),
-            ("artifact.path", self.artifact.path.as_str()),
-            ("artifact.entry_point", self.artifact.entry_point.as_str()),
             ("formats.storage", self.formats.storage.as_str()),
             ("formats.compute", self.formats.compute.as_str()),
             ("formats.accumulation", self.formats.accumulation.as_str()),
             ("geometry.shape_class", self.geometry.shape_class.as_str()),
         ] {
             require_non_empty(value, path)?;
+        }
+        if self.artifacts.is_empty() {
+            return invalid("artifacts must not be empty");
+        }
+        let mut artifact_paths = BTreeSet::new();
+        for artifact in &self.artifacts {
+            require_non_empty(&artifact.path, "artifacts.path")?;
+            require_digest(&artifact.sha256, "artifacts.sha256")?;
+            require_non_empty(&artifact.entry_point, "artifacts.entry_point")?;
+            if !artifact_paths.insert(artifact.path.as_str()) {
+                return invalid("artifact paths must be unique within an implementation");
+            }
         }
         require_non_empty_unique(&self.member_node_ids, "member_node_ids")?;
         require_unique_strings(
@@ -264,6 +319,31 @@ impl PhysicalExecutionContract {
         {
             return invalid("dynamic dimensions must name declared geometry dimensions");
         }
+        if let Some(extent) = &self.partition_extent {
+            require_non_empty(&extent.dimension_name, "partition_extent.dimension_name")?;
+            if extent.elements == 0
+                || extent.alignment_elements == 0
+                || extent.elements % extent.alignment_elements != 0
+            {
+                return invalid("partition extent must be positive and divisible by its alignment");
+            }
+            if self.geometry.dimensions.get(&extent.dimension_name) != Some(&extent.elements) {
+                return invalid("partition extent must match its declared geometry dimension");
+            }
+        }
+        if let Some(launch) = &self.partition_launch {
+            match (launch.origin, launch.origin_push_constant.as_deref()) {
+                (PartitionOrigin::LocalZero, None) => {}
+                (PartitionOrigin::PushConstantU32, Some(name)) => {
+                    require_non_empty(name, "partition_launch.origin_push_constant")?;
+                }
+                _ => {
+                    return invalid(
+                        "partition launch push constant must exactly match its origin source",
+                    );
+                }
+            }
+        }
         validate_bindings(self)?;
         validate_strategy(self)?;
         validate_resources(&self.resources)?;
@@ -275,8 +355,26 @@ impl PhysicalExecutionContract {
 fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), ContractError> {
     let mut parameter_bindings = BTreeSet::new();
     for partition in &contract.parameter_partitions {
-        if partition.alignment_elements == 0 || !parameter_bindings.insert(partition.binding) {
+        if partition.alignment_elements == 0
+            || partition.logical_elements_per_index == 0
+            || !parameter_bindings.insert(partition.binding)
+        {
             return invalid("parameter partitions require unique bindings and positive alignment");
+        }
+        if let Some(extent) = &contract.partition_extent {
+            let Some(logical_alignment) = partition
+                .alignment_elements
+                .checked_mul(partition.logical_elements_per_index)
+            else {
+                return invalid("parameter partition logical alignment overflowed");
+            };
+            if extent.elements % partition.logical_elements_per_index != 0
+                || extent.alignment_elements % logical_alignment != 0
+            {
+                return invalid(
+                    "parameter partitions must divide the logical extent and its alignment",
+                );
+            }
         }
     }
     let mut input_bindings = BTreeSet::new();
@@ -329,7 +427,10 @@ fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), Contrac
 
 fn validate_strategy(contract: &PhysicalExecutionContract) -> Result<(), ContractError> {
     if !contract.strategy.is_distributed() {
-        if !contract.parameter_partitions.is_empty()
+        if contract.execution_form != ExecutionForm::Local
+            || contract.partition_extent.is_some()
+            || contract.partition_launch.is_some()
+            || !contract.parameter_partitions.is_empty()
             || contract.inputs.iter().any(|input| {
                 !matches!(
                     input.distribution,
@@ -348,8 +449,32 @@ fn validate_strategy(contract: &PhysicalExecutionContract) -> Result<(), Contrac
         }
         return Ok(());
     }
+    if contract.execution_form == ExecutionForm::Local {
+        return invalid("distributed contracts require a distributed execution form");
+    }
+    if contract.partition_extent.is_none() {
+        return invalid("distributed contracts require an explicit partition extent");
+    }
+    if contract.partition_launch.is_none() {
+        return invalid("distributed contracts require an explicit partition launch");
+    }
     if contract.parameter_partitions.is_empty() {
         return invalid("distributed contracts require an explicit parameter partition");
+    }
+    let extent = contract
+        .partition_extent
+        .as_ref()
+        .expect("distributed extent was checked above");
+    if contract.inputs.iter().any(|input| {
+        input
+            .alignment_elements
+            .is_some_and(|alignment| extent.alignment_elements % alignment != 0)
+    }) || contract.outputs.iter().any(|output| {
+        output
+            .alignment_elements
+            .is_some_and(|alignment| extent.alignment_elements % alignment != 0)
+    }) {
+        return invalid("distributed input and output alignment must divide partition alignment");
     }
     if !contract.outputs.iter().any(|output| {
         matches!(
@@ -471,11 +596,11 @@ mod tests {
             operation_family: "parallel_projection".to_string(),
             region_family: Some("ffn_gate_up".to_string()),
             member_node_ids: vec!["gate_up".to_string()],
-            artifact: ArtifactIdentity {
+            artifacts: vec![ArtifactIdentity {
                 path: "shaders/gate_up.spv".to_string(),
                 sha256: digest('b'),
                 entry_point: "main".to_string(),
-            },
+            }],
             implementation_digest: digest('c'),
             phases: vec![ExecutionPhase::Decode, ExecutionPhase::Prefill],
             formats: PhysicalFormats {
@@ -492,11 +617,23 @@ mod tests {
                 dynamic_dimensions: Vec::new(),
             },
             strategy: ExecutionStrategy::TensorParallel,
+            execution_form: ExecutionForm::ReplicatedInputPartitionedOutput,
+            partition_extent: Some(PartitionExtent {
+                dimension_name: "output_rows".to_string(),
+                elements: 11008,
+                alignment_elements: 128,
+            }),
+            partition_launch: Some(PartitionLaunch {
+                workgroup_x: WorkgroupXMapping::Proportional,
+                origin: PartitionOrigin::LocalZero,
+                origin_push_constant: None,
+            }),
             parameter_partitions: vec![ParameterPartition {
                 binding: 2,
                 dimension: 0,
                 kind: ParameterPartitionKind::Contiguous,
                 alignment_elements: 128,
+                logical_elements_per_index: 1,
             }],
             inputs: vec![InputContract {
                 binding: 0,
@@ -549,6 +686,14 @@ mod tests {
     fn distributed_contract_without_partition_fails_closed() {
         let mut contract = valid_contract();
         contract.parameter_partitions.clear();
+        assert!(contract.validate().is_err());
+    }
+
+    #[test]
+    fn block_scaled_partition_requires_logically_aligned_slices() {
+        let mut contract = valid_contract();
+        contract.parameter_partitions[0].alignment_elements = 1;
+        contract.parameter_partitions[0].logical_elements_per_index = 256;
         assert!(contract.validate().is_err());
     }
 

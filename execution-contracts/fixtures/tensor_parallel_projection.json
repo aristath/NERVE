@@ -6,11 +6,13 @@
   "member_node_ids": [
     "gate_up"
   ],
-  "artifact": {
-    "path": "shaders/gate_up.spv",
-    "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "entry_point": "main"
-  },
+  "artifacts": [
+    {
+      "path": "shaders/gate_up.spv",
+      "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "entry_point": "main"
+    }
+  ],
   "implementation_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "phases": [
     "decode",
@@ -30,12 +32,23 @@
     "dynamic_dimensions": []
   },
   "strategy": "tensor_parallel",
+  "execution_form": "replicated_input_partitioned_output",
+  "partition_extent": {
+    "dimension_name": "output_rows",
+    "elements": 11008,
+    "alignment_elements": 128
+  },
+  "partition_launch": {
+    "workgroup_x": "proportional",
+    "origin": "local_zero"
+  },
   "parameter_partitions": [
     {
       "binding": 2,
       "dimension": 0,
       "kind": "contiguous",
-      "alignment_elements": 128
+      "alignment_elements": 128,
+      "logical_elements_per_index": 1
     }
   ],
   "inputs": [

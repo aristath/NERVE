@@ -138,6 +138,7 @@ fn runtime_overlay_disambiguates_equal_batch_geometry_by_structure() {
         workgroup_count_x: 64,
         batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
         batch_implementations: vec![cooperative, exact.clone()],
+        physical_execution_contracts: Vec::new(),
         resource_representation_dispatch: None,
     };
     let mut overlay = exact.clone();
@@ -171,6 +172,7 @@ fn runtime_overlay_rejects_ambiguous_batch_implementation_identity() {
         workgroup_count_x: 64,
         batch_mode: VulkanResidentComponentKernelBatchMode::WeightShared,
         batch_implementations: vec![first.clone(), second],
+        physical_execution_contracts: Vec::new(),
         resource_representation_dispatch: None,
     };
     let mut overlay = first;

@@ -22,6 +22,9 @@ from nerve.physical_representations import (
     SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
     fixed_mxfp4_resource_representation_dispatch,
 )
+from nerve.physical_execution_contracts import (
+    build_kernel_physical_execution_contracts,
+)
 from nerve.resource_residency_planning import (
     build_planned_resource_residency_contract,
 )
@@ -802,6 +805,21 @@ def build_vulkan_resident_package_manifest(
                 )
                 for stage in implementation["stages"]:
                     stage["shader_path"] = compiled_shader_path(stage["shader_path"])
+            circuit = compiled_circuits[execution["component_id"]]
+            node = next(
+                candidate
+                for candidate in circuit["nodes"]
+                if candidate["id"] == kernel["node_id"]
+            )
+            kernel["physical_execution_contracts"] = (
+                build_kernel_physical_execution_contracts(
+                    node=node,
+                    circuit=circuit,
+                    tensor_index=tensor_index,
+                    kernel=kernel,
+                    package_dir=package_dir,
+                )
+            )
     manifest = {
         "schema": PACKAGE_SCHEMA,
         "package_id": package_id,

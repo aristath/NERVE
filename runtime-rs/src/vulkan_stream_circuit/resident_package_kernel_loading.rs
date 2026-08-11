@@ -69,6 +69,7 @@ fn resident_package_component_kernel_shader_refs(
                     shader_path: kernel.shader_path.clone(),
                     local_size_x: kernel.local_size_x,
                     workgroup_count_x: kernel.workgroup_count_x,
+                    physical_execution_contracts: kernel.physical_execution_contracts.clone(),
                 })
         })
         .collect()
@@ -131,7 +132,10 @@ fn loaded_kernel_pack_from_package_shader_refs(
         loaded_artifacts.push(VulkanLoadedReusableKernelArtifact {
             artifact: VulkanReusableKernelArtifact::from_family(family, shader.shader_path.clone())
                 .with_local_size_x(shader.local_size_x)
-                .with_workgroup_count_x(shader.workgroup_count_x),
+                .with_workgroup_count_x(shader.workgroup_count_x)
+                .with_physical_execution_contracts(
+                    shader.physical_execution_contracts.clone(),
+                ),
             resolved_path: resolve_resident_model_package_path(manifest_dir, &shader.shader_path),
             words: spirv_words,
         });

@@ -1,3 +1,147 @@
+pub(super) fn validate_physical_execution_contracts(
+    package_root: &Path,
+    manifest: &VulkanResidentModelPackageManifest,
+) -> io::Result<()> {
+    let executions = manifest.component_executions.iter().chain(
+        manifest
+            .speculative_decoders
+            .iter()
+            .flat_map(|decoder| decoder.component_executions.iter()),
+    );
+    for execution in executions {
+        for kernel in &execution.kernels {
+            if kernel.physical_execution_contracts.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "component kernel {}.{} has no physical execution contracts",
+                        execution.component_id, kernel.node_id,
+                    ),
+                ));
+            }
+            let mut allowed_artifact_paths = BTreeSet::from([kernel.shader_path.as_str()]);
+            allowed_artifact_paths.extend(
+                kernel
+                    .batch_implementations
+                    .iter()
+                    .flat_map(|implementation| &implementation.stages)
+                    .map(|stage| stage.shader_path.as_str()),
+            );
+            let mut declared_artifact_paths = BTreeSet::new();
+            let mut contract_ids = BTreeSet::new();
+            let mut has_canonical_decode = false;
+            for contract in &kernel.physical_execution_contracts {
+                contract.validate().map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "invalid physical execution contract on {}.{}: {error}",
+                            execution.component_id, kernel.node_id,
+                        ),
+                    )
+                })?;
+                if !contract_ids.insert(contract.contract_id.as_str()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "component kernel {}.{} repeats physical contract {:?}",
+                            execution.component_id, kernel.node_id, contract.contract_id,
+                        ),
+                    ));
+                }
+                if !contract
+                    .member_node_ids
+                    .iter()
+                    .any(|node_id| node_id == &kernel.node_id)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "physical contract {:?} does not include owning node {}.{}",
+                            contract.contract_id, execution.component_id, kernel.node_id,
+                        ),
+                    ));
+                }
+                if contract.operation_family != kernel.op {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "physical contract {:?} operation {:?} disagrees with kernel {}.{} operation {:?}",
+                            contract.contract_id,
+                            contract.operation_family,
+                            execution.component_id,
+                            kernel.node_id,
+                            kernel.op,
+                        ),
+                    ));
+                }
+                for artifact in &contract.artifacts {
+                    validate_resident_package_relative_path(
+                        "physical execution artifact",
+                        &artifact.path,
+                    )?;
+                    if !allowed_artifact_paths.contains(artifact.path.as_str()) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "physical contract {:?} references artifact {:?} outside kernel {}.{}",
+                                contract.contract_id,
+                                artifact.path,
+                                execution.component_id,
+                                kernel.node_id,
+                            ),
+                        ));
+                    }
+                    let payload = fs::read(package_root.join(&artifact.path))?;
+                    let actual = format!("sha256:{:x}", Sha256::digest(payload));
+                    if actual != artifact.sha256 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "physical contract {:?} has a stale digest for artifact {:?}",
+                                contract.contract_id, artifact.path,
+                            ),
+                        ));
+                    }
+                    declared_artifact_paths.insert(artifact.path.as_str());
+                }
+                has_canonical_decode |= contract.strategy
+                    == nerve_execution_contracts::ExecutionStrategy::SingleDevice
+                    && contract.execution_form
+                        == nerve_execution_contracts::ExecutionForm::Local
+                    && contract
+                        .phases
+                        .contains(&nerve_execution_contracts::ExecutionPhase::Decode)
+                    && contract.artifacts.len() == 1
+                    && contract.artifacts[0].path == kernel.shader_path;
+            }
+            if !has_canonical_decode {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "component kernel {}.{} has no canonical decode contract for {:?}",
+                        execution.component_id, kernel.node_id, kernel.shader_path,
+                    ),
+                ));
+            }
+            if declared_artifact_paths != allowed_artifact_paths {
+                let missing = allowed_artifact_paths
+                    .difference(&declared_artifact_paths)
+                    .copied()
+                    .collect::<Vec<_>>();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "component kernel {}.{} has artifacts without physical contracts: {missing:?}",
+                        execution.component_id, kernel.node_id,
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_behavioral_validation_artifact(
     manifest_path: &Path,
     manifest: &VulkanResidentModelPackageManifest,

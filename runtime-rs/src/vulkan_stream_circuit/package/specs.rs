@@ -131,7 +131,7 @@ pub struct VulkanResidentSamplerKernelPackageSpec {
     pub workgroup_count_x: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VulkanResidentComponentExecutionSpec {
     pub component_id: String,
     pub operator_type: String,
@@ -139,7 +139,7 @@ pub struct VulkanResidentComponentExecutionSpec {
     pub kernels: Vec<VulkanResidentComponentKernelSpec>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VulkanResidentComponentKernelSpec {
     pub execution_index: usize,
     pub node_id: String,
@@ -153,6 +153,8 @@ pub struct VulkanResidentComponentKernelSpec {
     pub workgroup_count_x: u32,
     pub batch_mode: VulkanResidentComponentKernelBatchMode,
     pub batch_implementations: Vec<VulkanResidentComponentBatchImplementationSpec>,
+    pub physical_execution_contracts:
+        Vec<nerve_execution_contracts::PhysicalExecutionContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_representation_dispatch:
         Option<VulkanResidentKernelResourceRepresentationDispatchSpec>,
@@ -576,11 +578,13 @@ pub struct VulkanResidentDraftOutputTransducerPackageSpec {
     pub projection_shader_path: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VulkanResidentComponentKernelShaderRef {
     pub component_id: String,
     pub node_id: String,
     pub shader_path: String,
     pub local_size_x: u32,
     pub workgroup_count_x: u32,
+    pub physical_execution_contracts:
+        Vec<nerve_execution_contracts::PhysicalExecutionContract>,
 }

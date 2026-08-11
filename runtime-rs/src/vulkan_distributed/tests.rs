@@ -7,6 +7,15 @@ mod tests {
 
     use sha2::{Digest, Sha256};
 
+    use nerve_execution_contracts::{
+        ArtifactIdentity, EquivalenceKind, EquivalenceRequirement, ExecutionForm,
+        ExecutionGeometry, ExecutionPhase, ExecutionStrategy, InputContract,
+        InputDistribution, OutputCollection, OutputContract, ParameterPartition,
+        ParameterPartitionKind, PartitionExtent, PartitionLaunch, PartitionOrigin,
+        PhysicalExecutionContract, PhysicalFormats, WorkgroupXMapping,
+        PHYSICAL_EXECUTION_CONTRACT_SCHEMA,
+    };
+
     use super::*;
     use crate::stream_plan::TensorMetadata;
     use crate::vulkan_stream_circuit::{
@@ -102,6 +111,86 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(2, "gate", 32, 32), (3, "up", 32, 32)]
         );
+    }
+
+    #[test]
+    fn samples_real_dispatch_fragments_under_one_total_parameter_budget() {
+        let tensor_index = fixture_tensor_index("row_major");
+        let sampled = fixture_plan("row_major")
+            .sampled_for_parameter_budget(
+                &tensor_index,
+                &["owner".to_string(), "helper-a".to_string()],
+                96,
+            )
+            .unwrap()
+            .unwrap();
+        let allocations = VulkanDistributedParameterAllocationPlan::
+            from_sampled_execution_plan(&sampled, &tensor_index)
+            .unwrap();
+
+        assert!(allocations.total_byte_capacity <= 96);
+        assert_eq!(sampled.device_ids, ["owner", "helper-a"]);
+        assert!(sampled.dispatches.iter().all(|dispatch| {
+            dispatch.shards.len() == 2
+                && dispatch.shards.iter().all(|shard| {
+                    shard.row_count > 0
+                        && shard.row_count.is_multiple_of(dispatch.row_alignment)
+                        && shard.workgroup_count_x > 0
+                })
+        }));
+        assert!(
+            VulkanDistributedParameterAllocationPlan::from_execution_plan(
+                &sampled,
+                &tensor_index,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn samples_the_same_real_dispatch_for_a_single_participant() {
+        let tensor_index = fixture_tensor_index("row_major");
+        let sampled = fixture_plan("row_major")
+            .sampled_for_parameter_budget(
+                &tensor_index,
+                &["owner".to_string()],
+                64,
+            )
+            .unwrap()
+            .unwrap();
+        let allocations = VulkanDistributedParameterAllocationPlan::
+            from_sampled_execution_plan(&sampled, &tensor_index)
+            .unwrap();
+
+        assert_eq!(sampled.device_ids, ["owner"]);
+        assert_eq!(sampled.dispatches[0].shards.len(), 1);
+        assert_eq!(sampled.dispatches[0].shards[0].device_id, "owner");
+        assert!(allocations.total_byte_capacity <= 64);
+    }
+
+    #[test]
+    fn sampled_expert_ranges_keep_route_launch_and_output_geometry() {
+        let mut dispatch = fixture_plan("row_major").dispatches.remove(0);
+        dispatch.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
+        let source = dispatch.shards[0].clone();
+        let sampled = sampled_distributed_dispatch_shard(
+            &dispatch,
+            &source,
+            "owner",
+            1,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(sampled.row_count, source.row_count / 2);
+        assert_eq!(sampled.workgroup_count_x, source.workgroup_count_x);
+        assert_eq!(sampled.output_byte_count, source.output_byte_count);
+        assert_eq!(sampled.auxiliary_input_ranges, source.auxiliary_input_ranges);
+        assert!(sampled
+            .parameters
+            .iter()
+            .zip(&source.parameters)
+            .all(|(sampled, source)| sampled.byte_count == source.byte_count / 2));
     }
 
     #[test]
@@ -211,6 +300,28 @@ mod tests {
                     source: VulkanKernelScalarSource::PushConstant,
                 }],
                 stream_control_binding: None,
+                physical_execution_contracts: vec![test_physical_contract(
+                    "sparse_moe_down",
+                    "sparse-down",
+                    "sparse.spv",
+                    ExecutionStrategy::ExpertParallel,
+                    ExecutionForm::WholeExpertOwnership,
+                    256,
+                    1,
+                    8192,
+                    WorkgroupXMapping::Repeated,
+                    PartitionOrigin::PushConstantU32,
+                    Some("expert_start"),
+                    vec![
+                        test_partition(3, ParameterPartitionKind::ExpertRange, 1, 1),
+                        test_partition(4, ParameterPartitionKind::ExpertRange, 1, 1),
+                    ],
+                    vec![
+                        test_input(0, InputDistribution::Replicated, None),
+                        test_input(1, InputDistribution::Routed, Some(1)),
+                    ],
+                    test_output(2, OutputCollection::Routed, Some(1)),
+                )],
             }]);
 
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
@@ -288,10 +399,36 @@ mod tests {
             },
         );
         prequant.total_descriptor_count = 6;
+        let mut prequant_artifacts = artifacts.clone();
+        prequant_artifacts.artifacts[0].physical_execution_contracts = vec![
+            test_physical_contract(
+                "sparse_moe_down",
+                "sparse-down",
+                "sparse.spv",
+                ExecutionStrategy::ExpertParallel,
+                ExecutionForm::WholeExpertOwnership,
+                256,
+                1,
+                8192,
+                WorkgroupXMapping::Repeated,
+                PartitionOrigin::PushConstantU32,
+                Some("expert_start"),
+                vec![
+                    test_partition(4, ParameterPartitionKind::ExpertRange, 1, 1),
+                    test_partition(5, ParameterPartitionKind::ExpertRange, 1, 1),
+                ],
+                vec![
+                    test_input(0, InputDistribution::Replicated, None),
+                    test_input(1, InputDistribution::Replicated, None),
+                    test_input(2, InputDistribution::Routed, Some(1)),
+                ],
+                test_output(3, OutputCollection::Routed, Some(1)),
+            ),
+        ];
         let prequant_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prequant)],
             &tensor_index,
-            &artifacts,
+            &prequant_artifacts,
             &component_device_pools("moe", &["owner", "helper"]),
             &[],
             256,
@@ -327,12 +464,7 @@ mod tests {
             256,
         )
         .unwrap_err();
-        assert!(
-            legacy_plan
-                .to_string()
-                .contains("has no compatible distributable dispatch"),
-            "an explicitly requested sparse shard must not silently fall back"
-        );
+        assert!(legacy_plan.to_string().contains("requires the sole u32 push constant"));
     }
 
     #[test]
@@ -425,6 +557,94 @@ mod tests {
             plan.to_string()
                 .contains("has no compatible distributable dispatch")
         );
+    }
+
+    #[test]
+    fn requested_distribution_without_an_artifact_contract_fails_closed() {
+        let prepared_plan = fixture_prepared_plan();
+        let mut artifacts = fixture_artifact_manifest();
+        artifacts.artifacts[0].physical_execution_contracts.clear();
+
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("has no compatible distributable dispatch"));
+    }
+
+    #[test]
+    fn ambiguous_artifact_distribution_contracts_are_rejected() {
+        let prepared_plan = fixture_prepared_plan();
+        let mut artifacts = fixture_artifact_manifest();
+        let mut duplicate = artifacts.artifacts[0].physical_execution_contracts[0].clone();
+        duplicate.contract_id = format!("sha256:{}", "d".repeat(64));
+        artifacts.artifacts[0]
+            .physical_execution_contracts
+            .push(duplicate);
+
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ambiguous decode distribution contracts"));
+    }
+
+    #[test]
+    fn an_unseen_operation_family_uses_its_compiled_contract_without_runtime_changes() {
+        let mut prepared_plan = fixture_prepared_plan();
+        prepared_plan.dispatches[0].op = "future_fused_projection".to_string();
+        let mut artifacts = fixture_artifact_manifest();
+        artifacts.artifacts[0].op = "future_fused_projection".to_string();
+        artifacts.artifacts[0].physical_execution_contracts[0].operation_family =
+            "future_fused_projection".to_string();
+
+        let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(plan.dispatches.len(), 1);
+        assert_eq!(plan.dispatches[0].shards.len(), 2);
+    }
+
+    #[test]
+    fn a_stale_contract_cannot_partially_cover_the_artifact_abi() {
+        let prepared_plan = fixture_prepared_plan();
+        let mut artifacts = fixture_artifact_manifest();
+        artifacts.artifacts[0].physical_execution_contracts[0]
+            .parameter_partitions
+            .pop();
+
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("disagree with artifact ABI"));
     }
 
     #[test]
@@ -631,10 +851,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(
-            plan.to_string()
-                .contains("has no compatible distributable dispatch")
-        );
+        assert!(plan
+            .to_string()
+            .contains("local-zero partition contract forbids push constants"));
     }
 
     #[test]
@@ -713,10 +932,30 @@ mod tests {
             .insert("gate_scale".to_string(), scale.clone());
         tensor_index.tensors.insert("up_scale".to_string(), scale);
 
+        let artifacts = test_artifact_manifest(
+            "family",
+            "parallel_linear_silu_multiply",
+            "ffn",
+            "ffn.spv",
+            6,
+            vec![
+                test_partition(3, ParameterPartitionKind::Contiguous, 4, 1),
+                test_partition(4, ParameterPartitionKind::Contiguous, 1, 4),
+                test_partition(5, ParameterPartitionKind::Contiguous, 4, 1),
+                test_partition(6, ParameterPartitionKind::Contiguous, 1, 4),
+            ],
+            vec![
+                test_input(0, InputDistribution::Replicated, None),
+                test_input(1, InputDistribution::Replicated, None),
+            ],
+            test_output(2, OutputCollection::Concatenated, Some(2)),
+            12,
+            4,
+        );
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared_plan)],
             &tensor_index,
-            &fixture_artifact_manifest(),
+            &artifacts,
             &component_device_pools("component", &["owner", "helper"]),
             &[],
             4,
@@ -806,7 +1045,7 @@ mod tests {
                 circuit_id: "circuit".to_string(),
                 node_index: 4,
                 node_id: "residual".to_string(),
-                op: DISTRIBUTABLE_RESIDUAL_PROJECTION_OP.to_string(),
+                op: "linear_residual".to_string(),
                 reusable_family_id: "residual-family".to_string(),
                 artifact_path: "residual.spv".to_string(),
                 entry_point: "main".to_string(),
@@ -880,7 +1119,7 @@ mod tests {
         let artifacts =
             VulkanReusableKernelArtifactManifest::new(vec![VulkanReusableKernelArtifact {
                 family_id: "residual-family".to_string(),
-                op: DISTRIBUTABLE_RESIDUAL_PROJECTION_OP.to_string(),
+                op: "linear_residual".to_string(),
                 path: "residual.spv".to_string(),
                 entry_point: "main".to_string(),
                 local_size_x: 64,
@@ -888,6 +1127,29 @@ mod tests {
                 descriptor_signature: Vec::new(),
                 push_constants: Vec::new(),
                 stream_control_binding: None,
+                physical_execution_contracts: vec![test_physical_contract(
+                    "linear_residual",
+                    "residual",
+                    "residual.spv",
+                    ExecutionStrategy::TensorParallel,
+                    ExecutionForm::ReplicatedInputPartitionedOutput,
+                    12,
+                    4,
+                    6,
+                    WorkgroupXMapping::Proportional,
+                    PartitionOrigin::LocalZero,
+                    None,
+                    vec![
+                        test_partition(4, ParameterPartitionKind::Contiguous, 4, 1),
+                        test_partition(5, ParameterPartitionKind::Contiguous, 1, 4),
+                    ],
+                    vec![
+                        test_input(0, InputDistribution::Replicated, None),
+                        test_input(1, InputDistribution::Replicated, None),
+                        test_input(2, InputDistribution::Sharded, Some(2)),
+                    ],
+                    test_output(3, OutputCollection::Concatenated, Some(2)),
+                )],
             }]);
 
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
@@ -1128,7 +1390,7 @@ mod tests {
                 circuit_id: "circuit".to_string(),
                 node_index: 3,
                 node_id: "ffn".to_string(),
-                op: DISTRIBUTABLE_PARALLEL_PROJECTION_OP.to_string(),
+                op: "parallel_linear_silu_multiply".to_string(),
                 reusable_family_id: "family".to_string(),
                 artifact_path: "ffn.spv".to_string(),
                 entry_point: "main".to_string(),
@@ -1147,17 +1409,174 @@ mod tests {
     }
 
     fn fixture_artifact_manifest() -> VulkanReusableKernelArtifactManifest {
+        test_artifact_manifest(
+            "family",
+            "parallel_linear_silu_multiply",
+            "ffn",
+            "ffn.spv",
+            6,
+            vec![
+                test_partition(2, ParameterPartitionKind::Contiguous, 2, 1),
+                test_partition(3, ParameterPartitionKind::Contiguous, 2, 1),
+            ],
+            vec![test_input(0, InputDistribution::Replicated, None)],
+            test_output(1, OutputCollection::Concatenated, Some(2)),
+            12,
+            2,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_artifact_manifest(
+        family_id: &str,
+        op: &str,
+        node_id: &str,
+        path: &str,
+        workgroup_count_x: u32,
+        partitions: Vec<ParameterPartition>,
+        inputs: Vec<InputContract>,
+        output: OutputContract,
+        extent: u64,
+        alignment: u64,
+    ) -> VulkanReusableKernelArtifactManifest {
         VulkanReusableKernelArtifactManifest::new(vec![VulkanReusableKernelArtifact {
-            family_id: "family".to_string(),
-            op: DISTRIBUTABLE_PARALLEL_PROJECTION_OP.to_string(),
-            path: "ffn.spv".to_string(),
+            family_id: family_id.to_string(),
+            op: op.to_string(),
+            path: path.to_string(),
             entry_point: "main".to_string(),
             local_size_x: 64,
-            workgroup_count_x: 6,
+            workgroup_count_x,
             descriptor_signature: Vec::new(),
             push_constants: Vec::new(),
             stream_control_binding: None,
+            physical_execution_contracts: vec![test_physical_contract(
+                op,
+                node_id,
+                path,
+                ExecutionStrategy::TensorParallel,
+                ExecutionForm::ReplicatedInputPartitionedOutput,
+                extent,
+                alignment,
+                workgroup_count_x,
+                WorkgroupXMapping::Proportional,
+                PartitionOrigin::LocalZero,
+                None,
+                partitions,
+                inputs,
+                output,
+            )],
         }])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_physical_contract(
+        op: &str,
+        node_id: &str,
+        path: &str,
+        strategy: ExecutionStrategy,
+        execution_form: ExecutionForm,
+        extent: u64,
+        alignment: u64,
+        workgroup_count_x: u32,
+        workgroup_x: WorkgroupXMapping,
+        origin: PartitionOrigin,
+        origin_push_constant: Option<&str>,
+        parameter_partitions: Vec<ParameterPartition>,
+        inputs: Vec<InputContract>,
+        output: OutputContract,
+    ) -> PhysicalExecutionContract {
+        PhysicalExecutionContract {
+            schema: PHYSICAL_EXECUTION_CONTRACT_SCHEMA.to_string(),
+            contract_id: format!("sha256:{}", "a".repeat(64)),
+            operation_family: op.to_string(),
+            region_family: None,
+            member_node_ids: vec![node_id.to_string()],
+            artifacts: vec![ArtifactIdentity {
+                path: path.to_string(),
+                sha256: format!("sha256:{}", "b".repeat(64)),
+                entry_point: "main".to_string(),
+            }],
+            implementation_digest: format!("sha256:{}", "c".repeat(64)),
+            phases: vec![ExecutionPhase::Decode],
+            formats: PhysicalFormats {
+                storage: "test".to_string(),
+                compute: "test".to_string(),
+                accumulation: "f32".to_string(),
+            },
+            geometry: ExecutionGeometry {
+                shape_class: "test-shape".to_string(),
+                dimensions: BTreeMap::from([
+                    ("partition".to_string(), extent),
+                    ("workgroup_count_x".to_string(), u64::from(workgroup_count_x)),
+                ]),
+                dynamic_dimensions: Vec::new(),
+            },
+            strategy,
+            execution_form,
+            partition_extent: Some(PartitionExtent {
+                dimension_name: "partition".to_string(),
+                elements: extent,
+                alignment_elements: alignment,
+            }),
+            partition_launch: Some(PartitionLaunch {
+                workgroup_x,
+                origin,
+                origin_push_constant: origin_push_constant.map(str::to_string),
+            }),
+            parameter_partitions,
+            inputs,
+            outputs: vec![output],
+            local_intermediates: Vec::new(),
+            resources: Vec::new(),
+            equivalence: EquivalenceRequirement {
+                output: EquivalenceKind::BitExact,
+                state: EquivalenceKind::BitExact,
+                absolute_tolerance: None,
+                relative_tolerance: None,
+            },
+        }
+    }
+
+    fn test_partition(
+        binding: u32,
+        kind: ParameterPartitionKind,
+        alignment_elements: u64,
+        logical_elements_per_index: u64,
+    ) -> ParameterPartition {
+        ParameterPartition {
+            binding,
+            dimension: 0,
+            kind,
+            alignment_elements,
+            logical_elements_per_index,
+        }
+    }
+
+    fn test_input(
+        binding: u32,
+        distribution: InputDistribution,
+        alignment_elements: Option<u64>,
+    ) -> InputContract {
+        InputContract {
+            binding,
+            distribution,
+            dimension: alignment_elements.map(|_| 0),
+            alignment_elements,
+        }
+    }
+
+    fn test_output(
+        binding: u32,
+        collection: OutputCollection,
+        alignment_elements: Option<u64>,
+    ) -> OutputContract {
+        OutputContract {
+            binding,
+            collection,
+            dimension: alignment_elements.map(|_| 0),
+            alignment_elements,
+            reduction: None,
+        }
     }
 
     fn fixture_tensor_index(layout: &str) -> TensorIndex {

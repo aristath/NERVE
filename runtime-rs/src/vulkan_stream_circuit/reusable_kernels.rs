@@ -153,7 +153,7 @@ pub struct VulkanReusableKernelFamilyCoverage {
     pub available: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VulkanReusableKernelArtifactManifest {
     pub schema: String,
     pub backend_id: String,
@@ -215,7 +215,7 @@ impl VulkanReusableKernelArtifactManifest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VulkanReusableKernelArtifact {
     pub family_id: String,
     pub op: String,
@@ -226,6 +226,8 @@ pub struct VulkanReusableKernelArtifact {
     pub descriptor_signature: Vec<VulkanKernelDescriptorSlotSignature>,
     pub push_constants: Vec<VulkanKernelScalarBinding>,
     pub stream_control_binding: Option<u32>,
+    pub physical_execution_contracts:
+        Vec<nerve_execution_contracts::PhysicalExecutionContract>,
 }
 
 impl VulkanReusableKernelArtifact {
@@ -240,6 +242,7 @@ impl VulkanReusableKernelArtifact {
             descriptor_signature: family.descriptor_signature.clone(),
             push_constants: family.push_constants.clone(),
             stream_control_binding: family.stream_control_binding,
+            physical_execution_contracts: Vec::new(),
         }
     }
 
@@ -257,9 +260,17 @@ impl VulkanReusableKernelArtifact {
         self.workgroup_count_x = workgroup_count_x;
         self
     }
+
+    pub fn with_physical_execution_contracts(
+        mut self,
+        contracts: Vec<nerve_execution_contracts::PhysicalExecutionContract>,
+    ) -> Self {
+        self.physical_execution_contracts = contracts;
+        self
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VulkanLoadedReusableKernelArtifactManifest {
     pub schema: String,
     pub backend_id: String,
@@ -324,7 +335,7 @@ impl VulkanLoadedReusableKernelArtifactManifest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct VulkanLoadedReusableKernelArtifact {
     pub artifact: VulkanReusableKernelArtifact,
     pub resolved_path: PathBuf,

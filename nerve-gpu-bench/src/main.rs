@@ -15,6 +15,7 @@ use benchmark::{plan_benchmarks, run_benchmarks, validate_execution_coverage};
 use cli::{Command, parse_args};
 use discovery::discover_targets;
 use model::MAX_PLACEMENT_GROUP_SIZE;
+use nerve_execution_contracts::{PHYSICAL_EXECUTION_CONTRACT_SCHEMA, PhysicalExecutionContract};
 use policy::apply_selection_policy;
 
 fn main() {
@@ -144,6 +145,10 @@ fn validate_json_document(payload: &str) -> Result<(), Box<dyn Error>> {
         Some(model::PLAN_SCHEMA) => {
             let plan = model::parse_benchmark_plan_json(payload)?;
             plan.validate_basic()?;
+        }
+        Some(PHYSICAL_EXECUTION_CONTRACT_SCHEMA) => {
+            let contract = serde_json::from_str::<PhysicalExecutionContract>(payload)?;
+            contract.validate()?;
         }
         Some(schema) => {
             return Err(format!("unsupported benchmark JSON schema {schema:?}").into());
@@ -302,7 +307,7 @@ fn format_link(target: &model::Target) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_max_group_size;
+    use super::{resolve_max_group_size, validate_json_document};
 
     #[test]
     fn omitted_group_cap_uses_at_most_four_selected_targets() {
@@ -314,5 +319,13 @@ mod tests {
     fn explicit_group_cap_is_bounded_by_selected_targets() {
         assert_eq!(resolve_max_group_size(Some(4), 8), 4);
         assert_eq!(resolve_max_group_size(Some(12), 8), 4);
+    }
+
+    #[test]
+    fn benchmark_accepts_the_shared_physical_execution_contract() {
+        validate_json_document(include_str!(
+            "../../execution-contracts/fixtures/tensor_parallel_projection.json"
+        ))
+        .unwrap();
     }
 }

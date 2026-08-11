@@ -974,6 +974,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nerve-execution-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nerve-runtime"
 version = "0.1.0"
 dependencies = [
@@ -983,6 +991,7 @@ dependencies = [
  "libc",
  "minijinja",
  "minijinja-contrib",
+ "nerve-execution-contracts",
  "ratatui",
  "serde",
  "serde_json",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from hashlib import sha256
 import json
+from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 
@@ -17,7 +18,15 @@ ExecutionStrategy = Literal[
     "expert_parallel",
     "tensor_parallel_expert",
 ]
+ExecutionForm = Literal[
+    "local",
+    "replicated_input_partitioned_output",
+    "partitioned_input_partial_output",
+    "whole_expert_ownership",
+]
 ParameterPartitionKind = Literal["contiguous", "block_cyclic", "expert_range"]
+WorkgroupXMapping = Literal["proportional", "repeated"]
+PartitionOrigin = Literal["local_zero", "push_constant_u32"]
 InputDistribution = Literal["replicated", "sharded", "routed", "local"]
 OutputCollection = Literal[
     "local", "concatenated", "reduced", "routed", "retained"
@@ -58,6 +67,19 @@ class ParameterPartition(TypedDict):
     dimension: int
     kind: ParameterPartitionKind
     alignment_elements: int
+    logical_elements_per_index: int
+
+
+class PartitionExtent(TypedDict):
+    dimension_name: str
+    elements: int
+    alignment_elements: int
+
+
+class PartitionLaunch(TypedDict, total=False):
+    workgroup_x: WorkgroupXMapping
+    origin: PartitionOrigin
+    origin_push_constant: str
 
 
 class InputContract(TypedDict, total=False):
@@ -104,12 +126,15 @@ class PhysicalExecutionContract(TypedDict, total=False):
     operation_family: str
     region_family: str
     member_node_ids: list[str]
-    artifact: ArtifactIdentity
+    artifacts: list[ArtifactIdentity]
     implementation_digest: str
     phases: list[ExecutionPhase]
     formats: PhysicalFormats
     geometry: ExecutionGeometry
     strategy: ExecutionStrategy
+    execution_form: ExecutionForm
+    partition_extent: PartitionExtent
+    partition_launch: PartitionLaunch
     parameter_partitions: list[ParameterPartition]
     inputs: list[InputContract]
     outputs: list[OutputContract]
@@ -125,7 +150,15 @@ _STRATEGIES = {
     "expert_parallel",
     "tensor_parallel_expert",
 }
+_EXECUTION_FORMS = {
+    "local",
+    "replicated_input_partitioned_output",
+    "partitioned_input_partial_output",
+    "whole_expert_ownership",
+}
 _PARTITION_KINDS = {"contiguous", "block_cyclic", "expert_range"}
+_WORKGROUP_X_MAPPINGS = {"proportional", "repeated"}
+_PARTITION_ORIGINS = {"local_zero", "push_constant_u32"}
 _INPUT_DISTRIBUTIONS = {"replicated", "sharded", "routed", "local"}
 _OUTPUT_COLLECTIONS = {"local", "concatenated", "reduced", "routed", "retained"}
 _RESOURCE_KINDS = {
@@ -146,12 +179,15 @@ _TOP_LEVEL_KEYS = {
     "operation_family",
     "region_family",
     "member_node_ids",
-    "artifact",
+    "artifacts",
     "implementation_digest",
     "phases",
     "formats",
     "geometry",
     "strategy",
+    "execution_form",
+    "partition_extent",
+    "partition_launch",
     "parameter_partitions",
     "inputs",
     "outputs",
@@ -159,7 +195,12 @@ _TOP_LEVEL_KEYS = {
     "resources",
     "equivalence",
 }
-_REQUIRED_TOP_LEVEL_KEYS = _TOP_LEVEL_KEYS - {"region_family", "local_intermediates"}
+_REQUIRED_TOP_LEVEL_KEYS = _TOP_LEVEL_KEYS - {
+    "region_family",
+    "local_intermediates",
+    "partition_extent",
+    "partition_launch",
+}
 
 
 class PhysicalExecutionContractError(ValueError):
@@ -172,23 +213,596 @@ def artifact_sha256(payload: bytes) -> str:
 
 def implementation_digest(
     *,
-    artifact: ArtifactIdentity,
+    artifacts: list[ArtifactIdentity],
     phases: list[ExecutionPhase],
     formats: PhysicalFormats,
     geometry: ExecutionGeometry,
     strategy: ExecutionStrategy,
+    execution_form: ExecutionForm,
+    partition_extent: PartitionExtent | None,
+    partition_launch: PartitionLaunch | None,
+    parameter_partitions: list[ParameterPartition],
+    inputs: list[InputContract],
+    outputs: list[OutputContract],
+    local_intermediates: list[LocalIntermediateContract],
 ) -> str:
     return artifact_sha256(
         _canonical_json_bytes(
             {
-                "artifact": artifact,
+                "artifacts": artifacts,
                 "phases": phases,
                 "formats": formats,
                 "geometry": geometry,
                 "strategy": strategy,
+                "execution_form": execution_form,
+                "partition_extent": partition_extent,
+                "partition_launch": partition_launch,
+                "parameter_partitions": parameter_partitions,
+                "inputs": inputs,
+                "outputs": outputs,
+                "local_intermediates": local_intermediates,
             }
         )
     )
+
+
+def build_kernel_physical_execution_contracts(
+    *,
+    node: Json,
+    circuit: Json,
+    tensor_index: Json,
+    kernel: Json,
+    package_dir: Path,
+) -> list[PhysicalExecutionContract]:
+    """Describe compiled implementations without assigning physical devices."""
+    node = deepcopy(node)
+    node["semantic_module_ids"] = list(kernel.get("semantic_module_ids", []))
+    node["_physical_contract_member_node_ids"] = list(
+        dict.fromkeys(
+            [
+                _non_empty_string(node.get("id"), "node.id"),
+                *[
+                    _non_empty_string(source_node_id, "kernel.source_node_ids")
+                    for source_node_id in kernel.get("source_node_ids", [])
+                ],
+            ]
+        )
+    )
+    scalar_artifacts = [_artifact_identity(package_dir, kernel["shader_path"])]
+    scalar_geometry = _kernel_geometry(
+        node,
+        circuit,
+        tensor_index,
+        local_size_x=int(kernel["local_size_x"]),
+        workgroup_count_x=int(kernel["workgroup_count_x"]),
+    )
+    scalar_formats = _kernel_formats(node, circuit, tensor_index, scalar_artifacts)
+    contracts = [
+        _build_contract(
+            node=node,
+            circuit=circuit,
+            tensor_index=tensor_index,
+            artifacts=scalar_artifacts,
+            phases=["decode"],
+            formats=scalar_formats,
+            geometry=scalar_geometry,
+            strategy="single_device",
+            execution_form="local",
+            partition_extent=None,
+            partition_launch=None,
+            parameter_partitions=[],
+            inputs=_local_inputs(node),
+            outputs=_local_outputs(node),
+            local_intermediates=[],
+        )
+    ]
+    distributed = _distributed_scalar_contract(
+        node=node,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        artifacts=scalar_artifacts,
+        formats=scalar_formats,
+        geometry=scalar_geometry,
+        workgroup_count_x=int(kernel["workgroup_count_x"]),
+    )
+    if distributed is not None:
+        contracts.append(distributed)
+
+    for implementation in kernel.get("batch_implementations", []):
+        stages = implementation.get("stages", [])
+        if not stages:
+            _invalid(
+                f"batch implementation for {node.get('id')!r} has no artifact stages"
+            )
+        artifacts = [
+            _artifact_identity(package_dir, stage["shader_path"]) for stage in stages
+        ]
+        phases = _execution_domain_phases(implementation["execution_domain"])
+        lane_tile_width = _positive_int(
+            implementation["lane_tile_width"], "batch lane_tile_width"
+        )
+        geometry = _kernel_geometry(
+            node,
+            circuit,
+            tensor_index,
+            local_size_x=max(int(stage["local_size_x"]) for stage in stages),
+            workgroup_count_x=max(int(stage["workgroup_count_x"]) for stage in stages),
+            batch_width=lane_tile_width,
+        )
+        contracts.append(
+            _build_contract(
+                node=node,
+                circuit=circuit,
+                tensor_index=tensor_index,
+                artifacts=artifacts,
+                phases=phases,
+                formats=_kernel_formats(node, circuit, tensor_index, artifacts),
+                geometry=geometry,
+                strategy="single_device",
+                execution_form="local",
+                partition_extent=None,
+                partition_launch=None,
+                parameter_partitions=[],
+                inputs=_local_inputs(node),
+                outputs=_local_outputs(node),
+                local_intermediates=[],
+            )
+        )
+
+    by_id = {contract["contract_id"]: contract for contract in contracts}
+    if len(by_id) != len(contracts):
+        _invalid(f"kernel {node.get('id')!r} emitted duplicate physical contracts")
+    return list(by_id.values())
+
+
+def _build_contract(
+    *,
+    node: Json,
+    circuit: Json,
+    tensor_index: Json,
+    artifacts: list[ArtifactIdentity],
+    phases: list[ExecutionPhase],
+    formats: PhysicalFormats,
+    geometry: ExecutionGeometry,
+    strategy: ExecutionStrategy,
+    execution_form: ExecutionForm,
+    partition_extent: PartitionExtent | None,
+    partition_launch: PartitionLaunch | None,
+    parameter_partitions: list[ParameterPartition],
+    inputs: list[InputContract],
+    outputs: list[OutputContract],
+    local_intermediates: list[LocalIntermediateContract],
+) -> PhysicalExecutionContract:
+    resources = _kernel_resources(node, circuit, tensor_index)
+    contract: Json = {
+        "schema": PHYSICAL_EXECUTION_CONTRACT_SCHEMA,
+        "operation_family": _non_empty_string(node.get("op"), "node.op"),
+        "member_node_ids": node["_physical_contract_member_node_ids"],
+        "artifacts": artifacts,
+        "implementation_digest": implementation_digest(
+            artifacts=artifacts,
+            phases=phases,
+            formats=formats,
+            geometry=geometry,
+            strategy=strategy,
+            execution_form=execution_form,
+            partition_extent=partition_extent,
+            partition_launch=partition_launch,
+            parameter_partitions=parameter_partitions,
+            inputs=inputs,
+            outputs=outputs,
+            local_intermediates=local_intermediates,
+        ),
+        "phases": phases,
+        "formats": formats,
+        "geometry": geometry,
+        "strategy": strategy,
+        "execution_form": execution_form,
+        "parameter_partitions": parameter_partitions,
+        "inputs": inputs,
+        "outputs": outputs,
+        "local_intermediates": local_intermediates,
+        "resources": resources,
+        "equivalence": {
+            "output": "bit_exact",
+            "state": "bit_exact",
+        },
+    }
+    if partition_extent is not None:
+        contract["partition_extent"] = partition_extent
+    if partition_launch is not None:
+        contract["partition_launch"] = partition_launch
+    semantic_modules = node.get("semantic_module_ids")
+    if isinstance(semantic_modules, list) and semantic_modules:
+        contract["region_family"] = "+".join(map(str, semantic_modules))
+    return seal_physical_execution_contract(contract)
+
+
+def _distributed_scalar_contract(
+    *,
+    node: Json,
+    circuit: Json,
+    tensor_index: Json,
+    artifacts: list[ArtifactIdentity],
+    formats: PhysicalFormats,
+    geometry: ExecutionGeometry,
+    workgroup_count_x: int,
+) -> PhysicalExecutionContract | None:
+    op = node.get("op")
+    parameter_metadata = _node_parameter_metadata(node, circuit, tensor_index)
+    if not parameter_metadata:
+        return None
+    parameter_bindings = _direct_parameter_bindings(node)
+    input_count = len(node.get("inputs", []))
+    output_count = len(node.get("outputs", []))
+    if output_count != 1:
+        return None
+    output_binding = input_count
+    output_rows = int(parameter_metadata[0][1].get("shape", [0])[0])
+    if output_rows <= 0 or workgroup_count_x <= 0 or output_rows % workgroup_count_x:
+        return None
+    artifact_alignment = output_rows // workgroup_count_x
+
+    if op == "parallel_linear_silu_multiply":
+        dtypes = [metadata.get("dtype") for _, metadata in parameter_metadata]
+        if dtypes == ["BF16", "BF16"]:
+            partition_layouts = [
+                (artifact_alignment, 1),
+                (artifact_alignment, 1),
+            ]
+        elif dtypes == ["F8_E4M3", "BF16", "F8_E4M3", "BF16"]:
+            block_rows = _block_row_alignment(parameter_metadata)
+            partition_layouts = [
+                (max(artifact_alignment, block_rows), 1),
+                (max(1, artifact_alignment // block_rows), block_rows),
+                (max(artifact_alignment, block_rows), 1),
+                (max(1, artifact_alignment // block_rows), block_rows),
+            ]
+        else:
+            return None
+        logical_alignment = max(
+            alignment * logical_elements_per_index
+            for alignment, logical_elements_per_index in partition_layouts
+        )
+        return _build_contract(
+            node=node,
+            circuit=circuit,
+            tensor_index=tensor_index,
+            artifacts=artifacts,
+            phases=["decode"],
+            formats=formats,
+            geometry=geometry,
+            strategy="tensor_parallel",
+            execution_form="replicated_input_partitioned_output",
+            partition_extent={
+                "dimension_name": "parameter_0_dimension_0",
+                "elements": output_rows,
+                "alignment_elements": logical_alignment,
+            },
+            partition_launch={"workgroup_x": "proportional", "origin": "local_zero"},
+            parameter_partitions=[
+                {
+                    "binding": binding,
+                    "dimension": 0,
+                    "kind": "contiguous",
+                    "alignment_elements": alignment,
+                    "logical_elements_per_index": logical_elements_per_index,
+                }
+                for binding, (alignment, logical_elements_per_index) in zip(
+                    parameter_bindings, partition_layouts, strict=True
+                )
+            ],
+            inputs=[
+                {"binding": binding, "distribution": "replicated"}
+                for binding in range(input_count)
+            ],
+            outputs=[
+                {
+                    "binding": output_binding,
+                    "collection": "concatenated",
+                    "dimension": 0,
+                    "alignment_elements": artifact_alignment,
+                }
+            ],
+            local_intermediates=[],
+        )
+
+    if op == "linear_residual":
+        dtypes = [metadata.get("dtype") for _, metadata in parameter_metadata]
+        if dtypes != ["F8_E4M3", "BF16"] or input_count != 3:
+            return None
+        block_rows = _block_row_alignment(parameter_metadata)
+        return _build_contract(
+            node=node,
+            circuit=circuit,
+            tensor_index=tensor_index,
+            artifacts=artifacts,
+            phases=["decode"],
+            formats=formats,
+            geometry=geometry,
+            strategy="tensor_parallel",
+            execution_form="replicated_input_partitioned_output",
+            partition_extent={
+                "dimension_name": "parameter_0_dimension_0",
+                "elements": output_rows,
+                "alignment_elements": max(artifact_alignment, block_rows),
+            },
+            partition_launch={"workgroup_x": "proportional", "origin": "local_zero"},
+            parameter_partitions=[
+                {
+                    "binding": parameter_bindings[0],
+                    "dimension": 0,
+                    "kind": "contiguous",
+                    "alignment_elements": max(artifact_alignment, block_rows),
+                    "logical_elements_per_index": 1,
+                },
+                {
+                    "binding": parameter_bindings[1],
+                    "dimension": 0,
+                    "kind": "contiguous",
+                    "alignment_elements": max(1, artifact_alignment // block_rows),
+                    "logical_elements_per_index": block_rows,
+                },
+            ],
+            inputs=[
+                {"binding": 0, "distribution": "replicated"},
+                {"binding": 1, "distribution": "replicated"},
+                {
+                    "binding": 2,
+                    "distribution": "sharded",
+                    "dimension": 0,
+                    "alignment_elements": artifact_alignment,
+                },
+            ],
+            outputs=[
+                {
+                    "binding": output_binding,
+                    "collection": "concatenated",
+                    "dimension": 0,
+                    "alignment_elements": artifact_alignment,
+                }
+            ],
+            local_intermediates=[],
+        )
+
+    if op in {"sparse_moe_gate_up", "sparse_moe_down"}:
+        expert_count = int(parameter_metadata[0][1].get("shape", [0])[0])
+        if expert_count <= 0 or any(
+            int(metadata.get("shape", [0])[0]) != expert_count
+            for _, metadata in parameter_metadata
+        ):
+            return None
+        inputs: list[InputContract] = [
+            {"binding": 0, "distribution": "replicated"}
+        ]
+        inputs.extend(
+            {
+                "binding": binding,
+                "distribution": "routed",
+                "dimension": 0,
+                "alignment_elements": 1,
+            }
+            for binding in range(1, input_count)
+        )
+        return _build_contract(
+            node=node,
+            circuit=circuit,
+            tensor_index=tensor_index,
+            artifacts=artifacts,
+            phases=["decode"],
+            formats=formats,
+            geometry=geometry,
+            strategy="expert_parallel",
+            execution_form="whole_expert_ownership",
+            partition_extent={
+                "dimension_name": "parameter_0_dimension_0",
+                "elements": expert_count,
+                "alignment_elements": 1,
+            },
+            partition_launch={
+                "workgroup_x": "repeated",
+                "origin": "push_constant_u32",
+                "origin_push_constant": "expert_start",
+            },
+            parameter_partitions=[
+                {
+                    "binding": binding,
+                    "dimension": 0,
+                    "kind": "expert_range",
+                    "alignment_elements": 1,
+                    "logical_elements_per_index": 1,
+                }
+                for binding in parameter_bindings
+            ],
+            inputs=inputs,
+            outputs=[
+                {
+                    "binding": output_binding,
+                    "collection": "routed",
+                    "dimension": 0,
+                    "alignment_elements": 1,
+                }
+            ],
+            local_intermediates=[],
+        )
+    return None
+
+
+def _artifact_identity(package_dir: Path, relative_path: object) -> ArtifactIdentity:
+    path = _non_empty_string(relative_path, "artifact path")
+    artifact_path = package_dir / path
+    try:
+        payload = artifact_path.read_bytes()
+    except OSError as error:
+        _invalid(f"could not read compiled artifact {path!r}: {error}")
+    return {"path": path, "sha256": artifact_sha256(payload), "entry_point": "main"}
+
+
+def _kernel_geometry(
+    node: Json,
+    circuit: Json,
+    tensor_index: Json,
+    *,
+    local_size_x: int,
+    workgroup_count_x: int,
+    batch_width: int | None = None,
+) -> ExecutionGeometry:
+    dimensions: dict[str, int] = {
+        "local_size_x": _positive_int(local_size_x, "local_size_x"),
+        "workgroup_count_x": _positive_int(workgroup_count_x, "workgroup_count_x"),
+    }
+    for parameter_index, (_, metadata) in enumerate(
+        _node_parameter_metadata(node, circuit, tensor_index)
+    ):
+        for dimension_index, dimension in enumerate(metadata.get("shape", [])):
+            dimensions[f"parameter_{parameter_index}_dimension_{dimension_index}"] = (
+                _positive_int(dimension, "parameter shape")
+            )
+    dynamic_dimensions: list[str] = []
+    if batch_width is not None:
+        dimensions["batch_width"] = _positive_int(batch_width, "batch_width")
+        dynamic_dimensions.append("batch_width")
+    shape_payload = _canonical_json_bytes(dimensions)
+    return {
+        "shape_class": f"shape:{sha256(shape_payload).hexdigest()[:24]}",
+        "dimensions": dimensions,
+        "dynamic_dimensions": dynamic_dimensions,
+    }
+
+
+def _kernel_formats(
+    node: Json,
+    circuit: Json,
+    tensor_index: Json,
+    artifacts: list[ArtifactIdentity],
+) -> PhysicalFormats:
+    storage_formats = sorted(
+        {
+            ":".join(
+                filter(
+                    None,
+                    (str(metadata.get("dtype", "unknown")).lower(), metadata.get("layout")),
+                )
+            )
+            for _, metadata in _node_parameter_metadata(node, circuit, tensor_index)
+        }
+    )
+    storage = "+".join(storage_formats) if storage_formats else "activation_only"
+    artifact_names = " ".join(artifact["path"].lower() for artifact in artifacts)
+    compute = next(
+        (
+            format_name
+            for token, format_name in (
+                ("mxfp4_e2m1", "mxfp4_e2m1"),
+                ("nvfp4", "nvfp4"),
+                ("int4", "int4"),
+                ("fp8_e4m3", "fp8_e4m3"),
+                ("q8_0", "int8"),
+                ("int8", "int8"),
+                ("bf16", "bf16"),
+                ("f16", "f16"),
+                ("f32", "f32"),
+            )
+            if token in artifact_names
+        ),
+        "f32",
+    )
+    return {"storage": storage, "compute": compute, "accumulation": "f32"}
+
+
+def _node_parameter_metadata(
+    node: Json, circuit: Json, tensor_index: Json
+) -> list[tuple[str, Json]]:
+    refs = circuit.get("parameters", {}).get("refs", {})
+    tensors = tensor_index.get("tensors", {})
+    result = []
+    for parameter_id in node.get("params", []):
+        ref = refs.get(parameter_id, {})
+        tensor_name = ref.get("tensor")
+        metadata = tensors.get(tensor_name)
+        if not isinstance(tensor_name, str) or not isinstance(metadata, dict):
+            _invalid(
+                f"node {node.get('id')!r} parameter {parameter_id!r} has no tensor metadata"
+            )
+        result.append((tensor_name, metadata))
+    return result
+
+
+def _direct_parameter_bindings(node: Json) -> list[int]:
+    base = len(node.get("inputs", [])) + len(node.get("outputs", []))
+    return list(range(base, base + len(node.get("params", []))))
+
+
+def _kernel_resources(node: Json, circuit: Json, tensor_index: Json) -> list[ResourceRequirement]:
+    resources: list[ResourceRequirement] = []
+    direct_bindings = _direct_parameter_bindings(node)
+    lazy = str(node.get("op", "")).startswith("independent_sparse_moe_")
+    for index, (tensor, _) in enumerate(
+        _node_parameter_metadata(node, circuit, tensor_index)
+    ):
+        resource: ResourceRequirement = {
+            "resource": tensor,
+            "kind": "lazy_resource" if lazy else "persistent_parameter",
+            "residency": "demand" if lazy else "permanent",
+            "access": "read",
+        }
+        if not lazy:
+            resource["binding"] = direct_bindings[index]
+        resources.append(resource)
+    state_access: dict[str, str] = {}
+    for state_id in node.get("state_reads", []):
+        state_access[str(state_id)] = "read"
+    for state_id in node.get("state_writes", []):
+        state_access[str(state_id)] = (
+            "read_write" if str(state_id) in state_access else "write"
+        )
+    resources.extend(
+        {
+            "resource": state_id,
+            "kind": "recurrent_state",
+            "residency": "transaction",
+            "access": access,
+        }
+        for state_id, access in sorted(state_access.items())
+    )
+    return resources
+
+
+def _local_inputs(node: Json) -> list[InputContract]:
+    return [
+        {"binding": binding, "distribution": "local"}
+        for binding in range(len(node.get("inputs", [])))
+    ]
+
+
+def _local_outputs(node: Json) -> list[OutputContract]:
+    input_count = len(node.get("inputs", []))
+    return [
+        {"binding": input_count + index, "collection": "local"}
+        for index, _ in enumerate(node.get("outputs", []))
+    ]
+
+
+def _execution_domain_phases(value: object) -> list[ExecutionPhase]:
+    return {
+        "decode": ["decode"],
+        "prefill": ["prefill"],
+        "decode_and_prefill": ["decode", "prefill"],
+    }.get(_non_empty_string(value, "execution_domain")) or _invalid(
+        f"unsupported execution domain {value!r}"
+    )
+
+
+def _block_row_alignment(parameter_metadata: list[tuple[str, Json]]) -> int:
+    weight_shape = parameter_metadata[0][1].get("shape", [])
+    scale_shape = parameter_metadata[1][1].get("shape", [])
+    if len(weight_shape) != 2 or len(scale_shape) != 2:
+        _invalid("block-scaled projection tensors must be rank two")
+    weight_rows = _positive_int(weight_shape[0], "weight rows")
+    scale_rows = _positive_int(scale_shape[0], "scale rows")
+    if weight_rows % scale_rows:
+        _invalid("block-scaled projection rows do not align with scale rows")
+    return weight_rows // scale_rows
 
 
 def seal_physical_execution_contract(contract: Json) -> PhysicalExecutionContract:
@@ -210,16 +824,25 @@ def validate_physical_execution_contract(value: object) -> None:
         _non_empty_string(contract["region_family"], "contract.region_family")
     _non_empty_unique_strings(contract["member_node_ids"], "contract.member_node_ids")
 
-    artifact = _mapping(contract["artifact"], "contract.artifact")
-    _keys(
-        artifact,
-        {"path", "sha256", "entry_point"},
-        {"path", "sha256", "entry_point"},
-        "contract.artifact",
-    )
-    _non_empty_string(artifact["path"], "contract.artifact.path")
-    _digest(artifact["sha256"], "contract.artifact.sha256")
-    _non_empty_string(artifact["entry_point"], "contract.artifact.entry_point")
+    artifacts = _list(contract["artifacts"], "contract.artifacts")
+    if not artifacts:
+        _invalid("contract.artifacts must not be empty")
+    artifact_paths: set[str] = set()
+    for index, value in enumerate(artifacts):
+        path = f"contract.artifacts[{index}]"
+        artifact = _mapping(value, path)
+        _keys(
+            artifact,
+            {"path", "sha256", "entry_point"},
+            {"path", "sha256", "entry_point"},
+            path,
+        )
+        artifact_path = _non_empty_string(artifact["path"], f"{path}.path")
+        if artifact_path in artifact_paths:
+            _invalid("contract artifact paths must be unique")
+        artifact_paths.add(artifact_path)
+        _digest(artifact["sha256"], f"{path}.sha256")
+        _non_empty_string(artifact["entry_point"], f"{path}.entry_point")
     _digest(contract["implementation_digest"], "contract.implementation_digest")
 
     phases = _list(contract["phases"], "contract.phases")
@@ -259,10 +882,65 @@ def validate_physical_execution_contract(value: object) -> None:
         _invalid("dynamic dimensions must name declared geometry dimensions")
 
     strategy = _enum(contract["strategy"], _STRATEGIES, "contract.strategy")
+    execution_form = _enum(
+        contract["execution_form"], _EXECUTION_FORMS, "contract.execution_form"
+    )
+    partition_extent = contract.get("partition_extent")
+    if partition_extent is not None:
+        extent = _mapping(partition_extent, "contract.partition_extent")
+        _keys(
+            extent,
+            {"dimension_name", "elements", "alignment_elements"},
+            {"dimension_name", "elements", "alignment_elements"},
+            "contract.partition_extent",
+        )
+        dimension_name = _non_empty_string(
+            extent["dimension_name"], "contract.partition_extent.dimension_name"
+        )
+        elements = _positive_int(
+            extent["elements"], "contract.partition_extent.elements"
+        )
+        _positive_int(
+            extent["alignment_elements"],
+            "contract.partition_extent.alignment_elements",
+        )
+        if dimensions.get(dimension_name) != elements:
+            _invalid("partition extent must match its declared geometry dimension")
+        if elements % extent["alignment_elements"]:
+            _invalid("partition extent must be divisible by its alignment")
+    partition_launch = contract.get("partition_launch")
+    if partition_launch is not None:
+        launch = _mapping(partition_launch, "contract.partition_launch")
+        _keys(
+            launch,
+            {"workgroup_x", "origin"},
+            {"workgroup_x", "origin", "origin_push_constant"},
+            "contract.partition_launch",
+        )
+        _enum(
+            launch["workgroup_x"],
+            _WORKGROUP_X_MAPPINGS,
+            "contract.partition_launch.workgroup_x",
+        )
+        origin = _enum(
+            launch["origin"],
+            _PARTITION_ORIGINS,
+            "contract.partition_launch.origin",
+        )
+        has_origin_push_constant = "origin_push_constant" in launch
+        if (origin == "push_constant_u32") != has_origin_push_constant:
+            _invalid(
+                "partition launch push constant must exactly match its origin source"
+            )
+        if has_origin_push_constant:
+            _non_empty_string(
+                launch["origin_push_constant"],
+                "contract.partition_launch.origin_push_constant",
+            )
     partitions = _list(
         contract["parameter_partitions"], "contract.parameter_partitions"
     )
-    _validate_parameter_partitions(partitions)
+    _validate_parameter_partitions(partitions, partition_extent)
     inputs = _list(contract["inputs"], "contract.inputs")
     outputs = _list(contract["outputs"], "contract.outputs")
     _validate_inputs(inputs)
@@ -271,20 +949,48 @@ def validate_physical_execution_contract(value: object) -> None:
         contract.get("local_intermediates", []), "contract.local_intermediates"
     )
     _validate_intermediates(intermediates)
-    _validate_strategy(strategy, partitions, inputs, outputs, intermediates)
+    _validate_strategy(
+        strategy,
+        execution_form,
+        partition_extent,
+        partition_launch,
+        partitions,
+        inputs,
+        outputs,
+        intermediates,
+    )
     _validate_resources(_list(contract["resources"], "contract.resources"))
     _validate_equivalence(contract["equivalence"])
 
 
-def _validate_parameter_partitions(values: list[object]) -> None:
+def _validate_parameter_partitions(
+    values: list[object], partition_extent: object | None
+) -> None:
+    extent = (
+        _mapping(partition_extent, "contract.partition_extent")
+        if partition_extent is not None
+        else None
+    )
     bindings: set[int] = set()
     for index, value in enumerate(values):
         path = f"contract.parameter_partitions[{index}]"
         item = _mapping(value, path)
         _keys(
             item,
-            {"binding", "dimension", "kind", "alignment_elements"},
-            {"binding", "dimension", "kind", "alignment_elements"},
+            {
+                "binding",
+                "dimension",
+                "kind",
+                "alignment_elements",
+                "logical_elements_per_index",
+            },
+            {
+                "binding",
+                "dimension",
+                "kind",
+                "alignment_elements",
+                "logical_elements_per_index",
+            },
             path,
         )
         binding = _non_negative_int(item["binding"], f"{path}.binding")
@@ -293,7 +999,22 @@ def _validate_parameter_partitions(values: list[object]) -> None:
         bindings.add(binding)
         _non_negative_int(item["dimension"], f"{path}.dimension")
         _enum(item["kind"], _PARTITION_KINDS, f"{path}.kind")
-        _positive_int(item["alignment_elements"], f"{path}.alignment_elements")
+        alignment = _positive_int(
+            item["alignment_elements"], f"{path}.alignment_elements"
+        )
+        logical_elements_per_index = _positive_int(
+            item["logical_elements_per_index"],
+            f"{path}.logical_elements_per_index",
+        )
+        if extent is not None:
+            logical_alignment = alignment * logical_elements_per_index
+            if (
+                extent["elements"] % logical_elements_per_index
+                or extent["alignment_elements"] % logical_alignment
+            ):
+                _invalid(
+                    "parameter partitions must divide the logical extent and its alignment"
+                )
 
 
 def _validate_inputs(values: list[object]) -> None:
@@ -376,13 +1097,22 @@ def _validate_intermediates(values: list[object]) -> None:
 
 def _validate_strategy(
     strategy: str,
+    execution_form: str,
+    partition_extent: object | None,
+    partition_launch: object | None,
     partitions: list[object],
     inputs: list[object],
     outputs: list[object],
     intermediates: list[object],
 ) -> None:
     if strategy == "single_device":
-        if partitions or intermediates:
+        if (
+            execution_form != "local"
+            or partition_extent is not None
+            or partition_launch is not None
+            or partitions
+            or intermediates
+        ):
             _invalid("single-device contracts cannot declare distributed flow")
         if any(
             _mapping(item, "input")["distribution"] not in {"local", "replicated"}
@@ -393,8 +1123,22 @@ def _validate_strategy(
         ):
             _invalid("single-device contracts cannot declare distributed flow")
         return
+    if execution_form == "local":
+        _invalid("distributed contracts require a distributed execution form")
+    if partition_extent is None:
+        _invalid("distributed contracts require an explicit partition extent")
+    if partition_launch is None:
+        _invalid("distributed contracts require an explicit partition launch")
     if not partitions:
         _invalid("distributed contracts require an explicit parameter partition")
+    extent = _mapping(partition_extent, "contract.partition_extent")
+    for flow_kind, flows in (("input", inputs), ("output", outputs)):
+        for flow in flows:
+            alignment = _mapping(flow, flow_kind).get("alignment_elements")
+            if alignment is not None and extent["alignment_elements"] % alignment:
+                _invalid(
+                    "distributed input and output alignment must divide partition alignment"
+                )
     if not any(
         _mapping(item, "output")["collection"]
         in {"concatenated", "reduced", "routed", "retained"}

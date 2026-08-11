@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.vulkan_resident_model_package.v10",
+  "schema": "nerve.vulkan_resident_model_package.v11",
   "package_id": "model_d119caf1_vulkan_resident",
   "compiler_target": {
     "schema": "nerve.compiler_target.v2",
@@ -2036,6 +2036,406 @@
                 }
               ]
             }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "operator_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_bf16_h16_eps1e-05_offset0.spv",
+                  "sha256": "sha256:a4fe854f416cff773cdf5e41cd5092c047434e70ef649098a1081d051c863914",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:1c426b730090b6c01df07b756d23121212617ea2c4ef16e356794060973518db",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:940c9c9b2179410d647acdee",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.input_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.normalization",
+              "contract_id": "sha256:3403153031d770d205675d1b13e3cc4ad39716b9db9b2f8d6eb9f32a9116ddd3"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "operator_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:2a08dcef66809b1d580c293fdf48f78d9fce477ab0c314dc36eba4345a3fe291",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:250879c9f04b8ccdcf938c2bde7fc37b193448493cbf301e3871ee77347e9895",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:6db5af6155286c172a14880f",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 1
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.input_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.normalization",
+              "contract_id": "sha256:5546af0a24d0d98b2584d502417c64302643a1567db975007212b1494e9aa59b"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "operator_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:7db81fec5799fb670dd55bb229a3456e3b17dbe5be4951bc9793ee9dbfa32de4",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:c8420f65a3dfc33ed3770846c0fa89c7c36f9ed035cc2324bebac8a4c030a66d",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:336e932ad7ffca16b846dbbe",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 2
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.input_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.normalization",
+              "contract_id": "sha256:a4b14f5352778073d4c58a266dcd200e9fa52e06e61d3a1e2a52f540e1cc96bf"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "operator_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:f503fede10871c40cf398826001d8a7736a0871eef44b16c55c2f3e1f5755b72",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:6cb8b1a9fbf8ba0179b1023f6ad5dae9cf833e88378012e3e784484c5252de47",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:fb8d096261a5668a2737f550",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 4
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.input_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.normalization",
+              "contract_id": "sha256:40497dfe6fa92675731fb066f5a33d65476cd7d3e870a61decfe7463889eb33e"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "operator_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:0ba38e569b68e2600b14acbf20fe4f37120da8c45937561a1b849172c5579d57",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:1b2878db273497e7d7b4cfd40a792444395693aad1f885e4af2007736fbc3f67",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:44ebb9ec4370337ac6b3543e",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 8
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.input_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.normalization",
+              "contract_id": "sha256:bc17393fd551af8ac5c80c9a71d177e257aef4b82c98fdb34d7ec0d30f5e4525"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "operator_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:9d177024bca652695f2ccb661ac8833153ea8845cf0a2b052d855655e208da69",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:2fbc417e03f7ac585b0b1e0d153ae77ea62d3269c35042353a91731a837bc94d",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:af53709493d8601a8380fe12",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 16
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.input_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.normalization",
+              "contract_id": "sha256:f01adde0262efc38b2511638052d9ec6d4652e54b025ce66b52998dbf269cddc"
+            }
           ]
         },
         {
@@ -2217,6 +2617,585 @@
                 }
               ]
             }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_3way",
+              "member_node_ids": [
+                "q_projection__k_projection__v_projection",
+                "q_projection",
+                "k_projection",
+                "v_projection"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_3way_bf16_16x16_8_8.spv",
+                  "sha256": "sha256:172cabeb8fede222f8e498b585241ea4e5f763470c2ec235415c2bba9446f654",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:41f76c6040eefce670bcc34c75bbbd33eae5227f016af1fcc75a799067a43b0c",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:0486b4169121232a0ff93e8a",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 8,
+                  "parameter_1_dimension_1": 16,
+                  "parameter_2_dimension_0": 8,
+                  "parameter_2_dimension_1": 16
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                },
+                {
+                  "binding": 2,
+                  "collection": "local"
+                },
+                {
+                  "binding": 3,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.q_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 4
+                },
+                {
+                  "resource": "model.layers.0.self_attn.k_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 5
+                },
+                {
+                  "resource": "model.layers.0.self_attn.v_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 6
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.input_projections",
+              "contract_id": "sha256:6b7dd27b8477ccbcb73cbb5ad9b900b4333824df9ca0fd0cfb4b2ad2d964899e"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_3way",
+              "member_node_ids": [
+                "q_projection__k_projection__v_projection",
+                "q_projection",
+                "k_projection",
+                "v_projection"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_batch64_cooperative_3way_bf16_16x16_8_8__pbc31.spv",
+                  "sha256": "sha256:f3ba599b7ca0003ce13e14081c1494496bab132332cddd7f295affc1f4394b55",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:8ee78b6561b16ce29f7391596af987d90b11ab9356f2530934ea35a4a9d1859f",
+              "phases": [
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:ed10412208c8e7ae722a1c75",
+                "dimensions": {
+                  "local_size_x": 256,
+                  "workgroup_count_x": 3,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 8,
+                  "parameter_1_dimension_1": 16,
+                  "parameter_2_dimension_0": 8,
+                  "parameter_2_dimension_1": 16,
+                  "batch_width": 64
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                },
+                {
+                  "binding": 2,
+                  "collection": "local"
+                },
+                {
+                  "binding": 3,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.q_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 4
+                },
+                {
+                  "resource": "model.layers.0.self_attn.k_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 5
+                },
+                {
+                  "resource": "model.layers.0.self_attn.v_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 6
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.input_projections",
+              "contract_id": "sha256:a1ea6f44bffb6749cd90b659bfdb8b8b11657fd04af2061c363afdd14e943fee"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_3way",
+              "member_node_ids": [
+                "q_projection__k_projection__v_projection",
+                "q_projection",
+                "k_projection",
+                "v_projection"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_batch2_3way_bf16_16x16_8_8__pbc31.spv",
+                  "sha256": "sha256:ac4e3392b0febcdf7abbe888d591710d092eba020c637d58df330f1d64807977",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:77ee30431cc845b48324d2c6acd1f2504249bea090ee343108e2b727487ca8cf",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:74b5625d36ca5ee41783d53e",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 8,
+                  "parameter_1_dimension_1": 16,
+                  "parameter_2_dimension_0": 8,
+                  "parameter_2_dimension_1": 16,
+                  "batch_width": 2
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                },
+                {
+                  "binding": 2,
+                  "collection": "local"
+                },
+                {
+                  "binding": 3,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.q_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 4
+                },
+                {
+                  "resource": "model.layers.0.self_attn.k_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 5
+                },
+                {
+                  "resource": "model.layers.0.self_attn.v_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 6
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.input_projections",
+              "contract_id": "sha256:4819ace6157128d9eb8fa1a04049ce6f93a0673ff8510058c1bcca8f6877b391"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_3way",
+              "member_node_ids": [
+                "q_projection__k_projection__v_projection",
+                "q_projection",
+                "k_projection",
+                "v_projection"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_batch4_3way_bf16_16x16_8_8__pbc31.spv",
+                  "sha256": "sha256:b787b22fbe87ea1c3e180c7fc3bc56a65bdf5001de7fee110ddc88602ff81078",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:f47a48c5ef664e5dbb93778441aa6c77804ad0b9b670503781808044fa144321",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:a597873c6a8a59c821d813cc",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 8,
+                  "parameter_1_dimension_1": 16,
+                  "parameter_2_dimension_0": 8,
+                  "parameter_2_dimension_1": 16,
+                  "batch_width": 4
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                },
+                {
+                  "binding": 2,
+                  "collection": "local"
+                },
+                {
+                  "binding": 3,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.q_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 4
+                },
+                {
+                  "resource": "model.layers.0.self_attn.k_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 5
+                },
+                {
+                  "resource": "model.layers.0.self_attn.v_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 6
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.input_projections",
+              "contract_id": "sha256:4aa4cffc82a023f233fab0b6b24a27b7bc2a274df8c65bf13165f8269be876a0"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_3way",
+              "member_node_ids": [
+                "q_projection__k_projection__v_projection",
+                "q_projection",
+                "k_projection",
+                "v_projection"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_batch8_3way_bf16_16x16_8_8__pbc31.spv",
+                  "sha256": "sha256:04f53bde53db1393b9248a750e015a84ee62836aa4d4206c45a8991d84e7d6b3",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:ed7facdb135a48bedd4bb98f4993949c83578b822c541a670c0ad7ccbcf1f168",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:2af31b56905121541e885205",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 8,
+                  "parameter_1_dimension_1": 16,
+                  "parameter_2_dimension_0": 8,
+                  "parameter_2_dimension_1": 16,
+                  "batch_width": 8
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                },
+                {
+                  "binding": 2,
+                  "collection": "local"
+                },
+                {
+                  "binding": 3,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.q_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 4
+                },
+                {
+                  "resource": "model.layers.0.self_attn.k_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 5
+                },
+                {
+                  "resource": "model.layers.0.self_attn.v_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 6
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.input_projections",
+              "contract_id": "sha256:5a6e6fbb1c81a25542561b41e0a46bf5957a30da5533bf1d6831a7c546a22440"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_3way",
+              "member_node_ids": [
+                "q_projection__k_projection__v_projection",
+                "q_projection",
+                "k_projection",
+                "v_projection"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_batch16_3way_bf16_16x16_8_8__pbc31.spv",
+                  "sha256": "sha256:a84f76c70473fa5f4ceabd4b42f791c80d4b990a7eba1ac4a4d670da4a81b459",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:733a66339a92ffdce5fb38d21d36fa23c11ad04802b34e080ebd1c117188bec7",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:8c574e408117ab189b512e18",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 8,
+                  "parameter_1_dimension_1": 16,
+                  "parameter_2_dimension_0": 8,
+                  "parameter_2_dimension_1": 16,
+                  "batch_width": 16
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                },
+                {
+                  "binding": 2,
+                  "collection": "local"
+                },
+                {
+                  "binding": 3,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.q_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 4
+                },
+                {
+                  "resource": "model.layers.0.self_attn.k_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 5
+                },
+                {
+                  "resource": "model.layers.0.self_attn.v_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 6
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.input_projections",
+              "contract_id": "sha256:fe3513d1b27629c5cb5e57fa59ce564cdcf702b0a5a673e7d77a160ea710faca"
+            }
           ]
         },
         {
@@ -2262,6 +3241,119 @@
                 }
               ]
             }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rotary_position_embedding",
+              "member_node_ids": [
+                "q_rope"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rotary_bf16_2x8_r8_theta10000_half__sc2.spv",
+                  "sha256": "sha256:e5841b402d3d30eecacd315e6af1fa3beebef6df93f9b049fb6d297fc8ccaf8b",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:1b8809b15bb4b88e69b8e9bdd6dd13a1ad5a7ccf2b0da07543d2e2af08224b87",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "activation_only",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:b8542e86c4add850f0765190",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 2
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.position",
+              "contract_id": "sha256:7b249aa8b7ec98bc84ce6be9d36b118d466b6f8b31f7d527f5819006ad3d0412"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rotary_position_embedding",
+              "member_node_ids": [
+                "q_rope"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rotary_temporal_bf16_2x8_r8_theta10000_half__pbc2.spv",
+                  "sha256": "sha256:b3d9cbecd59df0eeab466fe901b966c30c04327cf7397f40670c352e9b60d081",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:4a858c4087bdae7d4863ef72a18d4f2a1cbff92dd422d3c9dba7fd8192c32dad",
+              "phases": [
+                "prefill"
+              ],
+              "formats": {
+                "storage": "activation_only",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:c87099a9ed433eb25e1b3daf",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 2,
+                  "batch_width": 64
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.position",
+              "contract_id": "sha256:aa0e434ffdd7184e723e3fd09119579653bb7ffecb342a6dad271c12ed963a6d"
+            }
           ]
         },
         {
@@ -2306,6 +3398,119 @@
                   }
                 }
               ]
+            }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rotary_position_embedding",
+              "member_node_ids": [
+                "k_rope"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rotary_bf16_1x8_r8_theta10000_half__sc2.spv",
+                  "sha256": "sha256:9ef0fb8c2e6f67954c98b41a7972972edc3c244f185cff7f7f53fb922f874ddb",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:8976f0dea4ae44af571321ca3ac2122d7320eaecfdbbd0afd153a52e6fc7680e",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "activation_only",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:5c8964d60beb066b774d56f2",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.position",
+              "contract_id": "sha256:4f968ede8cc8afd582f3188b8d44b9524a8da96eaf653e53ec9632bc80a843c5"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rotary_position_embedding",
+              "member_node_ids": [
+                "k_rope"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rotary_temporal_bf16_1x8_r8_theta10000_half__pbc2.spv",
+                  "sha256": "sha256:add1a8e000b32fc6012e3f7718fdaae63ee39535284713b9333a7acb1dbbdea8",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:6223ffce8bccc04e5d2c7f7fa52dfc0a0293cf6e3d5f2f36f07b45e2eb9d4c45",
+              "phases": [
+                "prefill"
+              ],
+              "formats": {
+                "storage": "activation_only",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:bb2c9f56bf84a409dd81e7ed",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "batch_width": 64
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.position",
+              "contract_id": "sha256:c88dcde8d7b0cbd80f876a69e7da4fd41f66bba01db0dfcbc11206abe13db5ce"
             }
           ]
         },
@@ -2356,6 +3561,161 @@
                   "dispatch_y_from_batch_width": true
                 }
               ]
+            }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "attention_partition_partials",
+              "member_node_ids": [
+                "kv_memory_append__attention_read__partition_partials",
+                "kv_memory_append",
+                "attention_read"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/attention_partition_partials_bf16_q2_kv1_d8_s8_scale0.353553391__sc6.spv",
+                  "sha256": "sha256:22cda283c06984a1ce6e53a3941841d0549847ef7e6081f3c506cd3c0a0b284c",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:a218e9d1899ceb34bbb2ce24b6ddea0772acc79d89ba7ea58458cfca39d07d6d",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "activation_only",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:7b4c24f4f78eafceabb018f6",
+                "dimensions": {
+                  "local_size_x": 1024,
+                  "workgroup_count_x": 16
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 2,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 3,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 4,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "kv_memory",
+                  "kind": "recurrent_state",
+                  "residency": "transaction",
+                  "access": "read"
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.attention_state",
+              "contract_id": "sha256:7a18e089ff73d04261d501da667dc6b90fd9f0897061f53960ad9acefee73552"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "attention_partition_partials",
+              "member_node_ids": [
+                "kv_memory_append__attention_read__partition_partials",
+                "kv_memory_append",
+                "attention_read"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/attention_partition_partials_temporal_bf16_q2_kv1_d8_s8_scale0.353553391__pbc6.spv",
+                  "sha256": "sha256:3c7672a853bb47dbbe2f2b18c8534b2c6e7219a5f6f3e6aa62cad576043019bf",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:7efb9204973730caf3edc3f5ef46f3b95b3c29a2ea9f2bead9f3749655fb0391",
+              "phases": [
+                "prefill"
+              ],
+              "formats": {
+                "storage": "activation_only",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:ca3ca383827efa2fb08f52f6",
+                "dimensions": {
+                  "local_size_x": 1024,
+                  "workgroup_count_x": 16,
+                  "batch_width": 64
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 2,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 3,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 4,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "kv_memory",
+                  "kind": "recurrent_state",
+                  "residency": "transaction",
+                  "access": "read"
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.attention_state",
+              "contract_id": "sha256:12983f0fdc55efd1deba6f239c00b3246a22e71863c7ae5d6c2916d688099f01"
             }
           ]
         },
@@ -2414,6 +3774,166 @@
                   }
                 }
               ]
+            }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "append_scaled_dot_product_attention",
+              "member_node_ids": [
+                "kv_memory_append__attention_read",
+                "kv_memory_append",
+                "attention_read"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/append_gqa_attention_partition_reduce_bf16_q2_kv1_d8_s8_scale0.353553391__sc7.spv",
+                  "sha256": "sha256:3ed9ff9c9e35aa98cc84f6283d6b46894927c86aff47af15028959f125a4965e",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:676b6715a96363f52021f45066e5b80e05209035ee6bd46ba45e5043a1291f6f",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "activation_only",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:959d658ca61c39b8d29f04ed",
+                "dimensions": {
+                  "local_size_x": 8,
+                  "workgroup_count_x": 2
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 2,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 3,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 4,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "kv_memory",
+                  "kind": "recurrent_state",
+                  "residency": "transaction",
+                  "access": "read_write"
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.attention_state",
+              "contract_id": "sha256:0acc1d659a9760c85789f6a5287ee2f68bfba4c50868770ce5a3ce02fe730110"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "append_scaled_dot_product_attention",
+              "member_node_ids": [
+                "kv_memory_append__attention_read",
+                "kv_memory_append",
+                "attention_read"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/append_gqa_attention_partition_reduce_temporal_bf16_q2_kv1_d8_s8_scale0.353553391__pbc7.spv",
+                  "sha256": "sha256:6823e0e3aeb2610605665e691e7473d74461946dfa60f83dc6690b763bb2b704",
+                  "entry_point": "main"
+                },
+                {
+                  "path": "shaders/append_kv_temporal_commit_bf16_kv1_d8_w0__pbc7.spv",
+                  "sha256": "sha256:cec62f75e93ab9d993d1851118dcd2dab86cc7458e39fb7e30257ad8c8882d7d",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:a02935c8a3bffb1baf77c2e12c1396280690d5cbca79798e168cdeda60f6f2e7",
+              "phases": [
+                "prefill"
+              ],
+              "formats": {
+                "storage": "activation_only",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:c87099a9ed433eb25e1b3daf",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 2,
+                  "batch_width": 64
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 2,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 3,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 4,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "kv_memory",
+                  "kind": "recurrent_state",
+                  "residency": "transaction",
+                  "access": "read_write"
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.attention_state",
+              "contract_id": "sha256:3a14520fff46b2b9fd569fc10692cb9bcf7d35c2f01327736e6afdf8a25a94e4"
             }
           ]
         },
@@ -2596,6 +4116,447 @@
                 }
               ]
             }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "attention_out_projection__operator_residual",
+                "attention_out_projection",
+                "operator_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_bf16_16x16.spv",
+                  "sha256": "sha256:acce0ae2c63ae45db19a89bbc4ffb42e11ce9cb4915031bac3262690167cf1c9",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:00f75a397dea451010680b1b2a154ce04a4459088463d444d24f3a5a99f49463",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:458474307b68ec3fa1045f60",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.o_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
+              "contract_id": "sha256:6ab5a2b73e2e4d3ac64cbb08ff5176a30953e5fb251be79f4af4dc009a03deb8"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "attention_out_projection__operator_residual",
+                "attention_out_projection",
+                "operator_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch64_cooperative_bf16_16x16__pbc31.spv",
+                  "sha256": "sha256:9824ca17c8f2c8a17614d1aabdb1a45991c5e90390a7cb915d2c696113af01dd",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:bacc347eabc4538d1bbb802b988a16eb2b121037567522e4ae185fdcf029e2ab",
+              "phases": [
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:6fa32079ad47505efebba9dc",
+                "dimensions": {
+                  "local_size_x": 256,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "batch_width": 64
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.o_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
+              "contract_id": "sha256:d4aefefc67fa0054312f93bb03ab7b35c2dc2c208e2c3ca1f60b51dcadf9caee"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "attention_out_projection__operator_residual",
+                "attention_out_projection",
+                "operator_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch2_bf16_16x16__pbc31.spv",
+                  "sha256": "sha256:b3b9574ff5ca08d2ae5e75d0e864f2d37b1ba923588d4c5c6b10701740ca711d",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:671f2f345f10f3642a2610f24f4e3f355de7500bb19d93994b5b32658133ca84",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:34a75cef15b9df3ae63146ed",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "batch_width": 2
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.o_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
+              "contract_id": "sha256:1e1eb116ebf8bd3f7bd44c70053d7e07cf1b9b3f61c0a5ab0ba60fb72ae48844"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "attention_out_projection__operator_residual",
+                "attention_out_projection",
+                "operator_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch4_bf16_16x16__pbc31.spv",
+                  "sha256": "sha256:0f399102ac0bb62d32d16ef50850bd5c9c3498773d5cdcda8f8b5b8f2aa9a18f",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:5394e9d5af4360f5a0ef10acb9efb7f7b320864fd21557632a389667082fec96",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:6142d06d34e63071ee4a558c",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "batch_width": 4
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.o_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
+              "contract_id": "sha256:81aedf3cca9466de912908244d4fcff3fb10297eef2f8db64b51e342cfd99151"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "attention_out_projection__operator_residual",
+                "attention_out_projection",
+                "operator_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch8_bf16_16x16__pbc31.spv",
+                  "sha256": "sha256:11d1558042ec907eed9e8513c3a3b24ead32f994b4c5a336c71d3556e4b1bc23",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:1d2fed9283941abe12a111d539aec2c25fb52445c187a3c510472c4dd28b8230",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:5051ccf3eb1c0c6902ffbc32",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "batch_width": 8
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.o_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
+              "contract_id": "sha256:2be4ea27a55d220352af73021085dad1cc48509f20cb251af453e75ee0aa28d3"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "attention_out_projection__operator_residual",
+                "attention_out_projection",
+                "operator_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch16_bf16_16x16__pbc31.spv",
+                  "sha256": "sha256:8d12df36e5fd99e152c975958a0dc59b019c503472f95a89316ecb1fe0f23fb6",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:6aa232d084af8cb7762dd2099bbe9adec9893cbfd818cb8ab2a3f4e71761d9e1",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:ab61c5707d69428918352687",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 16,
+                  "batch_width": 16
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.self_attn.o_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
+              "contract_id": "sha256:11099eaf390708d2cd176ab753d720f643ee628b690d1ef8a7385e967a7c67dd"
+            }
           ]
         },
         {
@@ -2761,6 +4722,406 @@
                   }
                 }
               ]
+            }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "ffn_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_bf16_h16_eps1e-05_offset0.spv",
+                  "sha256": "sha256:a4fe854f416cff773cdf5e41cd5092c047434e70ef649098a1081d051c863914",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:1c426b730090b6c01df07b756d23121212617ea2c4ef16e356794060973518db",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:940c9c9b2179410d647acdee",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.post_attention_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.normalization",
+              "contract_id": "sha256:a94b1eedbfcb140a707383e1b1df74ae9da11496e23be1059a648ee64fe233c0"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "ffn_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:2a08dcef66809b1d580c293fdf48f78d9fce477ab0c314dc36eba4345a3fe291",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:250879c9f04b8ccdcf938c2bde7fc37b193448493cbf301e3871ee77347e9895",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:6db5af6155286c172a14880f",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 1
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.post_attention_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.normalization",
+              "contract_id": "sha256:f5624e3089680844d4011befd4729414ec733908051570cd8e4e7a0595f3474d"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "ffn_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:7db81fec5799fb670dd55bb229a3456e3b17dbe5be4951bc9793ee9dbfa32de4",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:c8420f65a3dfc33ed3770846c0fa89c7c36f9ed035cc2324bebac8a4c030a66d",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:336e932ad7ffca16b846dbbe",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 2
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.post_attention_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.normalization",
+              "contract_id": "sha256:35b8841c25e103d2adf4c058687801f307c3ee56e5362d0a86e53308551bb571"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "ffn_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:f503fede10871c40cf398826001d8a7736a0871eef44b16c55c2f3e1f5755b72",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:6cb8b1a9fbf8ba0179b1023f6ad5dae9cf833e88378012e3e784484c5252de47",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:fb8d096261a5668a2737f550",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 4
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.post_attention_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.normalization",
+              "contract_id": "sha256:00d626c20f2b7bb5adaba355ac26d3d33a389b6227a7884f81615d70e676eb63"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "ffn_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:0ba38e569b68e2600b14acbf20fe4f37120da8c45937561a1b849172c5579d57",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:1b2878db273497e7d7b4cfd40a792444395693aad1f885e4af2007736fbc3f67",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:44ebb9ec4370337ac6b3543e",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 8
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.post_attention_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.normalization",
+              "contract_id": "sha256:bec1cb63ff0eeaf0ea3e1457db3ed1a29c01d752838d19b9538ec0655fbd56c3"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "rms_norm",
+              "member_node_ids": [
+                "ffn_norm"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0__pbc31.spv",
+                  "sha256": "sha256:9d177024bca652695f2ccb661ac8833153ea8845cf0a2b052d855655e208da69",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:2fbc417e03f7ac585b0b1e0d153ae77ea62d3269c35042353a91731a837bc94d",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:af53709493d8601a8380fe12",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "batch_width": 16
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.post_attention_layernorm.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.normalization",
+              "contract_id": "sha256:81014c13b3b4ea5695178fe8c22a9d5b03bb8b1a853f609f35f19d6ac7c5a3c0"
             }
           ]
         },
@@ -2946,6 +5307,592 @@
                 }
               ]
             }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_silu_multiply",
+              "member_node_ids": [
+                "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
+                "ffn_gate_projection",
+                "ffn_up_projection",
+                "ffn_gate_activation",
+                "ffn_gate_multiply"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_silu_multiply_bf16_16x32.spv",
+                  "sha256": "sha256:9c7024c3a8831b0155518a4a68f59b6565dffad82fe67c6595deb1070636e79a",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:0995db965b158d1b18f55cb84cb7c2ac42e57be7aa24abece4b2569c374c0eaf",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:64b6782fd824dd10e43fc8a4",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 32,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_1": 16
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.gate_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                },
+                {
+                  "resource": "model.layers.0.mlp.up_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
+              "contract_id": "sha256:5c82e22e42b907c069404a4fc625e608637c8493ad740855b7512e466513c34a"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_silu_multiply",
+              "member_node_ids": [
+                "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
+                "ffn_gate_projection",
+                "ffn_up_projection",
+                "ffn_gate_activation",
+                "ffn_gate_multiply"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_silu_multiply_bf16_16x32.spv",
+                  "sha256": "sha256:9c7024c3a8831b0155518a4a68f59b6565dffad82fe67c6595deb1070636e79a",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:699bfb26de8255bd1831880c98c4744c26d3313aec96efdaf679165b2dd1b53d",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:64b6782fd824dd10e43fc8a4",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 32,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_1": 16
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "tensor_parallel",
+              "execution_form": "replicated_input_partitioned_output",
+              "parameter_partitions": [
+                {
+                  "binding": 2,
+                  "dimension": 0,
+                  "kind": "contiguous",
+                  "alignment_elements": 2,
+                  "logical_elements_per_index": 1
+                },
+                {
+                  "binding": 3,
+                  "dimension": 0,
+                  "kind": "contiguous",
+                  "alignment_elements": 2,
+                  "logical_elements_per_index": 1
+                }
+              ],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "replicated"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "concatenated",
+                  "dimension": 0,
+                  "alignment_elements": 2
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.gate_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                },
+                {
+                  "resource": "model.layers.0.mlp.up_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "partition_extent": {
+                "dimension_name": "parameter_0_dimension_0",
+                "elements": 32,
+                "alignment_elements": 2
+              },
+              "partition_launch": {
+                "workgroup_x": "proportional",
+                "origin": "local_zero"
+              },
+              "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
+              "contract_id": "sha256:2ec8df51cef3713941a2a59e5f27787956c8cf4f29dc695a7453b59e7d52dd7f"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_silu_multiply",
+              "member_node_ids": [
+                "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
+                "ffn_gate_projection",
+                "ffn_up_projection",
+                "ffn_gate_activation",
+                "ffn_gate_multiply"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x32__pbc31.spv",
+                  "sha256": "sha256:aa75fecde2d4f8893d373bf4a1325d697307ec088438346d4e23199fd9aefb85",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:c0d02d688f3d6f52c9fd12d48b2c185e4f7da0f8ee3effad50d22530791f4938",
+              "phases": [
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:8fc55fb139ac018fe8f7ce88",
+                "dimensions": {
+                  "local_size_x": 256,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 32,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_1": 16,
+                  "batch_width": 64
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.gate_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                },
+                {
+                  "resource": "model.layers.0.mlp.up_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
+              "contract_id": "sha256:8bc4501b5551daa64dc56c9372ffaa433bf0720514c845f760ae1cdffb4ca79b"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_silu_multiply",
+              "member_node_ids": [
+                "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
+                "ffn_gate_projection",
+                "ffn_up_projection",
+                "ffn_gate_activation",
+                "ffn_gate_multiply"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_silu_multiply_batch2_bf16_16x32__pbc31.spv",
+                  "sha256": "sha256:0bc6293d2aa08f62646d659291908aab61e1b033d1d3705cde10376430e578fc",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:edb048e840470a7b15afc97f7752c58428465c42ee5f37b89cdfada4258e9f2c",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:1c45fed2187b8ec995e0bf1f",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 32,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_1": 16,
+                  "batch_width": 2
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.gate_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                },
+                {
+                  "resource": "model.layers.0.mlp.up_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
+              "contract_id": "sha256:9ac5e4b91ae3c3d88ae807a0b13cb31901b1e06eefa15043a54cc43c1504851a"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_silu_multiply",
+              "member_node_ids": [
+                "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
+                "ffn_gate_projection",
+                "ffn_up_projection",
+                "ffn_gate_activation",
+                "ffn_gate_multiply"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_silu_multiply_batch4_bf16_16x32__pbc31.spv",
+                  "sha256": "sha256:403afdca62da64341e33a27c0ce9622e71205f96f3976b0c426c36dda3002165",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:0d16d5e5f1d348dcfb9c61621aa47acdc20d4b60d2cf7630c1af87f46cde0031",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:188692cda7c3a19e69cc6645",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 32,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_1": 16,
+                  "batch_width": 4
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.gate_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                },
+                {
+                  "resource": "model.layers.0.mlp.up_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
+              "contract_id": "sha256:6438c4af4966e87d2b125706241c33373f314624984f90e5302de7b1fe00b2fa"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_silu_multiply",
+              "member_node_ids": [
+                "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
+                "ffn_gate_projection",
+                "ffn_up_projection",
+                "ffn_gate_activation",
+                "ffn_gate_multiply"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_silu_multiply_batch8_bf16_16x32__pbc31.spv",
+                  "sha256": "sha256:56bbce846ead3aa202c473346881460ccc90e3b3e9467e78cf40cb5374e973c4",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:03744f8441d91fd5ee68538f121d26396153879ae50c18e4c6b80a1c83d298c7",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:18eab53294c30e80c06270af",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 32,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_1": 16,
+                  "batch_width": 8
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.gate_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                },
+                {
+                  "resource": "model.layers.0.mlp.up_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
+              "contract_id": "sha256:148e668bd54cb29d81b25db231fb90c828bee9add3dd3961d9b8ff9de9b27477"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "parallel_linear_silu_multiply",
+              "member_node_ids": [
+                "ffn_gate_projection__ffn_up_projection__ffn_gate_activation__ffn_gate_multiply",
+                "ffn_gate_projection",
+                "ffn_up_projection",
+                "ffn_gate_activation",
+                "ffn_gate_multiply"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32__pbc31.spv",
+                  "sha256": "sha256:3f8a832732c08b4a3c0ae5fef9315cff4d283782e6611361ccbe21dc22b794c4",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:02517e59ae7a7872543ed1a7bd280b4f8aee3ee73e0de2dc51a7263a880bc1e2",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:23ca5c5431b7f1f3b12d527b",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 16,
+                  "parameter_0_dimension_0": 32,
+                  "parameter_0_dimension_1": 16,
+                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_1": 16,
+                  "batch_width": 16
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 1,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.gate_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 2
+                },
+                {
+                  "resource": "model.layers.0.mlp.up_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
+              "contract_id": "sha256:73889e6f1cf20311ae65357d0dcb7150ad25c4622074646c3cbf7c7539333dff"
+            }
           ]
         },
         {
@@ -3126,6 +6073,447 @@
                   }
                 }
               ]
+            }
+          ],
+          "physical_execution_contracts": [
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "ffn_down_projection__ffn_residual",
+                "ffn_down_projection",
+                "ffn_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_bf16_32x16.spv",
+                  "sha256": "sha256:58867cc5a9e799ddc07f788564c821044e8f374c9ef9358c2030026deb396434",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:a638cf09c029a48965deb64daf2550f82742e6c56a876b352b987de15a26996b",
+              "phases": [
+                "decode"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:27959a60c809efb8fd370977",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 32
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.down_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
+              "contract_id": "sha256:853b66d0a599e50571ae3f74893b82d9e4822ba9918a0eabaacaf9a6f0dda0c5"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "ffn_down_projection__ffn_residual",
+                "ffn_down_projection",
+                "ffn_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch64_cooperative_bf16_32x16__pbc31.spv",
+                  "sha256": "sha256:94ca6cca1700fb8a0450c9e7aa30b12d891276521e7043076c2d644966c9d765",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:8104c50ab4522f11597983f52ec6433d0468b385c32f68dd1c43477588fe7dbf",
+              "phases": [
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:802cf37ab6c1d7bfb91013c2",
+                "dimensions": {
+                  "local_size_x": 256,
+                  "workgroup_count_x": 1,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 32,
+                  "batch_width": 64
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.down_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
+              "contract_id": "sha256:bd63e446ff9e8907e69f871e26d36c9506c025d17e500fa4413e40632620155c"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "ffn_down_projection__ffn_residual",
+                "ffn_down_projection",
+                "ffn_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch2_bf16_32x16__pbc31.spv",
+                  "sha256": "sha256:8beb81a96d4d86944003e89cc4c87f80b5c08bce9b0ff99c0ace7c5cf50b7d44",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:23d43f3f49dd46a4d2260cbb817d735ee8fe772cacd8345c695ba789873edf63",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:a306dfddf1716c9ec962b2a2",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 32,
+                  "batch_width": 2
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.down_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
+              "contract_id": "sha256:821dd97e0bfe14ddaaa7bd42660e9d1c333df6160def0716541739d3c80f142f"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "ffn_down_projection__ffn_residual",
+                "ffn_down_projection",
+                "ffn_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch4_bf16_32x16__pbc31.spv",
+                  "sha256": "sha256:fe33d011631a30a193d5ded3ceb988e2570f4cb1584a48973e37011195f45142",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:1e172257909455ac20945dadea7383dcd604f20403e2b143ae5ca17ee46dfed3",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:6484f185433b1e4ec38a5149",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 32,
+                  "batch_width": 4
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.down_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
+              "contract_id": "sha256:a0433b328a1c686b06484c1bbdd3c06893fb99408ddded6016ae293c517288e4"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "ffn_down_projection__ffn_residual",
+                "ffn_down_projection",
+                "ffn_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch8_bf16_32x16__pbc31.spv",
+                  "sha256": "sha256:1e5123cdfe951e75afc2cb96fa6982de259b9bca167449c46cf97d8ba2d2600f",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:914fecce788f2e9aaf34c50b4a4a6d35dd4aa8f80beb671e5b30c6acff3fa876",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:4538a05a9a84caa611dc61fc",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 32,
+                  "batch_width": 8
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.down_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
+              "contract_id": "sha256:9eb780c638ffcf39358fc87524f0080adb77515ec0f6f5b830e7cdb50a8f1932"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v1",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "ffn_down_projection__ffn_residual",
+                "ffn_down_projection",
+                "ffn_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch16_bf16_32x16__pbc31.spv",
+                  "sha256": "sha256:c69b9452af5d573db1083279b80a34604a24b6ee342118968957723d63a39138",
+                  "entry_point": "main"
+                }
+              ],
+              "implementation_digest": "sha256:c298525184db2a29540ba423b33b1963a1cfdc95cc37db946438e01dd30b0e9c",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "formats": {
+                "storage": "bf16:row_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:16838bf22183be87bebc771b",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "parameter_0_dimension_0": 16,
+                  "parameter_0_dimension_1": 32,
+                  "batch_width": 16
+                },
+                "dynamic_dimensions": [
+                  "batch_width"
+                ]
+              },
+              "strategy": "single_device",
+              "execution_form": "local",
+              "parameter_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "local"
+                },
+                {
+                  "binding": 1,
+                  "distribution": "local"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "local"
+                }
+              ],
+              "local_intermediates": [],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.down_proj.weight",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "bit_exact",
+                "state": "bit_exact"
+              },
+              "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
+              "contract_id": "sha256:ebdf68d2af13ad61b088dc5bab027855885604d17d6a3ff39ad456ec0cdd1837"
             }
           ]
         }

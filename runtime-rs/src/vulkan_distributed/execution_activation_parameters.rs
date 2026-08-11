@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
-use crate::stream_plan::{TensorIndex, TensorMetadata};
+use crate::stream_plan::TensorIndex;
 use crate::stream_circuit::ComponentEdgePlacement;
 use crate::tensor_storage::{TensorStorage, TensorStorageRange};
 use crate::vulkan_compute::{
@@ -22,13 +22,11 @@ use crate::vulkan_stream_circuit::{
     VulkanActivationSlotBufferOverride, VulkanDescriptorResourceAddress,
     VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
     VulkanLoadedReusableKernelArtifact, VulkanLoadedReusableKernelArtifactManifest,
+    VulkanModelBoundaryBufferOverride, VulkanModelBoundaryDirection,
     VulkanPreparedDispatch, VulkanPreparedDispatchPlan, VulkanResidentFeedbackControlPlane,
     VulkanReusableKernelArtifactManifest,
 };
 
-const DISTRIBUTABLE_PARALLEL_PROJECTION_OP: &str = "parallel_linear_silu_multiply";
-const DISTRIBUTABLE_RESIDUAL_PROJECTION_OP: &str = "linear_residual";
-const DISTRIBUTABLE_SPARSE_EXPERT_OPS: [&str; 2] = ["sparse_moe_gate_up", "sparse_moe_down"];
 const BF16_BYTE_COUNT: usize = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,12 +101,6 @@ impl VulkanDistributedExecutionPlan {
                         dispatch.component_id, owner_device_id
                     )));
                 }
-                if dispatch.op != DISTRIBUTABLE_PARALLEL_PROJECTION_OP
-                    && dispatch.op != DISTRIBUTABLE_RESIDUAL_PROJECTION_OP
-                    && !DISTRIBUTABLE_SPARSE_EXPERT_OPS.contains(&dispatch.op.as_str())
-                {
-                    continue;
-                }
                 let artifact = artifact_manifest
                     .artifacts
                     .iter()
@@ -119,13 +111,17 @@ impl VulkanDistributedExecutionPlan {
                             dispatch.component_id, dispatch.node_id, dispatch.reusable_family_id
                         ))
                     })?;
-                let Some(planned) = plan_dispatch(
+                let Some(contract) = select_distributed_contract(dispatch, artifact)? else {
+                    continue;
+                };
+                let Some(planned) = plan_contract_dispatch(
                     owner_device_id,
                     dispatch,
                     tensor_index,
                     component_devices,
                     edge_placements,
-                    artifact.workgroup_count_x,
+                    artifact,
+                    contract,
                     storage_buffer_offset_alignment,
                 )?
                 else {
@@ -184,6 +180,405 @@ impl VulkanDistributedExecutionPlan {
             distributed_parameter_byte_count,
         })
     }
+
+    /// Retains an aligned, representative subset of every distributed
+    /// dispatch while keeping one total parameter budget across all
+    /// participants. The resulting plan runs the package's real shaders and
+    /// descriptor contracts; only the dispatched output-row or expert ranges
+    /// are reduced.
+    pub fn sampled_for_parameter_budget(
+        &self,
+        tensor_index: &TensorIndex,
+        participant_device_ids: &[String],
+        maximum_total_parameter_bytes: usize,
+    ) -> Result<Option<Self>, VulkanDistributedPlanError> {
+        if participant_device_ids.is_empty()
+            || maximum_total_parameter_bytes == 0
+            || participant_device_ids.iter().any(String::is_empty)
+            || participant_device_ids.iter().collect::<BTreeSet<_>>().len()
+                != participant_device_ids.len()
+        {
+            return Err(VulkanDistributedPlanError(
+                "sampled distributed execution requires distinct participants and a positive total parameter budget"
+                    .to_string(),
+            ));
+        }
+        if self.dispatches.is_empty() {
+            return Ok(None);
+        }
+        let build = |fraction_millionths: usize| {
+            sampled_distributed_execution_plan(
+                self,
+                participant_device_ids,
+                fraction_millionths,
+            )
+        };
+        let minimum = build(0)?;
+        let minimum_bytes = VulkanDistributedParameterAllocationPlan::
+            from_sampled_execution_plan(&minimum, tensor_index)?
+            .total_byte_capacity;
+        if minimum_bytes > maximum_total_parameter_bytes {
+            return Ok(None);
+        }
+        const SCALE: usize = 1_000_000;
+        let mut low = 0usize;
+        let mut high = SCALE;
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            let candidate = build(middle)?;
+            let bytes = VulkanDistributedParameterAllocationPlan::
+                from_sampled_execution_plan(&candidate, tensor_index)?
+                .total_byte_capacity;
+            if bytes <= maximum_total_parameter_bytes {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        Ok(Some(build(low)?))
+    }
+}
+
+fn sampled_distributed_execution_plan(
+    source: &VulkanDistributedExecutionPlan,
+    participant_device_ids: &[String],
+    fraction_millionths: usize,
+) -> Result<VulkanDistributedExecutionPlan, VulkanDistributedPlanError> {
+    const SCALE: usize = 1_000_000;
+    let dispatches = source
+        .dispatches
+        .iter()
+        .map(|dispatch| {
+            let source_shards = if participant_device_ids.len() == 1 {
+                vec![merged_distributed_dispatch_shard(dispatch)?]
+            } else {
+                dispatch
+                    .shards
+                    .iter()
+                    .take(participant_device_ids.len())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            let selected = source_shards
+                .iter()
+                .take(participant_device_ids.len())
+                .zip(participant_device_ids)
+                .map(|(shard, device_id)| {
+                    sampled_distributed_dispatch_shard(
+                        dispatch,
+                        shard,
+                        device_id,
+                        fraction_millionths.min(SCALE),
+                        SCALE,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if selected.len() != participant_device_ids.len() {
+                return Err(VulkanDistributedPlanError(format!(
+                    "distributed dispatch {}.{} has {} physical shards but {} participants were requested",
+                    dispatch.component_id,
+                    dispatch.node_id,
+                    dispatch.shards.len(),
+                    participant_device_ids.len(),
+                )));
+            }
+            let mut sampled = dispatch.clone();
+            sampled.owner_device_id = participant_device_ids[0].clone();
+            sampled.distributed_parameter_byte_count = selected
+                .iter()
+                .flat_map(|shard| &shard.parameters)
+                .try_fold(0usize, |total, fragment| {
+                    total.checked_add(fragment.byte_count).ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "sampled distributed parameter bytes overflowed".to_string(),
+                        )
+                    })
+                })?;
+            sampled.shards = selected;
+            Ok(sampled)
+        })
+        .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
+    let distributed_parameter_byte_count = dispatches.iter().try_fold(
+        0usize,
+        |total, dispatch| {
+            total
+                .checked_add(dispatch.distributed_parameter_byte_count)
+                .ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "sampled distributed parameter total overflowed".to_string(),
+                    )
+                })
+        },
+    )?;
+    let dispatch_groups = distributed_dispatch_groups(&dispatches);
+    Ok(VulkanDistributedExecutionPlan {
+        device_ids: participant_device_ids.to_vec(),
+        storage_buffer_offset_alignment: source.storage_buffer_offset_alignment,
+        dispatches,
+        dispatch_groups,
+        shared_input_byte_capacity: source.shared_input_byte_capacity,
+        shared_output_byte_capacity: source.shared_output_byte_capacity,
+        distributed_parameter_byte_count,
+    })
+}
+
+fn merged_distributed_dispatch_shard(
+    dispatch: &VulkanDistributedDispatchPlan,
+) -> Result<VulkanDistributedDispatchShard, VulkanDistributedPlanError> {
+    let first = dispatch.shards.first().ok_or_else(|| {
+        VulkanDistributedPlanError(format!(
+            "distributed dispatch {}.{} has no shards to merge",
+            dispatch.component_id, dispatch.node_id,
+        ))
+    })?;
+    let row_count = dispatch.shards.iter().try_fold(0usize, |total, shard| {
+        total.checked_add(shard.row_count).ok_or_else(|| {
+            VulkanDistributedPlanError(
+                "merged distributed row count overflowed".to_string(),
+            )
+        })
+    })?;
+    let merge_ranges = |ranges: Vec<&VulkanDistributedActivationRange>, label: &str| {
+        let leading = ranges.first().copied().ok_or_else(|| {
+            VulkanDistributedPlanError(format!(
+                "distributed dispatch {}.{} has no {label} ranges",
+                dispatch.component_id, dispatch.node_id,
+            ))
+        })?;
+        if ranges.iter().all(|range| *range == leading) {
+            return Ok(leading.clone());
+        }
+        let mut byte_end = leading
+            .byte_offset
+            .checked_add(leading.byte_count)
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(format!(
+                    "merged distributed {label} range overflowed",
+                ))
+            })?;
+        for range in ranges.iter().skip(1) {
+            if range.byte_offset != byte_end {
+                return Err(VulkanDistributedPlanError(format!(
+                    "distributed dispatch {}.{} has non-contiguous {label} ranges",
+                    dispatch.component_id, dispatch.node_id,
+                )));
+            }
+            byte_end = byte_end.checked_add(range.byte_count).ok_or_else(|| {
+                VulkanDistributedPlanError(format!(
+                    "merged distributed {label} range overflowed",
+                ))
+            })?;
+        }
+        Ok(VulkanDistributedActivationRange {
+            byte_offset: leading.byte_offset,
+            byte_count: byte_end - leading.byte_offset,
+        })
+    };
+    let input_range = merge_ranges(
+        dispatch.shards.iter().map(|shard| &shard.input_range).collect(),
+        "input",
+    )?;
+    let auxiliary_count = first.auxiliary_input_ranges.len();
+    if dispatch
+        .shards
+        .iter()
+        .any(|shard| shard.auxiliary_input_ranges.len() != auxiliary_count)
+    {
+        return Err(VulkanDistributedPlanError(format!(
+            "distributed dispatch {}.{} has inconsistent auxiliary ranges",
+            dispatch.component_id, dispatch.node_id,
+        )));
+    }
+    let auxiliary_input_ranges = (0..auxiliary_count)
+        .map(|index| {
+            merge_ranges(
+                dispatch
+                    .shards
+                    .iter()
+                    .map(|shard| &shard.auxiliary_input_ranges[index])
+                    .collect(),
+                "auxiliary input",
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut parameters = BTreeMap::<(usize, String), VulkanDistributedParameterFragment>::new();
+    for fragment in dispatch.shards.iter().flat_map(|shard| &shard.parameters) {
+        let key = (fragment.binding, fragment.tensor.clone());
+        if let Some(merged) = parameters.get_mut(&key) {
+            let expected_offset = merged
+                .byte_offset
+                .checked_add(merged.byte_count)
+                .ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "merged distributed parameter range overflowed".to_string(),
+                    )
+                })?;
+            if fragment.byte_offset != expected_offset {
+                return Err(VulkanDistributedPlanError(format!(
+                    "distributed parameter {:?} binding {} has non-contiguous shard ranges",
+                    fragment.tensor, fragment.binding,
+                )));
+            }
+            merged.byte_count = merged
+                .byte_count
+                .checked_add(fragment.byte_count)
+                .ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "merged distributed parameter bytes overflowed".to_string(),
+                    )
+                })?;
+        } else {
+            parameters.insert(key, fragment.clone());
+        }
+    }
+    let (workgroup_count_x, output_byte_offset, output_byte_count) = match dispatch.distribution {
+        VulkanDistributedDispatchDistribution::OutputRows => (
+            dispatch.shards.iter().try_fold(0u32, |total, shard| {
+                total.checked_add(shard.workgroup_count_x).ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "merged distributed workgroup count overflowed".to_string(),
+                    )
+                })
+            })?,
+            first.output_byte_offset,
+            dispatch.shards.iter().try_fold(0usize, |total, shard| {
+                total.checked_add(shard.output_byte_count).ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "merged distributed output bytes overflowed".to_string(),
+                    )
+                })
+            })?,
+        ),
+        VulkanDistributedDispatchDistribution::ExpertRange => (
+            first.workgroup_count_x,
+            first.output_byte_offset,
+            first.output_byte_count,
+        ),
+    };
+    Ok(VulkanDistributedDispatchShard {
+        device_id: first.device_id.clone(),
+        row_start: first.row_start,
+        row_count,
+        workgroup_count_x,
+        base_workgroup_z: first.base_workgroup_z,
+        input_range,
+        auxiliary_input_ranges,
+        output_byte_offset,
+        output_byte_count,
+        parameters: parameters.into_values().collect(),
+    })
+}
+
+fn sampled_distributed_dispatch_shard(
+    dispatch: &VulkanDistributedDispatchPlan,
+    source: &VulkanDistributedDispatchShard,
+    device_id: &str,
+    numerator: usize,
+    denominator: usize,
+) -> Result<VulkanDistributedDispatchShard, VulkanDistributedPlanError> {
+    if source.row_count == 0
+        || source.workgroup_count_x == 0
+        || dispatch.row_alignment == 0
+    {
+        return Err(VulkanDistributedPlanError(format!(
+            "distributed dispatch {}.{} has invalid shard geometry",
+            dispatch.component_id, dispatch.node_id,
+        )));
+    }
+    let proportional_rows = source
+        .row_count
+        .checked_mul(numerator)
+        .ok_or_else(|| {
+            VulkanDistributedPlanError(
+                "sampled distributed row calculation overflowed".to_string(),
+            )
+        })?
+        / denominator;
+    let row_count = proportional_rows
+        .min(source.row_count)
+        .checked_div(dispatch.row_alignment)
+        .expect("sampled distributed row alignment is positive")
+        .max(1)
+        .checked_mul(dispatch.row_alignment)
+        .ok_or_else(|| {
+            VulkanDistributedPlanError(
+                "sampled distributed aligned row count overflowed".to_string(),
+            )
+        })?
+        .min(source.row_count);
+    let scale = |value: usize, label: &str| {
+        value
+            .checked_mul(row_count)
+            .filter(|scaled| scaled.is_multiple_of(source.row_count))
+            .map(|scaled| scaled / source.row_count)
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(format!(
+                    "sampled distributed {label} is not row-aligned for {}.{}",
+                    dispatch.component_id, dispatch.node_id,
+                ))
+            })
+    };
+    let (workgroup_count_x, output_byte_count, auxiliary_input_ranges) =
+        match dispatch.distribution {
+            VulkanDistributedDispatchDistribution::OutputRows => {
+                let output_byte_count = scale(source.output_byte_count, "output range")?;
+                let workgroup_count_x = u32::try_from(scale(
+                    source.workgroup_count_x as usize,
+                    "workgroup count",
+                )?)
+                .map_err(|_| {
+                    VulkanDistributedPlanError(
+                        "sampled distributed workgroup count exceeds u32".to_string(),
+                    )
+                })?;
+                let auxiliary = source
+                    .auxiliary_input_ranges
+                    .iter()
+                    .map(|range| {
+                        if range.byte_offset == source.output_byte_offset
+                            && range.byte_count == source.output_byte_count
+                        {
+                            VulkanDistributedActivationRange {
+                                byte_offset: range.byte_offset,
+                                byte_count: output_byte_count,
+                            }
+                        } else {
+                            range.clone()
+                        }
+                    })
+                    .collect();
+                (workgroup_count_x, output_byte_count, auxiliary)
+            }
+            VulkanDistributedDispatchDistribution::ExpertRange => (
+                source.workgroup_count_x,
+                source.output_byte_count,
+                source.auxiliary_input_ranges.clone(),
+            ),
+        };
+    let parameters = source
+        .parameters
+        .iter()
+        .map(|fragment| {
+            Ok(VulkanDistributedParameterFragment {
+                binding: fragment.binding,
+                tensor: fragment.tensor.clone(),
+                byte_offset: fragment.byte_offset,
+                byte_count: scale(fragment.byte_count, "parameter fragment")?,
+            })
+        })
+        .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
+    Ok(VulkanDistributedDispatchShard {
+        device_id: device_id.to_string(),
+        row_start: source.row_start,
+        row_count,
+        workgroup_count_x,
+        base_workgroup_z: source.base_workgroup_z,
+        input_range: source.input_range.clone(),
+        auxiliary_input_ranges,
+        output_byte_offset: source.output_byte_offset,
+        output_byte_count,
+        parameters,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -313,6 +708,8 @@ pub struct VulkanDistributedActivationSlot {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VulkanDistributedActivationStorage {
     ActivationSlot,
+    BoundaryInput,
+    BoundaryOutput,
     Edge {
         edge_index: usize,
         owner_device_id: String,
@@ -607,11 +1004,14 @@ impl VulkanDistributedActivationBuffers {
         activation: &VulkanDistributedActivationSlot,
         device_id: &str,
     ) -> Option<&Arc<VulkanResidentBuffer>> {
-        let key = distributed_activation_allocation_key(dispatch_owner_device_id, activation);
         self.allocations
             .iter()
             .find(|allocation| {
-                distributed_activation_buffer_allocation_key(&allocation.planned) == key
+                distributed_activation_allocation_matches(
+                    dispatch_owner_device_id,
+                    activation,
+                    &allocation.planned,
+                )
             })
             .and_then(|allocation| allocation.device_buffers.get(device_id))
     }
@@ -636,6 +1036,35 @@ impl VulkanDistributedActivationBuffers {
                         slot: allocation.planned.slot,
                         buffer: Arc::clone(buffer),
                     })
+            })
+            .collect()
+    }
+
+    pub fn boundary_overrides_for_owner_device(
+        &self,
+        owner_device_id: &str,
+    ) -> Vec<VulkanModelBoundaryBufferOverride> {
+        self.allocations
+            .iter()
+            .filter(|allocation| allocation.planned.owner_device_id == owner_device_id)
+            .filter_map(|allocation| {
+                let direction = match allocation.planned.storage {
+                    VulkanDistributedActivationStorage::BoundaryInput => {
+                        VulkanModelBoundaryDirection::Input
+                    }
+                    VulkanDistributedActivationStorage::BoundaryOutput => {
+                        VulkanModelBoundaryDirection::Output
+                    }
+                    _ => return None,
+                };
+                allocation.device_buffers.get(owner_device_id).and_then(|buffer| {
+                    Some(VulkanModelBoundaryBufferOverride {
+                        direction,
+                        component_id: allocation.planned.component_id.clone(),
+                        signal_id: allocation.planned.signal_ids.first()?.clone(),
+                        buffer: Arc::clone(buffer),
+                    })
+                })
             })
             .collect()
     }
@@ -690,6 +1119,16 @@ enum VulkanDistributedActivationBufferAllocationKey {
         component_id: String,
         slot: usize,
     },
+    BoundaryInput {
+        owner_device_id: String,
+        component_id: String,
+        signal_id: String,
+    },
+    BoundaryOutput {
+        owner_device_id: String,
+        component_id: String,
+        signal_id: String,
+    },
     Edge {
         edge_index: usize,
         owner_device_id: String,
@@ -708,6 +1147,20 @@ fn distributed_activation_allocation_key(
                 slot: activation.slot,
             }
         }
+        VulkanDistributedActivationStorage::BoundaryInput => {
+            VulkanDistributedActivationBufferAllocationKey::BoundaryInput {
+                owner_device_id: dispatch_owner_device_id.to_string(),
+                component_id: activation.component_id.clone(),
+                signal_id: activation.signal_id.clone(),
+            }
+        }
+        VulkanDistributedActivationStorage::BoundaryOutput => {
+            VulkanDistributedActivationBufferAllocationKey::BoundaryOutput {
+                owner_device_id: dispatch_owner_device_id.to_string(),
+                component_id: activation.component_id.clone(),
+                signal_id: activation.signal_id.clone(),
+            }
+        }
         VulkanDistributedActivationStorage::Edge {
             edge_index,
             owner_device_id,
@@ -718,24 +1171,39 @@ fn distributed_activation_allocation_key(
     }
 }
 
-fn distributed_activation_buffer_allocation_key(
+fn distributed_activation_allocation_matches(
+    dispatch_owner_device_id: &str,
+    activation: &VulkanDistributedActivationSlot,
     allocation: &VulkanDistributedActivationBufferAllocation,
-) -> VulkanDistributedActivationBufferAllocationKey {
-    match &allocation.storage {
+) -> bool {
+    if allocation.storage != activation.storage {
+        return false;
+    }
+    match &activation.storage {
         VulkanDistributedActivationStorage::ActivationSlot => {
-            VulkanDistributedActivationBufferAllocationKey::ActivationSlot {
-                owner_device_id: allocation.owner_device_id.clone(),
-                component_id: allocation.component_id.clone(),
-                slot: allocation.slot,
-            }
+            allocation.owner_device_id == dispatch_owner_device_id
+                && allocation.component_id == activation.component_id
+                && allocation.slot == activation.slot
+        }
+        VulkanDistributedActivationStorage::BoundaryInput
+        | VulkanDistributedActivationStorage::BoundaryOutput => {
+            allocation.owner_device_id == dispatch_owner_device_id
+                && allocation.component_id == activation.component_id
+                && allocation.signal_ids.contains(&activation.signal_id)
         }
         VulkanDistributedActivationStorage::Edge {
             edge_index,
             owner_device_id,
-        } => VulkanDistributedActivationBufferAllocationKey::Edge {
-            edge_index: *edge_index,
-            owner_device_id: owner_device_id.clone(),
-        },
+        } => {
+            allocation.owner_device_id == *owner_device_id
+                && matches!(
+                    allocation.storage,
+                    VulkanDistributedActivationStorage::Edge {
+                        edge_index: candidate,
+                        ..
+                    } if candidate == *edge_index
+                )
+        }
     }
 }
 
@@ -785,6 +1253,21 @@ impl VulkanDistributedParameterAllocationPlan {
     pub fn from_execution_plan(
         execution_plan: &VulkanDistributedExecutionPlan,
         tensor_index: &TensorIndex,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        Self::from_execution_plan_with_coverage(execution_plan, tensor_index, true)
+    }
+
+    pub fn from_sampled_execution_plan(
+        execution_plan: &VulkanDistributedExecutionPlan,
+        tensor_index: &TensorIndex,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        Self::from_execution_plan_with_coverage(execution_plan, tensor_index, false)
+    }
+
+    fn from_execution_plan_with_coverage(
+        execution_plan: &VulkanDistributedExecutionPlan,
+        tensor_index: &TensorIndex,
+        require_complete_tensor_coverage: bool,
     ) -> Result<Self, VulkanDistributedPlanError> {
         let device_ids = execution_plan
             .device_ids
@@ -868,7 +1351,9 @@ impl VulkanDistributedParameterAllocationPlan {
             }
         }
 
-        validate_tensor_partition_coverage(allocations.values(), tensor_index)?;
+        if require_complete_tensor_coverage {
+            validate_tensor_partition_coverage(allocations.values(), tensor_index)?;
+        }
         let total_byte_capacity = allocations.values().try_fold(0usize, |total, allocation| {
             total.checked_add(allocation.byte_count).ok_or_else(|| {
                 VulkanDistributedPlanError(

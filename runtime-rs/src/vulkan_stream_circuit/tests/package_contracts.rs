@@ -45,6 +45,77 @@ fn partition_resource_identity_matches_the_compiler_contract() {
     );
 }
 
+#[test]
+fn package_rejects_a_kernel_without_physical_execution_contracts() {
+    let mut manifest = fixture_model_package_manifest();
+    manifest.component_executions[0].kernels[0]
+        .physical_execution_contracts
+        .clear();
+
+    let error = package::validate_physical_execution_contracts(&tiny_model_dir(), &manifest)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("has no physical execution contracts"));
+}
+
+#[test]
+fn package_rejects_a_stale_physical_artifact_digest() {
+    let mut manifest = fixture_model_package_manifest();
+    manifest.component_executions[0].kernels[0].physical_execution_contracts[0]
+        .artifacts[0]
+        .sha256 = format!("sha256:{}", "0".repeat(64));
+
+    let error = package::validate_physical_execution_contracts(&tiny_model_dir(), &manifest)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("has a stale digest"));
+}
+
+#[test]
+fn package_rejects_a_contract_artifact_outside_its_kernel() {
+    let mut manifest = fixture_model_package_manifest();
+    manifest.component_executions[0].kernels[0].physical_execution_contracts[0]
+        .artifacts[0]
+        .path = "shaders/not-owned-by-this-kernel.spv".to_string();
+
+    let error = package::validate_physical_execution_contracts(&tiny_model_dir(), &manifest)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("outside kernel"));
+}
+
+#[test]
+fn package_rejects_repeated_physical_contract_ids() {
+    let mut manifest = fixture_model_package_manifest();
+    let duplicate =
+        manifest.component_executions[0].kernels[0].physical_execution_contracts[0].clone();
+    manifest.component_executions[0].kernels[0]
+        .physical_execution_contracts
+        .push(duplicate);
+
+    let error = package::validate_physical_execution_contracts(&tiny_model_dir(), &manifest)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("repeats physical contract"));
+}
+
+#[test]
+fn package_rejects_a_contract_for_a_different_operation() {
+    let mut manifest = fixture_model_package_manifest();
+    manifest.component_executions[0].kernels[0].physical_execution_contracts[0]
+        .operation_family = "different_operation".to_string();
+
+    let error = package::validate_physical_execution_contracts(&tiny_model_dir(), &manifest)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("disagrees with kernel"));
+}
+
 fn parallel_speculative_decoder_with_default(
     id: &str,
     default_draft_tokens: usize,
