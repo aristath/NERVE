@@ -32,6 +32,7 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     distributed_activation_plan: VulkanDistributedActivationBufferPlan,
     distributed_parameter_allocation_plan: VulkanDistributedParameterAllocationPlan,
     distributed_parameter_exclusion_plan: VulkanDistributedParameterExclusionPlan,
+    distributed_selected_resource_store_plan: VulkanDistributedSelectedResourceStorePlan,
     distributed_loaded_manifest: VulkanLoadedKernelArtifactCatalog,
     distributed_parameter_buffers: Arc<VulkanDistributedParameterBuffers>,
     compiled_resource_device_stores:
@@ -87,6 +88,12 @@ impl VulkanResidentInProcessPlacedModelPackage {
         &self,
     ) -> &[VulkanCompiledResourcePhysicalPlacement] {
         &self.compiled_resource_physical_placements
+    }
+
+    pub fn distributed_selected_resource_store_plan(
+        &self,
+    ) -> &VulkanDistributedSelectedResourceStorePlan {
+        &self.distributed_selected_resource_store_plan
     }
 
     fn compiled_resource_load_required_count(

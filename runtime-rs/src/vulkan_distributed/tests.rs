@@ -1779,6 +1779,48 @@ mod tests {
         assert_eq!(dispatch.shards[1].row_start, 4);
         assert_eq!(dispatch.shards[1].row_count, 4);
 
+        let ownership =
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&plans).unwrap();
+        assert_eq!(ownership.device_count, 2);
+        assert_eq!(ownership.selector_count, 1);
+        assert_eq!(ownership.selector_placement_count, 2);
+        assert_eq!(ownership.unique_atomic_group_count, 8);
+        assert_eq!(ownership.total_addressable_bytes, 64);
+        let owner = ownership.device("owner").unwrap();
+        assert_eq!(owner.total_addressable_bytes, 32);
+        assert_eq!(owner.maximum_atomic_group_bytes, 8);
+        assert_eq!(owner.maximum_load_wave_bytes, 16);
+        assert_eq!(owner.selectors[0].owned_resource_indices, vec![0, 1, 2, 3]);
+        assert_eq!(
+            ownership.device("helper").unwrap().selectors[0].owned_resource_indices,
+            vec![4, 5, 6, 7]
+        );
+        let exclusions = VulkanDistributedParameterExclusionPlan::from_execution_plan_set(
+            &plans,
+            &[("owner", &prepared)],
+            &tensor_index,
+        )
+        .unwrap();
+        assert_eq!(exclusions.excluded_full_allocation_count, 0);
+        assert_eq!(exclusions.excluded_full_byte_capacity, 0);
+
+        let mut phase_mismatch = plans.clone();
+        phase_mismatch.decode_batch.dispatches[0].shards.swap(0, 1);
+        phase_mismatch.decode_batch.dispatches[0].shards[0].device_id = "owner".to_string();
+        phase_mismatch.decode_batch.dispatches[0].shards[1].device_id = "helper".to_string();
+        let phase_error =
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&phase_mismatch)
+                .unwrap_err();
+        assert!(phase_error.to_string().contains("assign different selected resources"));
+
+        let mut incomplete = plan.clone();
+        incomplete.dispatches[0].shards[1].row_start = 5;
+        incomplete.dispatches[0].shards[1].row_count = 3;
+        let coverage_error =
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&incomplete)
+                .unwrap_err();
+        assert!(coverage_error.to_string().contains("not partitioned exactly once"));
+
         let mut wrong_abi = prepared;
         let VulkanDescriptorResourceAddress::DynamicResourceParameterSlots {
             parameter_ids, ..

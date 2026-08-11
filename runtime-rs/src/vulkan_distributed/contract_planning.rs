@@ -839,6 +839,9 @@ fn resolve_selected_resource_partitions(
                     .map_err(|_| dispatch_error(dispatch, "dynamic binding exceeds usize".to_string()))?,
                 resource_count: selector.resource_count,
                 parameters_per_resource,
+                selection_count_per_activation: selector
+                    .encoding
+                    .selection_count_per_activation,
                 atomic_group_ids: atomic_group_ids.clone(),
                 atomic_group_byte_counts,
             })

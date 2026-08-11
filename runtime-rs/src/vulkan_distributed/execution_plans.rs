@@ -1529,6 +1529,7 @@ pub struct VulkanDistributedSelectedResourcePartitionPlan {
     pub parameter_slots_binding: usize,
     pub resource_count: usize,
     pub parameters_per_resource: usize,
+    pub selection_count_per_activation: usize,
     pub atomic_group_ids: Vec<String>,
     pub atomic_group_byte_counts: Vec<usize>,
 }

@@ -528,6 +528,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )),
                 )
             })?;
+        let distributed_selected_resource_store_plan =
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(
+                &distributed_execution_plans,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to plan distributed selected-resource ownership: {error}"
+                    )),
+                )
+            })?;
         let distributed_parameter_buffers = Arc::new(
             match parameter_pool {
                 Some(pool) => VulkanDistributedParameterBuffers::allocate_and_load_from_pool(
@@ -1270,6 +1281,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             distributed_activation_plan,
             distributed_parameter_allocation_plan,
             distributed_parameter_exclusion_plan,
+            distributed_selected_resource_store_plan,
             distributed_loaded_manifest,
             distributed_parameter_buffers,
             compiled_resource_device_stores,

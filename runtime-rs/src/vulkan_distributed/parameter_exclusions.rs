@@ -50,7 +50,7 @@ impl VulkanDistributedParameterExclusionPlan {
                 .flat_map(|shard| shard.parameters.iter())
                 .map(|fragment| fragment.tensor.clone())
                 .collect::<BTreeSet<_>>();
-            if tensors.is_empty() {
+            if tensors.is_empty() && dispatch.selected_resource_partitions.is_empty() {
                 return Err(VulkanDistributedPlanError(format!(
                     "distributed dispatch {}.{} has no parameter tensors",
                     dispatch.component_id, dispatch.node_id
