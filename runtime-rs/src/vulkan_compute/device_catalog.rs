@@ -831,10 +831,15 @@ impl VulkanComputeDeviceCatalog {
                 device.destroy_device(None);
                 return Err(error);
             }
+            let logical_device_lifetime = Arc::new(VulkanLogicalDeviceLifetime {
+                device: device.clone(),
+                _instance_context: Arc::clone(&self.context),
+            });
             Ok(VulkanComputeDevice {
                 context: Arc::clone(&self.context),
                 physical_device,
                 device,
+                logical_device_lifetime,
                 queue_family_index,
                 transfer_queue_is_distinct,
                 compute_queue_submission,

@@ -7,7 +7,6 @@ struct VulkanResidentInProcessPlacedPendingStreamFeedbackWindow {
 pub struct VulkanResidentInProcessPlacedPromptStream {
     package: Arc<VulkanResidentInProcessPlacedModelPackage>,
     processor: VulkanResidentInProcessPlacedStreamProcessor,
-    devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
     session: VulkanResidentInProcessPlacedPromptSession,
     transient_state_pages: VulkanResidentTransientStatePageTable,
     transaction_page_cow_depth: usize,
@@ -19,6 +18,9 @@ pub struct VulkanResidentInProcessPlacedPromptStream {
     resident_feedback_template_catalog: VulkanResidentPlacedFeedbackTemplateCatalog,
     pending_scheduler_activation:
         Option<VulkanResidentInProcessPlacedPendingSchedulerActivation>,
+    // Vulkan children in every preceding field must be released before the
+    // runtime drops the logical-device wrappers that created them.
+    devices: BTreeMap<String, Rc<VulkanComputeDevice>>,
 }
 
 impl VulkanResidentInProcessPlacedPromptStream {

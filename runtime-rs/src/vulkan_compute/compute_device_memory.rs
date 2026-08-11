@@ -837,6 +837,7 @@ impl VulkanComputeDevice {
             semaphore,
             opaque_fd_exportable,
             permanent_opaque_fd_imported: Cell::new(false),
+            _logical_device_lifetime: Arc::clone(&self.logical_device_lifetime),
         })
     }
 

@@ -76,6 +76,7 @@ impl Drop for VulkanComputeDevice {
             // A quarantined queue may still own in-flight objects. Leave the
             // logical device and instance alive for the process lifetime; the
             // OS/driver tears the context down atomically at process exit.
+            std::mem::forget(Arc::clone(&self.logical_device_lifetime));
             std::mem::forget(Arc::clone(&self.context));
             return;
         }
@@ -84,6 +85,7 @@ impl Drop for VulkanComputeDevice {
             if let Some(sequence) = self.immediate_kernel_sequence.get_mut().take() {
                 std::mem::forget(sequence);
             }
+            std::mem::forget(Arc::clone(&self.logical_device_lifetime));
             std::mem::forget(Arc::clone(&self.context));
             return;
         };
@@ -102,6 +104,7 @@ impl Drop for VulkanComputeDevice {
             if let Some(mut activity_lease) = self.activity_lease.get_mut().take() {
                 let _ = activity_lease.stop();
             }
+            std::mem::forget(Arc::clone(&self.logical_device_lifetime));
             std::mem::forget(Arc::clone(&self.context));
             return;
         }
@@ -126,7 +129,6 @@ impl Drop for VulkanComputeDevice {
             }
             self.device
                 .destroy_semaphore(self.compute_queue_progress_semaphore, None);
-            self.device.destroy_device(None);
         }
     }
 }

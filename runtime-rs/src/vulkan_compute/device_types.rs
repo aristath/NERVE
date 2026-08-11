@@ -2,6 +2,7 @@ pub struct VulkanComputeDevice {
     context: Arc<VulkanInstanceContext>,
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
+    logical_device_lifetime: Arc<VulkanLogicalDeviceLifetime>,
     queue_family_index: u32,
     transfer_queue_is_distinct: bool,
     compute_queue_submission: VulkanQueueSubmissionGate,
@@ -261,6 +262,25 @@ struct VulkanInstanceContext {
         Mutex<BTreeMap<String, std::sync::Weak<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>>>,
 }
 
+/// Owns the Vulkan logical device independently from any one runtime wrapper.
+///
+/// Recorded queue templates and their timeline semaphores are deliberately
+/// reusable after the temporary object that opened the device has gone away.
+/// Retaining this object makes that lifetime contract physical: the logical
+/// device is destroyed only after its final retained child resource.
+struct VulkanLogicalDeviceLifetime {
+    device: ash::Device,
+    _instance_context: Arc<VulkanInstanceContext>,
+}
+
+impl Drop for VulkanLogicalDeviceLifetime {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_device(None);
+        }
+    }
+}
+
 impl Drop for VulkanInstanceContext {
     fn drop(&mut self) {
         unsafe {
@@ -383,6 +403,7 @@ pub struct VulkanTimelineSemaphore {
     semaphore: vk::Semaphore,
     opaque_fd_exportable: bool,
     permanent_opaque_fd_imported: Cell<bool>,
+    _logical_device_lifetime: Arc<VulkanLogicalDeviceLifetime>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
