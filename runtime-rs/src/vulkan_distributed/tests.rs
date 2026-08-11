@@ -350,6 +350,50 @@ mod tests {
     }
 
     #[test]
+    fn distributed_sequence_selection_matches_the_submitted_variant() {
+        let direct = "direct";
+        let feedback = "feedback";
+        assert_eq!(
+            VulkanDistributedDispatchSequenceKind::for_feedback_lane(None),
+            VulkanDistributedDispatchSequenceKind::Direct,
+        );
+        assert_eq!(
+            VulkanDistributedDispatchSequenceKind::for_feedback_lane(Some(7)),
+            VulkanDistributedDispatchSequenceKind::FeedbackIndirect,
+        );
+        assert_eq!(
+            distributed_sequence_for_kind(
+                &direct,
+                Some(&feedback),
+                VulkanDistributedDispatchSequenceKind::Direct,
+                "device",
+            )
+            .unwrap(),
+            &direct,
+        );
+        assert_eq!(
+            distributed_sequence_for_kind(
+                &direct,
+                Some(&feedback),
+                VulkanDistributedDispatchSequenceKind::FeedbackIndirect,
+                "device",
+            )
+            .unwrap(),
+            &feedback,
+        );
+        let error = distributed_sequence_for_kind(
+            &direct,
+            None,
+            VulkanDistributedDispatchSequenceKind::FeedbackIndirect,
+            "helper",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("feedback shard on \"helper\" has no indirect sequence"));
+    }
+
+    #[test]
     fn embedded_distributed_sum_has_exact_typed_control() {
         let words = distributed_sum_f32_spirv_words().unwrap();
         assert_eq!(words.first().copied(), Some(0x0723_0203));

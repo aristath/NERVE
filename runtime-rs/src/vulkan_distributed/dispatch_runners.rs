@@ -4,6 +4,24 @@ pub struct VulkanDistributedDispatchRunners {
     pub shard_count: usize,
 }
 
+fn distributed_sequence_for_kind<'a, T>(
+    direct: &'a T,
+    feedback_indirect: Option<&'a T>,
+    sequence_kind: VulkanDistributedDispatchSequenceKind,
+    device_id: &str,
+) -> Result<&'a T, VulkanDistributedDispatchRunnerError> {
+    match sequence_kind {
+        VulkanDistributedDispatchSequenceKind::Direct => Ok(direct),
+        VulkanDistributedDispatchSequenceKind::FeedbackIndirect => {
+            feedback_indirect.ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "distributed feedback shard on {device_id:?} has no indirect sequence"
+                ))
+            })
+        }
+    }
+}
+
 fn physical_island_reduction_dispatch(
     island: &VulkanPhysicalExecutionIslandPlan,
 ) -> Result<Option<&VulkanDistributedDispatchPlan>, VulkanDistributedDispatchRunnerError> {
@@ -705,7 +723,7 @@ impl VulkanDistributedDispatchRunners {
             consume_owner_ready_signal,
             prepare_owner_continuation,
             signal_completion,
-            use_feedback_indirect,
+            sequence_kind,
         } = submission;
         let dispatch = self.dispatch(owner_device_id, dispatch_index).ok_or_else(|| {
             VulkanDistributedDispatchRunnerError(format!(
@@ -732,16 +750,12 @@ impl VulkanDistributedDispatchRunners {
             &VulkanResidentKernelSequence,
         )> = Vec::with_capacity(dispatch.shards.len());
         for (shard, device) in resolved_shards {
-            let sequence = if use_feedback_indirect {
-                shard.feedback_sequence.as_ref().ok_or_else(|| {
-                    VulkanDistributedDispatchRunnerError(format!(
-                        "distributed feedback shard on {:?} has no indirect sequence",
-                        shard.device_id
-                    ))
-                })?
-            } else {
-                &shard.sequence
-            };
+            let sequence = distributed_sequence_for_kind(
+                &shard.sequence,
+                shard.feedback_sequence.as_ref(),
+                sequence_kind,
+                &shard.device_id,
+            )?;
             let synchronization = dispatch
                 .helper_synchronization
                 .iter()
@@ -846,6 +860,7 @@ impl VulkanDistributedDispatchRunners {
             component_id: dispatch.planned.leader().component_id.clone(),
             node_id: dispatch.planned.tail().node_id.clone(),
             shard_count: dispatch.shards.len(),
+            sequence_kind,
         })
     }
 
@@ -853,6 +868,7 @@ impl VulkanDistributedDispatchRunners {
         &self,
         owner_device_id: &str,
         dispatch_index: usize,
+        sequence_kind: VulkanDistributedDispatchSequenceKind,
         mut device_for: F,
     ) -> Result<(), VulkanDistributedDispatchRunnerError>
     where
@@ -880,7 +896,13 @@ impl VulkanDistributedDispatchRunners {
             .collect::<Result<Vec<_>, _>>()?;
         let mut first_error = None;
         for (shard, device) in resolved_shards {
-            if let Err(error) = device.wait_resident_kernel_sequence(&shard.sequence)
+            let sequence = distributed_sequence_for_kind(
+                &shard.sequence,
+                shard.feedback_sequence.as_ref(),
+                sequence_kind,
+                &shard.device_id,
+            )?;
+            if let Err(error) = device.wait_resident_kernel_sequence(sequence)
                 && first_error.is_none()
             {
                 first_error = Some(format!(
@@ -934,14 +956,17 @@ impl VulkanDistributedDispatchRunners {
                 consume_owner_ready_signal: false,
                 prepare_owner_continuation: true,
                 signal_completion: true,
-                use_feedback_indirect: false,
+                sequence_kind: VulkanDistributedDispatchSequenceKind::Direct,
             },
             None,
             |device_id| device_for(device_id),
         )?;
-        self.wait_dispatch(owner_device_id, dispatch_index, |device_id| {
-            device_for(device_id)
-        })?;
+        self.wait_dispatch(
+            owner_device_id,
+            dispatch_index,
+            run.sequence_kind,
+            |device_id| device_for(device_id),
+        )?;
         Ok(run)
     }
 }
@@ -953,6 +978,7 @@ pub struct VulkanDistributedDispatchRun {
     pub component_id: String,
     pub node_id: String,
     pub shard_count: usize,
+    pub sequence_kind: VulkanDistributedDispatchSequenceKind,
 }
 
 pub struct VulkanDistributedDispatchRunner {

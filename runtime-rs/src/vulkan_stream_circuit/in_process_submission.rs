@@ -71,13 +71,18 @@ fn wait_for_compact_slice_submitted_work(
     }
     if let Some((dispatch_index, _)) = completion_dependency {
         return distributed_runners
-            .wait_dispatch(slice.device_id(), dispatch_index, |device_id| {
-                device_by_id.get(device_id).copied().ok_or_else(|| {
-                    VulkanError(format!(
-                        "distributed shard device {device_id:?} is not mounted"
-                    ))
-                })
-            })
+            .wait_dispatch(
+                slice.device_id(),
+                dispatch_index,
+                VulkanDistributedDispatchSequenceKind::for_feedback_lane(feedback_lane),
+                |device_id| {
+                    device_by_id.get(device_id).copied().ok_or_else(|| {
+                        VulkanError(format!(
+                            "distributed shard device {device_id:?} is not mounted"
+                        ))
+                    })
+                },
+            )
             .map_err(VulkanMountedPlacedResidentInProcessStreamTickError::Distributed);
     }
     if let Some(segment) = last_submitted_segment {
@@ -135,13 +140,18 @@ fn wait_for_compact_execution_plan_terminal_work(
             .leader_dispatch_index(device_id, dispatch.dispatch_index)
             .unwrap_or(dispatch.dispatch_index);
         return distributed_runners
-            .wait_dispatch(device_id, dispatch_index, |shard_device_id| {
-                device_by_id.get(shard_device_id).copied().ok_or_else(|| {
-                    VulkanError(format!(
-                        "distributed shard device {shard_device_id:?} is not mounted"
-                    ))
-                })
-            })
+            .wait_dispatch(
+                device_id,
+                dispatch_index,
+                VulkanDistributedDispatchSequenceKind::for_feedback_lane(feedback_lane),
+                |shard_device_id| {
+                    device_by_id.get(shard_device_id).copied().ok_or_else(|| {
+                        VulkanError(format!(
+                            "distributed shard device {shard_device_id:?} is not mounted"
+                        ))
+                    })
+                },
+            )
             .map_err(VulkanMountedPlacedResidentInProcessStreamTickError::Distributed);
     }
     if let Some(segment) = terminal_segment {

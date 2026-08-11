@@ -91,11 +91,11 @@ use crate::vulkan_distributed::{
     VulkanDistributedActivationStorage, VulkanDistributedDependencyClock,
     VulkanDistributedDispatchDistribution, VulkanDistributedDispatchPlan,
     VulkanDistributedDispatchRunnerError, VulkanDistributedDispatchRunners,
-    VulkanDistributedDispatchSubmission, VulkanDistributedExecutionPlan,
-    VulkanDistributedParameterAllocationPlan, VulkanDistributedParameterBuffers,
-    VulkanDistributedParameterExclusionPlan, VulkanDistributedQueueSynchronization,
-    VulkanPhysicalExecutionIslandPlan, VulkanPhysicalExecutionTransportKind,
-    resolved_physical_execution_islands,
+    VulkanDistributedDispatchSequenceKind, VulkanDistributedDispatchSubmission,
+    VulkanDistributedExecutionPlan, VulkanDistributedParameterAllocationPlan,
+    VulkanDistributedParameterBuffers, VulkanDistributedParameterExclusionPlan,
+    VulkanDistributedQueueSynchronization, VulkanPhysicalExecutionIslandPlan,
+    VulkanPhysicalExecutionTransportKind, resolved_physical_execution_islands,
 };
 
 mod package;

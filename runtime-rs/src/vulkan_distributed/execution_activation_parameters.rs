@@ -47,7 +47,23 @@ pub struct VulkanDistributedDispatchSubmission {
     pub consume_owner_ready_signal: bool,
     pub prepare_owner_continuation: bool,
     pub signal_completion: bool,
-    pub use_feedback_indirect: bool,
+    pub sequence_kind: VulkanDistributedDispatchSequenceKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VulkanDistributedDispatchSequenceKind {
+    Direct,
+    FeedbackIndirect,
+}
+
+impl VulkanDistributedDispatchSequenceKind {
+    pub fn for_feedback_lane(feedback_lane: Option<usize>) -> Self {
+        if feedback_lane.is_some() {
+            Self::FeedbackIndirect
+        } else {
+            Self::Direct
+        }
+    }
 }
 
 impl VulkanDistributedExecutionPlan {

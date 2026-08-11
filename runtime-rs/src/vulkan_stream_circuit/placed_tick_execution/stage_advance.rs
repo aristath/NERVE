@@ -235,7 +235,10 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                                 || completion_staging,
                             signal_completion: submission_policy.signal_completion
                                 && submission_batch.is_none(),
-                            use_feedback_indirect: submission_policy.feedback_lane.is_some(),
+                            sequence_kind:
+                                VulkanDistributedDispatchSequenceKind::for_feedback_lane(
+                                    submission_policy.feedback_lane,
+                                ),
                         },
                         submission_batch,
                         |device_id| {
@@ -266,6 +269,9 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             let _ = distributed_runners.wait_dispatch(
                                 slice.device_id(),
                                 distributed.dispatch_index,
+                                VulkanDistributedDispatchSequenceKind::for_feedback_lane(
+                                    submission_policy.feedback_lane,
+                                ),
                                 |device_id| {
                                     device_by_id.get(device_id).copied().ok_or_else(|| {
                                         VulkanError(format!(
@@ -315,6 +321,9 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             .wait_dispatch(
                                 slice.device_id(),
                                 distributed.dispatch_index,
+                                VulkanDistributedDispatchSequenceKind::for_feedback_lane(
+                                    submission_policy.feedback_lane,
+                                ),
                                 |device_id| {
                                     device_by_id.get(device_id).copied().ok_or_else(|| {
                                         VulkanError(format!(
