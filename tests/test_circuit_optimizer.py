@@ -1766,6 +1766,7 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
                             "bf16_blockwise_fp8_e4m3_f32_scale.v1"
                         ),
                         "physical_input_provider_id": "norm",
+                        "physical_input_source_node_ids": ["large_a", "large_b"],
                         "physical_logical_inputs": ["hidden"],
                     },
                 },
@@ -1814,6 +1815,57 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
         self.assertEqual(
             ["large_a", "large_b", "small_c", "small_d"],
             fused["attrs"]["compiled_from"],
+        )
+
+    def test_does_not_fuse_mixed_projection_without_source_provenance(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "large_a__large_b",
+                    "op": "parallel_linear_2way",
+                    "inputs": ["hidden_fp8", "hidden_scale"],
+                    "outputs": ["large_a_out", "large_b_out"],
+                    "params": [
+                        "large_a",
+                        "large_a_scale",
+                        "large_b",
+                        "large_b_scale",
+                    ],
+                    "attrs": {
+                        "compiled_from": ["large_a", "large_b"],
+                        "branch_count": 2,
+                        "branch_parameter_counts": [2, 2],
+                        "output_element_bytes": [2, 2],
+                        "physical_input_contract": (
+                            "bf16_blockwise_fp8_e4m3_f32_scale.v1"
+                        ),
+                        "physical_input_provider_id": "norm",
+                        "physical_logical_inputs": ["hidden"],
+                    },
+                },
+                {
+                    "id": "small_c__small_d",
+                    "op": "parallel_linear_2way",
+                    "inputs": ["hidden"],
+                    "outputs": ["small_c_out", "small_d_out"],
+                    "params": ["small_c", "small_d"],
+                    "attrs": {
+                        "compiled_from": ["small_c", "small_d"],
+                        "branch_count": 2,
+                        "output_element_bytes": [2, 2],
+                    },
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            can_fuse_mixed_precision_parallel_linears=lambda _fp8, _bf16: True,
+        )
+
+        self.assertEqual(
+            ["parallel_linear_2way", "parallel_linear_2way"],
+            [node["op"] for node in optimized["nodes"]],
         )
 
     def test_mixed_projection_preserves_physical_input_source_provenance(self) -> None:

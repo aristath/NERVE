@@ -59,6 +59,14 @@ the local placement calibration, and the mounted graph.
   tok/s and 8.7574 prefill tok/s with byte-identical responses, zero truth
   loads, and exact reservation restoration. The detailed phase attribution
   below comes from the preceding 8.6600 decode tok/s zero-load truth run.
+- The queue-liveness fix now survives the former DeepSeek quarantine point and
+  all three Qwen controls, but the latest five-R9700 warmup exposed an
+  independent placement failure: its protected cache quotas plateaued near
+  122 GiB, then a long reasoning turn thrashed below 1 tok/s while the GPUs
+  remained mostly idle. Placement must prove that the expected warm expert
+  working set fits the selected cache quotas, or include additional compatible
+  targets such as the discrete Intel GPU. A paged mount being admissible is not
+  evidence that its steady-state working set is viable.
 - That sampled hot decode path spends approximately 20.138 ms in
   hyper-connections, 19.150 ms in attention reads, 17.904 ms in expert gate/up,
   15.123 ms in state commit, 11.840 ms in attention score, 10.081 ms in expert
@@ -126,28 +134,6 @@ For every numbered item below:
    acceptance criterion is satisfied.
 
 ## Work queue
-
-### 1. Define typed physical execution contracts
-
-- Introduce a model-independent contract identifying:
-  - operation or connected-region family;
-  - compiled artifact and implementation digest;
-  - decode or prefill phase;
-  - physical storage, compute, and accumulation formats;
-  - exact geometry or representative compiler-emitted shape class;
-  - parameter partition dimension and aligned shard boundaries;
-  - replicated, sharded, or routed inputs;
-  - concatenated, reduced, routed, or locally retained outputs;
-  - legal local-intermediate flow;
-  - persistent, transient, KV/state, and lazy-resource requirements; and
-  - canonical numerical and state-equivalence requirements.
-- Make the compiler emit legal contracts and alternate implementations without
-  selecting devices or embedding workstation policy in the package.
-- Fail closed when the selected artifact does not declare a valid partition
-  contract. Do not infer distribution from operation names, descriptor counts,
-  tensor names, or model-level dtype.
-- Use the same typed contract definitions in the compiler, runtime, benchmark,
-  and tests.
 
 ### 2. Add a resolved physical execution-island plan
 
@@ -270,6 +256,10 @@ For every numbered item below:
 - Replan when reservations, selected targets, graph wiring, or implementation
   contracts change. Expert hotness may adapt online without rebuilding the
   stable backbone plan per token.
+- Reject a demand-paged candidate whose measured warm working-set estimate
+  exceeds its aggregate per-device cache quotas when another compatible target
+  can make that shortfall avoidable. Capacity admission and steady-state
+  working-set viability are separate proofs.
 
 ### 7. Make hybrid execution device-owned
 

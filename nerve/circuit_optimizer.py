@@ -631,6 +631,10 @@ def _fuse_mixed_precision_parallel_linears(
         first = nodes[index]
         second = nodes[index + 1] if index + 1 < len(nodes) else None
         first_attrs = first.get("attrs", {})
+        physical_input_source_node_ids = first_attrs.get(
+            "physical_input_source_node_ids"
+        )
+        first_source_node_ids = _source_node_ids(first)
         if (
             second is None
             or first.get("op") != "parallel_linear_2way"
@@ -638,6 +642,15 @@ def _fuse_mixed_precision_parallel_linears(
             or first_attrs.get("physical_input_contract")
             != "bf16_blockwise_fp8_e4m3_f32_scale.v1"
             or first_attrs.get("physical_logical_inputs") != second.get("inputs")
+            or not isinstance(physical_input_source_node_ids, list)
+            or not physical_input_source_node_ids
+            or len(set(physical_input_source_node_ids))
+            != len(physical_input_source_node_ids)
+            or any(
+                not isinstance(source_id, str)
+                or source_id not in first_source_node_ids
+                for source_id in physical_input_source_node_ids
+            )
             or len(first.get("inputs", [])) != 2
             or len(second.get("inputs", [])) != 1
             or len(first.get("outputs", [])) != 2
@@ -689,7 +702,7 @@ def _fuse_mixed_precision_parallel_linears(
                         "physical_input_provider_id"
                     ],
                     "physical_input_source_node_ids": deepcopy(
-                        first_attrs["physical_input_source_node_ids"]
+                        physical_input_source_node_ids
                     ),
                     "physical_logical_inputs": deepcopy(
                         first_attrs["physical_logical_inputs"]
