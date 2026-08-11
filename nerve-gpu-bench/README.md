@@ -39,14 +39,14 @@ The forced-split comparison uses the same total parameters and logical stages
 on both sides. Serialization places one equal parameter share on each target
 and includes every inter-target activation boundary. TP shards every stage
 across the same targets and includes its synchronization and shared-output
-work. Pair comparisons measure both serial directions. For triplets and quads,
-the directed pair measurements select the lowest-cost serial order, which is
-then executed end to end; every TP owner is executed, and the fastest valid
-serial and TP paths are compared in the final `combinations` section.
+work. Pair comparisons measure both serial directions. Larger target sets are
+expanded one participant at a time from the pair stage. The directed pair
+measurements select the lowest-cost serial order, which is then executed end to
+end; every TP owner is executed, and the fastest valid serial and TP paths are
+compared in the final `combinations` section.
 
-The group limit defaults to four. This bounds benchmark time and matches the
-current placement limit; it does not limit how many groups the inference engine
-may use across a model.
+The group limit defaults to all selected targets. `--max-group-size` is an
+optional workload bound, not an architectural device-count ceiling.
 
 The runner tries the executable Vulkan sharing routes and validates output
 before accepting a TP result. A route that cannot produce valid cross-device
@@ -95,7 +95,8 @@ cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- run \
 ```
 
 `--format` narrows the format set. `--payload-bytes` and `--samples` override
-the small defaults. `--max-group-size` accepts one through four.
+the small defaults. `--max-group-size` accepts any positive number and is
+clamped to the number of selected targets.
 
 Validate or summarize an artifact:
 

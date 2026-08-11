@@ -14,7 +14,6 @@ use std::io::{self, Write};
 use benchmark::{plan_benchmarks, run_benchmarks, validate_execution_coverage};
 use cli::{Command, parse_args};
 use discovery::discover_targets;
-use model::MAX_PLACEMENT_GROUP_SIZE;
 use nerve_execution_contracts::{PHYSICAL_EXECUTION_CONTRACT_SCHEMA, PhysicalExecutionContract};
 use policy::apply_selection_policy;
 
@@ -75,7 +74,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 exclude_pci,
                 exclude_kinds,
                 pair_measurements: pairs,
-                max_group_size: max_group_size.unwrap_or(MAX_PLACEMENT_GROUP_SIZE),
+                max_group_size: max_group_size.unwrap_or(1),
                 execute,
             };
             let selection = apply_selection_policy(&targets, &policy);
@@ -102,8 +101,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
 fn resolve_max_group_size(requested: Option<usize>, selected_target_count: usize) -> usize {
     requested
-        .unwrap_or(MAX_PLACEMENT_GROUP_SIZE)
-        .min(MAX_PLACEMENT_GROUP_SIZE)
+        .unwrap_or(selected_target_count)
         .min(selected_target_count)
         .max(1)
 }
@@ -310,15 +308,15 @@ mod tests {
     use super::{resolve_max_group_size, validate_json_document};
 
     #[test]
-    fn omitted_group_cap_uses_at_most_four_selected_targets() {
-        assert_eq!(resolve_max_group_size(None, 8), 4);
+    fn omitted_group_cap_uses_every_selected_target() {
+        assert_eq!(resolve_max_group_size(None, 8), 8);
         assert_eq!(resolve_max_group_size(None, 3), 3);
     }
 
     #[test]
     fn explicit_group_cap_is_bounded_by_selected_targets() {
         assert_eq!(resolve_max_group_size(Some(4), 8), 4);
-        assert_eq!(resolve_max_group_size(Some(12), 8), 4);
+        assert_eq!(resolve_max_group_size(Some(12), 8), 8);
     }
 
     #[test]

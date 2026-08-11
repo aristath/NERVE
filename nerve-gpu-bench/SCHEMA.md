@@ -73,7 +73,7 @@
 `placements` ranks equivalent one-projection candidates:
 
 - `single` has exactly one target;
-- `tp` has two through four targets, sorted by stable ID;
+- `tp` has two or more targets, sorted by stable ID;
 - `owner` identifies the measured TP member that owned shared activation and
   output memory; and
 - `transport` identifies the valid measured sharing route.

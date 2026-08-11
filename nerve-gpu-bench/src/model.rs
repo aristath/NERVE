@@ -8,7 +8,6 @@ pub const RUN_SCHEMA: &str = "nerve.gpu_benchmark_run";
 pub const PLAN_SCHEMA: &str = "nerve.gpu_benchmark_plan";
 pub const TARGET_LIST_SCHEMA: &str = "nerve.gpu_benchmark_targets";
 pub const PLACEMENT_SCHEMA: &str = "nerve.placement_bench";
-pub const MAX_PLACEMENT_GROUP_SIZE: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Target {
@@ -433,7 +432,7 @@ impl BenchmarkRun {
                     .iter()
                     .filter(|result| {
                         result.format == *format
-                            && result.regime == "two_component_chain"
+                            && result.regime == "component_chain_2"
                             && matches!(result.strategy.as_str(), "single" | "serial")
                     })
                     .cloned()
@@ -470,10 +469,8 @@ impl BenchmarkRun {
         if self.policy.samples == 0 {
             return Err("policy.samples must be greater than zero".to_string());
         }
-        if !(1..=MAX_PLACEMENT_GROUP_SIZE).contains(&self.policy.max_group_size) {
-            return Err(format!(
-                "policy.max_group_size must be between 1 and {MAX_PLACEMENT_GROUP_SIZE}"
-            ));
+        if self.policy.max_group_size == 0 {
+            return Err("policy.max_group_size must be greater than zero".to_string());
         }
         if self.policy.benchmark_formats.is_empty()
             || self.policy.benchmark_formats.iter().any(String::is_empty)
@@ -537,7 +534,7 @@ impl BenchmarkRun {
                     spec.workload_id
                 ));
             }
-            if spec.participant_count == 0 || spec.participant_count > MAX_PLACEMENT_GROUP_SIZE {
+            if spec.participant_count == 0 || spec.participant_count > self.policy.max_group_size {
                 return Err(format!(
                     "workload spec {:?} has invalid participant_count",
                     spec.workload_id
@@ -666,6 +663,14 @@ impl BenchmarkRun {
             if measurement.participant_count != measurement.target_ids.len() {
                 return Err(format!(
                     "group measurement {:?} participant_count does not match target_ids",
+                    measurement.workload_id
+                ));
+            }
+            if measurement.participant_count == 0
+                || measurement.participant_count > self.policy.max_group_size
+            {
+                return Err(format!(
+                    "group measurement {:?} exceeds policy.max_group_size",
                     measurement.workload_id
                 ));
             }
@@ -890,13 +895,9 @@ fn build_combination_comparisons(
     let mut candidates =
         BTreeMap::<(String, Vec<String>), (Vec<&PlacementResult>, Vec<&PlacementResult>)>::new();
     for result in results {
-        let expected_regime = match result.participants {
-            2 => "two_component_chain",
-            3 => "three_component_chain",
-            4 => "four_component_chain",
-            _ => continue,
-        };
-        if result.regime != expected_regime || !matches!(result.strategy.as_str(), "serial" | "tp")
+        if result.participants < 2
+            || result.regime != format!("component_chain_{}", result.participants)
+            || !matches!(result.strategy.as_str(), "serial" | "tp")
         {
             continue;
         }
@@ -1086,10 +1087,8 @@ impl BenchmarkPlan {
         if self.policy.samples == 0 {
             return Err("policy.samples must be greater than zero".to_string());
         }
-        if !(1..=MAX_PLACEMENT_GROUP_SIZE).contains(&self.policy.max_group_size) {
-            return Err(format!(
-                "policy.max_group_size must be between 1 and {MAX_PLACEMENT_GROUP_SIZE}"
-            ));
+        if self.policy.max_group_size == 0 {
+            return Err("policy.max_group_size must be greater than zero".to_string());
         }
         if self.policy.benchmark_formats.is_empty()
             || self.policy.benchmark_formats.iter().any(String::is_empty)
@@ -1201,12 +1200,7 @@ fn single_parameter_bytes(measurement: &Measurement) -> usize {
     if !is_parameterized_gemm {
         return measurement.payload_bytes;
     }
-    let components = match measurement.regime.as_str() {
-        "two_component_chain" => 2,
-        "three_component_chain" => 3,
-        "four_component_chain" => 4,
-        _ => 1,
-    };
+    let components = component_count_from_regime(&measurement.regime);
     let boundary_bytes = if components == 1 {
         measurement.activation_bytes + measurement.output_bytes
     } else {
@@ -1315,12 +1309,7 @@ fn placement_shape(
     work_ops: u64,
 ) -> BTreeMap<String, u64> {
     let mut shape = BTreeMap::new();
-    let stages = match regime {
-        "two_component_chain" => 2_u64,
-        "three_component_chain" => 3_u64,
-        "four_component_chain" => 4_u64,
-        _ => 1_u64,
-    };
+    let stages = component_count_from_regime(regime) as u64;
     if stages > 1 {
         shape.insert("components".to_string(), stages);
     }
@@ -1370,6 +1359,14 @@ fn placement_shape(
         }
     }
     shape
+}
+
+fn component_count_from_regime(regime: &str) -> usize {
+    regime
+        .strip_prefix("component_chain_")
+        .and_then(|count| count.parse::<usize>().ok())
+        .filter(|count| *count >= 2)
+        .unwrap_or(1)
 }
 
 fn placement_metrics(
@@ -1430,14 +1427,8 @@ fn placement_strategy(strategy: &str) -> &str {
         "activation_transfer_only"
         | "activation_transfer_external_device_local"
         | "activation_transfer_shared_host" => "transfer",
-        "two_target_serial"
-        | "three_target_serial"
-        | "four_target_serial"
-        | "multi_target_serial" => "serial",
-        "two_target_tensor_parallel"
-        | "three_target_tensor_parallel"
-        | "four_target_tensor_parallel"
-        | "multi_target_tensor_parallel" => "tp",
+        "two_target_serial" | "multi_target_serial" => "serial",
+        "two_target_tensor_parallel" | "multi_target_tensor_parallel" => "tp",
         other => other,
     }
 }
@@ -1476,12 +1467,8 @@ fn placement_transport(strategy: &str, pattern: &str) -> &'static str {
         "single_target_device_local" => "device_local",
         "activation_transfer_only"
         | "two_target_serial"
-        | "three_target_serial"
-        | "four_target_serial"
         | "multi_target_serial"
         | "two_target_tensor_parallel"
-        | "three_target_tensor_parallel"
-        | "four_target_tensor_parallel"
         | "multi_target_tensor_parallel" => "host_staged",
         "activation_transfer_external_device_local" => "external_device_local",
         "activation_transfer_shared_host" => "shared_host",
@@ -1498,14 +1485,10 @@ fn placement_collective(strategy: &str, workload: &str) -> &'static str {
         "activation_transfer_only"
         | "activation_transfer_external_device_local"
         | "activation_transfer_shared_host" => "copy",
-        "two_target_serial"
-        | "three_target_serial"
-        | "four_target_serial"
-        | "multi_target_serial" => "pipeline",
-        "two_target_tensor_parallel"
-        | "three_target_tensor_parallel"
-        | "four_target_tensor_parallel"
-        | "multi_target_tensor_parallel" => tensor_parallel_collective_name(workload),
+        "two_target_serial" | "multi_target_serial" => "pipeline",
+        "two_target_tensor_parallel" | "multi_target_tensor_parallel" => {
+            tensor_parallel_collective_name(workload)
+        }
         _ => "unknown",
     }
 }
@@ -1540,8 +1523,11 @@ fn validate_placement_candidates(
                 result.mode
             ));
         }
-        if result.targets.is_empty() || result.targets.len() > MAX_PLACEMENT_GROUP_SIZE {
+        if result.targets.is_empty() {
             return Err("placement candidate has an invalid target count".to_string());
+        }
+        if result.targets.iter().collect::<BTreeSet<_>>().len() != result.targets.len() {
+            return Err("placement candidate repeats a target".to_string());
         }
         if result.duration_ns == 0 || result.duration_ns < previous_duration_ns {
             return Err("placement durations must be positive and ordered".to_string());
@@ -1584,7 +1570,7 @@ fn validate_placement_candidates(
 }
 
 fn validate_combination_comparison(comparison: &CombinationComparison) -> Result<(), String> {
-    if !(2..=MAX_PLACEMENT_GROUP_SIZE).contains(&comparison.targets.len())
+    if comparison.targets.len() < 2
         || comparison.split.len() != comparison.targets.len()
         || comparison.split.contains(&0)
     {
@@ -2290,13 +2276,13 @@ mod tests {
                 strategy: strategy.to_string(),
                 targets: targets.iter().map(|target| (*target).to_string()).collect(),
                 workload: "dense_projection_decode".to_string(),
-                regime: "two_component_chain".to_string(),
+                regime: format!("component_chain_{}", targets.len()),
                 shape: BTreeMap::new(),
                 format: "fp8_e4m3".to_string(),
                 kernel: "test".to_string(),
-                participants: 2,
+                participants: targets.len(),
                 payload_bytes: 1024,
-                shard_bytes: vec![512, 512],
+                shard_bytes: vec![1024 / targets.len(); targets.len()],
                 activation_bytes: 32,
                 output_bytes: 32,
                 iters: 1,
@@ -2335,6 +2321,16 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.contains("equivalent work"));
+
+        let seven_targets = [
+            "gpu:a", "gpu:b", "gpu:c", "gpu:d", "gpu:e", "gpu:f", "gpu:g",
+        ];
+        let seven = build_combination_comparisons(&[
+            result("serial", &seven_targets, 220, 700),
+            result("tp", &seven_targets, 180, 700),
+        ])
+        .unwrap();
+        assert_eq!(seven["fp8_e4m3"][0].targets.len(), 7);
     }
 
     #[test]
@@ -2352,7 +2348,7 @@ mod tests {
             "shared_output_rows"
         );
         assert_eq!(
-            placement_collective("three_target_tensor_parallel", "router_reduction"),
+            placement_collective("multi_target_tensor_parallel", "router_reduction"),
             "unsupported"
         );
         assert_eq!(
@@ -2360,12 +2356,12 @@ mod tests {
             "pipeline"
         );
         assert_eq!(
-            placement_transport("three_target_tensor_parallel", "tensor_parallel"),
+            placement_transport("multi_target_tensor_parallel", "tensor_parallel"),
             "host_staged"
         );
-        assert_eq!(placement_strategy("four_target_serial"), "serial");
+        assert_eq!(placement_strategy("multi_target_serial"), "serial");
         assert_eq!(
-            placement_collective("four_target_tensor_parallel", "dense_projection"),
+            placement_collective("multi_target_tensor_parallel", "dense_projection"),
             "shared_output_rows"
         );
     }
@@ -2381,15 +2377,15 @@ mod tests {
     }
 
     #[test]
-    fn placement_shape_exposes_four_component_chain() {
+    fn placement_shape_has_no_fixed_component_ceiling() {
         let shape = placement_shape(
             "dense_projection_decode",
-            "four_component_chain",
+            "component_chain_7",
             2048,
             2048,
             1,
         );
-        assert_eq!(shape["components"], 4);
+        assert_eq!(shape["components"], 7);
     }
 
     #[test]

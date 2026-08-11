@@ -1,8 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
-    BenchmarkPlan, BenchmarkRun, ComparisonSet, Implementation, MAX_PLACEMENT_GROUP_SIZE,
-    Measurement, PLAN_SCHEMA, RUN_SCHEMA, RunPolicy, Selection, Target, WorkloadSpec, now_unix_ms,
+    BenchmarkPlan, BenchmarkRun, ComparisonSet, Implementation, Measurement, PLAN_SCHEMA,
+    RUN_SCHEMA, RunPolicy, Selection, Target, WorkloadSpec, now_unix_ms,
 };
 use crate::vulkan_features::{
     EXTERNAL_MEMORY_DMA_BUF_FEATURE, EXTERNAL_MEMORY_HOST_FEATURE,
@@ -17,7 +17,10 @@ pub fn plan_benchmarks(
     selection: Selection,
     mut policy: RunPolicy,
 ) -> BenchmarkPlan {
-    policy.max_group_size = policy.max_group_size.clamp(1, MAX_PLACEMENT_GROUP_SIZE);
+    policy.max_group_size = policy
+        .max_group_size
+        .max(1)
+        .min(selection.selected_target_ids.len().max(1));
     let format_count = policy.benchmark_formats.len();
     let workload_count = policy.benchmark_workloads.len();
     let payload_bytes = policy.payload_bytes;
@@ -113,7 +116,10 @@ pub fn run_benchmarks(
     selection: Selection,
     mut policy: RunPolicy,
 ) -> BenchmarkRun {
-    policy.max_group_size = policy.max_group_size.clamp(1, MAX_PLACEMENT_GROUP_SIZE);
+    policy.max_group_size = policy
+        .max_group_size
+        .max(1)
+        .min(selection.selected_target_ids.len().max(1));
     let started_at_unix_ms = now_unix_ms();
     let selected = selection
         .selected_target_ids
@@ -364,16 +370,6 @@ fn finish_benchmark_run(
     }
 }
 
-fn combinations(count: usize, choose: usize) -> usize {
-    if choose > count {
-        return 0;
-    }
-    let choose = choose.min(count - choose);
-    (0..choose).fold(1_usize, |result, index| {
-        result * (count - index) / (index + 1)
-    })
-}
-
 pub(crate) fn target_index_combinations(count: usize, choose: usize) -> Vec<Vec<usize>> {
     fn extend(
         count: usize,
@@ -399,7 +395,7 @@ pub(crate) fn target_index_combinations(count: usize, choose: usize) -> Vec<Vec<
     if choose > count {
         return Vec::new();
     }
-    let mut result = Vec::with_capacity(combinations(count, choose));
+    let mut result = Vec::new();
     extend(
         count,
         0,
@@ -408,6 +404,60 @@ pub(crate) fn target_index_combinations(count: usize, choose: usize) -> Vec<Vec<
         &mut result,
     );
     result
+}
+
+/// Expands device groups one participant at a time. Pair evidence is always
+/// the first multi-target stage; every larger group has a measured predecessor
+/// instead of appearing through an unrelated fixed-width sweep.
+pub(crate) fn staged_target_index_groups(
+    count: usize,
+    max_group_size: usize,
+) -> BTreeMap<usize, Vec<Vec<usize>>> {
+    let max_group_size = max_group_size.min(count);
+    if max_group_size < 2 {
+        return BTreeMap::new();
+    }
+    let mut stages = BTreeMap::from([(2, target_index_combinations(count, 2))]);
+    for group_size in 3..=max_group_size {
+        let mut expanded = BTreeSet::new();
+        for predecessor in &stages[&(group_size - 1)] {
+            let start = predecessor.last().copied().unwrap_or(0) + 1;
+            for next in start..count {
+                let mut candidate = predecessor.clone();
+                candidate.push(next);
+                expanded.insert(candidate);
+            }
+        }
+        if expanded.is_empty() {
+            break;
+        }
+        stages.insert(group_size, expanded.into_iter().collect());
+    }
+    stages
+}
+
+pub(crate) fn staged_tensor_parallel_target_groups(
+    targets: &[&Target],
+    max_group_size: usize,
+) -> BTreeMap<usize, Vec<Vec<usize>>> {
+    let mut viable = BTreeMap::<usize, Vec<Vec<usize>>>::new();
+    for (group_size, candidates) in staged_target_index_groups(targets.len(), max_group_size) {
+        let candidates = candidates
+            .into_iter()
+            .filter(|indices| {
+                let group = indices
+                    .iter()
+                    .map(|index| targets[*index])
+                    .collect::<Vec<_>>();
+                targets_support_tensor_parallel(&group)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            break;
+        }
+        viable.insert(group_size, candidates);
+    }
+    viable
 }
 
 pub(crate) fn targets_support_tensor_parallel(targets: &[&Target]) -> bool {
@@ -452,13 +502,12 @@ fn expected_group_measurement_count(
     if !policy.pair_measurements || policy.max_group_size < 3 {
         return 0;
     }
-    let max_group_size = policy
-        .max_group_size
-        .min(MAX_PLACEMENT_GROUP_SIZE)
-        .min(targets.len());
-    (3..=max_group_size)
-        .map(|group_size| {
-            let compatible_groups = tensor_parallel_combination_count(targets, group_size);
+    let max_group_size = policy.max_group_size.min(targets.len());
+    staged_tensor_parallel_target_groups(targets, max_group_size)
+        .into_iter()
+        .filter(|(group_size, _)| *group_size >= 3)
+        .map(|(group_size, groups)| {
+            let compatible_groups = groups.len();
             compatible_groups
                 * (tensor_parallel_axis_count * group_size * 2 + component_chain_axis_count)
         })
@@ -560,17 +609,12 @@ pub(crate) fn single_target_status_measurement(
     }
 }
 
-const TWO_COMPONENT_CHAIN_REGIME: &str = "two_component_chain";
-const THREE_COMPONENT_CHAIN_REGIME: &str = "three_component_chain";
-const FOUR_COMPONENT_CHAIN_REGIME: &str = "four_component_chain";
-
-pub(crate) fn component_chain_regime(participant_count: usize) -> &'static str {
-    match participant_count {
-        2 => TWO_COMPONENT_CHAIN_REGIME,
-        3 => THREE_COMPONENT_CHAIN_REGIME,
-        4 => FOUR_COMPONENT_CHAIN_REGIME,
-        _ => panic!("component chain participant count must be between 2 and 4"),
-    }
+pub(crate) fn component_chain_regime(participant_count: usize) -> String {
+    assert!(
+        participant_count >= 2,
+        "component chain participant count must be at least two"
+    );
+    format!("component_chain_{participant_count}")
 }
 
 pub(crate) fn tensor_parallel_group_workload_id(
@@ -682,7 +726,7 @@ fn build_workload_specs(
                 ]);
             }
             if max_group_size >= 3 && benchmark_supports_tensor_parallel(workload) {
-                for participant_count in 3..=max_group_size.min(MAX_PLACEMENT_GROUP_SIZE) {
+                for participant_count in 3..=max_group_size {
                     let pattern = tensor_parallel_group_pattern(participant_count);
                     specs.extend([
                         WorkloadSpec {
@@ -842,7 +886,7 @@ mod tests {
             specs.len()
         );
         assert!(specs.iter().all(|spec| {
-            !spec.pattern.contains("three_component_chain")
+            !spec.pattern.contains("component_chain_3")
                 && !spec.pattern.contains("layer_split_group")
                 && !spec.pattern.contains("resource_load")
         }));
@@ -854,5 +898,33 @@ mod tests {
         assert_eq!(target_index_combinations(5, 2).len(), 10);
         assert_eq!(target_index_combinations(5, 3).len(), 10);
         assert_eq!(target_index_combinations(5, 4).len(), 5);
+    }
+
+    #[test]
+    fn staged_expansion_has_no_fixed_device_ceiling() {
+        let stages = staged_target_index_groups(7, 7);
+        assert_eq!(stages[&2].len(), 21);
+        assert_eq!(stages[&3].len(), 35);
+        assert_eq!(stages[&4].len(), 35);
+        assert_eq!(stages[&5].len(), 21);
+        assert_eq!(stages[&6].len(), 7);
+        assert_eq!(stages[&7], [vec![0, 1, 2, 3, 4, 5, 6]]);
+    }
+
+    #[test]
+    fn staged_tp_expansion_only_grows_transport_compatible_predecessors() {
+        let mut targets = vec![
+            target("gpu:a"),
+            target("gpu:b"),
+            target("gpu:c"),
+            target("gpu:incompatible"),
+        ];
+        targets[3].vulkan.as_mut().unwrap().feature_flags.clear();
+        let borrowed = targets.iter().collect::<Vec<_>>();
+
+        let stages = staged_tensor_parallel_target_groups(&borrowed, 4);
+        assert_eq!(stages[&2], [vec![0, 1], vec![0, 2], vec![1, 2]]);
+        assert_eq!(stages[&3], [vec![0, 1, 2]]);
+        assert!(!stages.contains_key(&4));
     }
 }

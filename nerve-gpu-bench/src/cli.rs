@@ -2,8 +2,6 @@ use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::model::MAX_PLACEMENT_GROUP_SIZE;
-
 const DEFAULT_PAYLOAD_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_SAMPLES: usize = 1;
 const DEFAULT_BENCHMARK_FORMATS: &[&str] = &[
@@ -205,10 +203,10 @@ fn parse_run(arguments: Vec<String>) -> Result<Command, CliError> {
         )));
     }
     if let Some(max_group_size) = max_group_size {
-        if !(1..=MAX_PLACEMENT_GROUP_SIZE).contains(&max_group_size) {
-            return Err(CliError(format!(
-                "--max-group-size must be between 1 and {MAX_PLACEMENT_GROUP_SIZE}"
-            )));
+        if max_group_size == 0 {
+            return Err(CliError(
+                "--max-group-size must be greater than zero".to_string(),
+            ));
         }
     }
     if benchmark_formats.is_empty() {
@@ -367,28 +365,17 @@ mod tests {
     }
 
     #[test]
-    fn accepts_four_device_group_size() {
+    fn accepts_unbounded_positive_group_size() {
         let command = parse_args([
             "run".to_string(),
             "--max-group-size".to_string(),
-            "4".to_string(),
+            "17".to_string(),
         ])
         .unwrap();
         match command {
-            Command::Run { max_group_size, .. } => assert_eq!(max_group_size, Some(4)),
+            Command::Run { max_group_size, .. } => assert_eq!(max_group_size, Some(17)),
             _ => panic!("expected run command"),
         }
-    }
-
-    #[test]
-    fn rejects_group_sizes_above_four() {
-        let error = parse_args([
-            "run".to_string(),
-            "--max-group-size".to_string(),
-            "5".to_string(),
-        ])
-        .unwrap_err();
-        assert!(error.to_string().contains("between 1 and 4"));
     }
 
     #[test]
@@ -399,7 +386,7 @@ mod tests {
             "0".to_string(),
         ])
         .unwrap_err();
-        assert!(error.to_string().contains("between 1 and 4"));
+        assert!(error.to_string().contains("greater than zero"));
     }
 
     #[test]

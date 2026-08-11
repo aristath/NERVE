@@ -12,13 +12,11 @@ use ash::{Entry, vk};
 use crate::benchmark::{
     MULTI_TARGET_TENSOR_PARALLEL_STRATEGY, activation_bytes_for_payload, component_chain_regime,
     format_workload_id, output_bytes_for_payload, single_target_status_measurement,
-    single_target_status_measurements, target_index_combinations, targets_support_tensor_parallel,
-    tensor_parallel_group_pattern, tensor_parallel_group_workload_id,
+    single_target_status_measurements, staged_tensor_parallel_target_groups,
+    targets_support_tensor_parallel, tensor_parallel_group_pattern,
+    tensor_parallel_group_workload_id,
 };
-use crate::model::{
-    GroupMeasurement, MAX_PLACEMENT_GROUP_SIZE, Measurement, PairMeasurement, Sample, Summary,
-    Target,
-};
+use crate::model::{GroupMeasurement, Measurement, PairMeasurement, Sample, Summary, Target};
 use crate::vulkan_features::{
     MIXED_FLOAT_DOT_PRODUCT_NAME, MixedFloatDotProductFeatures, NATIVE_FP8_DOT_FEATURE,
     SHADER_FLOAT8_NAME, ShaderFloat8Features, external_timeline_semaphore_supported,
@@ -41,7 +39,7 @@ const TENSOR_PARALLEL_PAIR_PATTERN: &str = "synthetic_tensor_parallel_small_payl
 const TENSOR_PARALLEL_CHAIN_PATTERN: &str = "synthetic_tensor_parallel_forced_split_2";
 const TWO_TARGET_TENSOR_PARALLEL_STRATEGY: &str = "two_target_tensor_parallel";
 const SINGLE_COMPONENT_REGIME: &str = "single_component";
-const TWO_COMPONENT_CHAIN_REGIME: &str = "two_component_chain";
+const TWO_COMPONENT_CHAIN_REGIME: &str = "component_chain_2";
 const MOE_SELECTED_EXPERTS: usize = 6;
 
 #[derive(Clone, Copy)]
@@ -591,46 +589,64 @@ fn best_serial_order(
     target_ids: &[String],
     edge_costs: &BTreeMap<(String, String), u128>,
 ) -> Vec<String> {
-    let mut orders = Vec::new();
-    extend_target_orders(target_ids, &mut Vec::new(), &mut orders);
-    orders
-        .into_iter()
-        .min_by(|left, right| {
-            serial_order_cost(left, edge_costs)
-                .cmp(&serial_order_cost(right, edge_costs))
-                .then_with(|| left.cmp(right))
+    if target_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut states = BTreeMap::<(Vec<bool>, usize), (u128, Vec<usize>)>::new();
+    for start in 0..target_ids.len() {
+        let mut visited = vec![false; target_ids.len()];
+        visited[start] = true;
+        states.insert((visited, start), (0, vec![start]));
+    }
+    for _ in 1..target_ids.len() {
+        let mut next = BTreeMap::<(Vec<bool>, usize), (u128, Vec<usize>)>::new();
+        for ((visited, last), (cost, path)) in states {
+            for candidate in 0..target_ids.len() {
+                if visited[candidate] {
+                    continue;
+                }
+                let edge_cost = edge_costs
+                    .get(&(target_ids[last].clone(), target_ids[candidate].clone()))
+                    .copied()
+                    .unwrap_or(u128::MAX);
+                let candidate_cost = cost.checked_add(edge_cost).unwrap_or(u128::MAX);
+                let mut candidate_visited = visited.clone();
+                candidate_visited[candidate] = true;
+                let mut candidate_path = path.clone();
+                candidate_path.push(candidate);
+                let key = (candidate_visited, candidate);
+                let replace = next.get(&key).is_none_or(|(existing_cost, existing_path)| {
+                    candidate_cost < *existing_cost
+                        || (candidate_cost == *existing_cost
+                            && path_target_ids(&candidate_path, target_ids)
+                                < path_target_ids(existing_path, target_ids))
+                });
+                if replace {
+                    next.insert(key, (candidate_cost, candidate_path));
+                }
+            }
+        }
+        states = next;
+    }
+    states
+        .into_values()
+        .min_by(|(left_cost, left_path), (right_cost, right_path)| {
+            left_cost.cmp(right_cost).then_with(|| {
+                path_target_ids(left_path, target_ids).cmp(&path_target_ids(right_path, target_ids))
+            })
+        })
+        .map(|(_, path)| {
+            path.into_iter()
+                .map(|index| target_ids[index].clone())
+                .collect()
         })
         .unwrap_or_default()
 }
 
-fn extend_target_orders(
-    target_ids: &[String],
-    current: &mut Vec<String>,
-    orders: &mut Vec<Vec<String>>,
-) {
-    if current.len() == target_ids.len() {
-        orders.push(current.clone());
-        return;
-    }
-    for target_id in target_ids {
-        if current.contains(target_id) {
-            continue;
-        }
-        current.push(target_id.clone());
-        extend_target_orders(target_ids, current, orders);
-        current.pop();
-    }
-}
-
-fn serial_order_cost(order: &[String], edge_costs: &BTreeMap<(String, String), u128>) -> u128 {
-    order
-        .windows(2)
-        .try_fold(0_u128, |cost, edge| {
-            edge_costs
-                .get(&(edge[0].clone(), edge[1].clone()))
-                .and_then(|edge_cost| cost.checked_add(*edge_cost))
-        })
-        .unwrap_or(u128::MAX)
+fn path_target_ids<'a>(path: &[usize], target_ids: &'a [String]) -> Vec<&'a str> {
+    path.iter()
+        .map(|index| target_ids[*index].as_str())
+        .collect()
 }
 
 pub fn run_vulkan_benchmarks(
@@ -783,9 +799,7 @@ pub fn run_vulkan_benchmarks(
         }
     }
 
-    let max_group_size = max_group_size
-        .min(MAX_PLACEMENT_GROUP_SIZE)
-        .min(targets.len());
+    let max_group_size = max_group_size.min(targets.len());
     if max_group_size >= 3 {
         let serial_edge_costs = formats
             .iter()
@@ -804,8 +818,11 @@ pub fn run_vulkan_benchmarks(
             })
             .collect::<BTreeMap<_, _>>();
         drop(opened);
-        for group_size in 3..=max_group_size {
-            for indices in target_index_combinations(targets.len(), group_size) {
+        for (group_size, groups) in staged_tensor_parallel_target_groups(targets, max_group_size)
+            .into_iter()
+            .filter(|(group_size, _)| *group_size >= 3)
+        {
+            for indices in groups {
                 let group = indices
                     .iter()
                     .map(|index| targets[*index])
@@ -1537,7 +1554,7 @@ fn vulkan_chain_measurements(
                             payload_bytes,
                             workload,
                             format,
-                            component_chain_regime(stages),
+                            &component_chain_regime(stages),
                             "unsupported",
                             &reason,
                         );
@@ -1557,7 +1574,7 @@ fn vulkan_chain_measurements(
                             payload_bytes,
                             workload,
                             format,
-                            component_chain_regime(stages),
+                            &component_chain_regime(stages),
                             "failed",
                             &message,
                         )
