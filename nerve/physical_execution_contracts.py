@@ -31,6 +31,7 @@ InputDistribution = Literal["replicated", "sharded", "routed", "local"]
 OutputCollection = Literal[
     "local", "concatenated", "reduced", "routed", "retained"
 ]
+ReductionOperation = Literal["sum_f32"]
 ResourceKind = Literal[
     "persistent_parameter",
     "transient",
@@ -94,7 +95,7 @@ class OutputContract(TypedDict, total=False):
     collection: OutputCollection
     dimension: int
     alignment_elements: int
-    reduction: str
+    reduction: ReductionOperation
 
 
 class LocalIntermediateContract(TypedDict):
@@ -161,6 +162,7 @@ _WORKGROUP_X_MAPPINGS = {"proportional", "repeated"}
 _PARTITION_ORIGINS = {"local_zero", "push_constant_u32"}
 _INPUT_DISTRIBUTIONS = {"replicated", "sharded", "routed", "local"}
 _OUTPUT_COLLECTIONS = {"local", "concatenated", "reduced", "routed", "retained"}
+_REDUCTION_OPERATIONS = {"sum_f32"}
 _RESOURCE_KINDS = {
     "persistent_parameter",
     "transient",
@@ -1072,7 +1074,7 @@ def _validate_outputs(values: list[object]) -> None:
         if (collection == "reduced") != ("reduction" in item):
             _invalid("only reduced outputs require a reduction operation")
         if "reduction" in item:
-            _non_empty_string(item["reduction"], f"{path}.reduction")
+            _enum(item["reduction"], _REDUCTION_OPERATIONS, f"{path}.reduction")
 
 
 def _validate_intermediates(values: list[object]) -> None:
@@ -1125,6 +1127,17 @@ def _validate_strategy(
         return
     if execution_form == "local":
         _invalid("distributed contracts require a distributed execution form")
+    has_reduced_output = any(
+        _mapping(item, "output")["collection"] == "reduced" for item in outputs
+    )
+    if (execution_form == "partitioned_input_partial_output") != has_reduced_output:
+        _invalid(
+            "partitioned-input partial-output execution requires a reduced output and reduced outputs require that execution form"
+        )
+    if execution_form == "partitioned_input_partial_output" and not any(
+        _mapping(item, "input")["distribution"] == "sharded" for item in inputs
+    ):
+        _invalid("partitioned-input execution requires a sharded input")
     if partition_extent is None:
         _invalid("distributed contracts require an explicit partition extent")
     if partition_launch is None:

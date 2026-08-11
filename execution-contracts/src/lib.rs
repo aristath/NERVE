@@ -90,6 +90,12 @@ pub enum OutputCollection {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ReductionOperation {
+    SumF32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     PersistentParameter,
     Transient,
@@ -195,7 +201,7 @@ pub struct OutputContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment_elements: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reduction: Option<String>,
+    pub reduction: Option<ReductionOperation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,9 +421,6 @@ fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), Contrac
         if (output.collection == OutputCollection::Reduced) != output.reduction.is_some() {
             return invalid("only reduced outputs require a reduction operation");
         }
-        if output.reduction.as_deref().is_some_and(str::is_empty) {
-            return invalid("output reduction operation must not be empty");
-        }
     }
     if contract.inputs.is_empty() || contract.outputs.is_empty() {
         return invalid("execution contracts require at least one input and output");
@@ -451,6 +454,25 @@ fn validate_strategy(contract: &PhysicalExecutionContract) -> Result<(), Contrac
     }
     if contract.execution_form == ExecutionForm::Local {
         return invalid("distributed contracts require a distributed execution form");
+    }
+    let has_reduced_output = contract
+        .outputs
+        .iter()
+        .any(|output| output.collection == OutputCollection::Reduced);
+    if (contract.execution_form == ExecutionForm::PartitionedInputPartialOutput)
+        != has_reduced_output
+    {
+        return invalid(
+            "partitioned-input partial-output execution requires a reduced output and reduced outputs require that execution form",
+        );
+    }
+    if contract.execution_form == ExecutionForm::PartitionedInputPartialOutput
+        && !contract
+            .inputs
+            .iter()
+            .any(|input| input.distribution == InputDistribution::Sharded)
+    {
+        return invalid("partitioned-input execution requires a sharded input");
     }
     if contract.partition_extent.is_none() {
         return invalid("distributed contracts require an explicit partition extent");
@@ -687,6 +709,66 @@ mod tests {
         let mut contract = valid_contract();
         contract.parameter_partitions.clear();
         assert!(contract.validate().is_err());
+    }
+
+    #[test]
+    fn partial_output_contract_requires_typed_f32_sum_reduction() {
+        let mut contract = valid_contract();
+        contract.execution_form = ExecutionForm::PartitionedInputPartialOutput;
+        contract.inputs[0] = InputContract {
+            binding: 0,
+            distribution: InputDistribution::Sharded,
+            dimension: Some(0),
+            alignment_elements: Some(128),
+        };
+        contract.outputs[0] = OutputContract {
+            binding: 1,
+            collection: OutputCollection::Reduced,
+            dimension: None,
+            alignment_elements: None,
+            reduction: Some(ReductionOperation::SumF32),
+        };
+        contract.validate().unwrap();
+
+        contract.inputs[0] = InputContract {
+            binding: 0,
+            distribution: InputDistribution::Replicated,
+            dimension: None,
+            alignment_elements: None,
+        };
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("requires a sharded input")
+        );
+        contract.inputs[0] = InputContract {
+            binding: 0,
+            distribution: InputDistribution::Sharded,
+            dimension: Some(0),
+            alignment_elements: Some(128),
+        };
+        contract.execution_form = ExecutionForm::ReplicatedInputPartitionedOutput;
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("reduced outputs require that execution form")
+        );
+    }
+
+    #[test]
+    fn unknown_reduction_operation_fails_deserialization() {
+        let mut value = serde_json::to_value(valid_contract()).unwrap();
+        value["execution_form"] = serde_json::json!("partitioned_input_partial_output");
+        value["outputs"][0] = serde_json::json!({
+            "binding": 1,
+            "collection": "reduced",
+            "reduction": "vendor_magic",
+        });
+        assert!(serde_json::from_value::<PhysicalExecutionContract>(value).is_err());
     }
 
     #[test]

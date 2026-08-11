@@ -57,6 +57,56 @@ def test_invalid_or_model_specific_distribution_fails_closed(mutate, message: st
         validate_physical_execution_contract(contract)
 
 
+def partial_output_contract() -> dict[str, object]:
+    contract = fixture_contract()
+    contract["execution_form"] = "partitioned_input_partial_output"
+    contract["inputs"][0] = {
+        "binding": 0,
+        "distribution": "sharded",
+        "dimension": 0,
+        "alignment_elements": 128,
+    }
+    contract["outputs"][0] = {
+        "binding": 1,
+        "collection": "reduced",
+        "reduction": "sum_f32",
+    }
+    return contract
+
+
+def test_partial_output_requires_typed_f32_sum_reduction() -> None:
+    contract = partial_output_contract()
+    validate_physical_execution_contract(contract)
+
+    contract["outputs"][0]["reduction"] = "vendor_magic"
+    with pytest.raises(PhysicalExecutionContractError, match="reduction"):
+        validate_physical_execution_contract(contract)
+
+
+def test_reduced_output_and_partial_output_form_are_bidirectional() -> None:
+    reduced_with_wrong_form = partial_output_contract()
+    reduced_with_wrong_form["execution_form"] = (
+        "replicated_input_partitioned_output"
+    )
+    with pytest.raises(PhysicalExecutionContractError, match="reduced outputs"):
+        validate_physical_execution_contract(reduced_with_wrong_form)
+
+    partial_without_reduction = fixture_contract()
+    partial_without_reduction["execution_form"] = (
+        "partitioned_input_partial_output"
+    )
+    with pytest.raises(PhysicalExecutionContractError, match="requires a reduced output"):
+        validate_physical_execution_contract(partial_without_reduction)
+
+    partial_without_sharded_input = partial_output_contract()
+    partial_without_sharded_input["inputs"][0] = {
+        "binding": 0,
+        "distribution": "replicated",
+    }
+    with pytest.raises(PhysicalExecutionContractError, match="requires a sharded input"):
+        validate_physical_execution_contract(partial_without_sharded_input)
+
+
 def test_lazy_resources_cannot_be_declared_permanent() -> None:
     contract = fixture_contract()
     contract["resources"][0].update(kind="lazy_resource")
