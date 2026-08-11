@@ -215,6 +215,47 @@ impl VulkanPlacementCalibrationCatalog {
         self.observations.len()
     }
 
+    /// Transactionally unions independently produced exact catalogs. An exact
+    /// execution case measured more than once is retained conservatively at
+    /// its slowest complete observed duration. All non-timing evidence must be
+    /// identical; changing resources, outputs, state, or call shape is a
+    /// conflict rather than a remeasurement.
+    pub fn merge(
+        &mut self,
+        other: &Self,
+    ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
+        self.validate()?;
+        other.validate()?;
+        let mut merged = self.clone();
+        for reference in &other.references {
+            merged.record_reference(reference.clone())?;
+        }
+        for observation in &other.observations {
+            match merged.observations.binary_search_by(|existing| {
+                existing
+                    .execution_case
+                    .cmp(&observation.execution_case)
+            }) {
+                Ok(index) => {
+                    let existing = &merged.observations[index];
+                    if !compatible_remeasurement(existing, observation) {
+                        return Err(VulkanPlacementCalibrationCatalogError(
+                            "placement catalogs contain conflicting evidence for one exact execution case"
+                                .to_string(),
+                        ));
+                    }
+                    if observation.duration_ns > existing.duration_ns {
+                        merged.observations[index] = observation.clone();
+                    }
+                }
+                Err(_) => merged.record_observation(observation.clone())?,
+            }
+        }
+        merged.validate()?;
+        *self = merged;
+        Ok(())
+    }
+
     pub fn from_json_slice(payload: &[u8]) -> Result<Self, VulkanPlacementCalibrationCatalogError> {
         let decoded: Self = serde_json::from_slice(payload).map_err(|error| {
             VulkanPlacementCalibrationCatalogError(format!(
@@ -366,6 +407,24 @@ impl VulkanPlacementCalibrationCatalog {
             })
             .collect()
     }
+}
+
+fn compatible_remeasurement(
+    left: &VulkanPlacementCalibrationObservation,
+    right: &VulkanPlacementCalibrationObservation,
+) -> bool {
+    left.execution_case == right.execution_case
+        && left.warmup_call_count == right.warmup_call_count
+        && left.measured_call_count == right.measured_call_count
+        && left.complete_transaction == right.complete_transaction
+        && left.useful_activation_count == right.useful_activation_count
+        && left.output_digest == right.output_digest
+        && left.state_digest == right.state_digest
+        && left.resident_bytes_by_physical_device == right.resident_bytes_by_physical_device
+        && left.transient_peak_bytes_by_physical_device
+            == right.transient_peak_bytes_by_physical_device
+        && left.host_resident_bytes == right.host_resident_bytes
+        && left.host_transient_peak_bytes == right.host_transient_peak_bytes
 }
 
 fn validate_behavior_identity(
@@ -656,6 +715,65 @@ mod placement_calibration_catalog_tests {
             })
             .unwrap();
         catalog
+    }
+
+    #[test]
+    fn catalog_merge_preserves_distinct_exact_candidates() {
+        let mut left = catalog_with_reference();
+        left.record_observation(observation(behavior(), "gpu0", "gpu0", 100, 16))
+            .unwrap();
+        let mut right = catalog_with_reference();
+        right
+            .record_observation(observation(behavior(), "gpu1", "gpu1", 120, 16))
+            .unwrap();
+
+        left.merge(&right).unwrap();
+
+        assert_eq!(left.reference_count(), 1);
+        assert_eq!(left.observation_count(), 2);
+        assert_eq!(left.pareto_candidates(&behavior()).len(), 2);
+    }
+
+    #[test]
+    fn catalog_merge_is_commutative_and_conservative_for_remeasurement() {
+        let mut faster = catalog_with_reference();
+        faster
+            .record_observation(observation(behavior(), "gpu0", "gpu0", 80, 16))
+            .unwrap();
+        let execution_case = faster.observations[0].execution_case.clone();
+        let mut slower = catalog_with_reference();
+        slower
+            .record_observation(observation(behavior(), "gpu0", "gpu0", 110, 16))
+            .unwrap();
+
+        let mut forward = faster.clone();
+        forward.merge(&slower).unwrap();
+        let mut reverse = slower;
+        reverse.merge(&faster).unwrap();
+
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward.exact_observation(&execution_case).unwrap().duration_ns,
+            110
+        );
+    }
+
+    #[test]
+    fn catalog_merge_rejects_conflicts_without_modifying_the_receiver() {
+        let mut accepted = catalog_with_reference();
+        accepted
+            .record_observation(observation(behavior(), "gpu0", "gpu0", 80, 16))
+            .unwrap();
+        let original = accepted.clone();
+        let mut conflicting = catalog_with_reference();
+        conflicting
+            .record_observation(observation(behavior(), "gpu0", "gpu0", 80, 32))
+            .unwrap();
+
+        let error = accepted.merge(&conflicting).unwrap_err();
+
+        assert!(error.to_string().contains("conflicting evidence"));
+        assert_eq!(accepted, original);
     }
 
     #[test]
