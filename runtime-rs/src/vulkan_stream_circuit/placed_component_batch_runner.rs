@@ -235,7 +235,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
             VulkanComponentBatchExecutionMode::IndependentStreams,
             &BTreeMap::new(),
             false,
-            &first.model.distributed_execution_plan,
+            first.model.decode_batch_distributed_execution_plan(),
             &first.model.distributed_parameter_buffers,
             &VulkanComponentBatchExecutionScope::all(),
         )

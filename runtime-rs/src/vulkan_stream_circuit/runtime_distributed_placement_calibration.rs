@@ -692,6 +692,24 @@ struct VulkanRuntimeDistributedPlacementExecution {
     state_digest: String,
 }
 
+fn distributed_contract_phase_and_shape(
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> (
+    nerve_execution_contracts::ExecutionPhase,
+    nerve_execution_contracts::ExecutionShape,
+) {
+    match phase {
+        VulkanTargetedComponentExecutionPhase::Decode => (
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            nerve_execution_contracts::ExecutionShape::SingleLane,
+        ),
+        VulkanTargetedComponentExecutionPhase::Prefill { .. } => (
+            nerve_execution_contracts::ExecutionPhase::Prefill,
+            nerve_execution_contracts::ExecutionShape::MultiLane,
+        ),
+    }
+}
+
 impl VulkanRuntimeDistributedPlacementSession {
     fn prepare(
         devices: Vec<(String, Rc<VulkanComputeDevice>)>,
@@ -784,18 +802,23 @@ impl VulkanRuntimeDistributedPlacementSession {
             .map(|device| device.min_storage_buffer_offset_alignment())
             .max()
             .unwrap_or(1);
-        let full_distributed_execution_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
-            &[(
-                owner_device_id.as_str(),
-                &targeted_plan.slice_plan.prepared_plan,
-            )],
-            &tensor_index,
-            &artifact_manifest,
-            &BTreeMap::from([(target.component_id.clone(), planning_device_ids)]),
-            &placement_plan.edges,
-            alignment,
-        )
-        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        let (contract_phase, execution_shape) =
+            distributed_contract_phase_and_shape(phase);
+        let full_distributed_execution_plan =
+            VulkanDistributedExecutionPlan::from_prepared_plans_for_phase(
+                &[(
+                    owner_device_id.as_str(),
+                    &targeted_plan.slice_plan.prepared_plan,
+                )],
+                &tensor_index,
+                &artifact_manifest,
+                &BTreeMap::from([(target.component_id.clone(), planning_device_ids)]),
+                &placement_plan.edges,
+                alignment,
+                contract_phase,
+                execution_shape,
+            )
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         if full_distributed_execution_plan.dispatches.is_empty() {
             return Ok(None);
         }
@@ -1885,6 +1908,30 @@ fn distributed_calibration_error_value(
 #[cfg(test)]
 mod runtime_distributed_placement_calibration_strategy_tests {
     use super::*;
+
+    #[test]
+    fn calibration_selects_contracts_by_phase_and_lane_shape() {
+        assert_eq!(
+            distributed_contract_phase_and_shape(
+                VulkanTargetedComponentExecutionPhase::Decode,
+            ),
+            (
+                nerve_execution_contracts::ExecutionPhase::Decode,
+                nerve_execution_contracts::ExecutionShape::SingleLane,
+            ),
+        );
+        assert_eq!(
+            distributed_contract_phase_and_shape(
+                VulkanTargetedComponentExecutionPhase::Prefill {
+                    activation_batch_width: 64,
+                },
+            ),
+            (
+                nerve_execution_contracts::ExecutionPhase::Prefill,
+                nerve_execution_contracts::ExecutionShape::MultiLane,
+            ),
+        );
+    }
 
     #[test]
     fn classifies_physical_strategy_from_partition_contracts() {

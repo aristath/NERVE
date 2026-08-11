@@ -474,7 +474,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .into_iter()
             .max()
             .unwrap_or(1);
-        let distributed_execution_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+        let distributed_execution_plans = VulkanDistributedExecutionPlanSet::from_prepared_plans(
             &prepared_plans,
             &tensor_index,
             &distributed_artifact_manifest,
@@ -485,41 +485,43 @@ impl VulkanResidentInProcessPlacedModelPackage {
         .map_err(|error| {
             VulkanResidentInProcessPlacedRuntimeError::Package(
                 VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to lower distributed Vulkan execution: {error}"
+                    "failed to lower distributed Vulkan phase and shape plans: {error}"
                 )),
             )
         })?;
         let distributed_activation_plan =
-            VulkanDistributedActivationBufferPlan::from_execution_plan(&distributed_execution_plan)
-                .map_err(|error| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "failed to plan distributed Vulkan activations: {error}"
-                        )),
-                    )
-                })?;
+            VulkanDistributedActivationBufferPlan::from_execution_plan_set(
+                &distributed_execution_plans,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to plan distributed Vulkan phase activation edges: {error}"
+                    )),
+                )
+            })?;
         let distributed_parameter_allocation_plan =
-            VulkanDistributedParameterAllocationPlan::from_execution_plan(
-                &distributed_execution_plan,
+            VulkanDistributedParameterAllocationPlan::from_execution_plan_set(
+                &distributed_execution_plans,
                 &tensor_index,
             )
             .map_err(|error| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(
                     VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to plan distributed Vulkan parameter shards: {error}"
+                        "failed to plan distributed Vulkan phase parameter shards: {error}"
                     )),
                 )
             })?;
         let distributed_parameter_exclusion_plan =
-            VulkanDistributedParameterExclusionPlan::from_execution_and_prepared_plans(
-                &distributed_execution_plan,
+            VulkanDistributedParameterExclusionPlan::from_execution_plan_set(
+                &distributed_execution_plans,
                 &prepared_plans,
                 &tensor_index,
             )
             .map_err(|error| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(
                     VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to prove distributed Vulkan parameter replacement: {error}"
+                        "failed to prove distributed Vulkan phase parameter replacement: {error}"
                     )),
                 )
             })?;
@@ -1261,7 +1263,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             sampler_spec: runtime_model.package.sampler.spec.clone(),
             device_slices,
             speculative_decoders,
-            distributed_execution_plan,
+            distributed_execution_plans,
             distributed_activation_plan,
             distributed_parameter_allocation_plan,
             distributed_parameter_exclusion_plan,
@@ -1280,8 +1282,16 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .map(Arc::as_ref)
     }
 
-    pub fn distributed_execution_plan(&self) -> &VulkanDistributedExecutionPlan {
-        &self.distributed_execution_plan
+    pub fn decode_distributed_execution_plan(&self) -> &VulkanDistributedExecutionPlan {
+        &self.distributed_execution_plans.decode
+    }
+
+    pub fn prefill_distributed_execution_plan(&self) -> &VulkanDistributedExecutionPlan {
+        &self.distributed_execution_plans.prefill
+    }
+
+    pub fn decode_batch_distributed_execution_plan(&self) -> &VulkanDistributedExecutionPlan {
+        &self.distributed_execution_plans.decode_batch
     }
 
     pub fn distributed_activation_plan(&self) -> &VulkanDistributedActivationBufferPlan {
@@ -1408,7 +1418,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &device_for,
         )?;
         let mut distributed_dispatch_indices = BTreeMap::<&str, BTreeSet<usize>>::new();
-        for group in &self.distributed_execution_plan.execution_islands {
+        for group in &self.distributed_execution_plans.decode.execution_islands {
             distributed_dispatch_indices
                 .entry(group.owner_device_id.as_str())
                 .or_default()
@@ -1444,7 +1454,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
             },
         )?;
         let distributed_shard_count = self
-            .distributed_execution_plan
+            .distributed_execution_plans
+            .decode
             .execution_islands
             .iter()
             .try_fold(0usize, |total, group| {
@@ -1498,7 +1509,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             create_demand_feedback_pipeline_predicates(self, &device_for)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut distributed_dispatch_runners = VulkanDistributedDispatchRunners::create(
-            &self.distributed_execution_plan,
+            &self.distributed_execution_plans.decode,
             &self.distributed_parameter_buffers,
             &distributed_activation_buffers,
             &self.distributed_loaded_manifest,
@@ -1584,7 +1595,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 })?;
             let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
             let physical_execution_islands = self
-                .distributed_execution_plan
+                .distributed_execution_plans
+                .decode
                 .execution_islands
                 .iter()
                 .filter(|group| group.owner_device_id == package_slice.device_id)

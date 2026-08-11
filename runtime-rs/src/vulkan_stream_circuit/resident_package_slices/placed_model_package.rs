@@ -28,7 +28,7 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     sampler_spec: VulkanResidentSamplerSpec,
     device_slices: Vec<Arc<VulkanResidentModelPackageDeviceSlice>>,
     speculative_decoders: Vec<VulkanResidentSpeculativeDecoderModelPackage>,
-    distributed_execution_plan: VulkanDistributedExecutionPlan,
+    distributed_execution_plans: VulkanDistributedExecutionPlanSet,
     distributed_activation_plan: VulkanDistributedActivationBufferPlan,
     distributed_parameter_allocation_plan: VulkanDistributedParameterAllocationPlan,
     distributed_parameter_exclusion_plan: VulkanDistributedParameterExclusionPlan,

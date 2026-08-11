@@ -411,7 +411,7 @@ fn explicit_internal_component_sharding_matches_canonical_execution() {
     assert!(
         !sharded
             .package()
-            .distributed_execution_plan()
+            .decode_distributed_execution_plan()
             .dispatches
             .is_empty()
     );
