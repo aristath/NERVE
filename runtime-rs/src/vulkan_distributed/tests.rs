@@ -2188,6 +2188,53 @@ mod tests {
     }
 
     #[test]
+    fn phase_parameter_plans_merge_exact_fragments_without_duplicate_storage() {
+        let execution_plan = fixture_plan("row_major");
+        let plan = VulkanDistributedParameterAllocationPlan::from_execution_plan(
+            &execution_plan,
+            &fixture_tensor_index("row_major"),
+        )
+        .unwrap();
+
+        let merged = VulkanDistributedParameterAllocationPlan::merged(&[
+            plan.clone(),
+            plan.clone(),
+        ])
+        .unwrap();
+        assert_eq!(merged.allocation_count, plan.allocation_count);
+        assert_eq!(merged.tensor_count, plan.tensor_count);
+        assert_eq!(merged.total_byte_capacity, plan.total_byte_capacity);
+        assert!(
+            merged
+                .allocations
+                .iter()
+                .all(|allocation| allocation.use_count == 2)
+        );
+    }
+
+    #[test]
+    fn phase_parameter_plan_merge_rejects_use_count_overflow() {
+        let execution_plan = fixture_plan("row_major");
+        let mut saturated = VulkanDistributedParameterAllocationPlan::from_execution_plan(
+            &execution_plan,
+            &fixture_tensor_index("row_major"),
+        )
+        .unwrap();
+        saturated.allocations[0].use_count = usize::MAX;
+        let one = VulkanDistributedParameterAllocationPlan {
+            allocations: vec![VulkanDistributedParameterAllocation {
+                use_count: 1,
+                ..saturated.allocations[0].clone()
+            }],
+            allocation_count: 1,
+            tensor_count: 1,
+            total_byte_capacity: saturated.allocations[0].byte_count,
+        };
+
+        assert!(VulkanDistributedParameterAllocationPlan::merged(&[saturated, one]).is_err());
+    }
+
+    #[test]
     fn loads_each_tensor_once_and_streams_verified_shards_to_devices() {
         let execution_plan = fixture_plan("row_major");
         let fixture = DistributedStorageFixture::new();

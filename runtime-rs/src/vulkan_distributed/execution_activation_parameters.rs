@@ -2369,6 +2369,52 @@ pub struct VulkanDistributedParameterAllocationPlan {
 }
 
 impl VulkanDistributedParameterAllocationPlan {
+    pub fn merged(
+        plans: &[VulkanDistributedParameterAllocationPlan],
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        let mut allocations = BTreeMap::<
+            VulkanDistributedParameterAllocationKey,
+            VulkanDistributedParameterAllocation,
+        >::new();
+        for plan in plans {
+            for allocation in &plan.allocations {
+                let key = VulkanDistributedParameterAllocationKey::from(allocation);
+                if let Some(existing) = allocations.get_mut(&key) {
+                    existing.use_count = existing
+                        .use_count
+                        .checked_add(allocation.use_count)
+                        .ok_or_else(|| {
+                            VulkanDistributedPlanError(format!(
+                                "distributed parameter tensor {:?} merged use count overflowed",
+                                allocation.tensor
+                            ))
+                        })?;
+                } else {
+                    allocations.insert(key, allocation.clone());
+                }
+            }
+        }
+        let total_byte_capacity = allocations.values().try_fold(0usize, |total, allocation| {
+            total.checked_add(allocation.byte_count).ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "merged distributed parameter capacity overflowed".to_string(),
+                )
+            })
+        })?;
+        let tensor_count = allocations
+            .values()
+            .map(|allocation| allocation.tensor.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let allocations = allocations.into_values().collect::<Vec<_>>();
+        Ok(Self {
+            allocation_count: allocations.len(),
+            allocations,
+            tensor_count,
+            total_byte_capacity,
+        })
+    }
+
     pub fn from_execution_plan(
         execution_plan: &VulkanDistributedExecutionPlan,
         tensor_index: &TensorIndex,
