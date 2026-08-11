@@ -132,13 +132,18 @@ fn run_placed_chat(
             format!("{logical_device_id}={physical_device_id}")
         })
         .collect::<Vec<_>>();
+    let exact_calibration_observation_count = auto_placement
+        .as_ref()
+        .map(|placement| placement.calibration_catalog.observation_count())
+        .unwrap_or(0);
     println!(
-        "nerve chat ready: placed_in_process, devices={:?}, bindings={:?}, context_size={}, speculative_draft_tokens={}, residency_policy={}, setup_ms={:.3}",
+        "nerve chat ready: placed_in_process, devices={:?}, bindings={:?}, context_size={}, speculative_draft_tokens={}, residency_policy={}, exact_calibration_observations={}, setup_ms={:.3}",
         stream_snapshot.device_ids,
         mounted_device_bindings,
         stream_snapshot.context_window_activations,
         speculative_draft_tokens,
         args.resource_residency_policy.as_runtime_name(),
+        exact_calibration_observation_count,
         nanos_to_millis(elapsed_nanos_u64(setup_start))
     );
 

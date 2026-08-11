@@ -174,6 +174,8 @@ pub struct VulkanPlacementCalibrationObservation {
     pub state_digest: String,
     pub resident_bytes_by_physical_device: BTreeMap<String, usize>,
     pub transient_peak_bytes_by_physical_device: BTreeMap<String, usize>,
+    pub host_resident_bytes: usize,
+    pub host_transient_peak_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,6 +207,14 @@ impl Default for VulkanPlacementCalibrationCatalog {
 }
 
 impl VulkanPlacementCalibrationCatalog {
+    pub fn reference_count(&self) -> usize {
+        self.references.len()
+    }
+
+    pub fn observation_count(&self) -> usize {
+        self.observations.len()
+    }
+
     pub fn from_json_slice(payload: &[u8]) -> Result<Self, VulkanPlacementCalibrationCatalogError> {
         let decoded: Self = serde_json::from_slice(payload).map_err(|error| {
             VulkanPlacementCalibrationCatalogError(format!(
@@ -522,8 +532,15 @@ fn observation_dominates(
     let strict = left.duration_ns < right.duration_ns
         || left.resident_bytes_by_physical_device != right.resident_bytes_by_physical_device
         || left.transient_peak_bytes_by_physical_device
-            != right.transient_peak_bytes_by_physical_device;
-    left.duration_ns <= right.duration_ns && resident_no_worse && transient_no_worse && strict
+            != right.transient_peak_bytes_by_physical_device
+        || left.host_resident_bytes != right.host_resident_bytes
+        || left.host_transient_peak_bytes != right.host_transient_peak_bytes;
+    left.duration_ns <= right.duration_ns
+        && resident_no_worse
+        && transient_no_worse
+        && left.host_resident_bytes <= right.host_resident_bytes
+        && left.host_transient_peak_bytes <= right.host_transient_peak_bytes
+        && strict
 }
 
 fn resource_vector_no_worse(
@@ -624,6 +641,8 @@ mod placement_calibration_catalog_tests {
                 ("gpu0".to_string(), 8),
                 ("gpu1".to_string(), 8),
             ]),
+            host_resident_bytes: 0,
+            host_transient_peak_bytes: 0,
         }
     }
 
@@ -715,6 +734,25 @@ mod placement_calibration_catalog_tests {
         let frontier = catalog.pareto_candidates(&behavior());
         assert_eq!(frontier.len(), 1);
         assert_eq!(frontier[0].duration_ns, 10);
+    }
+
+    #[test]
+    fn pareto_frontier_preserves_host_vs_device_resource_tradeoffs() {
+        let behavior = behavior();
+        let mut catalog = catalog_with_reference();
+        let mut faster_shared_host = observation(behavior.clone(), "gpu0", "gpu0", 8, 16);
+        faster_shared_host.host_transient_peak_bytes = 4096;
+        let mut slower_device_local = observation(behavior.clone(), "gpu0", "gpu0", 10, 16);
+        slower_device_local.execution_case.transports[0].route =
+            "external_device_local".to_string();
+        slower_device_local.transient_peak_bytes_by_physical_device = BTreeMap::from([
+            ("gpu0".to_string(), 4096),
+            ("gpu1".to_string(), 8),
+        ]);
+        catalog.record_observation(faster_shared_host).unwrap();
+        catalog.record_observation(slower_device_local).unwrap();
+
+        assert_eq!(catalog.pareto_candidates(&behavior).len(), 2);
     }
 
     #[test]

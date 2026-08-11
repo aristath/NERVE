@@ -96,6 +96,7 @@ fn rank_runtime_auto_placement_candidates_across_capability_classes(
 struct RuntimeAutoPlacementContext {
     candidates: Vec<VulkanRuntimePlacementCandidate>,
     costs: VulkanRuntimePlacementCostModel,
+    calibration_catalog: VulkanPlacementCalibrationCatalog,
 }
 
 struct RuntimeCapacityPackedModel {
@@ -224,6 +225,7 @@ fn runtime_capacity_packed_model(
     );
     let mut calibration_evidence = BTreeMap::<String, (String, String)>::new();
     let mut placement_costs = VulkanRuntimePlacementCostModel::default();
+    let mut exact_calibration_catalog = VulkanPlacementCalibrationCatalog::default();
     let mut measured_candidates = Vec::with_capacity(eligible_devices.len());
     let mut opened_devices = BTreeMap::new();
     for (device_info, profile) in eligible_devices {
@@ -369,6 +371,16 @@ fn runtime_capacity_packed_model(
                     &transfer_byte_counts,
                 )?;
                 for report in reports {
+                    for phase in [
+                        nerve_runtime::execution_contracts::ExecutionPhase::Decode,
+                        nerve_runtime::execution_contracts::ExecutionPhase::Prefill,
+                    ] {
+                        record_vulkan_runtime_transfer_calibration_report(
+                            &mut exact_calibration_catalog,
+                            &report,
+                            phase,
+                        )?;
+                    }
                     placement_costs.record_boundary_transfer_cost(
                         &report.source_device_id,
                         &report.target_device_id,
@@ -472,6 +484,7 @@ fn runtime_capacity_packed_model(
         auto_placement: Some(RuntimeAutoPlacementContext {
             candidates: selected_candidates,
             costs: placement_costs,
+            calibration_catalog: exact_calibration_catalog,
         }),
     })
 }

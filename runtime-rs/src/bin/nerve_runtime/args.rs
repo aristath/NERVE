@@ -34,7 +34,7 @@ use nerve_runtime::{
     VulkanResidentModelPackageManifest, VulkanResidentPlacedPrefixStateCacheStats,
     VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
     VulkanResidentTokenTextCodec, VulkanRetainedCompiledResourceStores,
-    VulkanReusableKernelArtifactManifest,
+    VulkanReusableKernelArtifactManifest, VulkanPlacementCalibrationCatalog,
     VulkanRuntimePlacementCalibrationSuite, VulkanRuntimePlacementCandidate,
     VulkanRuntimePlacementCostModel, VulkanSpeculativeCycleTrace, VulkanSpeculativeWindowStats,
     calibrate_vulkan_runtime_placement_candidate,
@@ -47,6 +47,7 @@ use nerve_runtime::{
     runtime_critical_path_span, runtime_devices_from_compute_devices,
     vulkan_resident_execution_counters, vulkan_runtime_device_capacity_admission_bytes,
     vulkan_runtime_placement_transfer_byte_counts,
+    record_vulkan_runtime_transfer_calibration_report,
 };
 
 #[derive(Clone, Debug, PartialEq)]

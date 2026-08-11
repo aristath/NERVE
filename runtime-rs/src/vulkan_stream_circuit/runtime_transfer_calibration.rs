@@ -1,13 +1,152 @@
+const VULKAN_DIRECTED_TRANSFER_CONTRACT_ID: &str =
+    "nerve.physical_activation_boundary.copy.v1";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanRuntimePlacementTransferCalibrationReport {
     pub source_device_id: String,
+    pub source_api_version: u32,
+    pub source_driver_version: u32,
     pub target_device_id: String,
+    pub target_api_version: u32,
+    pub target_driver_version: u32,
     pub byte_count: usize,
     pub route: VulkanSharedResidentBufferRoute,
     pub warmup_ns: u64,
     pub measured_ns: u64,
     pub fixture_digest: String,
     pub output_digest: String,
+}
+
+impl VulkanRuntimePlacementTransferCalibrationReport {
+    pub fn canonical_reference(
+        &self,
+        phase: nerve_execution_contracts::ExecutionPhase,
+    ) -> VulkanPlacementCanonicalReference {
+        VulkanPlacementCanonicalReference {
+            behavior: self.behavior_identity(phase),
+            output_digest: self.fixture_digest.clone(),
+            state_digest: runtime_transfer_calibration_state_digest(),
+        }
+    }
+
+    pub fn calibration_observation(
+        &self,
+        phase: nerve_execution_contracts::ExecutionPhase,
+    ) -> Result<VulkanPlacementCalibrationObservation, VulkanPlacementCalibrationCatalogError> {
+        let mut devices = vec![
+            VulkanPlacementDeviceExecutionIdentity {
+                physical_device_id: self.source_device_id.clone(),
+                api_version: self.source_api_version,
+                driver_version: self.source_driver_version,
+            },
+            VulkanPlacementDeviceExecutionIdentity {
+                physical_device_id: self.target_device_id.clone(),
+                api_version: self.target_api_version,
+                driver_version: self.target_driver_version,
+            },
+        ];
+        devices.sort();
+        let source_transient = self
+            .byte_count
+            .checked_mul(match self.route {
+                VulkanSharedResidentBufferRoute::ExternalDeviceLocal => 2,
+                VulkanSharedResidentBufferRoute::SharedHost => 1,
+            })
+            .ok_or_else(|| {
+                VulkanPlacementCalibrationCatalogError(
+                    "directed transfer transient byte accounting overflowed".to_string(),
+                )
+            })?;
+        Ok(VulkanPlacementCalibrationObservation {
+            execution_case: VulkanPlacementExecutionCaseIdentity {
+                behavior: self.behavior_identity(phase),
+                strategy: VulkanPlacementExecutionStrategy::DirectedBoundary,
+                devices,
+                shards: Vec::new(),
+                input_physical_device_id: self.source_device_id.clone(),
+                output_physical_device_id: self.target_device_id.clone(),
+                owner_physical_device_id: self.source_device_id.clone(),
+                transports: vec![VulkanPlacementTransportIdentity {
+                    source_physical_device_id: self.source_device_id.clone(),
+                    destination_physical_device_id: self.target_device_id.clone(),
+                    byte_capacity: self.byte_count,
+                    route: runtime_transfer_calibration_route_name(self.route).to_string(),
+                }],
+            },
+            warmup_call_count: 1,
+            measured_call_count: 2,
+            complete_transaction: true,
+            duration_ns: self.measured_ns,
+            useful_activation_count: 1,
+            output_digest: self.output_digest.clone(),
+            state_digest: runtime_transfer_calibration_state_digest(),
+            resident_bytes_by_physical_device: BTreeMap::from([
+                (self.source_device_id.clone(), 0),
+                (self.target_device_id.clone(), 0),
+            ]),
+            transient_peak_bytes_by_physical_device: BTreeMap::from([
+                (self.source_device_id.clone(), source_transient),
+                (self.target_device_id.clone(), self.byte_count),
+            ]),
+            host_resident_bytes: 0,
+            host_transient_peak_bytes: match self.route {
+                VulkanSharedResidentBufferRoute::ExternalDeviceLocal => 0,
+                VulkanSharedResidentBufferRoute::SharedHost => self.byte_count,
+            },
+        })
+    }
+
+    fn behavior_identity(
+        &self,
+        phase: nerve_execution_contracts::ExecutionPhase,
+    ) -> VulkanPlacementBehaviorIdentity {
+        let implementation_digest = runtime_transfer_calibration_digest(
+            b"nerve.directed_transfer.implementation.v1",
+            &[crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.as_bytes()],
+        );
+        let artifact_digest = runtime_transfer_calibration_digest(
+            b"nerve.directed_transfer.artifact.v1",
+            &[
+                crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.as_bytes(),
+                VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.as_bytes(),
+            ],
+        );
+        let execution_graph_digest = runtime_transfer_calibration_digest(
+            b"nerve.directed_transfer.graph.v1",
+            &[
+                VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.as_bytes(),
+                &self.byte_count.to_le_bytes(),
+            ],
+        );
+        VulkanPlacementBehaviorIdentity {
+            contract_ids: vec![VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.to_string()],
+            implementation_digests: vec![implementation_digest],
+            artifact_digest,
+            execution_graph_digest,
+            runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
+                .to_string(),
+            phase,
+            shape: VulkanPlacementShapeClass {
+                activation_batch_width: 1,
+                input_byte_capacity: self.byte_count,
+                output_byte_capacity: self.byte_count,
+                operations: vec![VulkanPlacementOperationGeometry::DirectedTransfer {
+                    contract_id: VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.to_string(),
+                    byte_count: self.byte_count,
+                }],
+            },
+            input_fixture_digest: self.fixture_digest.clone(),
+        }
+    }
+}
+
+pub fn record_vulkan_runtime_transfer_calibration_report(
+    catalog: &mut VulkanPlacementCalibrationCatalog,
+    report: &VulkanRuntimePlacementTransferCalibrationReport,
+    phase: nerve_execution_contracts::ExecutionPhase,
+) -> Result<(), VulkanPlacementCalibrationCatalogError> {
+    catalog.record_reference(report.canonical_reference(phase))?;
+    catalog.record_observation(report.calibration_observation(phase)?)
 }
 
 pub fn vulkan_runtime_placement_transfer_byte_counts(
@@ -121,7 +260,11 @@ fn calibrate_vulkan_runtime_placement_transfer(
     let output_digest = format!("sha256:{:x}", Sha256::digest(&output));
     Ok(VulkanRuntimePlacementTransferCalibrationReport {
         source_device_id: source_device_id.to_string(),
+        source_api_version: source.api_version(),
+        source_driver_version: source.driver_version(),
         target_device_id: target_device_id.to_string(),
+        target_api_version: target.api_version(),
+        target_driver_version: target.driver_version(),
         byte_count,
         route: shared.route,
         warmup_ns,
@@ -129,6 +272,28 @@ fn calibrate_vulkan_runtime_placement_transfer(
         fixture_digest,
         output_digest,
     })
+}
+
+fn runtime_transfer_calibration_route_name(route: VulkanSharedResidentBufferRoute) -> &'static str {
+    match route {
+        VulkanSharedResidentBufferRoute::ExternalDeviceLocal => "external_device_local",
+        VulkanSharedResidentBufferRoute::SharedHost => "shared_host",
+    }
+}
+
+fn runtime_transfer_calibration_digest(domain: &[u8], fields: &[&[u8]]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update([0]);
+    for field in fields {
+        digest.update((field.len() as u64).to_le_bytes());
+        digest.update(field);
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn runtime_transfer_calibration_state_digest() -> String {
+    runtime_transfer_calibration_digest(b"nerve.directed_transfer.stateless.v1", &[])
 }
 
 fn runtime_transfer_calibration_fixture(byte_count: usize) -> Vec<u8> {
@@ -178,5 +343,65 @@ mod runtime_transfer_calibration_validation_tests {
             assert!(validate_runtime_transfer_calibration_output(&fixture, &corrupt).is_err());
         }
         assert!(validate_runtime_transfer_calibration_output(&fixture, &fixture[..256]).is_err());
+    }
+
+    fn report(route: VulkanSharedResidentBufferRoute) -> VulkanRuntimePlacementTransferCalibrationReport {
+        let fixture = runtime_transfer_calibration_fixture(257);
+        let digest = format!("sha256:{:x}", Sha256::digest(&fixture));
+        VulkanRuntimePlacementTransferCalibrationReport {
+            source_device_id: "gpu-a".to_string(),
+            source_api_version: 1,
+            source_driver_version: 2,
+            target_device_id: "gpu-b".to_string(),
+            target_api_version: 3,
+            target_driver_version: 4,
+            byte_count: fixture.len(),
+            route,
+            warmup_ns: 11,
+            measured_ns: 10,
+            fixture_digest: digest.clone(),
+            output_digest: digest,
+        }
+    }
+
+    #[test]
+    fn directed_boundary_report_records_an_exact_typed_observation() {
+        let report = report(VulkanSharedResidentBufferRoute::SharedHost);
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        record_vulkan_runtime_transfer_calibration_report(
+            &mut catalog,
+            &report,
+            nerve_execution_contracts::ExecutionPhase::Decode,
+        )
+        .unwrap();
+        let observation = report
+            .calibration_observation(nerve_execution_contracts::ExecutionPhase::Decode)
+            .unwrap();
+        assert_eq!(
+            catalog.exact_observation(&observation.execution_case),
+            Some(&observation),
+        );
+        assert_eq!(
+            observation.execution_case.strategy,
+            VulkanPlacementExecutionStrategy::DirectedBoundary,
+        );
+        assert!(matches!(
+            observation.execution_case.behavior.shape.operations.as_slice(),
+            [VulkanPlacementOperationGeometry::DirectedTransfer { byte_count: 257, .. }],
+        ));
+    }
+
+    #[test]
+    fn route_or_driver_change_creates_a_distinct_boundary_case() {
+        let shared = report(VulkanSharedResidentBufferRoute::SharedHost)
+            .calibration_observation(nerve_execution_contracts::ExecutionPhase::Prefill)
+            .unwrap();
+        let mut external_report = report(VulkanSharedResidentBufferRoute::ExternalDeviceLocal);
+        external_report.target_driver_version += 1;
+        let external = external_report
+            .calibration_observation(nerve_execution_contracts::ExecutionPhase::Prefill)
+            .unwrap();
+        assert_eq!(shared.execution_case.behavior, external.execution_case.behavior);
+        assert_ne!(shared.execution_case, external.execution_case);
     }
 }

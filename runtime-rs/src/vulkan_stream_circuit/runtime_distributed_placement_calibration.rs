@@ -55,6 +55,8 @@ impl VulkanRuntimeDistributedPlacementCalibrationReport {
             transient_peak_bytes_by_physical_device: self
                 .resident_transient_bytes_by_device
                 .clone(),
+            host_resident_bytes: 0,
+            host_transient_peak_bytes: 0,
         }
     }
 }
