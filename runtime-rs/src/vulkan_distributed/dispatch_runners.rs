@@ -259,7 +259,16 @@ fn create_distributed_resident_dispatch(
         })?;
         bindings.push(
             allocation
-                .kernel_binding(binding)
+                .kernel_binding_for_fragment(
+                    binding,
+                    fragment.byte_offset,
+                    fragment.byte_count,
+                )
+                .map_err(|error| {
+                    VulkanDistributedDispatchRunnerError(format!(
+                        "failed to bind distributed tensor fragment: {error}"
+                    ))
+                })?
                 .with_access(VulkanResidentKernelBufferAccess::Read),
         );
     }

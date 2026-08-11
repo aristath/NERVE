@@ -2346,6 +2346,77 @@ mod tests {
     }
 
     #[test]
+    fn phase_parameter_plans_union_overlapping_ranges_without_duplicate_storage() {
+        let plan = |allocations: Vec<VulkanDistributedParameterAllocation>| {
+            VulkanDistributedParameterAllocationPlan {
+                allocation_count: allocations.len(),
+                tensor_count: 1,
+                total_byte_capacity: allocations
+                    .iter()
+                    .map(|allocation| allocation.byte_count)
+                    .sum(),
+                allocations,
+            }
+        };
+        let allocation = |device_id: &str, byte_offset, byte_count| {
+            VulkanDistributedParameterAllocation {
+                device_id: device_id.to_string(),
+                tensor: "weight".to_string(),
+                byte_offset,
+                byte_count,
+                use_count: 1,
+            }
+        };
+        let scalar = plan(vec![
+            allocation("owner", 0, 64),
+            allocation("helper", 64, 64),
+        ]);
+        let batch = plan(vec![
+            allocation("owner", 0, 32),
+            allocation("helper", 32, 96),
+        ]);
+
+        let merged = VulkanDistributedParameterAllocationPlan::merged(&[scalar, batch]).unwrap();
+
+        assert_eq!(merged.allocation_count, 2);
+        assert_eq!(merged.tensor_count, 1);
+        assert_eq!(merged.total_byte_capacity, 160);
+        assert_eq!(
+            merged
+                .allocations
+                .iter()
+                .map(|allocation| (
+                    allocation.device_id.as_str(),
+                    allocation.byte_offset,
+                    allocation.byte_count,
+                    allocation.use_count,
+                ))
+                .collect::<Vec<_>>(),
+            [("helper", 32, 96, 2), ("owner", 0, 64, 2)],
+        );
+    }
+
+    #[test]
+    fn merged_parameter_allocation_exposes_only_contained_nonempty_fragments() {
+        let allocation = VulkanDistributedParameterAllocation {
+            device_id: "owner".to_string(),
+            tensor: "weight".to_string(),
+            byte_offset: 32,
+            byte_count: 96,
+            use_count: 2,
+        };
+
+        assert!(allocation.contains_fragment("owner", "weight", 32, 96));
+        assert!(allocation.contains_fragment("owner", "weight", 64, 32));
+        assert!(!allocation.contains_fragment("helper", "weight", 64, 32));
+        assert!(!allocation.contains_fragment("owner", "other", 64, 32));
+        assert!(!allocation.contains_fragment("owner", "weight", 31, 32));
+        assert!(!allocation.contains_fragment("owner", "weight", 64, 65));
+        assert!(!allocation.contains_fragment("owner", "weight", 64, 0));
+        assert!(!allocation.contains_fragment("owner", "weight", usize::MAX, 2));
+    }
+
+    #[test]
     fn phase_parameter_plan_merge_rejects_use_count_overflow() {
         let execution_plan = fixture_plan("row_major");
         let mut saturated = VulkanDistributedParameterAllocationPlan::from_execution_plan(

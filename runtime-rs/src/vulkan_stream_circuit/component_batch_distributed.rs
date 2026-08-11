@@ -624,11 +624,25 @@ impl VulkanDistributedComponentBatchRunners {
                         })?;
                     bindings.push(
                         allocation
-                            .kernel_binding(u32::try_from(fragment.binding).map_err(|_| {
+                            .kernel_binding_for_fragment(
+                                u32::try_from(fragment.binding).map_err(|_| {
+                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                        VulkanError(
+                                            "distributed component batch binding exceeds u32"
+                                                .to_string(),
+                                        ),
+                                    )
+                                })?,
+                                fragment.byte_offset,
+                                fragment.byte_count,
+                            )
+                            .map_err(|error| {
                                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                                    "distributed component batch binding exceeds u32".to_string(),
+                                    format!(
+                                        "failed to bind distributed component batch parameter: {error}"
+                                    ),
                                 ))
-                            })?)
+                            })?
                             .with_access(VulkanResidentKernelBufferAccess::Read),
                     );
                 }

@@ -22,29 +22,65 @@ impl VulkanDistributedParameterAllocationPlan {
     pub fn merged(
         plans: &[VulkanDistributedParameterAllocationPlan],
     ) -> Result<Self, VulkanDistributedPlanError> {
-        let mut allocations = BTreeMap::<
-            VulkanDistributedParameterAllocationKey,
-            VulkanDistributedParameterAllocation,
-        >::new();
+        let mut allocations_by_resource =
+            BTreeMap::<(String, String), Vec<VulkanDistributedParameterAllocation>>::new();
         for plan in plans {
             for allocation in &plan.allocations {
-                let key = VulkanDistributedParameterAllocationKey::from(allocation);
-                if let Some(existing) = allocations.get_mut(&key) {
-                    existing.use_count = existing
+                if allocation.byte_count == 0
+                    || allocation
+                        .byte_offset
+                        .checked_add(allocation.byte_count)
+                        .is_none()
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "distributed parameter tensor {:?} has an invalid merge range",
+                        allocation.tensor
+                    )));
+                }
+                allocations_by_resource
+                    .entry((allocation.device_id.clone(), allocation.tensor.clone()))
+                    .or_default()
+                    .push(allocation.clone());
+            }
+        }
+        let mut allocations = Vec::new();
+        for (_, mut ranges) in allocations_by_resource {
+            ranges.sort_by_key(|allocation| (allocation.byte_offset, allocation.byte_count));
+            let mut merged_ranges = Vec::<VulkanDistributedParameterAllocation>::new();
+            for allocation in ranges {
+                let Some(current) = merged_ranges.last_mut() else {
+                    merged_ranges.push(allocation);
+                    continue;
+                };
+                let current_end = current
+                    .byte_offset
+                    .checked_add(current.byte_count)
+                    .expect("merge ranges were validated above");
+                if allocation.byte_offset <= current_end {
+                    let allocation_end = allocation
+                        .byte_offset
+                        .checked_add(allocation.byte_count)
+                        .expect("merge ranges were validated above");
+                    current.byte_count = current_end
+                        .max(allocation_end)
+                        .checked_sub(current.byte_offset)
+                        .expect("sorted merge range cannot precede its origin");
+                    current.use_count = current
                         .use_count
                         .checked_add(allocation.use_count)
                         .ok_or_else(|| {
                             VulkanDistributedPlanError(format!(
                                 "distributed parameter tensor {:?} merged use count overflowed",
-                                allocation.tensor
+                                current.tensor
                             ))
                         })?;
                 } else {
-                    allocations.insert(key, allocation.clone());
+                    merged_ranges.push(allocation);
                 }
             }
+            allocations.extend(merged_ranges);
         }
-        let total_byte_capacity = allocations.values().try_fold(0usize, |total, allocation| {
+        let total_byte_capacity = allocations.iter().try_fold(0usize, |total, allocation| {
             total.checked_add(allocation.byte_count).ok_or_else(|| {
                 VulkanDistributedPlanError(
                     "merged distributed parameter capacity overflowed".to_string(),
@@ -52,11 +88,10 @@ impl VulkanDistributedParameterAllocationPlan {
             })
         })?;
         let tensor_count = allocations
-            .values()
+            .iter()
             .map(|allocation| allocation.tensor.as_str())
             .collect::<BTreeSet<_>>()
             .len();
-        let allocations = allocations.into_values().collect::<Vec<_>>();
         Ok(Self {
             allocation_count: allocations.len(),
             allocations,
@@ -278,6 +313,27 @@ pub struct VulkanDistributedParameterAllocation {
     pub byte_offset: usize,
     pub byte_count: usize,
     pub use_count: usize,
+}
+
+impl VulkanDistributedParameterAllocation {
+    fn contains_fragment(
+        &self,
+        device_id: &str,
+        tensor: &str,
+        byte_offset: usize,
+        byte_count: usize,
+    ) -> bool {
+        if self.device_id != device_id || self.tensor != tensor || byte_count == 0 {
+            return false;
+        }
+        let Some(allocation_end) = self.byte_offset.checked_add(self.byte_count) else {
+            return false;
+        };
+        let Some(fragment_end) = byte_offset.checked_add(byte_count) else {
+            return false;
+        };
+        byte_offset >= self.byte_offset && fragment_end <= allocation_end
+    }
 }
 
 pub struct VulkanDistributedParameterBuffers {
@@ -585,10 +641,9 @@ impl VulkanDistributedParameterBuffers {
         byte_count: usize,
     ) -> Option<&VulkanDistributedParameterBufferAllocation> {
         self.buffers.iter().find(|buffer| {
-            buffer.allocation.device_id == device_id
-                && buffer.allocation.tensor == tensor
-                && buffer.allocation.byte_offset == byte_offset
-                && buffer.allocation.byte_count == byte_count
+            buffer
+                .allocation
+                .contains_fragment(device_id, tensor, byte_offset, byte_count)
         })
     }
 }
@@ -600,16 +655,47 @@ pub struct VulkanDistributedParameterBufferAllocation {
 }
 
 impl VulkanDistributedParameterBufferAllocation {
-    pub fn kernel_binding(
+    pub fn kernel_binding_for_fragment(
         &self,
         binding: u32,
-    ) -> VulkanResidentKernelBufferBinding<'_> {
-        VulkanResidentKernelBufferBinding::new(
+        byte_offset: usize,
+        byte_count: usize,
+    ) -> Result<VulkanResidentKernelBufferBinding<'_>, VulkanDistributedParameterBufferError> {
+        if !self.allocation.contains_fragment(
+            &self.allocation.device_id,
+            &self.allocation.tensor,
+            byte_offset,
+            byte_count,
+        ) {
+            return Err(VulkanDistributedParameterBufferError(format!(
+                "distributed parameter fragment {}..{} is outside tensor {:?} allocation {}..{} on {:?}",
+                byte_offset,
+                byte_offset.saturating_add(byte_count),
+                self.allocation.tensor,
+                self.allocation.byte_offset,
+                self.allocation
+                    .byte_offset
+                    .saturating_add(self.allocation.byte_count),
+                self.allocation.device_id,
+            )));
+        }
+        let relative_byte_offset = byte_offset
+            .checked_sub(self.allocation.byte_offset)
+            .expect("fragment containment was checked above");
+        let resident_byte_offset = self
+            .byte_offset
+            .checked_add(relative_byte_offset)
+            .ok_or_else(|| {
+                VulkanDistributedParameterBufferError(
+                    "distributed parameter resident offset overflowed".to_string(),
+                )
+            })?;
+        Ok(VulkanResidentKernelBufferBinding::new(
             binding,
             &self.buffer,
-            self.allocation.byte_count,
+            byte_count,
         )
-        .with_byte_offset(self.byte_offset)
+        .with_byte_offset(resident_byte_offset))
     }
 }
 
