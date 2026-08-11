@@ -98,6 +98,9 @@ pub(super) fn validate_physical_execution_contracts(
                     && contract.execution_form
                         == nerve_execution_contracts::ExecutionForm::Local
                     && contract
+                        .execution_shape
+                        .supports(nerve_execution_contracts::ExecutionShape::SingleLane)
+                    && contract
                         .phases
                         .contains(&nerve_execution_contracts::ExecutionPhase::Decode)
                     && contract.artifacts.len() == 1
@@ -111,6 +114,46 @@ pub(super) fn validate_physical_execution_contracts(
                         execution.component_id, kernel.node_id, kernel.shader_path,
                     ),
                 ));
+            }
+            for implementation in &kernel.batch_implementations {
+                let expected_paths = implementation
+                    .stages
+                    .iter()
+                    .map(|stage| stage.shader_path.as_str())
+                    .collect::<Vec<_>>();
+                let has_batch_contract = kernel.physical_execution_contracts.iter().any(
+                    |contract| {
+                        contract.strategy
+                            == nerve_execution_contracts::ExecutionStrategy::SingleDevice
+                            && contract.execution_form
+                                == nerve_execution_contracts::ExecutionForm::Local
+                            && contract.execution_shape.supports(
+                                nerve_execution_contracts::ExecutionShape::MultiLane,
+                            )
+                            && (!implementation.execution_domain.supports_decode()
+                                || contract.phases.contains(
+                                    &nerve_execution_contracts::ExecutionPhase::Decode,
+                                ))
+                            && (!implementation.execution_domain.supports_prefill()
+                                || contract.phases.contains(
+                                    &nerve_execution_contracts::ExecutionPhase::Prefill,
+                                ))
+                            && contract
+                                .artifacts
+                                .iter()
+                                .map(|artifact| artifact.path.as_str())
+                                .eq(expected_paths.iter().copied())
+                    },
+                );
+                if !has_batch_contract {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "component kernel {}.{} has no multi-lane physical contract for batch artifacts {expected_paths:?}",
+                            execution.component_id, kernel.node_id,
+                        ),
+                    ));
+                }
             }
             if !required_artifact_paths.is_subset(&declared_artifact_paths) {
                 let missing = required_artifact_paths

@@ -161,6 +161,8 @@ def test_contract_owns_the_input_column_shader_and_physical_weight(
     physical_weight = input_block_major_tensor_name(
         "down.weight", TP_INPUT_BLOCK_COLUMNS
     )
+    assert implementation["execution_shape"] == "single_and_multi_lane"
+    assert distributed["execution_shape"] == "single_and_multi_lane"
     assert distributed["artifacts"][0]["path"] == implementation["shader_path"]
     assert distributed["artifacts"][0]["path"] != kernel["shader_path"]
     assert distributed["parameter_partitions"] == [

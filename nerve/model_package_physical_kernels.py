@@ -210,6 +210,7 @@ def physical_kernel_implementations_for_node(
             "workgroup_count_x": (output_rows + output_tile_rows - 1)
             // output_tile_rows,
             "phases": ["decode", "prefill"],
+            "execution_shape": "single_and_multi_lane",
             "formats": {
                 "storage": storage,
                 "compute": compute,

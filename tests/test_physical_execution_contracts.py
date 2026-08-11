@@ -34,6 +34,7 @@ def test_shared_tensor_parallel_contract_is_valid() -> None:
     ("mutate", "message"),
     [
         (lambda value: value.update(strategy="model_named_deepseek"), "strategy"),
+        (lambda value: value.update(execution_shape="grid"), "execution_shape"),
         (lambda value: value.update(parameter_partitions=[]), "partition"),
         (
             lambda value: value["inputs"][0].update(
@@ -245,6 +246,7 @@ def test_implementation_digest_covers_artifact_phase_format_geometry_and_strateg
     digest = implementation_digest(
         artifacts=contract["artifacts"],
         phases=contract["phases"],
+        execution_shape=contract["execution_shape"],
         formats=contract["formats"],
         geometry=contract["geometry"],
         strategy=contract["strategy"],
@@ -265,6 +267,7 @@ def test_implementation_digest_covers_artifact_phase_format_geometry_and_strateg
             }
         ],
         phases=contract["phases"],
+        execution_shape=contract["execution_shape"],
         formats=contract["formats"],
         geometry=contract["geometry"],
         strategy=contract["strategy"],
@@ -351,6 +354,7 @@ def test_compiler_emits_local_batch_and_legal_distributed_contracts(tmp_path: Pa
         "tensor_parallel",
         "single_device",
         "tensor_parallel",
+        "tensor_parallel",
     ]
     distributed = contracts[1]
     assert distributed["execution_form"] == "replicated_input_partitioned_output"
@@ -374,8 +378,11 @@ def test_compiler_emits_local_batch_and_legal_distributed_contracts(tmp_path: Pa
         }
     ]
     assert contracts[2]["phases"] == ["decode", "prefill"]
-    assert contracts[3]["phases"] == ["prefill"]
+    assert contracts[2]["execution_shape"] == "multi_lane"
+    assert contracts[3]["phases"] == ["decode"]
+    assert contracts[4]["phases"] == ["prefill"]
     assert contracts[3]["artifacts"] == contracts[2]["artifacts"]
+    assert contracts[4]["artifacts"] == contracts[2]["artifacts"]
     assert contracts[3]["execution_form"] == "replicated_input_partitioned_output"
     assert contracts[0]["artifacts"][0]["sha256"] == artifact_sha256(b"scalar spirv")
     assert all("model_name" not in contract for contract in contracts)
@@ -431,6 +438,15 @@ def test_prefill_distribution_uses_one_strongest_compatible_batch_partition(
     assert distributed_prefill[0]["partition_extent"]["alignment_elements"] == 32
     assert distributed_prefill[0]["geometry"]["dimensions"]["workgroup_count_x"] == 8
     assert distributed_prefill[0]["artifacts"][0]["path"] == alternative_path.name
+    distributed_decode = [
+        contract
+        for contract in contracts
+        if contract["strategy"] == "tensor_parallel"
+        and contract["phases"] == ["decode"]
+        and contract["execution_shape"] == "multi_lane"
+    ]
+    assert len(distributed_decode) == 1
+    assert distributed_decode[0]["artifacts"] == distributed_prefill[0]["artifacts"]
 
 
 def test_compiler_declares_the_exact_sparse_expert_range_abi(tmp_path: Path) -> None:

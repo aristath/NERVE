@@ -1,4 +1,7 @@
-include!("vulkan_distributed/execution_activation_parameters.rs");
+include!("vulkan_distributed/execution_plans.rs");
+include!("vulkan_distributed/activation_buffers.rs");
+include!("vulkan_distributed/dispatch_shards.rs");
+include!("vulkan_distributed/parameter_buffers.rs");
 include!("vulkan_distributed/queue_dependencies.rs");
 include!("vulkan_distributed/reduction_runner.rs");
 include!("vulkan_distributed/dispatch_runners.rs");

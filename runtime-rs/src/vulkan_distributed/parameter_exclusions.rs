@@ -8,6 +8,32 @@ pub struct VulkanDistributedParameterExclusionPlan {
 }
 
 impl VulkanDistributedParameterExclusionPlan {
+    pub fn from_execution_plan_set(
+        plans: &VulkanDistributedExecutionPlanSet,
+        prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
+        tensor_index: &TensorIndex,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        let decode = Self::from_execution_and_prepared_plans(
+            &plans.decode,
+            prepared_plans,
+            tensor_index,
+        )?;
+        for plan in [&plans.decode_batch, &plans.prefill] {
+            let candidate = Self::from_execution_and_prepared_plans(
+                plan,
+                prepared_plans,
+                tensor_index,
+            )?;
+            if candidate != decode {
+                return Err(VulkanDistributedPlanError(
+                    "single-lane decode, multi-lane decode, and multi-lane prefill replace different canonical parameter tensors"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(decode)
+    }
+
     pub fn from_execution_and_prepared_plans(
         execution_plan: &VulkanDistributedExecutionPlan,
         prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
@@ -253,4 +279,3 @@ impl Display for VulkanDistributedPlanError {
 }
 
 impl Error for VulkanDistributedPlanError {}
-

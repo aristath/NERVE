@@ -9,7 +9,7 @@ mod tests {
 
     use nerve_execution_contracts::{
         ArtifactIdentity, EquivalenceKind, EquivalenceRequirement, ExecutionForm,
-        ExecutionGeometry, ExecutionPhase, ExecutionStrategy, InputContract,
+        ExecutionGeometry, ExecutionPhase, ExecutionShape, ExecutionStrategy, InputContract,
         InputDistribution, OutputCollection, OutputContract, ParameterPartition,
         ParameterPartitionKind, PartitionExtent, PartitionLaunch, PartitionOrigin,
         PhysicalExecutionContract, PhysicalFormats, ReductionContract,
@@ -49,10 +49,12 @@ mod tests {
     }
 
     #[test]
-    fn distributed_planning_selects_only_contracts_declared_for_its_phase() {
+    fn distributed_planning_selects_contracts_by_phase_and_shape() {
         let mut prepared_plan = fixture_prepared_plan();
         prepared_plan.dispatches[0].physical_execution_contracts[0].phases =
             vec![ExecutionPhase::Prefill];
+        prepared_plan.dispatches[0].physical_execution_contracts[0].execution_shape =
+            ExecutionShape::SingleLane;
         let pools = component_device_pools("component", &["owner", "helper"]);
         let decode_error = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared_plan)],
@@ -65,6 +67,21 @@ mod tests {
         .unwrap_err();
         assert!(decode_error.to_string().contains("no compatible distributable dispatch"));
 
+        let shape_error = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &pools,
+            &[],
+            4,
+            ExecutionPhase::Prefill,
+            ExecutionShape::MultiLane,
+        )
+        .unwrap_err();
+        assert!(shape_error.to_string().contains("no compatible distributable dispatch"));
+
+        prepared_plan.dispatches[0].physical_execution_contracts[0].execution_shape =
+            ExecutionShape::SingleAndMultiLane;
         let prefill = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase(
             &[("owner", &prepared_plan)],
             &fixture_tensor_index("row_major"),
@@ -73,6 +90,7 @@ mod tests {
             &[],
             4,
             ExecutionPhase::Prefill,
+            ExecutionShape::MultiLane,
         )
         .unwrap();
         assert_eq!(prefill.dispatches.len(), 1);
@@ -80,6 +98,121 @@ mod tests {
             prefill.execution_islands[0].phase_schedules[0].phase,
             ExecutionPhase::Prefill
         );
+    }
+
+    #[test]
+    fn phase_plans_must_replace_the_same_logical_dispatches() {
+        let mut prepared_plan = fixture_prepared_plan();
+        prepared_plan.dispatches[0].physical_execution_contracts[0].phases =
+            vec![ExecutionPhase::Decode, ExecutionPhase::Prefill];
+        prepared_plan.dispatches[0].physical_execution_contracts[0].execution_shape =
+            ExecutionShape::SingleAndMultiLane;
+        let pools = component_device_pools("component", &["owner", "helper"]);
+        let decode = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &pools,
+            &[],
+            4,
+        )
+        .unwrap();
+        let mut prefill = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &pools,
+            &[],
+            4,
+            ExecutionPhase::Prefill,
+            ExecutionShape::MultiLane,
+        )
+        .unwrap();
+        assert!(decode.replaces_same_logical_dispatches(&prefill));
+
+        prefill.dispatches.push(prefill.dispatches[0].clone());
+        assert!(!decode.replaces_same_logical_dispatches(&prefill));
+        prefill.dispatches.pop();
+        prefill.dispatches[0].node_id = "different-node".to_string();
+        assert!(!decode.replaces_same_logical_dispatches(&prefill));
+    }
+
+    #[test]
+    fn phase_plans_must_share_the_same_activation_interface() {
+        let mut prepared_plan = fixture_prepared_plan();
+        prepared_plan.dispatches[0].physical_execution_contracts[0].phases =
+            vec![ExecutionPhase::Decode, ExecutionPhase::Prefill];
+        prepared_plan.dispatches[0].physical_execution_contracts[0].execution_shape =
+            ExecutionShape::SingleAndMultiLane;
+        let pools = component_device_pools("component", &["owner", "helper"]);
+        let decode = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &pools,
+            &[],
+            4,
+        )
+        .unwrap();
+        let prefill = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &pools,
+            &[],
+            4,
+            ExecutionPhase::Prefill,
+            ExecutionShape::MultiLane,
+        )
+        .unwrap();
+        let decode_buffers =
+            VulkanDistributedActivationBufferPlan::from_execution_plan(&decode).unwrap();
+        let mut prefill_buffers =
+            VulkanDistributedActivationBufferPlan::from_execution_plan(&prefill).unwrap();
+        assert!(decode_buffers.has_same_shared_activation_interface(&prefill_buffers));
+
+        prefill_buffers.allocations[0].signal_ids[0] = "different-signal".to_string();
+        assert!(!decode_buffers.has_same_shared_activation_interface(&prefill_buffers));
+    }
+
+    #[test]
+    fn execution_plan_set_owns_consistent_phase_and_shape_resources() {
+        let mut prepared_plan = fixture_prepared_plan();
+        prepared_plan.dispatches[0].physical_execution_contracts[0].phases =
+            vec![ExecutionPhase::Decode, ExecutionPhase::Prefill];
+        prepared_plan.dispatches[0].physical_execution_contracts[0].execution_shape =
+            ExecutionShape::SingleAndMultiLane;
+        let tensor_index = fixture_tensor_index("row_major");
+        let plans = VulkanDistributedExecutionPlanSet::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &tensor_index,
+            &fixture_artifact_manifest(),
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(plans.all().iter().map(|plan| plan.dispatches.len()).sum::<usize>(), 3);
+        assert_eq!(
+            plans.decode.execution_islands[0].phase_schedules[0].phase,
+            ExecutionPhase::Decode,
+        );
+        assert_eq!(
+            plans.prefill.execution_islands[0].phase_schedules[0].phase,
+            ExecutionPhase::Prefill,
+        );
+        VulkanDistributedActivationBufferPlan::from_execution_plan_set(&plans).unwrap();
+        let parameters =
+            VulkanDistributedParameterAllocationPlan::from_execution_plan_set(&plans, &tensor_index)
+                .unwrap();
+        assert!(parameters.allocations.iter().all(|allocation| allocation.use_count == 3));
+        VulkanDistributedParameterExclusionPlan::from_execution_plan_set(
+            &plans,
+            &[("owner", &prepared_plan)],
+            &tensor_index,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2532,6 +2665,7 @@ mod tests {
             }],
             implementation_digest: format!("sha256:{}", "c".repeat(64)),
             phases: vec![ExecutionPhase::Decode],
+            execution_shape: ExecutionShape::SingleLane,
             formats: PhysicalFormats {
                 storage: "test".to_string(),
                 compute: "test".to_string(),

@@ -1,5 +1,5 @@
 use nerve_execution_contracts::{
-    ExecutionForm, ExecutionPhase, InputDistribution, OutputCollection,
+    ExecutionForm, ExecutionPhase, ExecutionShape, InputDistribution, OutputCollection,
     ParameterPartitionKind, PartitionOrigin, PhysicalExecutionContract,
     ReductionFinalization, ReductionOperation, WorkgroupXMapping,
 };
@@ -95,6 +95,7 @@ fn select_distributed_contract<'a, 'b>(
     dispatch: &'a VulkanPreparedDispatch,
     artifact_manifest: &'b VulkanPhysicalKernelArtifactManifest,
     phase: ExecutionPhase,
+    execution_shape: ExecutionShape,
 ) -> Result<
     Option<(
         &'a PhysicalExecutionContract,
@@ -106,6 +107,7 @@ fn select_distributed_contract<'a, 'b>(
     for contract in dispatch.physical_execution_contracts.iter().filter(|contract| {
         contract.strategy.is_distributed()
             && contract.phases.contains(&phase)
+            && contract.execution_shape.supports(execution_shape)
             && contract.operation_family == dispatch.op
             && contract.member_node_ids.contains(&dispatch.node_id)
     }) {

@@ -16,6 +16,7 @@ Json = dict[str, Any]
 PHYSICAL_EXECUTION_CONTRACT_SCHEMA = "nerve.physical_execution_contract.v1"
 
 ExecutionPhase = Literal["decode", "prefill"]
+ExecutionShape = Literal["single_lane", "multi_lane", "single_and_multi_lane"]
 ExecutionStrategy = Literal[
     "single_device",
     "tensor_parallel",
@@ -147,6 +148,7 @@ class PhysicalExecutionContract(TypedDict, total=False):
     artifacts: list[ArtifactIdentity]
     implementation_digest: str
     phases: list[ExecutionPhase]
+    execution_shape: ExecutionShape
     formats: PhysicalFormats
     geometry: ExecutionGeometry
     strategy: ExecutionStrategy
@@ -162,6 +164,7 @@ class PhysicalExecutionContract(TypedDict, total=False):
 
 
 _PHASES = {"decode", "prefill"}
+_EXECUTION_SHAPES = {"single_lane", "multi_lane", "single_and_multi_lane"}
 _STRATEGIES = {
     "single_device",
     "tensor_parallel",
@@ -201,6 +204,7 @@ _TOP_LEVEL_KEYS = {
     "artifacts",
     "implementation_digest",
     "phases",
+    "execution_shape",
     "formats",
     "geometry",
     "strategy",
@@ -234,6 +238,7 @@ def implementation_digest(
     *,
     artifacts: list[ArtifactIdentity],
     phases: list[ExecutionPhase],
+    execution_shape: ExecutionShape,
     formats: PhysicalFormats,
     geometry: ExecutionGeometry,
     strategy: ExecutionStrategy,
@@ -250,6 +255,7 @@ def implementation_digest(
             {
                 "artifacts": artifacts,
                 "phases": phases,
+                "execution_shape": execution_shape,
                 "formats": formats,
                 "geometry": geometry,
                 "strategy": strategy,
@@ -303,6 +309,7 @@ def build_kernel_physical_execution_contracts(
             tensor_index=tensor_index,
             artifacts=scalar_artifacts,
             phases=["decode"],
+            execution_shape="single_lane",
             formats=scalar_formats,
             geometry=scalar_geometry,
             strategy="single_device",
@@ -321,6 +328,7 @@ def build_kernel_physical_execution_contracts(
         tensor_index=tensor_index,
         artifacts=scalar_artifacts,
         phases=["decode"],
+        execution_shape="single_lane",
         formats=scalar_formats,
         geometry=scalar_geometry,
         workgroup_count_x=int(kernel["workgroup_count_x"]),
@@ -341,7 +349,9 @@ def build_kernel_physical_execution_contracts(
         for implementation in kernel.get("physical_implementations", [])
     )
 
-    distributed_batch_candidates: list[PhysicalExecutionContract] = []
+    distributed_batch_candidates: dict[
+        ExecutionPhase, list[PhysicalExecutionContract]
+    ] = {"decode": [], "prefill": []}
     for implementation in kernel.get("batch_implementations", []):
         stages = implementation.get("stages", [])
         if not stages:
@@ -371,6 +381,7 @@ def build_kernel_physical_execution_contracts(
                 tensor_index=tensor_index,
                 artifacts=artifacts,
                 phases=phases,
+                execution_shape="multi_lane",
                 formats=batch_formats,
                 geometry=geometry,
                 strategy="single_device",
@@ -383,34 +394,37 @@ def build_kernel_physical_execution_contracts(
                 local_intermediates=[],
             )
         )
-        distributed_phases = [phase for phase in phases if phase == "prefill"]
-        if len(stages) == 1 and distributed_phases:
-            distributed_batch = _distributed_kernel_contract(
-                node=node,
-                circuit=circuit,
-                tensor_index=tensor_index,
-                artifacts=artifacts,
-                phases=distributed_phases,
-                formats=batch_formats,
-                geometry=geometry,
-                workgroup_count_x=int(stages[0]["workgroup_count_x"]),
-                local_intermediates=local_output_shard_intermediates_for_node(
-                    circuit, node, tensor_index
-                ),
-            )
-            if distributed_batch is not None:
-                distributed_batch_candidates.append(distributed_batch)
+        if len(stages) == 1:
+            for phase in phases:
+                distributed_batch = _distributed_kernel_contract(
+                    node=node,
+                    circuit=circuit,
+                    tensor_index=tensor_index,
+                    artifacts=artifacts,
+                    phases=[phase],
+                    execution_shape="multi_lane",
+                    formats=batch_formats,
+                    geometry=geometry,
+                    workgroup_count_x=int(stages[0]["workgroup_count_x"]),
+                    local_intermediates=local_output_shard_intermediates_for_node(
+                        circuit, node, tensor_index
+                    ),
+                )
+                if distributed_batch is not None:
+                    distributed_batch_candidates[phase].append(distributed_batch)
 
-    if distributed_batch_candidates:
-        contracts.append(
-            sorted(
-                distributed_batch_candidates,
-                key=lambda contract: (
-                    -int(contract["partition_extent"]["alignment_elements"]),
-                    contract["artifacts"][0]["path"],
-                ),
-            )[0]
-        )
+    for phase in ("decode", "prefill"):
+        candidates = distributed_batch_candidates[phase]
+        if candidates:
+            contracts.append(
+                sorted(
+                    candidates,
+                    key=lambda contract: (
+                        -int(contract["partition_extent"]["alignment_elements"]),
+                        contract["artifacts"][0]["path"],
+                    ),
+                )[0]
+            )
 
     by_id = {contract["contract_id"]: contract for contract in contracts}
     if len(by_id) != len(contracts):
@@ -425,6 +439,7 @@ def _build_contract(
     tensor_index: Json,
     artifacts: list[ArtifactIdentity],
     phases: list[ExecutionPhase],
+    execution_shape: ExecutionShape,
     formats: PhysicalFormats,
     geometry: ExecutionGeometry,
     strategy: ExecutionStrategy,
@@ -451,6 +466,7 @@ def _build_contract(
         "implementation_digest": implementation_digest(
             artifacts=artifacts,
             phases=phases,
+            execution_shape=execution_shape,
             formats=formats,
             geometry=geometry,
             strategy=strategy,
@@ -463,6 +479,7 @@ def _build_contract(
             local_intermediates=local_intermediates,
         ),
         "phases": phases,
+        "execution_shape": execution_shape,
         "formats": formats,
         "geometry": geometry,
         "strategy": strategy,
@@ -527,6 +544,11 @@ def _physical_implementation_contract(
         tensor_index=tensor_index,
         artifacts=[_artifact_identity(package_dir, implementation["shader_path"])],
         phases=list(implementation["phases"]),
+        execution_shape=_enum(
+            implementation.get("execution_shape"),
+            _EXECUTION_SHAPES,
+            "physical implementation execution_shape",
+        ),
         formats=deepcopy(implementation["formats"]),
         geometry=geometry,
         strategy=implementation["strategy"],
@@ -549,6 +571,7 @@ def _distributed_kernel_contract(
     tensor_index: Json,
     artifacts: list[ArtifactIdentity],
     phases: list[ExecutionPhase],
+    execution_shape: ExecutionShape,
     formats: PhysicalFormats,
     geometry: ExecutionGeometry,
     workgroup_count_x: int,
@@ -598,6 +621,7 @@ def _distributed_kernel_contract(
             tensor_index=tensor_index,
             artifacts=artifacts,
             phases=phases,
+            execution_shape=execution_shape,
             formats=formats,
             geometry=geometry,
             strategy="tensor_parallel",
@@ -653,6 +677,7 @@ def _distributed_kernel_contract(
             tensor_index=tensor_index,
             artifacts=artifacts,
             phases=phases,
+            execution_shape=execution_shape,
             formats=formats,
             geometry=geometry,
             strategy="tensor_parallel",
@@ -727,6 +752,7 @@ def _distributed_kernel_contract(
             tensor_index=tensor_index,
             artifacts=artifacts,
             phases=phases,
+            execution_shape=execution_shape,
             formats=formats,
             geometry=geometry,
             strategy="expert_parallel",
@@ -988,6 +1014,11 @@ def validate_physical_execution_contract(value: object) -> None:
 
     phases = _list(contract["phases"], "contract.phases")
     _enum_list(phases, _PHASES, "contract.phases")
+    _enum(
+        contract["execution_shape"],
+        _EXECUTION_SHAPES,
+        "contract.execution_shape",
+    )
 
     formats = _mapping(contract["formats"], "contract.formats")
     _keys(

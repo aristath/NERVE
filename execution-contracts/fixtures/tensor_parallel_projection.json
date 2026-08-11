@@ -18,6 +18,7 @@
     "decode",
     "prefill"
   ],
+  "execution_shape": "single_and_multi_lane",
   "formats": {
     "storage": "fp8_e4m3",
     "compute": "fp8_e4m3",

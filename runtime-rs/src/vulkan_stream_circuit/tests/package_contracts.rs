@@ -142,6 +142,38 @@ fn package_rejects_a_contract_for_a_different_operation() {
     assert!(error.contains("disagrees with kernel"));
 }
 
+#[test]
+fn package_rejects_a_canonical_decode_artifact_without_single_lane_support() {
+    let mut manifest = fixture_model_package_manifest();
+    manifest.component_executions[0].kernels[0].physical_execution_contracts[0]
+        .execution_shape = nerve_execution_contracts::ExecutionShape::MultiLane;
+
+    let error = package::validate_physical_execution_contracts(&tiny_model_dir(), &manifest)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("has no canonical decode contract"));
+}
+
+#[test]
+fn package_rejects_a_batch_artifact_without_multi_lane_support() {
+    let mut manifest = fixture_model_package_manifest();
+    let kernel = &mut manifest.component_executions[0].kernels[0];
+    let batch_path = &kernel.batch_implementations[0].stages[0].shader_path;
+    kernel
+        .physical_execution_contracts
+        .iter_mut()
+        .find(|contract| contract.artifacts[0].path == *batch_path)
+        .unwrap()
+        .execution_shape = nerve_execution_contracts::ExecutionShape::SingleLane;
+
+    let error = package::validate_physical_execution_contracts(&tiny_model_dir(), &manifest)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("has no multi-lane physical contract"));
+}
+
 fn parallel_speculative_decoder_with_default(
     id: &str,
     default_draft_tokens: usize,

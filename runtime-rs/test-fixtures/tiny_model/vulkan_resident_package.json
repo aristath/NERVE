@@ -2051,7 +2051,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:1c426b730090b6c01df07b756d23121212617ea2c4ef16e356794060973518db",
+              "implementation_digest": "sha256:e2d4d827c0698f892b813d92b2f677029479a5a3d2a1e29fa42bba542c54f757",
               "phases": [
                 "decode"
               ],
@@ -2099,7 +2099,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "contract_id": "sha256:3403153031d770d205675d1b13e3cc4ad39716b9db9b2f8d6eb9f32a9116ddd3"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:191d73f6610c5c4f2e9ca46bc23dbf0d95ebbbe41e95c3d46460e35a8a8f145d"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -2114,7 +2115,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:250879c9f04b8ccdcf938c2bde7fc37b193448493cbf301e3871ee77347e9895",
+              "implementation_digest": "sha256:fd21a8f3c0dd692057444b98cd6d772136e371d6269b84720785aa87d980ce9c",
               "phases": [
                 "decode",
                 "prefill"
@@ -2166,7 +2167,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "contract_id": "sha256:5546af0a24d0d98b2584d502417c64302643a1567db975007212b1494e9aa59b"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:905ffb50c00c21920dec9e736293cb2e66e55ab42bdffa2bd7945f6fb8a2887f"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -2181,7 +2183,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:c8420f65a3dfc33ed3770846c0fa89c7c36f9ed035cc2324bebac8a4c030a66d",
+              "implementation_digest": "sha256:2f5e7aa3028cba9f2e87cebd42e2fb2f1c7b8ebad72c48a57cead60a327dc73a",
               "phases": [
                 "decode",
                 "prefill"
@@ -2233,7 +2235,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "contract_id": "sha256:a4b14f5352778073d4c58a266dcd200e9fa52e06e61d3a1e2a52f540e1cc96bf"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:b634691a144b4e221f5ce98066cdaaf621fd7ba4679e248bbed35eb64fb274e8"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -2248,7 +2251,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:6cb8b1a9fbf8ba0179b1023f6ad5dae9cf833e88378012e3e784484c5252de47",
+              "implementation_digest": "sha256:6332a4eb1f81dbf8c076acda10d8db1283b8d5d74de114d86e340c3cbace945e",
               "phases": [
                 "decode",
                 "prefill"
@@ -2300,7 +2303,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "contract_id": "sha256:40497dfe6fa92675731fb066f5a33d65476cd7d3e870a61decfe7463889eb33e"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:addcea9c51b422e3cd5936f73e0ec8f9ecb27922e5c17a6081e8709ac41579c9"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -2315,7 +2319,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:1b2878db273497e7d7b4cfd40a792444395693aad1f885e4af2007736fbc3f67",
+              "implementation_digest": "sha256:d592365a91aa3fc1b5587f92c9ec4eb85aace6e1385e6ba970000ef957865f04",
               "phases": [
                 "decode",
                 "prefill"
@@ -2367,7 +2371,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "contract_id": "sha256:bc17393fd551af8ac5c80c9a71d177e257aef4b82c98fdb34d7ec0d30f5e4525"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:293a555deadd03fb60808751e803557b9f0e68c07df5fa03a713eb6f56d4f064"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -2382,7 +2387,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:2fbc417e03f7ac585b0b1e0d153ae77ea62d3269c35042353a91731a837bc94d",
+              "implementation_digest": "sha256:87c5649fd3159934835be42deaef0b088fefb8346a77227c3be4774b871f638f",
               "phases": [
                 "decode",
                 "prefill"
@@ -2434,7 +2439,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "contract_id": "sha256:f01adde0262efc38b2511638052d9ec6d4652e54b025ce66b52998dbf269cddc"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:1b8e6b4217e479addd785369251a0c5352981faab5c2156f34839f6ac8b6f634"
             }
           ]
         },
@@ -2635,7 +2641,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:41f76c6040eefce670bcc34c75bbbd33eae5227f016af1fcc75a799067a43b0c",
+              "implementation_digest": "sha256:a7208a19c8b83870f32546c2c502681b65ee570d709daf9be25a08a971cb9b18",
               "phases": [
                 "decode"
               ],
@@ -2710,7 +2716,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "contract_id": "sha256:6b7dd27b8477ccbcb73cbb5ad9b900b4333824df9ca0fd0cfb4b2ad2d964899e"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:37193e6c944416a63549b0bbfd5d5b61704ebd27f0fedee14c0240dcc48c64a6"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -2728,7 +2735,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:8ee78b6561b16ce29f7391596af987d90b11ab9356f2530934ea35a4a9d1859f",
+              "implementation_digest": "sha256:d7ab7b7f49017e5d34081447a37d2964722561960fbf2a35990581bee3c2a60d",
               "phases": [
                 "prefill"
               ],
@@ -2806,7 +2813,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "contract_id": "sha256:a1ea6f44bffb6749cd90b659bfdb8b8b11657fd04af2061c363afdd14e943fee"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:07b1f43b217d532d0e135dd308ded91a7003bb6035b7f37605796ae513d6463a"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -2824,7 +2832,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:77ee30431cc845b48324d2c6acd1f2504249bea090ee343108e2b727487ca8cf",
+              "implementation_digest": "sha256:cbb89f20693658d781a14b6a9e2e0c4942b44005d1c3166e7f27ddf1c5ec9e3a",
               "phases": [
                 "decode",
                 "prefill"
@@ -2903,7 +2911,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "contract_id": "sha256:4819ace6157128d9eb8fa1a04049ce6f93a0673ff8510058c1bcca8f6877b391"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:fee5a1e2e90982309e28a95f1dee010766f4ae30d69517154b1bc2c1f5661a1f"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -2921,7 +2930,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:f47a48c5ef664e5dbb93778441aa6c77804ad0b9b670503781808044fa144321",
+              "implementation_digest": "sha256:0deb0066436597514e3633b43e2517db454f29a1a8bb521a8e9cb3ef833376ca",
               "phases": [
                 "decode",
                 "prefill"
@@ -3000,7 +3009,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "contract_id": "sha256:4aa4cffc82a023f233fab0b6b24a27b7bc2a274df8c65bf13165f8269be876a0"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:bdf1439569274b7ef2209ceb09af706625dab04fb7d63c048550972365c67056"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -3018,7 +3028,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:ed7facdb135a48bedd4bb98f4993949c83578b822c541a670c0ad7ccbcf1f168",
+              "implementation_digest": "sha256:3b54a9b222040e7ca38a55d9fd933da17e0b0b86a9b7945427da726be9f006de",
               "phases": [
                 "decode",
                 "prefill"
@@ -3097,7 +3107,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "contract_id": "sha256:5a6e6fbb1c81a25542561b41e0a46bf5957a30da5533bf1d6831a7c546a22440"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:cd660a4d358247205772ea065a3c0f7ba51df1c36f4cf22b3aec9b40cafafe20"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -3115,7 +3126,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:733a66339a92ffdce5fb38d21d36fa23c11ad04802b34e080ebd1c117188bec7",
+              "implementation_digest": "sha256:b359951437f9ac06d059132fd238d22aaa192f092133fbc66da41e747ce172aa",
               "phases": [
                 "decode",
                 "prefill"
@@ -3194,7 +3205,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "contract_id": "sha256:fe3513d1b27629c5cb5e57fa59ce564cdcf702b0a5a673e7d77a160ea710faca"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:64412451d18f3610c6dd4a56032d4e0cd8b4c783a7fced63876957d3fac0b267"
             }
           ]
         },
@@ -3256,7 +3268,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:1b8809b15bb4b88e69b8e9bdd6dd13a1ad5a7ccf2b0da07543d2e2af08224b87",
+              "implementation_digest": "sha256:25748f7d4ba363213e21740113f11197f62a2c708130a38c04bd402aa6b3fa4a",
               "phases": [
                 "decode"
               ],
@@ -3295,7 +3307,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.position",
-              "contract_id": "sha256:7b249aa8b7ec98bc84ce6be9d36b118d466b6f8b31f7d527f5819006ad3d0412"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:a27df8d390586992e9fefc78a942d9e36e14eca136e16258d30a8048f392e2ae"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -3310,7 +3323,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:4a858c4087bdae7d4863ef72a18d4f2a1cbff92dd422d3c9dba7fd8192c32dad",
+              "implementation_digest": "sha256:d36c834e86205844696fb53d2161f99fb47314680813edfa78e9ff1c208b164a",
               "phases": [
                 "prefill"
               ],
@@ -3352,7 +3365,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.position",
-              "contract_id": "sha256:aa0e434ffdd7184e723e3fd09119579653bb7ffecb342a6dad271c12ed963a6d"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:31f487e746bb0fca0e5de548660fbf5c8a639feddbe04aa3bef9ea1e588dff01"
             }
           ]
         },
@@ -3414,7 +3428,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:8976f0dea4ae44af571321ca3ac2122d7320eaecfdbbd0afd153a52e6fc7680e",
+              "implementation_digest": "sha256:72d88872a1e54e8d19d4bda7dce9e234459e6d76d7a4e723307a97b3e194c622",
               "phases": [
                 "decode"
               ],
@@ -3453,7 +3467,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.position",
-              "contract_id": "sha256:4f968ede8cc8afd582f3188b8d44b9524a8da96eaf653e53ec9632bc80a843c5"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:84961973a9504502c5cc2312673999600f191ba8b2eb4a62823d401e751597ec"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -3468,7 +3483,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:6223ffce8bccc04e5d2c7f7fa52dfc0a0293cf6e3d5f2f36f07b45e2eb9d4c45",
+              "implementation_digest": "sha256:32233c66a04471f4dfe8b7ed60c2f378d2ea556af1a9ce778a3520fe8b81f5f3",
               "phases": [
                 "prefill"
               ],
@@ -3510,7 +3525,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.position",
-              "contract_id": "sha256:c88dcde8d7b0cbd80f876a69e7da4fd41f66bba01db0dfcbc11206abe13db5ce"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:27154e6c8dd1afcc421806d77b3aefe0822cb44f1d3f7fc0de332d044e6ed52f"
             }
           ]
         },
@@ -3579,7 +3595,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:a218e9d1899ceb34bbb2ce24b6ddea0772acc79d89ba7ea58458cfca39d07d6d",
+              "implementation_digest": "sha256:919590dfe16f9ee9e9784dd5c4297b9764a3e09235dafb1ebaa383d94c6d48dd",
               "phases": [
                 "decode"
               ],
@@ -3637,7 +3653,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.attention_state",
-              "contract_id": "sha256:7a18e089ff73d04261d501da667dc6b90fd9f0897061f53960ad9acefee73552"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:33b4e8a1eb897adf988e7133bf08c121d839b1d1387758e60af8139c32107f31"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -3654,7 +3671,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:7efb9204973730caf3edc3f5ef46f3b95b3c29a2ea9f2bead9f3749655fb0391",
+              "implementation_digest": "sha256:1b890ff9c00f10391e9bd8f3a49c3a47380c53ca41f06813220d1343bae42214",
               "phases": [
                 "prefill"
               ],
@@ -3715,7 +3732,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.attention_state",
-              "contract_id": "sha256:12983f0fdc55efd1deba6f239c00b3246a22e71863c7ae5d6c2916d688099f01"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:3f8ca3e21f4e3b38c73efd34a87b1cbc03e225b64f1bcfe00e74f7dac0c41ff3"
             }
           ]
         },
@@ -3792,7 +3810,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:676b6715a96363f52021f45066e5b80e05209035ee6bd46ba45e5043a1291f6f",
+              "implementation_digest": "sha256:e924d3c8d9162fa65a285604d71b3da1eccd2679d762557b3899e22016305e6b",
               "phases": [
                 "decode"
               ],
@@ -3850,7 +3868,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.attention_state",
-              "contract_id": "sha256:0acc1d659a9760c85789f6a5287ee2f68bfba4c50868770ce5a3ce02fe730110"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:3b6549d082efa7795738cb3c3fe4bb8f392382b79caef08416ca550a036ad6f4"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -3872,7 +3891,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:a02935c8a3bffb1baf77c2e12c1396280690d5cbca79798e168cdeda60f6f2e7",
+              "implementation_digest": "sha256:bbe408c6fca16e9f679bb6ad6979f01a6f8c727e6f7d93df4c12fe5a8d17f83c",
               "phases": [
                 "prefill"
               ],
@@ -3933,7 +3952,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.attention_state",
-              "contract_id": "sha256:3a14520fff46b2b9fd569fc10692cb9bcf7d35c2f01327736e6afdf8a25a94e4"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:feabf1287fcf41b00c3af645e8f975c2253d1a984a00ce9288bc6afa29e959fd"
             }
           ]
         },
@@ -4133,7 +4153,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:00f75a397dea451010680b1b2a154ce04a4459088463d444d24f3a5a99f49463",
+              "implementation_digest": "sha256:bae92f34929d18384956dbfb51c19da0d92abc9ebf104e82a6d60f08cc676d06",
               "phases": [
                 "decode"
               ],
@@ -4186,7 +4206,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "contract_id": "sha256:6ab5a2b73e2e4d3ac64cbb08ff5176a30953e5fb251be79f4af4dc009a03deb8"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:99a2337898f682955e8e9129e8e5f1dc74b24178a15170f952272a1f4640a1af"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -4203,7 +4224,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:bacc347eabc4538d1bbb802b988a16eb2b121037567522e4ae185fdcf029e2ab",
+              "implementation_digest": "sha256:7182591e0e74c11e47cf980e9c7d7fbcbb2e80684f6b4cc3c59846234ed90346",
               "phases": [
                 "prefill"
               ],
@@ -4259,7 +4280,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "contract_id": "sha256:d4aefefc67fa0054312f93bb03ab7b35c2dc2c208e2c3ca1f60b51dcadf9caee"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:a3664fa2ab2fd477025d93d11ff2f5a5ddaf86c98821f2e16b81e280b749322b"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -4276,7 +4298,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:671f2f345f10f3642a2610f24f4e3f355de7500bb19d93994b5b32658133ca84",
+              "implementation_digest": "sha256:b6b04954e982ee75c9bb2c7d359f06563d879c76258c3963f06fa91b6d4e62e7",
               "phases": [
                 "decode",
                 "prefill"
@@ -4333,7 +4355,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "contract_id": "sha256:1e1eb116ebf8bd3f7bd44c70053d7e07cf1b9b3f61c0a5ab0ba60fb72ae48844"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:fa6fd4e1b7d4df32c1e4bf4b4b205d6dfd970cfc1fdf7f1df0cbccccf0a09004"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -4350,7 +4373,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:5394e9d5af4360f5a0ef10acb9efb7f7b320864fd21557632a389667082fec96",
+              "implementation_digest": "sha256:bfbd591b7606e0456c1a2076e63315d11b098b2fe7268aa4e7dea8900f551809",
               "phases": [
                 "decode",
                 "prefill"
@@ -4407,7 +4430,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "contract_id": "sha256:81aedf3cca9466de912908244d4fcff3fb10297eef2f8db64b51e342cfd99151"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:517f0605ec3cdacadcdf8b9185e8378045a284a1a595731dccb0025c3c0777d9"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -4424,7 +4448,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:1d2fed9283941abe12a111d539aec2c25fb52445c187a3c510472c4dd28b8230",
+              "implementation_digest": "sha256:590a249f07f1df492e76ba204d50aed0707f61770f9fd15cec8ec58c9d193263",
               "phases": [
                 "decode",
                 "prefill"
@@ -4481,7 +4505,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "contract_id": "sha256:2be4ea27a55d220352af73021085dad1cc48509f20cb251af453e75ee0aa28d3"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:a3aad6f2b6fc4c3d0a6b061f3ee7cac5d880c65eaa810728e784e8aee19b4edc"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -4498,7 +4523,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:6aa232d084af8cb7762dd2099bbe9adec9893cbfd818cb8ab2a3f4e71761d9e1",
+              "implementation_digest": "sha256:af5ab3613970d1db3cd3ee1a15bb6dad73d60cb07d9f2eefa3f5de7559176fcd",
               "phases": [
                 "decode",
                 "prefill"
@@ -4555,7 +4580,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "contract_id": "sha256:11099eaf390708d2cd176ab753d720f643ee628b690d1ef8a7385e967a7c67dd"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:223c6f88c00f9d3ecae79b5c07b9b889d41085fa9b3c54ac6c1966da3c780c19"
             }
           ]
         },
@@ -4738,7 +4764,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:1c426b730090b6c01df07b756d23121212617ea2c4ef16e356794060973518db",
+              "implementation_digest": "sha256:e2d4d827c0698f892b813d92b2f677029479a5a3d2a1e29fa42bba542c54f757",
               "phases": [
                 "decode"
               ],
@@ -4786,7 +4812,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "contract_id": "sha256:a94b1eedbfcb140a707383e1b1df74ae9da11496e23be1059a648ee64fe233c0"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:6f31f90d852b043276fb004822db5ae5a25cccda997e5ec8bd58efcfa22735fe"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -4801,7 +4828,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:250879c9f04b8ccdcf938c2bde7fc37b193448493cbf301e3871ee77347e9895",
+              "implementation_digest": "sha256:fd21a8f3c0dd692057444b98cd6d772136e371d6269b84720785aa87d980ce9c",
               "phases": [
                 "decode",
                 "prefill"
@@ -4853,7 +4880,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "contract_id": "sha256:f5624e3089680844d4011befd4729414ec733908051570cd8e4e7a0595f3474d"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:666b06c87b70740dfd2c567a6cad6fec7e49b1b880f3c433252da62bc9585120"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -4868,7 +4896,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:c8420f65a3dfc33ed3770846c0fa89c7c36f9ed035cc2324bebac8a4c030a66d",
+              "implementation_digest": "sha256:2f5e7aa3028cba9f2e87cebd42e2fb2f1c7b8ebad72c48a57cead60a327dc73a",
               "phases": [
                 "decode",
                 "prefill"
@@ -4920,7 +4948,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "contract_id": "sha256:35b8841c25e103d2adf4c058687801f307c3ee56e5362d0a86e53308551bb571"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:aee6ac9a1f49399086b0df1bc020a39378763cc9790156492648e2808b422bf3"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -4935,7 +4964,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:6cb8b1a9fbf8ba0179b1023f6ad5dae9cf833e88378012e3e784484c5252de47",
+              "implementation_digest": "sha256:6332a4eb1f81dbf8c076acda10d8db1283b8d5d74de114d86e340c3cbace945e",
               "phases": [
                 "decode",
                 "prefill"
@@ -4987,7 +5016,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "contract_id": "sha256:00d626c20f2b7bb5adaba355ac26d3d33a389b6227a7884f81615d70e676eb63"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:f0485b9914b8941b7286e276c7b44c427a1e5a413eb6f268580661d9bdc42beb"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -5002,7 +5032,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:1b2878db273497e7d7b4cfd40a792444395693aad1f885e4af2007736fbc3f67",
+              "implementation_digest": "sha256:d592365a91aa3fc1b5587f92c9ec4eb85aace6e1385e6ba970000ef957865f04",
               "phases": [
                 "decode",
                 "prefill"
@@ -5054,7 +5084,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "contract_id": "sha256:bec1cb63ff0eeaf0ea3e1457db3ed1a29c01d752838d19b9538ec0655fbd56c3"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:0bc0f919e6c44d031ced3f2157ab5e86adca395fc9762382407cd301ca2bf1c1"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -5069,7 +5100,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:2fbc417e03f7ac585b0b1e0d153ae77ea62d3269c35042353a91731a837bc94d",
+              "implementation_digest": "sha256:87c5649fd3159934835be42deaef0b088fefb8346a77227c3be4774b871f638f",
               "phases": [
                 "decode",
                 "prefill"
@@ -5121,7 +5152,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "contract_id": "sha256:81014c13b3b4ea5695178fe8c22a9d5b03bb8b1a853f609f35f19d6ac7c5a3c0"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:b9aff28596c0dde0c46b7e4ee471b3d0f531870c3aab30cc92e5cf3c0781ce4a"
             }
           ]
         },
@@ -5326,7 +5358,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:0995db965b158d1b18f55cb84cb7c2ac42e57be7aa24abece4b2569c374c0eaf",
+              "implementation_digest": "sha256:6c2ef18215bd3b87fc795d6af7c1b402da037f153b88177e3520778afda79c9c",
               "phases": [
                 "decode"
               ],
@@ -5384,7 +5416,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:5c82e22e42b907c069404a4fc625e608637c8493ad740855b7512e466513c34a"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:659f60df37e689e9184083d35c9f5b0452fc334e1fc995c2d7d91df6580729ba"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -5403,7 +5436,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:8d375a52e582499183ea9c9fc48b0af155d5a4562afb69eb6973fdadf1894201",
+              "implementation_digest": "sha256:6223654fb6838d3f462ce0ae7c6a95e0121bad2eda6ab619bda3a10c9eb20650",
               "phases": [
                 "decode"
               ],
@@ -5489,7 +5522,8 @@
                 "origin": "local_zero"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:c19789a9208607785a4787b48d6f4f11afb1770260dd4318de2c5a2f10c7aece"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:113e2fd94491414f906984822e5014078252784d022fc2cf17866529be74627e"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -5508,7 +5542,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:c0d02d688f3d6f52c9fd12d48b2c185e4f7da0f8ee3effad50d22530791f4938",
+              "implementation_digest": "sha256:c39e422484e55710978fb932fc6c55b4078713c9a02c1c895d600e9ca0436357",
               "phases": [
                 "prefill"
               ],
@@ -5569,7 +5603,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:8bc4501b5551daa64dc56c9372ffaa433bf0720514c845f760ae1cdffb4ca79b"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:1604d2673cf7a54e5cf46d8f14a73baa9fbdfbd75eebfec4e60d20619440d30b"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -5588,7 +5623,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:edb048e840470a7b15afc97f7752c58428465c42ee5f37b89cdfada4258e9f2c",
+              "implementation_digest": "sha256:f396a9f26e5ba31a8643bd631b8d7209698228a29d0fb1df783f558dcce1412a",
               "phases": [
                 "decode",
                 "prefill"
@@ -5650,7 +5685,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:9ac5e4b91ae3c3d88ae807a0b13cb31901b1e06eefa15043a54cc43c1504851a"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:a9353d4a6313405c5dc55a0011370451d0e15f27bb59c2f148351542f5ddb260"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -5669,7 +5705,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:0d16d5e5f1d348dcfb9c61621aa47acdc20d4b60d2cf7630c1af87f46cde0031",
+              "implementation_digest": "sha256:92ce9afdcffc799dac414459f5d7a82ba05ec4c7becb426f1c502972e2b4a3cb",
               "phases": [
                 "decode",
                 "prefill"
@@ -5731,7 +5767,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:6438c4af4966e87d2b125706241c33373f314624984f90e5302de7b1fe00b2fa"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:61e385ce39d2dc21b3e3da66b7a34c83881da845e8573ec5849858aff0c24a08"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -5750,7 +5787,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:03744f8441d91fd5ee68538f121d26396153879ae50c18e4c6b80a1c83d298c7",
+              "implementation_digest": "sha256:a44fe21a2a359d709145ca4def98df8ba7adf4f19ee3d11a85997fceaa4195e2",
               "phases": [
                 "decode",
                 "prefill"
@@ -5812,7 +5849,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:148e668bd54cb29d81b25db231fb90c828bee9add3dd3961d9b8ff9de9b27477"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:84f3ca903815919d965aafd0260e0e69ac692fbd810d052db890b57f6e3a72fb"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -5831,7 +5869,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:02517e59ae7a7872543ed1a7bd280b4f8aee3ee73e0de2dc51a7263a880bc1e2",
+              "implementation_digest": "sha256:a2babb6009425bb0e25436c74ecf7925455d9907700381632226d769c9ad3703",
               "phases": [
                 "decode",
                 "prefill"
@@ -5893,7 +5931,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:73889e6f1cf20311ae65357d0dcb7150ad25c4622074646c3cbf7c7539333dff"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:01611aa7051f022de223cc66a8672cd9d8eeee3859495d1d10c6ddd89203e6b6"
             }
           ]
         },
@@ -6093,7 +6132,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:a638cf09c029a48965deb64daf2550f82742e6c56a876b352b987de15a26996b",
+              "implementation_digest": "sha256:981682a62b674519c56e2b497389cab7c6cc5c48e388f9600396c00eebe29584",
               "phases": [
                 "decode"
               ],
@@ -6146,7 +6185,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "contract_id": "sha256:853b66d0a599e50571ae3f74893b82d9e4822ba9918a0eabaacaf9a6f0dda0c5"
+              "execution_shape": "single_lane",
+              "contract_id": "sha256:c165c1bd3244e7571e6dc55857244a87a7b63bf73579d78dcdf2e91c1b8ab5a5"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -6163,7 +6203,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:8104c50ab4522f11597983f52ec6433d0468b385c32f68dd1c43477588fe7dbf",
+              "implementation_digest": "sha256:a6c2357fe93f327daf6c32771cd619f907463909de88acb18c568f42f189075a",
               "phases": [
                 "prefill"
               ],
@@ -6219,7 +6259,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "contract_id": "sha256:bd63e446ff9e8907e69f871e26d36c9506c025d17e500fa4413e40632620155c"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:3ea0384addd7c80938879dbe746aa4bf2283125f0c735270a15364864a606d05"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -6236,7 +6277,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:23d43f3f49dd46a4d2260cbb817d735ee8fe772cacd8345c695ba789873edf63",
+              "implementation_digest": "sha256:ae8b5125882695df0f643fa888e76ec831b44633c89772a5832472bc059fc2a9",
               "phases": [
                 "decode",
                 "prefill"
@@ -6293,7 +6334,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "contract_id": "sha256:821dd97e0bfe14ddaaa7bd42660e9d1c333df6160def0716541739d3c80f142f"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:0546e6b8d636beda8c465fb0e003ae5cc682da21f4edc088b6c2b1e9d3a955c2"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -6310,7 +6352,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:1e172257909455ac20945dadea7383dcd604f20403e2b143ae5ca17ee46dfed3",
+              "implementation_digest": "sha256:7175ecb650b37691aacba53fb2d381ee9e31c09453e398b6dff86e1c43f050b2",
               "phases": [
                 "decode",
                 "prefill"
@@ -6367,7 +6409,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "contract_id": "sha256:a0433b328a1c686b06484c1bbdd3c06893fb99408ddded6016ae293c517288e4"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:b37580ad0c6ac34afa508c9050648a8cd0a8abbb9943ac06ac0b7f2025bea7e6"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -6384,7 +6427,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:914fecce788f2e9aaf34c50b4a4a6d35dd4aa8f80beb671e5b30c6acff3fa876",
+              "implementation_digest": "sha256:12c6e8cd89e6bb26d3c6fc6658a411cc4b8111a5dfefe0d9f7aaa83bf3b32999",
               "phases": [
                 "decode",
                 "prefill"
@@ -6441,7 +6484,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "contract_id": "sha256:9eb780c638ffcf39358fc87524f0080adb77515ec0f6f5b830e7cdb50a8f1932"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:98efab0a8173ee235f258288762e249139c3cdc088779cbac874c421e7634c77"
             },
             {
               "schema": "nerve.physical_execution_contract.v1",
@@ -6458,7 +6502,7 @@
                   "entry_point": "main"
                 }
               ],
-              "implementation_digest": "sha256:c298525184db2a29540ba423b33b1963a1cfdc95cc37db946438e01dd30b0e9c",
+              "implementation_digest": "sha256:5e1b7e5aff70ebeb9c6dc4300bfa04e284af845c184f31199e264684ec812691",
               "phases": [
                 "decode",
                 "prefill"
@@ -6515,7 +6559,8 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "contract_id": "sha256:ebdf68d2af13ad61b088dc5bab027855885604d17d6a3ff39ad456ec0cdd1837"
+              "execution_shape": "multi_lane",
+              "contract_id": "sha256:9ff92c1ed9f93882ff6bd6361fbd7edb9f8baaf0d883e55f4aa1e681d6465e6d"
             }
           ]
         }

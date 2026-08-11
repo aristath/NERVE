@@ -23,6 +23,20 @@ pub enum ExecutionPhase {
     Prefill,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionShape {
+    SingleLane,
+    MultiLane,
+    SingleAndMultiLane,
+}
+
+impl ExecutionShape {
+    pub fn supports(self, requested: Self) -> bool {
+        self == requested || self == Self::SingleAndMultiLane
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionStrategy {
@@ -267,6 +281,7 @@ pub struct PhysicalExecutionContract {
     pub artifacts: Vec<ArtifactIdentity>,
     pub implementation_digest: String,
     pub phases: Vec<ExecutionPhase>,
+    pub execution_shape: ExecutionShape,
     pub formats: PhysicalFormats,
     pub geometry: ExecutionGeometry,
     pub strategy: ExecutionStrategy,
@@ -788,6 +803,7 @@ mod tests {
             }],
             implementation_digest: digest('c'),
             phases: vec![ExecutionPhase::Decode, ExecutionPhase::Prefill],
+            execution_shape: ExecutionShape::SingleAndMultiLane,
             formats: PhysicalFormats {
                 storage: "fp8_e4m3".to_string(),
                 compute: "fp8_e4m3".to_string(),
@@ -860,6 +876,14 @@ mod tests {
         let encoded = serde_json::to_string(&contract).unwrap();
         let decoded: PhysicalExecutionContract = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, contract);
+    }
+
+    #[test]
+    fn execution_shape_support_is_explicit() {
+        assert!(ExecutionShape::SingleLane.supports(ExecutionShape::SingleLane));
+        assert!(!ExecutionShape::SingleLane.supports(ExecutionShape::MultiLane));
+        assert!(ExecutionShape::SingleAndMultiLane.supports(ExecutionShape::SingleLane));
+        assert!(ExecutionShape::SingleAndMultiLane.supports(ExecutionShape::MultiLane));
     }
 
     #[test]
