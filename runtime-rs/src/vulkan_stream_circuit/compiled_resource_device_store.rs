@@ -463,7 +463,11 @@ impl std::fmt::Debug for VulkanCompiledResourceDeviceMemoryReclaimer {
 }
 
 impl VulkanDeviceLocalMemoryReclaimer for VulkanCompiledResourceDeviceMemoryReclaimer {
-    fn reclaim_device_local_memory(&self, requested_bytes: usize) -> Result<usize, VulkanError> {
+    fn reclaim_device_local_memory(
+        &self,
+        _quiescence: crate::vulkan_compute::VulkanDeviceLocalMemoryQuiescence,
+        requested_bytes: usize,
+    ) -> Result<usize, VulkanError> {
         let Some(store) = self.store.upgrade() else {
             return Ok(0);
         };
@@ -1103,7 +1107,7 @@ impl VulkanCompiledResourceDeviceStore {
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
         device
-            .ensure_device_local_memory_headroom()
+            .restore_device_local_memory_headroom_after_quiescence()
             .map_err(compiled_device_store_vulkan_error)?;
         let _load = self.begin_load_operation()?;
         let shared_host_mutation = self

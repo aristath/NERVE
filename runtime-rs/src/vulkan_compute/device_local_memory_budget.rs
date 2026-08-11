@@ -7,6 +7,7 @@ pub const VULKAN_DEVICE_LOCAL_RESERVABLE_FRACTION_PPM: u64 =
         - VULKAN_DEVICE_LOCAL_PROTECTED_HEADROOM_FRACTION_PPM;
 const VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_BYTE_CAP: u64 = 16 * 1024 * 1024;
 const VULKAN_DEVICE_LOCAL_COUNTER_TOLERANCE_HEADROOM_DIVISOR: u64 = 4;
+const VULKAN_DEVICE_LOCAL_PRESSURE_RECOVERY_HEADROOM_DIVISOR: u64 = 16;
 const VULKAN_DEVICE_LOCAL_MEMORY_OBSERVER_INTERVAL: Duration = Duration::from_millis(25);
 const VULKAN_EXECUTION_HEADROOM_OBSERVATION_MAXIMUM_AGE: Duration = Duration::from_millis(100);
 
@@ -59,6 +60,24 @@ pub struct VulkanDeviceLocalMemoryAccounting {
     pub admissible_remaining_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct VulkanDeviceLocalMemoryPressure {
+    pub active: bool,
+    pub episode: u64,
+    pub observed_available_bytes: u64,
+    pub current_deficit_bytes: u64,
+    pub peak_deficit_bytes: u64,
+}
+
+/// Proof that all queues owned by a physical device were quiesced immediately
+/// before a reclamation transaction began. Construction is deliberately kept
+/// inside the Vulkan compute layer so observation and ordinary allocation code
+/// cannot release physical backing.
+#[derive(Clone, Copy, Debug)]
+pub struct VulkanDeviceLocalMemoryQuiescence {
+    _private: (),
+}
+
 #[derive(Debug)]
 struct VulkanDeviceLocalMemoryBudgetTracker {
     budget: VulkanDeviceLocalMemoryBudget,
@@ -66,12 +85,17 @@ struct VulkanDeviceLocalMemoryBudgetTracker {
     pending_reservation_bytes: u64,
     allocation_generation: u64,
     execution_memory_observation: Option<(Instant, u64, u64)>,
+    pressure: VulkanDeviceLocalMemoryPressure,
     next_reclaimer_id: u64,
     reclaimers: BTreeMap<u64, std::sync::Weak<dyn VulkanDeviceLocalMemoryReclaimer>>,
 }
 
 pub trait VulkanDeviceLocalMemoryReclaimer: std::fmt::Debug + Send + Sync {
-    fn reclaim_device_local_memory(&self, requested_bytes: usize) -> Result<usize, VulkanError>;
+    fn reclaim_device_local_memory(
+        &self,
+        quiescence: VulkanDeviceLocalMemoryQuiescence,
+        requested_bytes: usize,
+    ) -> Result<usize, VulkanError>;
 }
 
 #[derive(Debug)]
@@ -101,6 +125,7 @@ impl VulkanDeviceLocalMemoryBudgetTracker {
             pending_reservation_bytes: 0,
             allocation_generation: 0,
             execution_memory_observation: None,
+            pressure: VulkanDeviceLocalMemoryPressure::default(),
             next_reclaimer_id: 0,
             reclaimers: BTreeMap::new(),
         }
@@ -250,7 +275,49 @@ impl VulkanDeviceLocalMemoryBudgetTracker {
             available_bytes,
             allocation_generation,
         ));
+        state.record_pressure_observation(available_bytes);
         Ok(true)
+    }
+
+    fn record_pressure_observation(&mut self, available_bytes: u64) {
+        let deficit = self
+            .budget
+            .protected_headroom_deficit_at(available_bytes);
+        if !self.pressure.active && deficit > 0 {
+            self.pressure.active = true;
+            self.pressure.episode = self.pressure.episode.wrapping_add(1);
+            self.pressure.peak_deficit_bytes = deficit;
+        } else if self.pressure.active {
+            self.pressure.peak_deficit_bytes =
+                self.pressure.peak_deficit_bytes.max(deficit);
+            let recovery_margin = self
+                .budget
+                .protected_headroom_bytes
+                .checked_div(VULKAN_DEVICE_LOCAL_PRESSURE_RECOVERY_HEADROOM_DIVISOR)
+                .unwrap_or(0)
+                .max(self.budget.counter_tolerance_bytes);
+            let recovered_at = self
+                .budget
+                .protected_headroom_bytes
+                .saturating_add(recovery_margin);
+            if available_bytes >= recovered_at {
+                self.pressure.active = false;
+                self.pressure.peak_deficit_bytes = 0;
+            }
+        }
+        self.pressure.observed_available_bytes = available_bytes;
+        self.pressure.current_deficit_bytes = deficit;
+    }
+
+    fn pressure(
+        tracker: &Arc<Mutex<Self>>,
+    ) -> Result<VulkanDeviceLocalMemoryPressure, VulkanError> {
+        tracker
+            .lock()
+            .map(|state| state.pressure)
+            .map_err(|_| {
+                VulkanError("device-local memory budget tracker was poisoned".to_string())
+            })
     }
 
     fn allocation_generation(tracker: &Arc<Mutex<Self>>) -> Result<u64, VulkanError> {
@@ -299,47 +366,11 @@ fn start_device_local_memory_observer(
                 memory_budget_supported,
                 device_local_memory_bytes,
             );
-            let recorded = VulkanDeviceLocalMemoryBudgetTracker::record_execution_observation(
+            let _ = VulkanDeviceLocalMemoryBudgetTracker::record_execution_observation(
                 &tracker,
                 allocation_generation,
                 available_bytes,
-            )
-            .unwrap_or(false);
-            if recorded {
-                let budget = tracker.lock().ok().map(|state| state.budget);
-                if let Some(budget) = budget
-                    && budget.protected_headroom_deficit_at(available_bytes) > 0
-                    && let Ok(reclaimers) =
-                        VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(&tracker)
-                    && !reclaimers.is_empty()
-                {
-                    let _ = restore_protected_device_local_headroom(
-                        budget,
-                        reclaimers,
-                        Duration::from_millis(250),
-                        || {
-                            let currently_available_bytes =
-                                query_available_device_local_memory_bytes(
-                                    &context.instance,
-                                    physical_device,
-                                    memory_budget_supported,
-                                    device_local_memory_bytes,
-                                );
-                            tracker
-                                .lock()
-                                .map(|state| {
-                                    state.accounting_at(currently_available_bytes)
-                                })
-                                .map_err(|_| {
-                                    VulkanError(
-                                        "device-local memory budget tracker was poisoned"
-                                            .to_string(),
-                                    )
-                                })
-                        },
-                    );
-                }
-            }
+            );
             drop(tracker);
             std::thread::sleep(VULKAN_DEVICE_LOCAL_MEMORY_OBSERVER_INTERVAL);
         })
@@ -354,6 +385,7 @@ fn start_device_local_memory_observer(
 fn restore_protected_device_local_headroom(
     budget: VulkanDeviceLocalMemoryBudget,
     reclaimers: Vec<Arc<dyn VulkanDeviceLocalMemoryReclaimer>>,
+    quiescence: VulkanDeviceLocalMemoryQuiescence,
     settlement_timeout: Duration,
     mut current_accounting: impl FnMut() -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError>,
 ) -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError> {
@@ -374,7 +406,7 @@ fn restore_protected_device_local_headroom(
     let mut reclaimer_errors = Vec::new();
     for reclaimer in reclaimers {
         let requested_bytes = usize::try_from(deficit).unwrap_or(usize::MAX);
-        match reclaimer.reclaim_device_local_memory(requested_bytes) {
+        match reclaimer.reclaim_device_local_memory(quiescence, requested_bytes) {
             Ok(reclaimed) => reclaimed_bytes = reclaimed_bytes.saturating_add(reclaimed),
             Err(error) => reclaimer_errors.push(error.to_string()),
         }

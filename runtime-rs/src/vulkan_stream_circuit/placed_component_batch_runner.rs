@@ -621,7 +621,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 }
             })?;
             device
-                .ensure_device_local_memory_headroom()
+                .validate_device_local_memory_headroom()
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }
         Ok(())

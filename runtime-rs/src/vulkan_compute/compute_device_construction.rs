@@ -153,10 +153,10 @@ impl VulkanComputeDevice {
             })
     }
 
-    /// Restores the device-local headroom protected when this physical device
-    /// was opened. Residency reclaimers retire evictable resources through
-    /// queue-ordered address invalidation before releasing their allocations.
-    pub fn ensure_device_local_memory_headroom(
+    /// Validates the device-local headroom protected when this physical device
+    /// was opened. This is an observation-only hot-path check: it must never
+    /// destroy or create Vulkan memory.
+    pub fn validate_device_local_memory_headroom(
         &self,
     ) -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError> {
         let recent = VulkanDeviceLocalMemoryBudgetTracker::recent_execution_accounting(
@@ -178,12 +178,47 @@ impl VulkanComputeDevice {
         {
             return Ok(recent);
         }
+        Err(VulkanError(format!(
+            "device-local execution paused: only {} bytes are currently available, below the protected {}-byte headroom ({} bytes of counter tolerance); physical reclamation is only legal after explicit queue quiescence",
+            recent.currently_available_bytes,
+            self.device_local_memory_budget.protected_headroom_bytes,
+            self.device_local_memory_budget.counter_tolerance_bytes,
+        )))
+    }
+
+    pub fn device_local_memory_pressure(
+        &self,
+    ) -> Result<VulkanDeviceLocalMemoryPressure, VulkanError> {
+        VulkanDeviceLocalMemoryBudgetTracker::pressure(
+            &self.device_local_memory_budget_tracker,
+        )
+    }
+
+    /// Reclaims device-local backing only after both queues have reached a
+    /// known completion boundary. Callers must use this as a scheduler pause,
+    /// never as an allocation retry or a background-observer callback.
+    pub fn restore_device_local_memory_headroom_after_quiescence(
+        &self,
+    ) -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError> {
+        let recent = match self.validate_device_local_memory_headroom() {
+            Ok(accounting) => return Ok(accounting),
+            Err(_) => self.device_local_memory_accounting()?,
+        };
+        if self
+            .device_local_memory_budget
+            .protected_headroom_deficit_at(recent.currently_available_bytes)
+            == 0
+        {
+            return Ok(recent);
+        }
+        self.quiesce()?;
         let reclaimers = VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(
             &self.device_local_memory_budget_tracker,
         )?;
         restore_protected_device_local_headroom(
             self.device_local_memory_budget,
             reclaimers,
+            VulkanDeviceLocalMemoryQuiescence { _private: () },
             Duration::from_millis(250),
             || self.device_local_memory_accounting(),
         )
@@ -193,67 +228,11 @@ impl VulkanComputeDevice {
         &self,
         byte_count: u64,
     ) -> Result<Arc<VulkanDeviceLocalMemoryReservation>, VulkanError> {
-        let initial = VulkanDeviceLocalMemoryReservation::acquire(
+        VulkanDeviceLocalMemoryReservation::acquire(
             &self.device_local_memory_budget_tracker,
             self.available_device_local_memory_bytes(),
             byte_count,
-        );
-        let Err(initial_error) = initial else {
-            return initial;
-        };
-        let requested_bytes = usize::try_from(byte_count).map_err(|_| {
-            VulkanError("device-local allocation request exceeds usize".to_string())
-        })?;
-        let reclaimers = VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(
-            &self.device_local_memory_budget_tracker,
-        )?;
-        if reclaimers.is_empty() {
-            return Err(initial_error);
-        }
-        let mut reclaimed_bytes = 0usize;
-        let mut reclaimer_errors = Vec::new();
-        for reclaimer in reclaimers {
-            let available_bytes = self
-                .device_local_memory_accounting()?
-                .admissible_remaining_bytes;
-            let requested_reclaim_bytes = usize::try_from(
-                byte_count.saturating_sub(available_bytes),
-            )
-            .unwrap_or(requested_bytes);
-            if requested_reclaim_bytes == 0 {
-                return VulkanDeviceLocalMemoryReservation::acquire(
-                    &self.device_local_memory_budget_tracker,
-                    self.available_device_local_memory_bytes(),
-                    byte_count,
-                );
-            }
-            match reclaimer.reclaim_device_local_memory(requested_reclaim_bytes) {
-                Ok(reclaimed) => reclaimed_bytes = reclaimed_bytes.saturating_add(reclaimed),
-                Err(error) => reclaimer_errors.push(error.to_string()),
-            }
-            let started = Instant::now();
-            loop {
-                match VulkanDeviceLocalMemoryReservation::acquire(
-                    &self.device_local_memory_budget_tracker,
-                    self.available_device_local_memory_bytes(),
-                    byte_count,
-                ) {
-                    Ok(reservation) => return Ok(reservation),
-                    Err(_) if started.elapsed() < Duration::from_millis(250) => {
-                        std::thread::sleep(Duration::from_micros(100));
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-        Err(VulkanError(format!(
-            "{initial_error}; registered evictable stores released {reclaimed_bytes} bytes but the allocation still could not be admitted{}",
-            if reclaimer_errors.is_empty() {
-                String::new()
-            } else {
-                format!("; reclaimer errors: {}", reclaimer_errors.join(" | "))
-            }
-        )))
+        )
     }
 
     pub fn register_device_local_memory_reclaimer(

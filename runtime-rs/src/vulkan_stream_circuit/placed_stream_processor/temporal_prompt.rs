@@ -456,7 +456,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 // allocator-triggered reclaim retires addresses in consumer
                 // queue order before later work can observe them.
                 device
-                    .ensure_device_local_memory_headroom()
+                    .validate_device_local_memory_headroom()
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             }
         }
