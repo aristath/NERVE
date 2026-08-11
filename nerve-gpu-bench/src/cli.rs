@@ -31,6 +31,10 @@ pub enum Command {
         target_ids: Vec<String>,
         output: PathBuf,
     },
+    MergeCatalogs {
+        inputs: Vec<PathBuf>,
+        output: PathBuf,
+    },
     Run {
         output: Option<PathBuf>,
         payload_bytes: usize,
@@ -79,12 +83,56 @@ where
         "summarize" => parse_input_file_command("summarize", args.collect()),
         "validate" => parse_validate(args.collect()),
         "calibrate-package" => parse_calibrate_package(args.collect()),
+        "merge-catalogs" => parse_merge_catalogs(args.collect()),
         "run" => parse_run(args.collect()),
         other => Err(CliError(format!(
             "unknown command {other:?}\n\n{}",
             usage()
         ))),
     }
+}
+
+fn parse_merge_catalogs(arguments: Vec<String>) -> Result<Command, CliError> {
+    let mut inputs = Vec::new();
+    let mut output = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--input" => inputs.push(PathBuf::from(required_value(
+                &arguments, &mut index, "--input",
+            )?)),
+            "--output" => {
+                let value = PathBuf::from(required_value(&arguments, &mut index, "--output")?);
+                if output.replace(value).is_some() {
+                    return Err(CliError("--output may only be specified once".to_string()));
+                }
+            }
+            other => {
+                return Err(CliError(format!(
+                    "unknown merge-catalogs argument {other:?}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+        index += 1;
+    }
+    if inputs.len() < 2 {
+        return Err(CliError(
+            "merge-catalogs requires at least two --input paths".to_string(),
+        ));
+    }
+    let mut distinct_inputs = inputs.clone();
+    distinct_inputs.sort();
+    distinct_inputs.dedup();
+    if distinct_inputs.len() != inputs.len() {
+        return Err(CliError(
+            "merge-catalogs requires distinct input paths".to_string(),
+        ));
+    }
+    let output =
+        output.ok_or_else(|| CliError("merge-catalogs requires --output PATH".to_string()))?;
+    Ok(Command::MergeCatalogs { inputs, output })
 }
 
 fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> {
@@ -405,7 +453,7 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -796,5 +844,59 @@ mod tests {
                 "{option} produced {error}"
             );
         }
+    }
+
+    #[test]
+    fn parses_exact_catalog_merge() {
+        assert_eq!(
+            parse_args(
+                [
+                    "merge-catalogs",
+                    "--input",
+                    "owner-a.json",
+                    "--input",
+                    "owner-b.json",
+                    "--output",
+                    "merged.json",
+                ]
+                .map(str::to_string),
+            )
+            .unwrap(),
+            Command::MergeCatalogs {
+                inputs: vec![PathBuf::from("owner-a.json"), PathBuf::from("owner-b.json"),],
+                output: PathBuf::from("merged.json"),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_underspecified_or_duplicate_catalog_merge() {
+        let one_input = parse_args(
+            [
+                "merge-catalogs",
+                "--input",
+                "one.json",
+                "--output",
+                "merged.json",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(one_input.to_string().contains("at least two"));
+
+        let duplicate = parse_args(
+            [
+                "merge-catalogs",
+                "--input",
+                "one.json",
+                "--input",
+                "one.json",
+                "--output",
+                "merged.json",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("distinct input"));
     }
 }

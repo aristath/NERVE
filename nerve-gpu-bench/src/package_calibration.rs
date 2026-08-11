@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use nerve_runtime::{
     VulkanComputeDevice, VulkanComputeDeviceCatalog, VulkanDeviceLocalMemoryAccounting,
@@ -17,6 +16,7 @@ use nerve_runtime::{
 };
 
 use crate::cli::PackageCalibrationPhase;
+use crate::output::write_atomic;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DeviceCalibrationSnapshot {
@@ -351,49 +351,13 @@ fn verify_device_snapshots_restored(
     Ok(())
 }
 
-fn write_atomic(path: &Path, payload: &[u8]) -> Result<(), io::Error> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("placement-calibration"),
-        std::process::id(),
-        nonce,
-    ));
-    let write_result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(payload)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)?;
-        OpenOptions::new().read(true).open(parent)?.sync_all()
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    write_result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn temporary_test_directory(name: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
@@ -492,20 +456,6 @@ mod tests {
                 .unwrap_err()
                 .contains("changed identity")
         );
-    }
-
-    #[test]
-    fn atomic_catalog_write_replaces_only_the_requested_output() {
-        let directory = temporary_test_directory("atomic-catalog");
-        fs::create_dir_all(&directory).unwrap();
-        let output = directory.join("catalog.json");
-        fs::write(&output, b"stale").unwrap();
-
-        write_atomic(&output, b"{\"schema\":\"test\"}").unwrap();
-
-        assert_eq!(fs::read(&output).unwrap(), b"{\"schema\":\"test\"}\n");
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -1,7 +1,9 @@
 mod benchmark;
+mod catalog_merge;
 mod cli;
 mod discovery;
 mod model;
+mod output;
 mod package_calibration;
 mod policy;
 mod vulkan_exec;
@@ -67,6 +69,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 &output,
             )?;
         }
+        Command::MergeCatalogs { inputs, output } => {
+            catalog_merge::merge_catalog_files(&inputs, &output)?;
+        }
         Command::Run {
             output,
             payload_bytes,
@@ -109,7 +114,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 placement.to_json()?
             };
             if let Some(path) = output {
-                fs::write(path, payload.as_bytes())?;
+                output::write_atomic(&path, payload.as_bytes())?;
             } else {
                 println!("{payload}");
             }
