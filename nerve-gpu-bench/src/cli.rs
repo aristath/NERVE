@@ -38,6 +38,15 @@ pub enum Command {
         target_id: String,
         output: PathBuf,
     },
+    CalibrateLoadWave {
+        package: PathBuf,
+        component: String,
+        selector: String,
+        phase: PackageCalibrationPhase,
+        resource_indices: Vec<usize>,
+        target_id: String,
+        output: PathBuf,
+    },
     MergeCatalogs {
         inputs: Vec<PathBuf>,
         output: PathBuf,
@@ -91,6 +100,7 @@ where
         "validate" => parse_validate(args.collect()),
         "calibrate-package" => parse_calibrate_package(args.collect()),
         "calibrate-boundaries" => parse_calibrate_boundaries(args.collect()),
+        "calibrate-load-wave" => parse_calibrate_load_wave(args.collect()),
         "merge-catalogs" => parse_merge_catalogs(args.collect()),
         "run" => parse_run(args.collect()),
         other => Err(CliError(format!(
@@ -98,6 +108,90 @@ where
             usage()
         ))),
     }
+}
+
+fn parse_calibrate_load_wave(arguments: Vec<String>) -> Result<Command, CliError> {
+    let mut package = None;
+    let mut component = None;
+    let mut selector = None;
+    let mut phase = None;
+    let mut activation_batch_width = None;
+    let mut resource_indices = Vec::new();
+    let mut target_id = None;
+    let mut output = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--package" => set_once_path(&mut package, &arguments, &mut index, "--package")?,
+            "--component" => {
+                set_once_string(&mut component, &arguments, &mut index, "--component")?
+            }
+            "--selector" => set_once_string(&mut selector, &arguments, &mut index, "--selector")?,
+            "--phase" => set_once_string(&mut phase, &arguments, &mut index, "--phase")?,
+            "--batch-width" => {
+                let value = parse_usize(
+                    &required_value(&arguments, &mut index, "--batch-width")?,
+                    "--batch-width",
+                )?;
+                if activation_batch_width.replace(value).is_some() {
+                    return Err(CliError(
+                        "--batch-width may only be specified once".to_string(),
+                    ));
+                }
+            }
+            "--resource-index" => resource_indices.push(parse_usize_allow_zero(
+                &required_value(&arguments, &mut index, "--resource-index")?,
+                "--resource-index",
+            )?),
+            "--target" => set_once_string(&mut target_id, &arguments, &mut index, "--target")?,
+            "--output" => set_once_path(&mut output, &arguments, &mut index, "--output")?,
+            other => {
+                return Err(CliError(format!(
+                    "unknown calibrate-load-wave argument {other:?}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+        index += 1;
+    }
+    let package = package
+        .ok_or_else(|| CliError("calibrate-load-wave requires --package PATH".to_string()))?;
+    let component = component
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CliError("calibrate-load-wave requires --component ID".to_string()))?;
+    let selector = selector
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CliError("calibrate-load-wave requires --selector ID".to_string()))?;
+    let phase =
+        parse_package_calibration_phase(phase, activation_batch_width, "calibrate-load-wave")?;
+    if resource_indices.is_empty() {
+        return Err(CliError(
+            "calibrate-load-wave requires at least one --resource-index N".to_string(),
+        ));
+    }
+    resource_indices.sort_unstable();
+    if resource_indices.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(CliError(
+            "calibrate-load-wave requires distinct resource indices".to_string(),
+        ));
+    }
+    let target_id = target_id
+        .filter(|id| is_canonical_vulkan_target_id(id))
+        .ok_or_else(|| {
+            CliError("calibrate-load-wave requires canonical --target vulkan-uuid:ID".to_string())
+        })?;
+    let output =
+        output.ok_or_else(|| CliError("calibrate-load-wave requires --output PATH".to_string()))?;
+    Ok(Command::CalibrateLoadWave {
+        package,
+        component,
+        selector,
+        phase,
+        resource_indices,
+        target_id,
+        output,
+    })
 }
 
 fn parse_calibrate_boundaries(arguments: Vec<String>) -> Result<Command, CliError> {
@@ -561,8 +655,14 @@ fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
         .map_err(|_| CliError(format!("{option} requires a positive integer")))
 }
 
+fn parse_usize_allow_zero(value: &str, option: &str) -> Result<usize, CliError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| CliError(format!("{option} requires a non-negative integer")))
+}
+
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench calibrate-load-wave --package PACKAGE.json --component ID --selector ID --phase decode|prefill [--batch-width N] --resource-index N ... --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -939,6 +1039,139 @@ mod tests {
                 target,
                 "--output",
                 "boundaries.json",
+            ]
+            .map(str::to_string)
+            .to_vec();
+            arguments.extend([option.to_string(), second.to_string()]);
+            let error = parse_args(arguments).unwrap_err();
+            assert!(
+                error.to_string().contains("may only be specified once"),
+                "{option} produced {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_canonical_load_wave_and_sorts_resource_set() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        assert_eq!(
+            parse_args(
+                [
+                    "calibrate-load-wave",
+                    "--package",
+                    "package.json",
+                    "--component",
+                    "block.7",
+                    "--selector",
+                    "sha256:selector",
+                    "--phase",
+                    "decode",
+                    "--resource-index",
+                    "5",
+                    "--resource-index",
+                    "0",
+                    "--resource-index",
+                    "3",
+                    "--target",
+                    target,
+                    "--output",
+                    "wave.json",
+                ]
+                .map(str::to_string)
+            )
+            .unwrap(),
+            Command::CalibrateLoadWave {
+                package: PathBuf::from("package.json"),
+                component: "block.7".to_string(),
+                selector: "sha256:selector".to_string(),
+                phase: PackageCalibrationPhase::Decode,
+                resource_indices: vec![0, 3, 5],
+                target_id: target.to_string(),
+                output: PathBuf::from("wave.json"),
+            }
+        );
+    }
+
+    #[test]
+    fn load_wave_rejects_missing_duplicate_and_invalid_resources() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let base = [
+            "calibrate-load-wave",
+            "--package",
+            "package.json",
+            "--component",
+            "block.7",
+            "--selector",
+            "selector",
+            "--phase",
+            "decode",
+            "--target",
+            target,
+            "--output",
+            "wave.json",
+        ];
+        assert!(
+            parse_args(base.map(str::to_string))
+                .unwrap_err()
+                .to_string()
+                .contains("at least one --resource-index")
+        );
+
+        let duplicated = base
+            .iter()
+            .copied()
+            .chain(["--resource-index", "2", "--resource-index", "2"])
+            .map(str::to_string);
+        assert!(
+            parse_args(duplicated)
+                .unwrap_err()
+                .to_string()
+                .contains("distinct resource indices")
+        );
+
+        let invalid = base
+            .iter()
+            .copied()
+            .chain(["--resource-index", "-1"])
+            .map(str::to_string);
+        assert!(
+            parse_args(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("non-negative integer")
+        );
+    }
+
+    #[test]
+    fn load_wave_rejects_repeated_scalar_options() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        for (option, second) in [
+            ("--package", "other.json"),
+            ("--component", "other"),
+            ("--selector", "other"),
+            ("--phase", "prefill"),
+            ("--batch-width", "2"),
+            ("--target", "vulkan-uuid:ffeeddccbbaa99887766554433221100"),
+            ("--output", "other.json"),
+        ] {
+            let mut arguments = [
+                "calibrate-load-wave",
+                "--package",
+                "package.json",
+                "--component",
+                "block.7",
+                "--selector",
+                "selector",
+                "--phase",
+                "prefill",
+                "--batch-width",
+                "64",
+                "--resource-index",
+                "0",
+                "--target",
+                target,
+                "--output",
+                "wave.json",
             ]
             .map(str::to_string)
             .to_vec();

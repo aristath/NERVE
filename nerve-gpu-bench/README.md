@@ -181,6 +181,35 @@ destination output validation. It uses the same before/after VRAM reservation,
 pressure, activity, quiescence, and exact NERVE-owned teardown proof as
 component calibration. A failed or unrestored route publishes no catalog.
 
+Measure an exact demand-residency load wave by naming the compiler-emitted
+selector and the resource indices selected together. Resource indices form a
+set and are canonicalized; duplicates are rejected:
+
+```sh
+cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
+  calibrate-load-wave \
+  --package /path/to/compiled/vulkan_resident_package.json \
+  --component transformer.block.7 \
+  --selector sha256:COMPILER_SELECTOR_ID \
+  --phase decode \
+  --resource-index 0 \
+  --resource-index 3 \
+  --resource-index 5 \
+  --target vulkan-uuid:00112233445566778899aabbccddeeff \
+  --output /path/to/load-wave-catalog.json
+```
+
+The untimed warmup and timed call use separate, freshly mounted demand stores,
+so the measurement is a real load rather than a retained-cache hit. The first
+load warms filesystem and driver state; the second measures verified backing
+reads, applicable package representation preparation, GPU upload, publication,
+and residency.
+After timing, NERVE reads every published GPU allocation back and compares it
+byte-for-byte with the package's integrity-verified source before accepting the
+observation. Resident/transient device bytes and host read/staging bytes are
+recorded as resource vectors. Teardown and catalog publication use the same
+strict transactional proof as the other package calibrators.
+
 The component-calibration path executes the compiler-emitted component artifacts and physical
 execution contracts used by inference. It measures every singleton reference
 and then each prefix of the requested owner/worker order, with one warmup and

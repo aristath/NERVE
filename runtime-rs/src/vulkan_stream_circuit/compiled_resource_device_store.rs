@@ -1055,6 +1055,10 @@ impl VulkanCompiledResourceDeviceStore {
         &self.allowed_selector_ids
     }
 
+    fn maximum_load_wave_group_count(&self) -> usize {
+        self.maximum_load_wave_group_count
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn is_compatible_with_mount(
         &self,

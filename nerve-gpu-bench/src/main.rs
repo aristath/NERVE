@@ -4,6 +4,7 @@ mod calibration_device_state;
 mod catalog_merge;
 mod cli;
 mod discovery;
+mod load_wave_calibration;
 mod model;
 mod output;
 mod package_calibration;
@@ -80,6 +81,25 @@ fn run() -> Result<(), Box<dyn Error>> {
         } => {
             boundary_calibration::run_boundary_calibration(
                 &package, phase, &source_id, &target_id, &output,
+            )?;
+        }
+        Command::CalibrateLoadWave {
+            package,
+            component,
+            selector,
+            phase,
+            resource_indices,
+            target_id,
+            output,
+        } => {
+            load_wave_calibration::run_load_wave_calibration(
+                &package,
+                &component,
+                &selector,
+                phase,
+                &resource_indices,
+                &target_id,
+                &output,
             )?;
         }
         Command::MergeCatalogs { inputs, output } => {

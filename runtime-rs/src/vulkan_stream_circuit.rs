@@ -202,6 +202,8 @@ include!("vulkan_stream_circuit/compiled_resource_residency_report.rs");
 include!("vulkan_stream_circuit/compiled_resource_memory_plan.rs");
 include!("vulkan_stream_circuit/compiled_resource_shared_host_cache.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_store.rs");
+include!("vulkan_stream_circuit/compiled_resource_readback_validation.rs");
+include!("vulkan_stream_circuit/runtime_load_wave_calibration.rs");
 include!("vulkan_stream_circuit/compiled_resource_wave.rs");
 include!("vulkan_stream_circuit/compiled_resource_retiering.rs");
 include!("vulkan_stream_circuit/runtime_working_set_pressure.rs");
