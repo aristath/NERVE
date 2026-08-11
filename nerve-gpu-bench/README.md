@@ -119,5 +119,44 @@ only benchmark artifacts intended for future automatic placement consumption;
 the compact `nerve.placement_bench` ranking remains historical hardware
 evidence.
 
+Create exact placement evidence from an actual compiled model package with an
+explicit ordered candidate (the first target is the owner):
+
+```sh
+cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
+  calibrate-package \
+  --package /path/to/compiled/vulkan_resident_package.json \
+  --component transformer.block.7 \
+  --phase decode \
+  --target vulkan-uuid:00112233445566778899aabbccddeeff \
+  --target vulkan-uuid:ffeeddccbbaa99887766554433221100 \
+  --output /path/to/decode-placement-catalog.json
+```
+
+Prefill evidence requires its exact batch width:
+
+```sh
+cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
+  calibrate-package \
+  --package /path/to/compiled/vulkan_resident_package.json \
+  --component transformer.block.7 \
+  --phase prefill \
+  --batch-width 64 \
+  --target vulkan-uuid:00112233445566778899aabbccddeeff \
+  --output /path/to/prefill-placement-catalog.json
+```
+
+This path executes the compiler-emitted component artifacts and physical
+execution contracts used by inference. It measures every singleton reference
+and then each prefix of the requested owner/worker order, with one warmup and
+one measured call under a one-minute transaction bound. All stages use the
+same safe parameter budget derived from the least-free selected target, so a
+smaller sample cannot make a larger placement appear to perform different
+work. The command inspects VRAM accounting, usable capacity, pressure, and
+available activity counters immediately before and after the workload. It
+publishes the catalog atomically only when outputs are canonical and NERVE's
+allocations and reservations have returned to the pre-run state. A missing,
+stale, unavailable, invalid, or unrestored candidate produces no catalog.
+
 The final JSON contains completed, validated comparisons only. A missing target
 or combination was not a usable measured path.
