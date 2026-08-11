@@ -1,4 +1,40 @@
 impl VulkanResidentPlacedComponentBatchRunner {
+    fn resident_transient_bytes_by_device(
+        &self,
+    ) -> Result<BTreeMap<String, usize>, VulkanError> {
+        let mut totals = self
+            .distributed_dispatches
+            .resident_transient_bytes_by_device()?;
+        for (device_id, slice) in self.device_ids.iter().zip(&self.slices) {
+            for buffer in &slice.signal_buffers {
+                checked_add_device_bytes(&mut totals, device_id, buffer.buffer.byte_capacity())?;
+            }
+            for buffer in &slice.stream_control_buffers {
+                checked_add_device_bytes(&mut totals, device_id, buffer.byte_capacity())?;
+            }
+            checked_add_device_bytes(
+                &mut totals,
+                device_id,
+                slice.runtime_token_ids_buffer.byte_capacity(),
+            )?;
+            for buffer in slice.batch_control_buffers.values() {
+                checked_add_device_bytes(&mut totals, device_id, buffer.byte_capacity())?;
+            }
+            checked_add_device_bytes(
+                &mut totals,
+                device_id,
+                slice.causal_state_snapshots.total_byte_capacity(),
+            )?;
+        }
+        if let (Some(predicates), Some(owner_device_id)) =
+            (&self.demand_pipeline_predicates, self.device_ids.first())
+            && let Some(owner) = predicates.first()
+        {
+            checked_add_device_bytes(&mut totals, owner_device_id, owner.byte_capacity())?;
+        }
+        Ok(totals)
+    }
+
     fn new_single_device(
         device: &VulkanComputeDevice,
         slice: &VulkanResidentInProcessPlacedStreamProcessorDevice,

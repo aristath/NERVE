@@ -38,6 +38,19 @@ impl VulkanComputeDevice {
         &self.physical_device_id
     }
 
+    pub fn api_version(&self) -> u32 {
+        self.api_version
+    }
+
+    pub fn driver_version(&self) -> u32 {
+        unsafe {
+            self.context
+                .instance
+                .get_physical_device_properties(self.physical_device)
+                .driver_version
+        }
+    }
+
     pub fn pci_address(&self) -> Option<&str> {
         self.pci_address.as_deref()
     }

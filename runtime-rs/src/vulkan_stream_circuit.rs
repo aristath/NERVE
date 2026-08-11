@@ -94,7 +94,8 @@ use crate::vulkan_distributed::{
     VulkanDistributedDispatchSubmission, VulkanDistributedExecutionPlan,
     VulkanDistributedParameterAllocationPlan, VulkanDistributedParameterBuffers,
     VulkanDistributedParameterExclusionPlan, VulkanDistributedQueueSynchronization,
-    VulkanPhysicalExecutionIslandPlan, resolved_physical_execution_islands,
+    VulkanPhysicalExecutionIslandPlan, VulkanPhysicalExecutionTransportKind,
+    resolved_physical_execution_islands,
 };
 
 mod package;
@@ -185,6 +186,7 @@ include!("vulkan_stream_circuit/residency_backpressure_scheduler.rs");
 include!("vulkan_stream_circuit/runtime_residency_plan.rs");
 include!("vulkan_stream_circuit/runtime_auto_placement.rs");
 include!("vulkan_stream_circuit/runtime_placement_calibration.rs");
+include!("vulkan_stream_circuit/placement_calibration_catalog.rs");
 include!("vulkan_stream_circuit/runtime_distributed_placement_calibration.rs");
 include!("vulkan_stream_circuit/runtime_transfer_calibration.rs");
 include!("vulkan_stream_circuit/resource_backing_store.rs");

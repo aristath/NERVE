@@ -208,6 +208,27 @@ impl VulkanDistributedComponentBatchShardRunner {
 }
 
 impl VulkanDistributedComponentBatchRunners {
+    fn resident_transient_bytes_by_device(&self) -> Result<BTreeMap<String, usize>, VulkanError> {
+        let mut totals = BTreeMap::<String, usize>::new();
+        for (key, buffer) in &self._private_activation_buffers {
+            checked_add_device_bytes(&mut totals, &key.device_id, buffer.byte_capacity())?;
+        }
+        for dispatch in &self.dispatches {
+            for shard in &dispatch.shards {
+                for buffers in &shard.batch_control_buffer_sets {
+                    for buffer in buffers.values() {
+                        checked_add_device_bytes(
+                            &mut totals,
+                            &shard.device_id,
+                            buffer.byte_capacity(),
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(totals)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
@@ -1021,6 +1042,18 @@ impl VulkanDistributedComponentBatchRunners {
         }
         Ok(())
     }
+}
+
+fn checked_add_device_bytes(
+    totals: &mut BTreeMap<String, usize>,
+    device_id: &str,
+    bytes: usize,
+) -> Result<(), VulkanError> {
+    let total = totals.entry(device_id.to_string()).or_default();
+    *total = total
+        .checked_add(bytes)
+        .ok_or_else(|| VulkanError("resident transient byte accounting overflowed".to_string()))?;
+    Ok(())
 }
 
 fn selected_distributed_component_batch_artifact<'a>(

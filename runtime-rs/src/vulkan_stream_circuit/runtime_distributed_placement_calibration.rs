@@ -16,6 +16,57 @@ pub struct VulkanRuntimeDistributedPlacementCalibrationReport {
     pub resident_transient_bytes_by_device: BTreeMap<String, usize>,
     pub activation_routes: Vec<String>,
     pub dispatch_work: Vec<VulkanRuntimeDistributedPlacementDispatchWork>,
+    pub execution_case: VulkanPlacementExecutionCaseIdentity,
+    pub warmup_call_count: usize,
+    pub measured_call_count: usize,
+    pub useful_activation_count: usize,
+}
+
+impl VulkanRuntimeDistributedPlacementCalibrationReport {
+    pub fn canonical_reference(
+        &self,
+    ) -> Result<VulkanPlacementCanonicalReference, VulkanPlacementCalibrationCatalogError> {
+        if self.execution_case.strategy != VulkanPlacementExecutionStrategy::SingleDevice {
+            return Err(VulkanPlacementCalibrationCatalogError(
+                "only a single-device execution of the exact sampled contract may establish its canonical placement reference"
+                    .to_string(),
+            ));
+        }
+        Ok(VulkanPlacementCanonicalReference {
+            behavior: self.execution_case.behavior.clone(),
+            output_digest: self.output_digest.clone(),
+            state_digest: self.state_digest.clone(),
+        })
+    }
+
+    pub fn calibration_observation(&self) -> VulkanPlacementCalibrationObservation {
+        VulkanPlacementCalibrationObservation {
+            execution_case: self.execution_case.clone(),
+            warmup_call_count: self.warmup_call_count,
+            measured_call_count: self.measured_call_count,
+            complete_transaction: true,
+            duration_ns: self.measured_execution_ns,
+            useful_activation_count: self.useful_activation_count,
+            output_digest: self.output_digest.clone(),
+            state_digest: self.state_digest.clone(),
+            resident_bytes_by_physical_device: self
+                .resident_parameter_bytes_by_device
+                .clone(),
+            transient_peak_bytes_by_physical_device: self
+                .resident_transient_bytes_by_device
+                .clone(),
+        }
+    }
+}
+
+pub fn record_vulkan_runtime_distributed_calibration_report(
+    catalog: &mut VulkanPlacementCalibrationCatalog,
+    report: &VulkanRuntimeDistributedPlacementCalibrationReport,
+) -> Result<(), VulkanPlacementCalibrationCatalogError> {
+    if report.execution_case.strategy == VulkanPlacementExecutionStrategy::SingleDevice {
+        catalog.record_reference(report.canonical_reference()?)?;
+    }
+    catalog.record_observation(report.calibration_observation())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +97,7 @@ struct VulkanRuntimeDistributedPlacementSession {
     activation_routes: Vec<String>,
     dispatch_work: Vec<VulkanRuntimeDistributedPlacementDispatchWork>,
     sampled_workload: bool,
+    execution_case: VulkanPlacementExecutionCaseIdentity,
 }
 
 pub fn calibrate_vulkan_runtime_distributed_placement_candidate_with_policy(
@@ -204,6 +256,10 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
             ),
             activation_routes: session.activation_routes.clone(),
             dispatch_work: session.dispatch_work.clone(),
+            execution_case: session.execution_case.clone(),
+            warmup_call_count: policy.warmup_units,
+            measured_call_count: policy.measured_units,
+            useful_activation_count: measured_useful_units,
         })
     })();
     let cleanup_result = session.cleanup();
@@ -215,6 +271,326 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
             "{error}; cleanup also failed: {cleanup_error}",
         ))),
     }
+}
+
+fn distributed_calibration_execution_case(
+    devices: &[(String, Rc<VulkanComputeDevice>)],
+    logical_device_ids: &[String],
+    execution_plan: &VulkanDistributedExecutionPlan,
+    loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+    artifact_digest: String,
+    execution_graph_digest: String,
+    phase: VulkanTargetedComponentExecutionPhase,
+    dispatch_work: &[VulkanRuntimeDistributedPlacementDispatchWork],
+) -> Result<VulkanPlacementExecutionCaseIdentity, VulkanResidentTokenModelPackageError> {
+    if devices.len() != logical_device_ids.len()
+        || execution_plan.dispatches.len() != dispatch_work.len()
+        || execution_plan.execution_islands.is_empty()
+    {
+        return distributed_calibration_error(
+            "distributed calibration cannot identify an incomplete physical execution case",
+        );
+    }
+    let physical_id_by_logical = logical_device_ids
+        .iter()
+        .cloned()
+        .zip(devices.iter().map(|(physical_id, _)| physical_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let physical_id = |logical_id: &str| {
+        physical_id_by_logical
+            .get(logical_id)
+            .cloned()
+            .ok_or_else(|| {
+                distributed_calibration_error_value(format!(
+                    "distributed calibration physical case references unknown logical device {logical_id:?}",
+                ))
+            })
+    };
+
+    let mut devices = devices
+        .iter()
+        .map(|(physical_device_id, device)| VulkanPlacementDeviceExecutionIdentity {
+            physical_device_id: physical_device_id.clone(),
+            api_version: device.api_version(),
+            driver_version: device.driver_version(),
+        })
+        .collect::<Vec<_>>();
+    devices.sort();
+
+    let mut contract_digests = BTreeMap::<String, String>::new();
+    for island in &execution_plan.execution_islands {
+        for (contract_id, implementation_digest) in island
+            .contract_ids
+            .iter()
+            .zip(&island.implementation_digests)
+        {
+            if let Some(existing) = contract_digests
+                .insert(contract_id.clone(), implementation_digest.clone())
+                && existing != *implementation_digest
+            {
+                return distributed_calibration_error(format!(
+                    "distributed calibration contract {contract_id:?} has conflicting implementation digests",
+                ));
+            }
+        }
+    }
+    if contract_digests.is_empty() {
+        return distributed_calibration_error(
+            "distributed calibration physical case has no implementation contract",
+        );
+    }
+    let contract_ids = contract_digests.keys().cloned().collect::<Vec<_>>();
+    let implementation_digests = contract_digests.values().cloned().collect::<Vec<_>>();
+
+    let mut dispatches = Vec::with_capacity(execution_plan.dispatches.len());
+    let mut shards = Vec::new();
+    for (dispatch_ordinal, (dispatch, work)) in execution_plan
+        .dispatches
+        .iter()
+        .zip(dispatch_work)
+        .enumerate()
+    {
+        let artifact = loaded_manifest
+            .artifact(&dispatch.reusable_family_id)
+            .ok_or_else(|| {
+                distributed_calibration_error_value(format!(
+                    "distributed calibration case is missing loaded artifact {:?}",
+                    dispatch.reusable_family_id,
+                ))
+            })?;
+        let workgroup_count_x = dispatch.shards.iter().try_fold(0u32, |total, shard| {
+            total.checked_add(shard.workgroup_count_x).ok_or_else(|| {
+                distributed_calibration_error_value(
+                    "distributed calibration workgroup geometry overflowed",
+                )
+            })
+        })?;
+        dispatches.push(VulkanPlacementDispatchGeometry {
+            contract_id: dispatch.physical_execution_contract_id.clone(),
+            logical_extent: work.full_rows,
+            sampled_extent: work.sampled_rows,
+            input_width: dispatch.input_width,
+            workgroup_count_x,
+            local_size_x: artifact.artifact.local_size_x,
+        });
+        for shard in &dispatch.shards {
+            let parameter_bytes = shard.parameters.iter().try_fold(
+                0usize,
+                |total, parameter| {
+                    total.checked_add(parameter.byte_count).ok_or_else(|| {
+                        distributed_calibration_error_value(
+                            "distributed calibration shard parameter bytes overflowed",
+                        )
+                    })
+                },
+            )?;
+            shards.push(VulkanPlacementShardIdentity {
+                dispatch_ordinal,
+                physical_device_id: physical_id(&shard.device_id)?,
+                distribution: distributed_calibration_distribution_name(
+                    dispatch.distribution,
+                )
+                .to_string(),
+                logical_start: shard.row_start,
+                logical_count: shard.row_count,
+                parameter_bytes,
+            });
+        }
+    }
+    shards.sort();
+
+    let first_island = execution_plan
+        .execution_islands
+        .first()
+        .expect("checked nonempty above");
+    let last_island = execution_plan
+        .execution_islands
+        .last()
+        .expect("checked nonempty above");
+    let input_physical_device_id = physical_id(&first_island.entry_device_id)?;
+    let output_physical_device_id = physical_id(&last_island.exit_device_id)?;
+    let owner_physical_device_id = physical_id(&first_island.owner_device_id)?;
+    if execution_plan
+        .execution_islands
+        .iter()
+        .any(|island| island.owner_device_id != first_island.owner_device_id)
+    {
+        return distributed_calibration_error(
+            "one distributed calibration case cannot span multiple island owners",
+        );
+    }
+    let mut transports = execution_plan
+        .execution_islands
+        .iter()
+        .flat_map(|island| &island.transport_routes)
+        .map(|route| {
+            Ok(VulkanPlacementTransportIdentity {
+                source_physical_device_id: physical_id(&route.source_device_id)?,
+                destination_physical_device_id: physical_id(&route.destination_device_id)?,
+                byte_capacity: route.byte_capacity,
+                route: match route.kind {
+                    VulkanPhysicalExecutionTransportKind::ExternalDeviceLocal => {
+                        "external_device_local"
+                    }
+                    VulkanPhysicalExecutionTransportKind::SharedHost => "shared_host",
+                }
+                .to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
+    transports.sort();
+    transports.dedup();
+
+    let shape = VulkanPlacementShapeClass {
+        activation_batch_width: phase.activation_batch_width(),
+        input_byte_capacity: first_island.leader().input_byte_capacity,
+        output_byte_capacity: last_island.tail().output_byte_capacity,
+        dispatches,
+    };
+    let execution_phase = match phase {
+        VulkanTargetedComponentExecutionPhase::Decode => {
+            nerve_execution_contracts::ExecutionPhase::Decode
+        }
+        VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+            nerve_execution_contracts::ExecutionPhase::Prefill
+        }
+    };
+    let input_fixture_digest = distributed_calibration_fixture_identity(
+        execution_phase,
+        &shape,
+        0,
+    )?;
+    Ok(VulkanPlacementExecutionCaseIdentity {
+        behavior: VulkanPlacementBehaviorIdentity {
+            contract_ids,
+            implementation_digests,
+            artifact_digest,
+            execution_graph_digest,
+            runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
+                .to_string(),
+            phase: execution_phase,
+            shape,
+            input_fixture_digest,
+        },
+        strategy: if devices.len() == 1 {
+            VulkanPlacementExecutionStrategy::SingleDevice
+        } else {
+            VulkanPlacementExecutionStrategy::TensorParallel
+        },
+        devices,
+        shards,
+        input_physical_device_id,
+        output_physical_device_id,
+        owner_physical_device_id,
+        transports,
+    })
+}
+
+fn distributed_calibration_distribution_name(
+    distribution: VulkanDistributedDispatchDistribution,
+) -> &'static str {
+    match distribution {
+        VulkanDistributedDispatchDistribution::OutputRows => "output_rows",
+        VulkanDistributedDispatchDistribution::ExpertRange => "expert_range",
+    }
+}
+
+fn distributed_calibration_fixture_identity(
+    phase: nerve_execution_contracts::ExecutionPhase,
+    shape: &VulkanPlacementShapeClass,
+    seed: u32,
+) -> Result<String, VulkanResidentTokenModelPackageError> {
+    let payload = serde_json::to_vec(&("nerve.distributed_calibration_fixture.v1", phase, shape, seed))
+        .map_err(|error| {
+            distributed_calibration_error_value(format!(
+                "failed to encode distributed calibration fixture identity: {error}",
+            ))
+        })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(payload)))
+}
+
+fn distributed_calibration_artifact_digest(
+    loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
+    package_slice: &VulkanResidentModelPackageDeviceSlice,
+) -> Result<String, VulkanResidentTokenModelPackageError> {
+    let mut digest = Sha256::new();
+    digest.update(b"nerve.distributed_calibration_artifacts.v1\0");
+    let mut artifacts = loaded_manifest.artifacts.iter().collect::<Vec<_>>();
+    artifacts.sort_by(|left, right| left.artifact.family_id.cmp(&right.artifact.family_id));
+    if artifacts.is_empty() {
+        return distributed_calibration_error(
+            "distributed calibration artifact identity is empty",
+        );
+    }
+    for artifact in artifacts {
+        let manifest_bytes = serde_json::to_vec(&artifact.artifact).map_err(|error| {
+            distributed_calibration_error_value(format!(
+                "failed to encode distributed calibration artifact {:?}: {error}",
+                artifact.artifact.family_id,
+            ))
+        })?;
+        digest.update((manifest_bytes.len() as u64).to_le_bytes());
+        digest.update(manifest_bytes);
+        for word in &artifact.words {
+            digest.update(word.to_le_bytes());
+        }
+    }
+    let mut batch_artifacts = package_slice.batch_kernels.iter().collect::<Vec<_>>();
+    batch_artifacts.sort_by(|left, right| {
+        left.component_id
+            .cmp(&right.component_id)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+            .then_with(|| left.selection_priority.cmp(&right.selection_priority))
+            .then_with(|| left.lane_tile_width.cmp(&right.lane_tile_width))
+    });
+    for artifact in batch_artifacts {
+        digest.update(artifact.component_id.as_bytes());
+        digest.update([0]);
+        digest.update(artifact.node_id.as_bytes());
+        digest.update(artifact.lane_tile_width.to_le_bytes());
+        digest.update(artifact.selection_priority.to_le_bytes());
+        digest.update([
+            u8::from(artifact.independent_candidate_compatible),
+            u8::from(artifact.causal_sequence_compatible),
+            u8::from(artifact.parallel_block_compatible),
+        ]);
+        for stage in &artifact.stages {
+            digest.update(stage.shader_path.as_bytes());
+            digest.update(stage.local_size_x.to_le_bytes());
+            digest.update(stage.workgroup_count_x.to_le_bytes());
+            for word in &stage.spirv_words {
+                digest.update(word.to_le_bytes());
+            }
+        }
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn distributed_calibration_execution_graph_digest(
+    target: &VulkanRuntimePlacementCalibrationTarget,
+    tick_plan: &VulkanMountedPlacedStreamTickPlan,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"nerve.distributed_calibration_execution_graph.v1\0");
+    digest.update(target.component_id.as_bytes());
+    digest.update([0]);
+    digest.update(target.terminal_node_id.as_bytes());
+    for stage in &tick_plan.stages {
+        let VulkanMountedPlacedStreamTickStage::Dispatch { dispatch, .. } = stage else {
+            continue;
+        };
+        digest.update(dispatch.dispatch_index.to_le_bytes());
+        digest.update(dispatch.kernel_id.as_bytes());
+        digest.update([0]);
+        digest.update(dispatch.component_id.as_bytes());
+        digest.update([0]);
+        digest.update(dispatch.node_id.as_bytes());
+        digest.update([0]);
+        digest.update(dispatch.op.as_bytes());
+        digest.update(dispatch.descriptor_count.to_le_bytes());
+        digest.update(dispatch.resident_descriptor_count.to_le_bytes());
+    }
+    format!("sha256:{:x}", digest.finalize())
 }
 
 struct VulkanRuntimeDistributedPlacementExecution {
@@ -582,6 +958,12 @@ impl VulkanRuntimeDistributedPlacementSession {
                 ))
             })?;
         let tick_plan = distributed_calibration_dispatch_tick_plan(&mounted_bound);
+        let artifact_digest = distributed_calibration_artifact_digest(
+            &loaded_manifest,
+            &targeted.slice,
+        )?;
+        let execution_graph_digest =
+            distributed_calibration_execution_graph_digest(target, &tick_plan);
         let execution_plan =
             VulkanMountedPlacedResidentStreamTickExecutionPlan::
                 from_tick_plan_with_physical_execution_islands_and_demand(
@@ -611,30 +993,36 @@ impl VulkanRuntimeDistributedPlacementSession {
             .saturating_add(mounted.boundary_io.total_byte_capacity)
             .saturating_add(mounted.edge_io.total_byte_capacity)
             .saturating_add(mounted.stream_control_buffer.byte_capacity());
-        let mut resident_transient_bytes_by_device = activation_plan
-            .allocations
+        // A distributed activation has one physical backing allocation on its
+        // declared owner. Peer Vulkan buffers import that same allocation and
+        // must not be counted as duplicate capacity on every participant.
+        let mut resident_transient_bytes_by_device = logical_device_ids
             .iter()
-            .flat_map(|allocation| {
-                allocation
-                    .device_ids
-                    .iter()
-                    .map(move |device_id| (device_id.clone(), allocation.byte_capacity))
-            })
-            .fold(
-                BTreeMap::<String, usize>::new(),
-                |mut totals, (device_id, bytes)| {
-                    let total = totals.entry(device_id).or_default();
-                    *total = total.saturating_add(bytes);
-                    totals
-                },
-            );
-        *resident_transient_bytes_by_device
-            .entry(owner_device_id.clone())
-            .or_default() = resident_transient_bytes_by_device
-            .get(&owner_device_id)
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(owner_transient);
+            .map(|device_id| (device_id.clone(), 0usize))
+            .collect::<BTreeMap<_, _>>();
+        for allocation in &activation_plan.allocations {
+            let total = resident_transient_bytes_by_device
+                .get_mut(&allocation.owner_device_id)
+                .ok_or_else(|| {
+                    distributed_calibration_error_value(format!(
+                        "distributed activation allocation references unknown owner {:?}",
+                        allocation.owner_device_id,
+                    ))
+                })?;
+            *total = total.checked_add(allocation.byte_capacity).ok_or_else(|| {
+                distributed_calibration_error_value(
+                    "distributed activation byte accounting overflowed",
+                )
+            })?;
+        }
+        let owner_total = resident_transient_bytes_by_device
+            .get_mut(&owner_device_id)
+            .expect("distributed calibration owner was inserted");
+        *owner_total = owner_total.checked_add(owner_transient).ok_or_else(|| {
+            distributed_calibration_error_value(
+                "distributed owner transient byte accounting overflowed",
+            )
+        })?;
 
         let package_slice = Arc::new(targeted.slice);
         let placed_slice = VulkanResidentInProcessPlacedStreamProcessorDevice {
@@ -704,7 +1092,36 @@ impl VulkanRuntimeDistributedPlacementSession {
                 )
             }
         };
+        if let Some(prefill_runner) = &prefill_runner {
+            for (device_id, bytes) in prefill_runner
+                .resident_transient_bytes_by_device()
+                .map_err(|error| distributed_calibration_error_value(error.to_string()))?
+            {
+                let total = resident_transient_bytes_by_device
+                    .get_mut(&device_id)
+                    .ok_or_else(|| {
+                        distributed_calibration_error_value(format!(
+                            "distributed prefill transient allocation references unknown device {device_id:?}",
+                        ))
+                    })?;
+                *total = total.checked_add(bytes).ok_or_else(|| {
+                    distributed_calibration_error_value(
+                        "distributed prefill transient byte accounting overflowed",
+                    )
+                })?;
+            }
+        }
 
+        let execution_case = distributed_calibration_execution_case(
+            &devices,
+            &logical_device_ids,
+            &distributed_execution_plan,
+            &loaded_manifest,
+            artifact_digest,
+            execution_graph_digest,
+            phase,
+            &dispatch_work,
+        )?;
         Ok(Some(Self {
             physical_device_ids: devices
                 .into_iter()
@@ -728,6 +1145,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             activation_routes,
             dispatch_work,
             sampled_workload,
+            execution_case,
         }))
     }
 
@@ -982,6 +1400,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             activation_routes: _,
             dispatch_work: _,
             sampled_workload: _,
+            execution_case: _,
         } = self;
         let mut cleanup_errors = Vec::new();
         for device in logical_devices.values() {

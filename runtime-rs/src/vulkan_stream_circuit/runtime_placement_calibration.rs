@@ -1,5 +1,5 @@
-const VULKAN_RUNTIME_PLACEMENT_CALIBRATION_WARMUP_UNITS: usize = 16;
-const VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MEASURED_UNITS: usize = 16;
+const VULKAN_RUNTIME_PLACEMENT_CALIBRATION_WARMUP_UNITS: usize = 1;
+const VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MEASURED_UNITS: usize = 1;
 const VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_STATE_ACTIVATIONS: usize = 128;
 const VULKAN_RUNTIME_PLACEMENT_CALIBRATION_LOGICAL_DEVICE_ID: &str =
     "calibration:physical_candidate";
@@ -32,6 +32,19 @@ impl Default for VulkanRuntimePlacementCalibrationPolicy {
             maximum_duration: VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION,
             maximum_resident_parameter_bytes: usize::MAX,
         }
+    }
+}
+
+#[cfg(test)]
+mod runtime_placement_calibration_policy_tests {
+    use super::*;
+
+    #[test]
+    fn default_calibration_is_one_warmup_and_one_measured_call() {
+        let policy = VulkanRuntimePlacementCalibrationPolicy::default();
+        assert_eq!(policy.warmup_units, 1);
+        assert_eq!(policy.measured_units, 1);
+        assert!(policy.maximum_duration <= Duration::from_secs(60));
     }
 }
 
