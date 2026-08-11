@@ -380,6 +380,13 @@ fn distributed_calibration_execution_case(
                 local_size_x: artifact.artifact.local_size_x,
             },
         });
+        if let Some(reduction) = distributed_calibration_reduction_geometry(
+            &dispatch.physical_execution_contract_id,
+            dispatch.reduction.as_ref(),
+            dispatch.shards.len(),
+        )? {
+            operations.push(reduction);
+        }
         for shard in &dispatch.shards {
             let parameter_bytes = shard.parameters.iter().try_fold(
                 0usize,
@@ -493,6 +500,27 @@ fn distributed_calibration_execution_case(
         owner_physical_device_id,
         transports,
     })
+}
+
+fn distributed_calibration_reduction_geometry(
+    contract_id: &str,
+    reduction: Option<&VulkanDistributedReductionPlan>,
+    participant_count: usize,
+) -> Result<Option<VulkanPlacementOperationGeometry>, VulkanResidentTokenModelPackageError> {
+    let Some(reduction) = reduction else {
+        return Ok(None);
+    };
+    if contract_id.is_empty() || reduction.element_count == 0 || participant_count < 2 {
+        return distributed_calibration_error(
+            "distributed calibration reduction geometry is incomplete",
+        );
+    }
+    Ok(Some(VulkanPlacementOperationGeometry::Reduction {
+        contract_id: contract_id.to_string(),
+        element_count: reduction.element_count,
+        element_byte_count: size_of::<f32>(),
+        participant_count,
+    }))
 }
 
 fn distributed_calibration_execution_strategy(
@@ -1992,6 +2020,32 @@ mod runtime_distributed_placement_calibration_strategy_tests {
         let no_dispatches =
             distributed_calibration_execution_strategy(1, std::iter::empty()).unwrap_err();
         assert!(no_dispatches.to_string().contains("partitioned dispatch"));
+    }
+
+    #[test]
+    fn records_complete_f32_reduction_geometry_in_the_behavior_shape() {
+        let reduction = VulkanDistributedReductionPlan {
+            operation: nerve_execution_contracts::ReductionOperation::SumF32,
+            element_count: 4096,
+            partial_byte_capacity: 4096 * size_of::<f32>(),
+            finalization: VulkanDistributedReductionFinalizationPlan::StoreF32,
+        };
+        assert_eq!(
+            distributed_calibration_reduction_geometry("contract", Some(&reduction), 3).unwrap(),
+            Some(VulkanPlacementOperationGeometry::Reduction {
+                contract_id: "contract".to_string(),
+                element_count: 4096,
+                element_byte_count: size_of::<f32>(),
+                participant_count: 3,
+            })
+        );
+        assert!(
+            distributed_calibration_reduction_geometry("contract", Some(&reduction), 1).is_err()
+        );
+        assert_eq!(
+            distributed_calibration_reduction_geometry("contract", None, 1).unwrap(),
+            None
+        );
     }
 
     #[test]

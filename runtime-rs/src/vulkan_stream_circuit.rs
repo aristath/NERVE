@@ -96,10 +96,10 @@ use crate::vulkan_distributed::{
     VulkanDistributedParameterAllocationPlan, VulkanDistributedParameterBuffers,
     VulkanDistributedParameterExclusionPlan, VulkanDistributedQueueSynchronization,
     VulkanDistributedReductionBuffer, VulkanDistributedReductionFinalizationPlan,
-    VulkanDistributedReductionRunner, VulkanPhysicalExecutionIslandPlan,
-    VulkanPhysicalExecutionTransportKind, allocate_distributed_shared_buffer,
-    create_distributed_reduction_runner_for_buffers, distributed_shard_push_constants,
-    resolved_physical_execution_islands,
+    VulkanDistributedReductionPlan, VulkanDistributedReductionRunner,
+    VulkanPhysicalExecutionIslandPlan, VulkanPhysicalExecutionTransportKind,
+    allocate_distributed_shared_buffer, create_distributed_reduction_runner_for_buffers,
+    distributed_shard_push_constants, resolved_physical_execution_islands,
 };
 
 mod package;
