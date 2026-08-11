@@ -651,7 +651,12 @@ impl VulkanResidentComponentBatchSliceRunner {
         {
             for activation in std::iter::once(&dispatch.input_activation)
                 .chain(&dispatch.auxiliary_input_activations)
-                .chain(std::iter::once(&dispatch.output_activation))
+                .chain(
+                    dispatch
+                        .reduction
+                        .is_none()
+                        .then_some(&dispatch.output_activation),
+                )
             {
                 if private_distributed_activations.contains_key(
                     &distributed_component_batch_activation_key(

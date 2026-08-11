@@ -2031,6 +2031,27 @@ fn distributed_batch_output_binding_rejects_a_shard_past_the_frame() {
 }
 
 #[test]
+fn distributed_batch_reduction_planes_are_participant_major() {
+    assert_eq!(
+        distributed_batch_reduction_plane_binding_range(16_384, 3, 5, 0).unwrap(),
+        (0, 81_920)
+    );
+    assert_eq!(
+        distributed_batch_reduction_plane_binding_range(16_384, 3, 5, 2).unwrap(),
+        (163_840, 81_920)
+    );
+}
+
+#[test]
+fn distributed_batch_reduction_planes_reject_invalid_geometry() {
+    assert!(distributed_batch_reduction_plane_binding_range(16_384, 3, 5, 3).is_err());
+    assert!(distributed_batch_reduction_plane_binding_range(0, 3, 5, 0).is_err());
+    assert!(
+        distributed_batch_reduction_plane_binding_range(usize::MAX, 2, 2, 0).is_err()
+    );
+}
+
+#[test]
 fn distributed_batch_workgroups_preserve_the_compiled_row_granularity() {
     assert_eq!(
         distributed_batch_rows_per_workgroup(32_768, 512, "layer", "ffn").unwrap(),

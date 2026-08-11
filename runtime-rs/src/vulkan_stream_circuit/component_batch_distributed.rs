@@ -10,6 +10,7 @@ struct VulkanResidentPlacedComponentBatchRunner {
 struct VulkanDistributedComponentBatchRunners {
     dispatches: Vec<VulkanDistributedComponentBatchDispatchRunner>,
     dependency_clock: VulkanDistributedDependencyClock,
+    reduction_buffers: Vec<VulkanDistributedReductionBuffer>,
     _private_activation_buffers: BTreeMap<
         VulkanDistributedComponentBatchPrivateActivationBufferKey,
         Arc<VulkanResidentBuffer>,
@@ -142,6 +143,7 @@ struct VulkanDistributedComponentBatchDispatchRunner {
     planned: VulkanPhysicalExecutionIslandPlan,
     shards: Vec<VulkanDistributedComponentBatchShardRunner>,
     helper_synchronization: Vec<VulkanDistributedQueueSynchronization>,
+    reduction: Option<VulkanDistributedReductionRunner>,
 }
 
 struct VulkanDistributedComponentBatchShardRunner {
@@ -156,6 +158,7 @@ struct VulkanDistributedComponentBatchShardRunner {
 
 struct VulkanDistributedComponentBatchShardDispatch {
     dispatch: VulkanResidentKernelDispatch,
+    push_constants: Vec<u8>,
     control_buffer_set_index: usize,
     indirect_dispatch:
         Option<(VulkanResidentComponentBatchControlPayload, usize)>,
@@ -207,11 +210,28 @@ impl VulkanDistributedComponentBatchShardRunner {
     }
 }
 
+
 impl VulkanDistributedComponentBatchRunners {
     fn resident_transient_bytes_by_device(&self) -> Result<BTreeMap<String, usize>, VulkanError> {
         let mut totals = BTreeMap::<String, usize>::new();
         for (key, buffer) in &self._private_activation_buffers {
             checked_add_device_bytes(&mut totals, &key.device_id, buffer.byte_capacity())?;
+        }
+        for reduction in &self.reduction_buffers {
+            let owner = reduction
+                .device_buffers
+                .get(&reduction.planned.owner_device_id)
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "distributed batch reduction {}.{} has no owner buffer",
+                        reduction.planned.component_id, reduction.planned.node_id
+                    ))
+                })?;
+            checked_add_device_bytes(
+                &mut totals,
+                &reduction.planned.owner_device_id,
+                owner.byte_capacity(),
+            )?;
         }
         for dispatch in &self.dispatches {
             for shard in &dispatch.shards {
@@ -239,16 +259,6 @@ impl VulkanDistributedComponentBatchRunners {
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
-        if let Some(planned) = execution_plan.dispatches.iter().find(|planned| {
-            planned.distribution == VulkanDistributedDispatchDistribution::InputColumns
-        }) {
-            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                VulkanError(format!(
-                    "distributed component batch {}.{} requires partial-output collection",
-                    planned.component_id, planned.node_id
-                )),
-            ));
-        }
         let private_activation_specs =
             distributed_component_batch_private_activation_specs(execution_plan);
         let mut private_activation_buffers = BTreeMap::new();
@@ -281,6 +291,51 @@ impl VulkanDistributedComponentBatchRunners {
                 );
             }
         }
+        let activation_buffer_plan =
+            VulkanDistributedActivationBufferPlan::from_execution_plan(execution_plan).map_err(
+                |error| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        error.to_string(),
+                    ))
+                },
+            )?;
+        let mut reduction_buffers =
+            Vec::with_capacity(activation_buffer_plan.reduction_allocations.len());
+        for planned in &activation_buffer_plan.reduction_allocations {
+            let byte_capacity = planned
+                .byte_capacity
+                .checked_mul(lane_capacity)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "distributed component batch reduction {}.{} capacity overflowed",
+                        planned.component_id, planned.node_id
+                    )))
+                })?;
+            let shared = allocate_distributed_shared_buffer(
+                &planned.owner_device_id,
+                &planned.device_ids,
+                byte_capacity,
+                execution_plan.shared_activation_route,
+                &format!("component batch reduction {}.{}", planned.component_id, planned.node_id),
+                &mut |device_id| {
+                    devices
+                        .get(device_id)
+                        .map(|device| device.as_ref())
+                        .ok_or_else(|| format!("missing device {device_id:?}"))
+                },
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    error.to_string(),
+                ))
+            })?;
+            reduction_buffers.push(VulkanDistributedReductionBuffer {
+                planned: planned.clone(),
+                route: shared.route,
+                external_device_local_error: shared.external_device_local_error,
+                device_buffers: shared.device_buffers,
+            });
+        }
         let mut dispatches = Vec::with_capacity(execution_plan.dispatches.len());
         for planned in &execution_plan.dispatches {
             for shard in &planned.shards {
@@ -291,6 +346,20 @@ impl VulkanDistributedComponentBatchRunners {
                         },
                     );
                 }
+            }
+            if planned.distribution == VulkanDistributedDispatchDistribution::InputColumns {
+                dispatches.push(create_distributed_input_column_component_batch_dispatch(
+                    devices,
+                    placed_slices,
+                    batch_slices,
+                    planned,
+                    parameter_buffers,
+                    &reduction_buffers,
+                    &private_activation_buffers,
+                    lane_capacity,
+                    execution_plan.shared_activation_route,
+                )?);
+                continue;
             }
             let owner_index = placed_slices
                 .iter()
@@ -663,6 +732,7 @@ impl VulkanDistributedComponentBatchRunners {
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                     resident_dispatches.push(VulkanDistributedComponentBatchShardDispatch {
                         dispatch,
+                        push_constants: Vec::new(),
                         control_buffer_set_index: 0,
                         indirect_dispatch: stage
                             .indirect_dispatch_byte_offset
@@ -710,6 +780,7 @@ impl VulkanDistributedComponentBatchRunners {
                 planned: planned_island,
                 shards,
                 helper_synchronization: Vec::new(),
+                reduction: None,
             });
         }
         let mut dispatches_by_key = dispatches
@@ -741,7 +812,7 @@ impl VulkanDistributedComponentBatchRunners {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let mut leader_runner = members.remove(0);
-            for member in members {
+            for mut member in members {
                 if member.shards.len() != leader_runner.shards.len() {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                         VulkanError(format!(
@@ -757,6 +828,17 @@ impl VulkanDistributedComponentBatchRunners {
                     leader_shard
                         .append_group_member(member_shard)
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                }
+                if let Some(reduction) = member.reduction.take() {
+                    if leader_runner.reduction.replace(reduction).is_some() {
+                        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                            VulkanError(format!(
+                                "distributed component batch group {}..{} contains multiple reductions",
+                                planned_island.leader().dispatch_index,
+                                planned_island.tail().dispatch_index
+                            )),
+                        ));
+                    }
                 }
             }
             leader_runner.planned = planned_island.clone();
@@ -803,6 +885,7 @@ impl VulkanDistributedComponentBatchRunners {
         Ok(Self {
             dispatches: island_dispatches,
             dependency_clock: VulkanDistributedDependencyClock::new(),
+            reduction_buffers,
             _private_activation_buffers: private_activation_buffers,
         })
     }
@@ -935,7 +1018,7 @@ impl VulkanDistributedComponentBatchRunners {
                         return if resident.dispatch_y_from_batch_width {
                             VulkanResidentKernelSequenceStep::new_direct_with_workgroup_count(
                                 &resident.dispatch,
-                                &[],
+                                &resident.push_constants,
                                 resident.dispatch.workgroup_count_x(),
                                 u32::try_from(batch_width).map_err(|_| {
                                     VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
@@ -950,7 +1033,7 @@ impl VulkanDistributedComponentBatchRunners {
                         } else {
                             Ok(VulkanResidentKernelSequenceStep::new(
                                 &resident.dispatch,
-                                &[],
+                                &resident.push_constants,
                             ))
                         };
                     };
@@ -968,7 +1051,7 @@ impl VulkanDistributedComponentBatchRunners {
                         })?;
                     VulkanResidentKernelSequenceStep::new_indirect(
                         &resident.dispatch,
-                        &[],
+                        &resident.push_constants,
                         control_buffer,
                         byte_offset,
                     )
@@ -1020,7 +1103,7 @@ impl VulkanDistributedComponentBatchRunners {
                 })
                 .unwrap_or_default();
             let signal_points = synchronization
-                .filter(|_| prepare_owner_continuation)
+                .filter(|_| prepare_owner_continuation || dispatch.reduction.is_some())
                 .map(|synchronization| {
                     vec![synchronization.helper_done(dependency_value)]
                 })
@@ -1041,10 +1124,48 @@ impl VulkanDistributedComponentBatchRunners {
             }
             submitted.push((device.as_ref(), sequence));
         }
+        if let Some(reduction) = &dispatch.reduction {
+            let owner = devices.get(&dispatch.planned.owner_device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: dispatch.planned.owner_device_id.clone(),
+                }
+            })?;
+            let wait_points = dispatch
+                .helper_synchronization
+                .iter()
+                .map(|synchronization| synchronization.owner_done(dependency_value))
+                .collect::<Vec<_>>();
+            if let Err(error) = owner
+                .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+                    &reduction.sequence,
+                    &wait_points,
+                    &[],
+                )
+            {
+                for (submitted_device, submitted_sequence) in &submitted {
+                    let _ = submitted_device.wait_resident_kernel_sequence(submitted_sequence);
+                }
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    error,
+                ));
+            }
+        }
         if !prepare_owner_continuation {
             let mut first_error = None;
             for (device, sequence) in submitted {
                 if let Err(error) = device.wait_resident_kernel_sequence(sequence)
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+            }
+            if let Some(reduction) = &dispatch.reduction {
+                let owner = devices.get(&dispatch.planned.owner_device_id).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                        device_id: dispatch.planned.owner_device_id.clone(),
+                    }
+                })?;
+                if let Err(error) = owner.wait_resident_kernel_sequence(&reduction.sequence)
                     && first_error.is_none()
                 {
                     first_error = Some(error);
@@ -1174,6 +1295,7 @@ fn distributed_batch_shard_binding_range(
         range.byte_count,
     )
 }
+
 
 fn distributed_batch_rows_per_workgroup(
     output_rows: usize,

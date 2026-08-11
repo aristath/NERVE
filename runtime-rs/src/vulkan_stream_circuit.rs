@@ -94,8 +94,11 @@ use crate::vulkan_distributed::{
     VulkanDistributedDispatchSequenceKind, VulkanDistributedDispatchSubmission,
     VulkanDistributedExecutionPlan, VulkanDistributedParameterAllocationPlan,
     VulkanDistributedParameterBuffers, VulkanDistributedParameterExclusionPlan,
-    VulkanDistributedQueueSynchronization, VulkanPhysicalExecutionIslandPlan,
-    VulkanPhysicalExecutionTransportKind, resolved_physical_execution_islands,
+    VulkanDistributedQueueSynchronization, VulkanDistributedReductionBuffer,
+    VulkanDistributedReductionFinalizationPlan, VulkanDistributedReductionRunner,
+    VulkanPhysicalExecutionIslandPlan, VulkanPhysicalExecutionTransportKind,
+    allocate_distributed_shared_buffer, create_distributed_reduction_runner_for_buffers,
+    distributed_shard_push_constants, resolved_physical_execution_islands,
 };
 
 mod package;
@@ -144,6 +147,7 @@ include!("vulkan_stream_circuit/component_batch_buffers.rs");
 include!("vulkan_stream_circuit/component_batch_kernel_selection.rs");
 include!("vulkan_stream_circuit/component_batch_slice_runner.rs");
 include!("vulkan_stream_circuit/component_batch_distributed.rs");
+include!("vulkan_stream_circuit/component_batch_input_columns.rs");
 include!("vulkan_stream_circuit/component_batch_temporal.rs");
 include!("vulkan_stream_circuit/placed_component_batch_runner.rs");
 include!("vulkan_stream_circuit/stream_processor.rs");
