@@ -60,6 +60,8 @@ def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Pa
     assert "const uint EXPERTS_PER_TOKEN = 8u;" in router
     assert "buffer SelectionTelemetry" in router
     assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in router
+    assert "left * (2u * NUM_EXPERTS - left - 1u) / 2u" in router
+    assert "selection_telemetry.counts[NUM_EXPERTS + pair_index]" in router
     assert "shared float router_scores[NUM_EXPERTS];" in router
     assert "shared float top_scores[EXPERTS_PER_TOKEN];" in router
     assert "router_scores[expert] = read_router(expert);" in router
@@ -392,6 +394,7 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
     assert "binding = 2) readonly buffer RouterSelectionBias" in primary_source
     assert "binding = 3) buffer SelectionTelemetry" in primary_source
     assert "atomicAdd(selection_telemetry.counts[expert], 1u);" in primary_source
+    assert "selection_telemetry.counts[NUM_EXPERTS + pair_index]" in primary_source
     assert "shared float router_values[NUM_EXPERTS];" in primary_source
     assert "shared uint selected_experts[NUM_EXPERTS];" in primary_source
     assert "router_values[expert] = router_logit(expert);" in primary_source
@@ -404,6 +407,7 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
     assert "binding = 2) buffer ExpertRoutes" not in primary_source
     assert "gl_WorkGroupID.y" in batch_source
     assert "binding = 3) buffer SelectionTelemetry" in batch_source
+    assert "selection_telemetry.counts[NUM_EXPERTS + pair_index]" in batch_source
     assert (
         "router_values[expert] = router_logit(batch_index, expert);"
         in batch_source
@@ -488,6 +492,7 @@ def test_compiler_renders_score_selected_sqrtsoftplus_router(
     assert "binding = 1) buffer ExpertRoutes" in primary_source
     assert "binding = 2) readonly buffer RouterSelectionBias" in primary_source
     assert "binding = 3) buffer SelectionTelemetry" in primary_source
+    assert "selection_telemetry.counts[NUM_EXPERTS + pair_index]" in primary_source
     assert "gl_WorkGroupID.y" in batch_source
     assert "batch_index * ROUTER_WORDS" in batch_source
     assert "batch_index * EXPERTS_PER_TOKEN" in batch_source
@@ -565,6 +570,7 @@ def test_compiler_renders_token_table_sqrtsoftplus_router(
     assert "binding = 2) buffer ExpertRoutes" in primary_source
     assert "binding = 3) readonly buffer RouteTable" in primary_source
     assert "binding = 4) buffer SelectionTelemetry" in primary_source
+    assert "selection_telemetry.counts[NUM_EXPERTS + pair_index]" in primary_source
     assert "gl_WorkGroupID.y" in batch_source
     assert "token_ids.values[batch_index]" in batch_source
     assert "batch_index * ROUTER_WORDS" in batch_source

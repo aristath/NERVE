@@ -74,6 +74,7 @@ pub struct VulkanSelectionTelemetryBufferAllocation {
     pub node_id: String,
     pub domain_id: String,
     pub resource_count: usize,
+    pub co_selection_pair_count: usize,
     pub byte_capacity: usize,
     pub buffer: VulkanResidentBuffer,
 }

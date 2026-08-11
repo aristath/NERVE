@@ -1518,6 +1518,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             domain_id: "resources".to_string(),
             resource_count: 2,
             selection_counts: vec![1],
+            co_selection_counts: vec![0],
         }],
     };
     assert!(tiered_store
@@ -1533,6 +1534,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             domain_id: "resources".to_string(),
             resource_count: 2,
             selection_counts,
+            co_selection_counts: vec![0],
         }],
     };
     let (publications_before_failure, group_chunks_before_failure, chunk_groups_before_failure) = {
@@ -1657,6 +1659,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             domain_id: "resources".to_string(),
             resource_count: 2,
             selection_counts: shifted_selection_counts,
+            co_selection_counts: vec![0],
         }],
     };
     assert_eq!(
@@ -2427,6 +2430,7 @@ fn adaptive_representation_cache_promotes_restores_and_tears_down_atomically() {
             domain_id: "experts".to_string(),
             resource_count: 1,
             selection_counts: vec![7],
+            co_selection_counts: Vec::new(),
         }],
     };
 

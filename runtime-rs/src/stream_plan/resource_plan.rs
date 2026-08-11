@@ -40,6 +40,7 @@ pub struct PlannedSelectionDomain {
     pub node_id: String,
     pub domain_id: String,
     pub resource_count: usize,
+    pub selection_count_per_activation: usize,
 }
 
 fn circuit_dtype_bytes(dtype: &str) -> Result<usize, CircuitPlanError> {

@@ -211,6 +211,9 @@ impl StreamCircuitResourcePlan {
                         node_id: node.id.clone(),
                         domain_id: domain.domain_id.clone(),
                         resource_count: domain.resource_count,
+                        selection_count_per_activation: domain
+                            .encoding
+                            .selection_count_per_activation,
                     });
                 }
             }

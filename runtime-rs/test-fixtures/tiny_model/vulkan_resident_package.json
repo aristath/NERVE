@@ -1,5 +1,5 @@
 {
-  "schema": "nerve.vulkan_resident_model_package.v12",
+  "schema": "nerve.vulkan_resident_model_package.v13",
   "package_id": "model_d119caf1_vulkan_resident",
   "compiler_target": {
     "schema": "nerve.compiler_target.v2",

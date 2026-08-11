@@ -168,6 +168,7 @@ fn placed_resident_plan_hosts_only_the_components_assigned_to_a_device() {
             node_id: "selector".to_string(),
             domain_id: "resources".to_string(),
             resource_count: 256,
+            selection_count_per_activation: 8,
         },
         crate::stream_plan::PlannedSelectionDomain {
             component_id: "layer_00_remote".to_string(),
@@ -175,6 +176,7 @@ fn placed_resident_plan_hosts_only_the_components_assigned_to_a_device() {
             node_id: "selector".to_string(),
             domain_id: "resources".to_string(),
             resource_count: 128,
+            selection_count_per_activation: 1,
         },
     ]);
     let placement_plan = graph.placement_plan(&runtime_model.placement).unwrap();
@@ -214,7 +216,8 @@ fn placed_resident_plan_hosts_only_the_components_assigned_to_a_device() {
             node_id: "selector".to_string(),
             domain_id: "resources".to_string(),
             resource_count: 256,
-            byte_capacity: 256 * std::mem::size_of::<u32>(),
+            co_selection_pair_count: 256 * 255 / 2,
+            byte_capacity: (256 + 256 * 255 / 2) * std::mem::size_of::<u32>(),
         }
     );
     assert_eq!(gpu0.resident_plan.activation_banks.len(), 2);
@@ -261,6 +264,7 @@ fn placed_resident_plan_hosts_only_the_components_assigned_to_a_device() {
             node_id: "selector".to_string(),
             domain_id: "resources".to_string(),
             resource_count: 128,
+            co_selection_pair_count: 0,
             byte_capacity: 128 * std::mem::size_of::<u32>(),
         }
     );

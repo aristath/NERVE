@@ -157,5 +157,16 @@ void main() {
             expert_routes.words[route] = (f32_to_bf16(weight) << 16u) | expert;
             atomicAdd(selection_telemetry.counts[expert], 1u);
         }
+        for (uint left_route = 0u; left_route < EXPERTS_PER_TOKEN; left_route++) {
+            uint left = top_indices[left_route];
+            for (uint right_route = left_route + 1u; right_route < EXPERTS_PER_TOKEN; right_route++) {
+                uint right = top_indices[right_route];
+                if (left < right) {
+                    uint preceding = left * (2u * NUM_EXPERTS - left - 1u) / 2u;
+                    uint pair_index = preceding + right - left - 1u;
+                    atomicAdd(selection_telemetry.counts[NUM_EXPERTS + pair_index], 1u);
+                }
+            }
+        }
     }
 }

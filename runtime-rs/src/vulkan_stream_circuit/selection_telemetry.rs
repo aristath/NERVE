@@ -11,6 +11,10 @@ pub struct VulkanSelectionTelemetryDomainSnapshot {
     pub domain_id: String,
     pub resource_count: usize,
     pub selection_counts: Vec<u64>,
+    /// Packed upper triangle excluding the diagonal. Pair `(left, right)` is
+    /// addressed with `left < right`; each counter records activations where
+    /// both resources were selected by the same selector invocation.
+    pub co_selection_counts: Vec<u64>,
 }
 
 impl VulkanSelectionTelemetrySnapshot {
@@ -33,6 +37,10 @@ impl VulkanSelectionTelemetrySnapshot {
             digest.update((domain.selection_counts.len() as u64).to_le_bytes());
             for selection_count in &domain.selection_counts {
                 digest.update(selection_count.to_le_bytes());
+            }
+            digest.update((domain.co_selection_counts.len() as u64).to_le_bytes());
+            for co_selection_count in &domain.co_selection_counts {
+                digest.update(co_selection_count.to_le_bytes());
             }
         }
         format!(
@@ -59,6 +67,8 @@ impl VulkanSelectionTelemetrySnapshot {
             .map(|(current, previous)| {
                 if current.identity() != previous.identity()
                     || current.selection_counts.len() != previous.selection_counts.len()
+                    || current.co_selection_counts.len()
+                        != previous.co_selection_counts.len()
                 {
                     return Err(selection_telemetry_error(format!(
                         "selection telemetry domain changed from {:?} to {:?}",
@@ -85,6 +95,25 @@ impl VulkanSelectionTelemetrySnapshot {
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let co_selection_counts = current
+                    .co_selection_counts
+                    .iter()
+                    .zip(&previous.co_selection_counts)
+                    .enumerate()
+                    .map(|(pair_id, (current_count, previous_count))| {
+                        current_count.checked_sub(*previous_count).ok_or_else(|| {
+                            selection_telemetry_error(format!(
+                                "selection telemetry co-selection counter {} regressed from {} to {} in {}.{}.{}",
+                                pair_id,
+                                previous_count,
+                                current_count,
+                                current.component_id,
+                                current.node_id,
+                                current.domain_id,
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(VulkanSelectionTelemetryDomainSnapshot {
                     execution_scope: current.execution_scope.clone(),
                     component_id: current.component_id.clone(),
@@ -92,6 +121,7 @@ impl VulkanSelectionTelemetrySnapshot {
                     domain_id: current.domain_id.clone(),
                     resource_count: current.resource_count,
                     selection_counts,
+                    co_selection_counts,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -124,6 +154,19 @@ impl VulkanSelectionTelemetrySnapshot {
 }
 
 impl VulkanSelectionTelemetryDomainSnapshot {
+    pub fn co_selection_count(
+        &self,
+        left_resource_id: usize,
+        right_resource_id: usize,
+    ) -> Option<u64> {
+        selection_telemetry_co_selection_index(
+            self.resource_count,
+            left_resource_id,
+            right_resource_id,
+        )
+        .and_then(|index| self.co_selection_counts.get(index).copied())
+    }
+
     fn identity(&self) -> (&str, &str, &str, &str, usize) {
         (
             &self.execution_scope,
@@ -229,7 +272,7 @@ fn append_mounted_selection_telemetry(
         let bytes = readback
             .range_bytes(index)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let selection_counts = bytes
+        let counters = bytes
             .chunks_exact(size_of::<u32>())
             .map(|bytes| {
                 u64::from(u32::from_le_bytes(
@@ -239,23 +282,35 @@ fn append_mounted_selection_telemetry(
                 ))
             })
             .collect::<Vec<_>>();
-        if selection_counts.len() != telemetry.resource_count {
+        let expected_counter_count = telemetry
+            .resource_count
+            .checked_add(telemetry.co_selection_pair_count)
+            .ok_or_else(|| {
+                selection_telemetry_error(format!(
+                    "{}.{}.{} telemetry counter count overflowed",
+                    telemetry.component_id, telemetry.node_id, telemetry.domain_id,
+                ))
+            })?;
+        if counters.len() != expected_counter_count {
             return Err(selection_telemetry_error(format!(
                 "{}.{}.{} telemetry contains {} counters, expected {}",
                 telemetry.component_id,
                 telemetry.node_id,
                 telemetry.domain_id,
-                selection_counts.len(),
-                telemetry.resource_count
+                counters.len(),
+                expected_counter_count
             )));
         }
+        let (selection_counts, co_selection_counts) =
+            counters.split_at(telemetry.resource_count);
         domains.push(VulkanSelectionTelemetryDomainSnapshot {
             execution_scope: execution_scope.to_string(),
             component_id: telemetry.component_id.clone(),
             node_id: telemetry.node_id.clone(),
             domain_id: telemetry.domain_id.clone(),
             resource_count: telemetry.resource_count,
-            selection_counts,
+            selection_counts: selection_counts.to_vec(),
+            co_selection_counts: co_selection_counts.to_vec(),
         });
     }
     Ok(())
@@ -280,6 +335,28 @@ fn selection_telemetry_error(
     VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(message.into()))
 }
 
+fn selection_telemetry_co_selection_index(
+    resource_count: usize,
+    left_resource_id: usize,
+    right_resource_id: usize,
+) -> Option<usize> {
+    if left_resource_id >= resource_count
+        || right_resource_id >= resource_count
+        || left_resource_id == right_resource_id
+    {
+        return None;
+    }
+    let (left, right) = if left_resource_id < right_resource_id {
+        (left_resource_id, right_resource_id)
+    } else {
+        (right_resource_id, left_resource_id)
+    };
+    let preceding = left
+        .checked_mul(resource_count.checked_mul(2)?.checked_sub(left)?.checked_sub(1)?)?
+        .checked_div(2)?;
+    preceding.checked_add(right.checked_sub(left)?.checked_sub(1)?)
+}
+
 #[cfg(test)]
 mod selection_telemetry_tests {
     use super::*;
@@ -293,6 +370,7 @@ mod selection_telemetry_tests {
                 domain_id: "resources".to_string(),
                 resource_count: counts.len(),
                 selection_counts: counts.to_vec(),
+                co_selection_counts: vec![0; counts.len() * counts.len().saturating_sub(1) / 2],
             }],
         }
     }
@@ -304,6 +382,10 @@ mod selection_telemetry_tests {
 
         let counter_change = snapshot(&[1, 3, 2]);
         assert_ne!(baseline.digest(), counter_change.digest());
+
+        let mut co_selection_change = baseline.clone();
+        co_selection_change.domains[0].co_selection_counts[1] = 1;
+        assert_ne!(baseline.digest(), co_selection_change.digest());
 
         let mut identity_change = baseline.clone();
         identity_change.domains[0].execution_scope = "draft".to_string();
@@ -343,5 +425,34 @@ mod selection_telemetry_tests {
         );
 
         assert!(snapshot(&[0, 2, 1]).delta_since(&previous).is_err());
+    }
+
+    #[test]
+    fn packed_co_selection_counts_are_symmetric_and_reject_invalid_pairs() {
+        let mut telemetry = snapshot(&[4, 5, 6, 7]);
+        telemetry.domains[0].co_selection_counts = vec![10, 11, 12, 13, 14, 15];
+        let domain = &telemetry.domains[0];
+
+        assert_eq!(domain.co_selection_count(0, 1), Some(10));
+        assert_eq!(domain.co_selection_count(1, 0), Some(10));
+        assert_eq!(domain.co_selection_count(0, 3), Some(12));
+        assert_eq!(domain.co_selection_count(2, 3), Some(15));
+        assert_eq!(domain.co_selection_count(2, 2), None);
+        assert_eq!(domain.co_selection_count(0, 4), None);
+    }
+
+    #[test]
+    fn turn_delta_covers_co_selection_counts() {
+        let mut previous = snapshot(&[1, 1, 1]);
+        previous.domains[0].co_selection_counts = vec![2, 3, 4];
+        let mut current = snapshot(&[2, 3, 4]);
+        current.domains[0].co_selection_counts = vec![5, 8, 11];
+
+        let delta = current.delta_since(&previous).unwrap();
+        assert_eq!(delta.domains[0].selection_counts, vec![1, 2, 3]);
+        assert_eq!(delta.domains[0].co_selection_counts, vec![3, 5, 7]);
+
+        current.domains[0].co_selection_counts[1] = 2;
+        assert!(current.delta_since(&previous).is_err());
     }
 }

@@ -24,7 +24,21 @@ pub struct VulkanResidentSelectionTelemetry {
     pub node_id: String,
     pub domain_id: String,
     pub resource_count: usize,
+    pub co_selection_pair_count: usize,
     pub byte_capacity: usize,
+}
+
+fn selection_telemetry_co_selection_pair_count(
+    resource_count: usize,
+) -> Result<usize, VulkanResidentPlanError> {
+    resource_count
+        .checked_mul(resource_count.saturating_sub(1))
+        .and_then(|pairs| pairs.checked_div(2))
+        .ok_or_else(|| {
+            VulkanResidentPlanError(
+                "selection telemetry co-selection pair count overflowed".to_string(),
+            )
+        })
 }
 
 impl VulkanStreamCircuitResidentPlan {
@@ -164,8 +178,21 @@ impl VulkanStreamCircuitResidentPlan {
             .iter()
             .filter(|domain| hosts_component(&domain.component_id))
             .map(|domain| {
-                let byte_capacity = domain
+                let co_selection_pair_count = if domain.selection_count_per_activation > 1 {
+                    selection_telemetry_co_selection_pair_count(domain.resource_count)?
+                } else {
+                    0
+                };
+                let counter_count = domain
                     .resource_count
+                    .checked_add(co_selection_pair_count)
+                    .ok_or_else(|| {
+                        VulkanResidentPlanError(format!(
+                            "{}.{} selection telemetry counter count overflowed",
+                            domain.component_id, domain.node_id
+                        ))
+                    })?;
+                let byte_capacity = counter_count
                     .checked_mul(size_of::<u32>())
                     .ok_or_else(|| {
                         VulkanResidentPlanError(format!(
@@ -178,6 +205,7 @@ impl VulkanStreamCircuitResidentPlan {
                     node_id: domain.node_id.clone(),
                     domain_id: domain.domain_id.clone(),
                     resource_count: domain.resource_count,
+                    co_selection_pair_count,
                     byte_capacity,
                 })
             })
@@ -395,6 +423,7 @@ impl VulkanStreamCircuitResidentPlan {
                 node_id: telemetry.node_id.clone(),
                 domain_id: telemetry.domain_id.clone(),
                 resource_count: telemetry.resource_count,
+                co_selection_pair_count: telemetry.co_selection_pair_count,
                 byte_capacity: telemetry.byte_capacity,
                 buffer,
             });
