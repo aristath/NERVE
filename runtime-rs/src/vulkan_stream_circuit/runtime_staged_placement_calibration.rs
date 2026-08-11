@@ -14,6 +14,59 @@ pub fn calibrate_vulkan_runtime_staged_placement_candidate_with_policy(
     Option<VulkanRuntimeDistributedPlacementCalibrationReport>,
     VulkanResidentTokenModelPackageError,
 > {
+    calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
+        devices,
+        manifest_dir.as_ref(),
+        runtime_model,
+        target,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        catalog,
+        policy,
+    )
+}
+
+/// Prefill counterpart to the staged decode calibration. It exercises the
+/// same compiler-emitted component and physical contracts at the requested
+/// batch width; the width is therefore part of the catalog's exact behavior
+/// and shape identity rather than an inferred scaling factor.
+pub fn calibrate_vulkan_runtime_staged_prefill_placement_candidate_with_policy(
+    devices: &[(String, Rc<VulkanComputeDevice>)],
+    manifest_dir: impl AsRef<Path>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    target: &VulkanRuntimePlacementCalibrationTarget,
+    activation_batch_width: usize,
+    catalog: &mut VulkanPlacementCalibrationCatalog,
+    policy: VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<
+    Option<VulkanRuntimeDistributedPlacementCalibrationReport>,
+    VulkanResidentTokenModelPackageError,
+> {
+    calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
+        devices,
+        manifest_dir.as_ref(),
+        runtime_model,
+        target,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width,
+        },
+        catalog,
+        policy,
+    )
+}
+
+fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
+    devices: &[(String, Rc<VulkanComputeDevice>)],
+    manifest_dir: &Path,
+    runtime_model: &VulkanResidentRuntimeModel,
+    target: &VulkanRuntimePlacementCalibrationTarget,
+    phase: VulkanTargetedComponentExecutionPhase,
+    catalog: &mut VulkanPlacementCalibrationCatalog,
+    policy: VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<
+    Option<VulkanRuntimeDistributedPlacementCalibrationReport>,
+    VulkanResidentTokenModelPackageError,
+> {
+    validate_vulkan_runtime_staged_placement_phase(phase)?;
     let stages = vulkan_runtime_staged_placement_device_groups(devices)?;
     let started = Instant::now();
     let mut final_report = None;
@@ -34,14 +87,28 @@ pub fn calibrate_vulkan_runtime_staged_placement_candidate_with_policy(
             .iter()
             .map(|(physical_id, _)| physical_id.clone())
             .collect::<Vec<_>>();
-        let Some(report) = calibrate_vulkan_runtime_distributed_placement_candidate_with_policy(
-            stage,
-            manifest_dir.as_ref(),
-            runtime_model,
-            target,
-            stage_policy,
-        )?
-        else {
+        let report = match phase {
+            VulkanTargetedComponentExecutionPhase::Decode => {
+                calibrate_vulkan_runtime_distributed_placement_candidate_with_policy(
+                    stage,
+                    manifest_dir,
+                    runtime_model,
+                    target,
+                    stage_policy,
+                )?
+            }
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width,
+            } => calibrate_vulkan_runtime_distributed_prefill_placement_candidate_with_policy(
+                stage,
+                manifest_dir,
+                runtime_model,
+                target,
+                activation_batch_width,
+                stage_policy,
+            )?,
+        };
+        let Some(report) = report else {
             return Ok(None);
         };
         if report.physical_device_ids != expected_ids
@@ -56,6 +123,22 @@ pub fn calibrate_vulkan_runtime_staged_placement_candidate_with_policy(
         final_report = Some(report);
     }
     Ok(final_report)
+}
+
+fn validate_vulkan_runtime_staged_placement_phase(
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    if matches!(
+        phase,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 0
+        }
+    ) {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "staged prefill calibration requires a positive activation batch width",
+        ));
+    }
+    Ok(())
 }
 
 fn vulkan_runtime_staged_placement_device_groups(
@@ -140,5 +223,30 @@ mod runtime_staged_placement_calibration_tests {
         assert!(staged_id_groups(&[]).is_err());
         assert!(staged_id_groups(&["owner", ""]).is_err());
         assert!(staged_id_groups(&["owner", "owner"]).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_width_prefill_before_opening_a_calibration_session() {
+        let error = validate_vulkan_runtime_staged_placement_phase(
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("positive activation batch width")
+        );
+        validate_vulkan_runtime_staged_placement_phase(
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
+        validate_vulkan_runtime_staged_placement_phase(
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width: 64,
+            },
+        )
+        .unwrap();
     }
 }
