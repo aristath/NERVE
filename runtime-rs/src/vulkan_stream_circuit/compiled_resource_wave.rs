@@ -862,7 +862,7 @@ impl VulkanCompiledResourceDeviceStore {
         device: &VulkanComputeDevice,
     ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
         device
-            .validate_device_local_memory_headroom()
+            .restore_device_local_memory_headroom_after_quiescence()
             .map(|_| ())
             .map_err(compiled_device_store_vulkan_error)
     }

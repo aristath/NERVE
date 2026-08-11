@@ -458,7 +458,18 @@ impl VulkanComputeDevice {
                 .expect("at least the owner external buffer exists")
         };
         let device_local_memory_reservation =
-            match self.reserve_device_local_memory(allocation_size) {
+            match usize::try_from(allocation_size)
+                .map_err(|_| {
+                    VulkanError(
+                        "shared device-local allocation requirement exceeds usize".to_string(),
+                    )
+                })
+                .and_then(|byte_count| {
+                    self.reserve_fixed_device_local_memory_capacity(byte_count)
+                })
+                .and_then(|permit| {
+                    self.commit_device_local_memory_capacity(permit, allocation_size)
+                }) {
                 Ok(reservation) => reservation,
                 Err(error) => {
                     unsafe {
@@ -1355,7 +1366,22 @@ impl VulkanComputeDevice {
                         Some(permit) => {
                             self.commit_device_local_memory_capacity(permit, requirements.size)
                         }
-                        None => self.reserve_device_local_memory(requirements.size),
+                        None => usize::try_from(requirements.size)
+                            .map_err(|_| {
+                                VulkanError(
+                                    "resident storage allocation requirement exceeds usize"
+                                        .to_string(),
+                                )
+                            })
+                            .and_then(|byte_count| {
+                                self.reserve_fixed_device_local_memory_capacity(byte_count)
+                            })
+                            .and_then(|permit| {
+                                self.commit_device_local_memory_capacity(
+                                    permit,
+                                    requirements.size,
+                                )
+                            }),
                     };
                     match reservation {
                     Ok(reservation) => Some(reservation),

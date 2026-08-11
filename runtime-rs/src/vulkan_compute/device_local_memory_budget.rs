@@ -494,6 +494,7 @@ fn restore_protected_device_local_headroom(
 }
 
 impl VulkanDeviceLocalMemoryReservation {
+    #[cfg(test)]
     fn acquire(
         tracker: &Arc<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>,
         currently_available_bytes: u64,

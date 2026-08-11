@@ -236,17 +236,6 @@ impl VulkanComputeDevice {
         })
     }
 
-    fn reserve_device_local_memory(
-        &self,
-        byte_count: u64,
-    ) -> Result<Arc<VulkanDeviceLocalMemoryReservation>, VulkanError> {
-        VulkanDeviceLocalMemoryReservation::acquire(
-            &self.device_local_memory_budget_tracker,
-            self.available_device_local_memory_bytes(),
-            byte_count,
-        )
-    }
-
     pub fn register_device_local_memory_reclaimer(
         &self,
         reclaimer: Arc<dyn VulkanDeviceLocalMemoryReclaimer>,
@@ -268,6 +257,99 @@ impl VulkanComputeDevice {
                 VulkanError("device-local capacity permit exceeds u64".to_string())
             })?,
         )
+    }
+
+    /// Admits fixed runtime memory against a device whose remaining stable
+    /// budget may currently be occupied by inactive paged resources.
+    ///
+    /// This is deliberately an admission transaction rather than a Vulkan
+    /// allocation retry: no memory has been allocated when it runs. Dynamic
+    /// residency is first retired, every physical queue is quiesced, backing
+    /// is released, and the requested bytes are converted into a pending
+    /// permit before residency work is allowed to resume. The permit prevents
+    /// another loader from consuming the reclaimed capacity before the caller
+    /// commits its fixed allocation.
+    fn reserve_fixed_device_local_memory_capacity(
+        &self,
+        byte_count: usize,
+    ) -> Result<VulkanDeviceLocalMemoryPermit, VulkanError> {
+        let initial_error = match self.reserve_device_local_memory_capacity(byte_count) {
+            Ok(permit) => return Ok(permit),
+            Err(error) => error,
+        };
+        let accounting = self.device_local_memory_accounting()?;
+        let requested_bytes = byte_count.saturating_sub(
+            usize::try_from(accounting.admissible_remaining_bytes).unwrap_or(usize::MAX),
+        );
+        if requested_bytes == 0 {
+            // The heap observation changed between the failed admission and
+            // the accounting snapshot. Retry once without disturbing dynamic
+            // residency; any further failure is handled below.
+            if let Ok(permit) = self.reserve_device_local_memory_capacity(byte_count) {
+                return Ok(permit);
+            }
+        }
+        let reclaimers = VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(
+            &self.device_local_memory_budget_tracker,
+        )?;
+        if reclaimers.is_empty() {
+            return Err(VulkanError(format!(
+                "fixed device-local allocation admission failed ({initial_error}); no evictable residency store is registered",
+            )));
+        }
+        let reclamation_request = requested_bytes.max(1);
+        let reclamations = reclaimers
+            .into_iter()
+            .map(|reclaimer| {
+                reclaimer.begin_device_local_memory_reclamation(reclamation_request)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut reclaimed_bytes = 0usize;
+        let permit = self.with_quiescent_memory_reclamation(|quiescence| {
+            if let Ok(permit) = self.reserve_device_local_memory_capacity(byte_count) {
+                return Ok(permit);
+            }
+            for reclamation in &reclamations {
+                let accounting = self.device_local_memory_accounting()?;
+                let deficit = byte_count.saturating_sub(
+                    usize::try_from(accounting.admissible_remaining_bytes)
+                        .unwrap_or(usize::MAX),
+                );
+                if deficit == 0 {
+                    if let Ok(permit) = self.reserve_device_local_memory_capacity(byte_count) {
+                        return Ok(permit);
+                    }
+                } else {
+                    reclaimed_bytes = reclaimed_bytes.saturating_add(
+                        reclamation.reclaim_device_local_memory(quiescence, deficit)?,
+                    );
+                    if let Ok(permit) = self.reserve_device_local_memory_capacity(byte_count) {
+                        return Ok(permit);
+                    }
+                }
+            }
+            // VK_EXT_memory_budget may publish a release slightly after the
+            // tracked allocation has been destroyed. Keep the residency
+            // transaction closed while waiting for that counter to settle and
+            // atomically convert the reclaimed bytes into a pending permit.
+            let started = Instant::now();
+            loop {
+                match self.reserve_device_local_memory_capacity(byte_count) {
+                    Ok(permit) => return Ok(permit),
+                    Err(error) if started.elapsed() < Duration::from_millis(250) => {
+                        let _ = error;
+                        std::thread::sleep(Duration::from_micros(100));
+                    }
+                    Err(error) => {
+                        return Err(VulkanError(format!(
+                            "fixed device-local allocation admission still failed after reclaiming {reclaimed_bytes} bytes ({error}); initial admission: {initial_error}",
+                        )));
+                    }
+                }
+            }
+        })?;
+        drop(reclamations);
+        Ok(permit)
     }
 
     fn commit_device_local_memory_capacity(

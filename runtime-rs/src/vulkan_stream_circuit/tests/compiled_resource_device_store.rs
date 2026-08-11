@@ -1705,10 +1705,29 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         .mapping
         .resource_slots(host_resource_index)
         .unwrap();
-    let competing_device_allocation = tiered_store
-        .device_arena
-        .allocate_groups(&device, &[(&reload_slots, &[8])], 8)
-        .unwrap();
+    let mut competing_device_allocations = Vec::new();
+    loop {
+        match tiered_store.device_arena.allocate_groups(
+            &device,
+            &[(&reload_slots, &[8])],
+            8,
+        ) {
+            Ok(allocation) => competing_device_allocations.push(allocation),
+            Err(error)
+                if error.to_string().contains("already committed")
+                    && error.to_string().contains("no retained slab range") =>
+            {
+                break;
+            }
+            Err(error) => panic!(
+                "failed to saturate the device arena before testing host-tier fallback: {error}"
+            ),
+        }
+    }
+    assert!(
+        !competing_device_allocations.is_empty(),
+        "the fallback fixture must consume the device arena's reusable capacity"
+    );
     tiered_store
         .load_selector_resource(
             &device,
@@ -1719,7 +1738,7 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         .expect(
             "a retiered layout must support another physical generation when reloaded to the host tier",
         );
-    drop(competing_device_allocation);
+    drop(competing_device_allocations);
     let reloaded_plan = tiered_store.memory_plan.as_ref().unwrap().lock().unwrap();
     assert_eq!(reloaded_plan.device_payload_bytes, 0);
     assert_eq!(reloaded_plan.host_visible_payload_bytes, 16);
