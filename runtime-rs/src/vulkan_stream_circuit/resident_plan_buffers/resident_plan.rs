@@ -320,9 +320,11 @@ impl VulkanStreamCircuitResidentPlan {
                     activation_override.component_id, activation_override.slot
                 )));
             }
-            if !activation_override.buffer.is_shared_host_backed() {
+            if !activation_override.buffer.is_shared_host_backed()
+                && !activation_override.buffer.is_shared_device_memory_backed()
+            {
                 return Err(VulkanError(format!(
-                    "activation buffer override {}.slot_{} is not backed by shared host memory",
+                    "activation buffer override {}.slot_{} is not backed by shared host or shared device memory",
                     activation_override.component_id, activation_override.slot
                 )));
             }

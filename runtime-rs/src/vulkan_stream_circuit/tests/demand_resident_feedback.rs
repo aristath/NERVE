@@ -86,6 +86,14 @@ fn demand_checkpoint_resume_preserves_the_full_sequence_indirect_offsets() {
 }
 
 #[test]
+fn demand_checkpoint_resume_places_terminal_snapshots_after_the_exact_suffix() {
+    assert_eq!(demand_feedback_sequence_step_count(358, 0).unwrap(), 358);
+    assert_eq!(demand_feedback_sequence_step_count(358, 10).unwrap(), 348);
+    assert!(demand_feedback_sequence_step_count(358, 358).is_err());
+    assert!(demand_feedback_sequence_step_count(358, 359).is_err());
+}
+
+#[test]
 fn demand_feedback_requires_one_unambiguous_miss_checkpoint() {
     assert_eq!(
         unique_pending_demand_feedback_checkpoint(&[]).unwrap(),
@@ -95,34 +103,94 @@ fn demand_feedback_requires_one_unambiguous_miss_checkpoint() {
         unique_pending_demand_feedback_checkpoint(&[(3, 1, 4)]).unwrap(),
         Some((3, 1, 4))
     );
-    assert!(
-        unique_pending_demand_feedback_checkpoint(&[(3, 1, 4), (3, 2, 0)]).is_err()
-    );
+    assert!(unique_pending_demand_feedback_checkpoint(&[(3, 1, 4), (3, 2, 0)]).is_err());
 }
 
 #[test]
-fn demand_feedback_pipeline_predicate_skips_only_fully_resident_queue_scans() {
-    assert!(!demand_feedback_pipeline_has_pending_miss([
-        ("gpu0", 1),
-        ("gpu1", 1),
-        ("gpu2", 1),
-    ])
-    .unwrap());
-    assert!(demand_feedback_pipeline_has_pending_miss([
-        ("gpu0", 1),
-        ("gpu1", 0),
-        ("gpu2", 1),
-    ])
-    .unwrap());
-
-    let invalid = demand_feedback_pipeline_has_pending_miss([("gpu0", 2)]).unwrap_err();
+fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() {
     assert_eq!(
-        invalid,
-        VulkanError(
-            "demand feedback pipeline predicate on \"gpu0\" has invalid value 2".to_string()
-        )
+        resident_feedback_fault_reason_from_continuation(VULKAN_FEEDBACK_CONTINUATION_READY)
+            .unwrap(),
+        VULKAN_FEEDBACK_FAULT_NONE,
     );
-    assert!(demand_feedback_pipeline_has_pending_miss(std::iter::empty()).is_err());
+    assert_eq!(
+        resident_feedback_fault_reason_from_continuation(VULKAN_FEEDBACK_CONTINUATION_FAULTED)
+            .unwrap(),
+        VULKAN_FEEDBACK_FAULT_RESIDENCY,
+    );
+    assert!(resident_feedback_fault_reason_from_continuation(2).is_err());
+
+    let complete = VulkanResidentFeedbackControlCompletion {
+        executed_tick_count: 8,
+        sampled_tick_count: 8,
+        stop_reason: VULKAN_FEEDBACK_STOP_REASON_NONE,
+        fault_reason: VULKAN_FEEDBACK_FAULT_NONE,
+        template_replayed: false,
+    };
+    assert_eq!(
+        resident_feedback_terminal_state(complete, 8).unwrap(),
+        VulkanResidentFeedbackTerminalState::Complete
+    );
+
+    let fault = VulkanResidentFeedbackControlCompletion {
+        executed_tick_count: 3,
+        sampled_tick_count: 3,
+        stop_reason: VULKAN_FEEDBACK_STOP_REASON_EOS,
+        fault_reason: VULKAN_FEEDBACK_FAULT_RESIDENCY,
+        template_replayed: false,
+    };
+    assert_eq!(
+        resident_feedback_terminal_state(fault, 8).unwrap(),
+        VulkanResidentFeedbackTerminalState::ResidencyFault
+    );
+
+    let fault_before_any_ordinary_progress = VulkanResidentFeedbackControlCompletion {
+        executed_tick_count: 0,
+        sampled_tick_count: 0,
+        stop_reason: VULKAN_FEEDBACK_STOP_REASON_CANCELLED,
+        fault_reason: VULKAN_FEEDBACK_FAULT_RESIDENCY,
+        template_replayed: false,
+    };
+    assert_eq!(
+        resident_feedback_terminal_state(fault_before_any_ordinary_progress, 8).unwrap(),
+        VulkanResidentFeedbackTerminalState::ResidencyFault
+    );
+
+    let inferred_fault = VulkanResidentFeedbackControlCompletion {
+        executed_tick_count: 3,
+        sampled_tick_count: 3,
+        stop_reason: VULKAN_FEEDBACK_STOP_REASON_NONE,
+        fault_reason: VULKAN_FEEDBACK_FAULT_NONE,
+        template_replayed: false,
+    };
+    assert!(resident_feedback_terminal_state(inferred_fault, 8).is_err());
+
+    let contradictory_fault = VulkanResidentFeedbackControlCompletion {
+        executed_tick_count: 3,
+        sampled_tick_count: 4,
+        stop_reason: VULKAN_FEEDBACK_STOP_REASON_NONE,
+        fault_reason: VULKAN_FEEDBACK_FAULT_RESIDENCY,
+        template_replayed: false,
+    };
+    assert!(resident_feedback_terminal_state(contradictory_fault, 8).is_err());
+
+    let unknown_fault = VulkanResidentFeedbackControlCompletion {
+        executed_tick_count: 8,
+        sampled_tick_count: 8,
+        stop_reason: VULKAN_FEEDBACK_STOP_REASON_NONE,
+        fault_reason: 2,
+        template_replayed: false,
+    };
+    assert!(resident_feedback_terminal_state(unknown_fault, 8).is_err());
+
+    let unknown_stop_during_fault = VulkanResidentFeedbackControlCompletion {
+        executed_tick_count: 0,
+        sampled_tick_count: 0,
+        stop_reason: 3,
+        fault_reason: VULKAN_FEEDBACK_FAULT_RESIDENCY,
+        template_replayed: false,
+    };
+    assert!(resident_feedback_terminal_state(unknown_stop_during_fault, 8).is_err());
 }
 
 #[test]
@@ -158,8 +226,8 @@ fn demand_feedback_rejects_a_resource_that_faults_twice_at_one_checkpoint() {
     };
     let mut resolved = BTreeMap::new();
     record_demand_feedback_resolution(&mut resolved, checkpoint, &[4, 68]).unwrap();
-    let error = record_demand_feedback_resolution(&mut resolved, checkpoint, &[68, 89])
-        .unwrap_err();
+    let error =
+        record_demand_feedback_resolution(&mut resolved, checkpoint, &[68, 89]).unwrap_err();
     assert!(error.0.contains("missed resources [68] again"));
     assert_eq!(resolved.get(&checkpoint), Some(&BTreeSet::from([4, 68])));
 }
@@ -202,9 +270,7 @@ fn demand_residency_loads_the_immutable_gpu_miss_record_not_mutable_selector_sta
 #[test]
 fn scalar_and_feedback_demand_chains_have_distinct_predicate_ownership() {
     assert!(!VulkanDemandResidencyChainLane::Scalar.uses_shared_pipeline_guard());
-    assert!(
-        VulkanDemandResidencyChainLane::Feedback(0).uses_shared_pipeline_guard()
-    );
+    assert!(VulkanDemandResidencyChainLane::Feedback(0).uses_shared_pipeline_guard());
 }
 
 #[test]
@@ -248,7 +314,12 @@ fn demand_feedback_test_plan(
     let stage_count = stages.len();
     let receive_stage_count = stages
         .iter()
-        .filter(|stage| matches!(stage, VulkanMountedPlacedStreamTickStage::ReceiveEdge { .. }))
+        .filter(|stage| {
+            matches!(
+                stage,
+                VulkanMountedPlacedStreamTickStage::ReceiveEdge { .. }
+            )
+        })
         .count();
     let dispatch_stage_count = stages
         .iter()
@@ -256,7 +327,12 @@ fn demand_feedback_test_plan(
         .count();
     let publish_stage_count = stages
         .iter()
-        .filter(|stage| matches!(stage, VulkanMountedPlacedStreamTickStage::PublishEdge { .. }))
+        .filter(|stage| {
+            matches!(
+                stage,
+                VulkanMountedPlacedStreamTickStage::PublishEdge { .. }
+            )
+        })
         .count();
     VulkanMountedPlacedStreamTickPlan {
         backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
@@ -372,14 +448,8 @@ fn demand_feedback_resume_plan_handles_a_causal_device_revisit() {
 
 #[test]
 fn demand_feedback_resume_rejects_an_independent_parallel_branch() {
-    let gpu0 = demand_feedback_test_plan(
-        "gpu0",
-        vec![demand_feedback_test_dispatch(0, "gpu0")],
-    );
-    let gpu1 = demand_feedback_test_plan(
-        "gpu1",
-        vec![demand_feedback_test_dispatch(0, "gpu1")],
-    );
+    let gpu0 = demand_feedback_test_plan("gpu0", vec![demand_feedback_test_dispatch(0, "gpu0")]);
+    let gpu1 = demand_feedback_test_plan("gpu1", vec![demand_feedback_test_dispatch(0, "gpu1")]);
 
     let error = demand_feedback_resume_plan(&[&gpu0, &gpu1], 1, 0).unwrap_err();
     assert!(error.0.contains("independent parallel"));

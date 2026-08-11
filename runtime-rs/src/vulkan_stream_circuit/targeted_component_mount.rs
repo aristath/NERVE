@@ -54,10 +54,21 @@ impl VulkanResidentTargetedModelPackageDeviceSlicePlan {
         parameter_pool: &VulkanResidentBufferPool,
     ) -> Result<VulkanResidentTargetedModelPackageDeviceSlice, VulkanResidentTokenModelPackageError>
     {
+        self.materialize_excluding_tensors(device, manifest_dir, parameter_pool, &BTreeSet::new())
+    }
+
+    fn materialize_excluding_tensors(
+        &self,
+        device: &VulkanComputeDevice,
+        manifest_dir: &Path,
+        parameter_pool: &VulkanResidentBufferPool,
+        excluded_tensors: &BTreeSet<String>,
+    ) -> Result<VulkanResidentTargetedModelPackageDeviceSlice, VulkanResidentTokenModelPackageError>
+    {
         let mut slice = self.slice_plan.clone().materialize(
             device,
             &self.tensor_index,
-            &BTreeSet::new(),
+            excluded_tensors,
             Some(parameter_pool),
         )?;
         if slice.physical_residency_schedule().checkpoints.is_empty() {

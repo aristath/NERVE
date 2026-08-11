@@ -147,7 +147,9 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             ),
                         );
                     }
-                    let (completion_bridge, completion_staging) = if dependencies.has_owner_continuation {
+                    let (completion_bridge, completion_staging) = if dependencies
+                        .has_owner_continuation
+                    {
                         (None, false)
                     } else if let Some(VulkanMountedPlacedStreamTickStage::PublishEdge {
                         edge_index,
@@ -303,10 +305,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                         } else {
                             slice
                                 .device
-                                .submit_timeline_semaphore_bridge(
-                                    &wait_points,
-                                    &signal_points,
-                                )
+                                .submit_timeline_semaphore_bridge(&wait_points, &signal_points)
                                 .map_err(
                                     VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
                                 )?;
@@ -388,12 +387,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     if let Some(copy) = turn.destination_copy(slice.device_id()) {
                         if let Some(batch) = submission_batch {
                             batch
-                                .enqueue_resident_buffer_copy(
-                                    slice.device,
-                                    copy,
-                                    &[wait],
-                                    &[],
-                                )
+                                .enqueue_resident_buffer_copy(slice.device, copy, &[wait], &[])
                                 .map_err(
                                     VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
                                 )?;
@@ -529,26 +523,54 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                 } else {
                     &[]
                 };
-                let snapshot_copies = if is_terminal_segment {
+                let demand_resume_gate = demand_resume
+                    .filter(|(segment_start_stage_index, _)| {
+                        *segment_start_stage_index == segment.start_stage_index
+                    })
+                    .map(|(_, gate_index)| gate_index);
+                let terminal_step_index = if is_terminal_segment
+                    && (state_transaction.is_some()
+                        || !slice
+                            .dispatch_extensions
+                            .terminal_snapshot_copies
+                            .is_empty())
+                {
+                    Some(
+                        segment
+                            .feedback_sequence_step_count(
+                                prefix_dispatches.len(),
+                                suffix_dispatches.len(),
+                                slice.dispatch_extensions.sequence_variant,
+                                submission_policy.feedback_lane,
+                                demand_resume_gate,
+                            )
+                            .map_err(|error| {
+                                VulkanMountedPlacedResidentInProcessStreamTickError::StreamTick(
+                                    VulkanMountedPlacedResidentStreamTickError::Dispatch(error),
+                                )
+                            })?
+                            .checked_sub(1)
+                            .ok_or_else(|| {
+                                VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
+                                    VulkanError(
+                                        "resident feedback snapshot step index overflowed"
+                                            .to_string(),
+                                    ),
+                                )
+                            })?,
+                    )
+                } else {
+                    None
+                };
+                let mut snapshot_copies = if is_terminal_segment {
                     state_transaction
                         .map(|transaction| {
-                            let after_step_index = prefix_dispatches
-                                .len()
-                                .checked_add(segment.dispatch_count)
-                                .and_then(|count| count.checked_add(suffix_dispatches.len()))
-                                .and_then(|count| count.checked_sub(1))
-                                .ok_or_else(|| {
-                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
-                                        VulkanError(
-                                            "resident feedback snapshot step index overflowed"
-                                                .to_string(),
-                                        ),
-                                    )
-                                })?;
                             transaction
                                 .copies_for_tick(
                                     &slice.mounted.buffers,
-                                    after_step_index,
+                                    terminal_step_index.expect(
+                                        "a state transaction requires one terminal step",
+                                    ),
                                     submission_policy.feedback_lane.ok_or_else(|| {
                                         VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
                                             VulkanError(
@@ -567,6 +589,22 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                 } else {
                     Vec::new()
                 };
+                if let Some(after_step_index) = terminal_step_index {
+                    snapshot_copies.extend(
+                        slice
+                            .dispatch_extensions
+                            .terminal_snapshot_copies
+                            .iter()
+                            .copied()
+                            .map(|copy| {
+                                VulkanResidentKernelSequenceSnapshotCopy::
+                                    unconditional_from_range_after_conditional_step(
+                                        after_step_index,
+                                        copy,
+                                    )
+                            }),
+                    );
+                }
                 let submission = segment.submit_with_stream_control_and_timeline_semaphores(
                     slice.device,
                     control,
@@ -574,11 +612,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     suffix_dispatches,
                     slice.dispatch_extensions.sequence_variant,
                     submission_policy.feedback_lane,
-                    demand_resume
-                        .filter(|(segment_start_stage_index, _)| {
-                            *segment_start_stage_index == segment.start_stage_index
-                        })
-                        .map(|(_, gate_index)| gate_index),
+                    demand_resume_gate,
                     &snapshot_copies,
                     &wait_points,
                     &signal_points,
@@ -616,12 +650,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     }
                     if let Some(batch) = submission_batch {
                         batch
-                            .enqueue_resident_buffer_copy(
-                                slice.device,
-                                copy,
-                                &[],
-                                &copy_signals,
-                            )
+                            .enqueue_resident_buffer_copy(slice.device, copy, &[], &copy_signals)
                             .map_err(
                                 VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
                             )?;
@@ -673,9 +702,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             )
                         })
                         .transpose()
-                        .map_err(
-                            VulkanMountedPlacedResidentInProcessStreamTickError::Distributed,
-                        )?
+                        .map_err(VulkanMountedPlacedResidentInProcessStreamTickError::Distributed)?
                         .unwrap_or_default();
                     if !edge_synchronizations
                         .enqueue_source_staging_transfer(
@@ -684,9 +711,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             &transfer_wait_points,
                             submission_batch,
                         )
-                        .map_err(
-                            VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
-                        )?
+                        .map_err(VulkanMountedPlacedResidentInProcessStreamTickError::Schedule)?
                     {
                         return Err(
                             VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(

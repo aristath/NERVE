@@ -355,6 +355,7 @@ pub struct VulkanMountedPlacedResidentStreamTickCursorAdvance {
 pub struct VulkanMountedPlacedResidentStreamTickDispatchExtensions<'a> {
     pub prefix_dispatches: SmallVec<[&'a VulkanResidentKernelDispatch; 1]>,
     pub suffix_dispatches: SmallVec<[&'a VulkanResidentKernelDispatch; 3]>,
+    terminal_snapshot_copies: SmallVec<[VulkanResidentBufferRangeCopy<'a>; 1]>,
     sequence_variant: u8,
 }
 

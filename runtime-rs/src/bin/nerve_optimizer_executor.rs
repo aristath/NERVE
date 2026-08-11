@@ -220,6 +220,7 @@ fn execute_session(
             "physical_node_id": mount.physical_node_id,
             "execution_scope": match mount.execution_scope {
                 VulkanTargetedComponentExecutionScope::Node => "node",
+                VulkanTargetedComponentExecutionScope::Component => "component",
                 VulkanTargetedComponentExecutionScope::DecodeComponentPrefix => "decode_component_prefix",
             },
             "logical_device_id": mount.logical_device_id,
@@ -622,6 +623,7 @@ impl MountCommand {
         };
         let execution_scope = match execution_scope.as_str() {
             "node" => VulkanTargetedComponentExecutionScope::Node,
+            "component" => VulkanTargetedComponentExecutionScope::Component,
             "decode_component_prefix" if phase == VulkanTargetedComponentExecutionPhase::Decode => {
                 VulkanTargetedComponentExecutionScope::DecodeComponentPrefix
             }
@@ -633,7 +635,7 @@ impl MountCommand {
             }
             _ => {
                 return Err(invalid_input(
-                    "executor execution_scope must be node or decode_component_prefix",
+                    "executor execution_scope must be node, component, or decode_component_prefix",
                 )
                 .into());
             }

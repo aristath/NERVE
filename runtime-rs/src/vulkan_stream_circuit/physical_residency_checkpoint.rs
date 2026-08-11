@@ -83,6 +83,18 @@ impl Display for VulkanPhysicalResidencyCheckpointError {
 impl Error for VulkanPhysicalResidencyCheckpointError {}
 
 impl VulkanPhysicalResidencySchedule {
+    pub fn demand_gate_count(&self, policy: ResourceResidencyPolicy) -> usize {
+        if policy.is_demand_loaded() {
+            self.checkpoints.len()
+        } else {
+            0
+        }
+    }
+
+    pub fn requires_demand_execution(&self, policy: ResourceResidencyPolicy) -> bool {
+        self.demand_gate_count(policy) != 0
+    }
+
     pub fn from_prepared_dispatch_plan(
         contract: &CompiledResourceResidencyContract,
         execution_scope: impl Into<String>,

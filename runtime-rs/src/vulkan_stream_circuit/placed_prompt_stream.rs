@@ -1414,13 +1414,27 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let mut remaining_feedback_ticks = max_feedback_ticks;
         let mut ran_window = false;
         loop {
-            let Some(pending) =
+            let Some(mut pending) =
                 self.submit_resident_feedback_window_limited(remaining_feedback_ticks)?
             else {
                 break;
             };
             let tick_count = pending.window.tick_count;
-            self.wait_resident_feedback_window_for(&pending, u64::MAX)?;
+            loop {
+                self.wait_resident_feedback_window_for(&pending, u64::MAX)?;
+                match self.processor.resolve_resident_feedback_terminal(
+                    &self.devices,
+                    pending.window,
+                )? {
+                    VulkanResidentFeedbackTerminalDisposition::Complete(window) => {
+                        pending.window = window;
+                        break;
+                    }
+                    VulkanResidentFeedbackTerminalDisposition::Resubmitted(window) => {
+                        pending.window = window;
+                    }
+                }
+            }
             let completion =
                 self.complete_submitted_resident_feedback_window(pending, on_output_event)?;
             ran_window = true;

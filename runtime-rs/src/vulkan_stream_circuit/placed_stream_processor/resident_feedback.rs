@@ -5,6 +5,19 @@ struct VulkanResidentInProcessPlacedPendingFeedbackWindow {
     template_replayed: bool,
     transport_stats: VulkanPlacedEdgeTransportStats,
     demand_resolved_checkpoints: Vec<VulkanDemandFeedbackCheckpoint>,
+    demand_resolution: Option<VulkanResidentDemandFeedbackResolutionState>,
+}
+
+struct VulkanResidentDemandFeedbackResolutionState {
+    maximum_resolution_count: usize,
+    resolved_resource_count: usize,
+    resolved_checkpoints:
+        BTreeMap<VulkanDemandFeedbackCheckpoint, BTreeSet<usize>>,
+}
+
+enum VulkanResidentFeedbackTerminalDisposition {
+    Complete(VulkanResidentInProcessPlacedPendingFeedbackWindow),
+    Resubmitted(VulkanResidentInProcessPlacedPendingFeedbackWindow),
 }
 
 struct VulkanResidentInProcessPlacedMountedFeedbackAttempt {
@@ -105,6 +118,20 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow
                     })?)
                     .ok_or(VulkanResidentInProcessPlacedRuntimeError::StreamTickOverflow)?;
+            let completes_window = tick_index + 1 == tick_count;
+            let terminal_fault_copy = if completes_window {
+                self.resident_feedback_loop
+                    .as_ref()
+                    .and_then(|feedback_loop| {
+                        feedback_loop.demand_residency.as_ref().map(|demand| {
+                            demand.terminal_fault_publication_copy(&feedback_loop.control)
+                        })
+                    })
+                    .transpose()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?
+            } else {
+                None
+            };
             let mut slices = SmallVec::<
                 [VulkanMountedPlacedResidentInProcessStreamTickSlice<'_>; 4],
             >::with_capacity(self.device_slices.len());
@@ -143,6 +170,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     dispatch_extensions
                         .suffix_dispatches
                         .push(self.sampler.feedback_control_dispatch());
+                    if let Some(copy) = terminal_fault_copy {
+                        dispatch_extensions.terminal_snapshot_copies.push(copy);
+                    }
                 }
                 slices.push(
                     VulkanMountedPlacedResidentInProcessStreamTickSlice::new_with_dispatch_extensions(
@@ -154,7 +184,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     ),
                 );
             }
-            let completes_window = tick_index + 1 == tick_count;
             let tick_resume = demand_resume.filter(|resume| resume.feedback_lane == tick_index);
             let feedback_turn = feedback_synchronization
                 .map(|synchronization| match tick_resume {
@@ -341,86 +370,28 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             let maximum_resolution_count = demand
                 .resolution_bound(&self.device_slices, tick_count)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            let mut resolved_checkpoints = BTreeMap::new();
-            let mut resolved_resource_count = 0usize;
-            let mut aggregate_transport_stats = VulkanPlacedEdgeTransportStats::default();
-            loop {
-                demand
-                    .ensure_execution_headroom(&self.device_slices, devices)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                if self.resident_feedback_window_is_complete(devices, &mounted.pending)? {
-                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                        VulkanError(format!(
-                            "demand feedback terminal timeline value {} was already complete before its submission",
-                            mounted.pending.terminal_output_value,
-                        )),
-                    ));
-                }
-                mounted
-                    .submission_template
-                    .submit_with_timeline_value_offset(0)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                if !self.wait_resident_feedback_window_for(
-                    devices,
-                    &mounted.pending,
-                    u64::MAX,
-                )? {
-                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                        VulkanError(
-                            "demand feedback attempt did not reach its terminal timeline"
-                                .to_string(),
-                        ),
-                    ));
-                }
-                aggregate_transport_stats.accumulate(&mounted.pending.transport_stats);
-                let Some((checkpoint, resource_indices)) = demand.resolve_first_miss(
-                    &self.device_slices,
-                    devices,
-                    tick_count,
-                    VulkanResidentPlacedTokenTickTail::Sample.sequence_variant(),
-                )?
-                else {
-                    // Every miss gate stops before the first unavailable
-                    // resource is consumed, while the mounted activation,
-                    // state, sampler, and timeline buffers retain the exact
-                    // completed causal prefix. A continuation therefore
-                    // completes the same transaction; replaying from a copied
-                    // baseline would execute valid work twice and would put a
-                    // full-state copy on every all-hit token.
-                    mounted.pending.transport_stats = aggregate_transport_stats;
-                    mounted.pending.demand_resolved_checkpoints =
-                        resolved_checkpoints.keys().copied().collect();
-                    return Ok(mounted.pending);
-                };
-                resolved_resource_count = resolved_resource_count
-                    .checked_add(
-                        record_demand_feedback_resolution(
-                            &mut resolved_checkpoints,
-                            checkpoint,
-                            &resource_indices,
-                        )
-                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-                    )
-                    .ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                            "demand feedback resolved-resource count overflowed".to_string(),
-                        ))
-                    })?;
-                if resolved_resource_count > maximum_resolution_count {
-                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                        VulkanError(format!(
-                            "demand feedback exceeded its compiled resource-domain resolution bound of {maximum_resolution_count}"
-                        )),
-                    ));
-                }
-                let resume = self.demand_feedback_tick_resume(checkpoint)?;
-                mounted = self.mount_demand_resident_feedback_continuation(
-                    devices,
-                    start_stream_tick,
-                    tick_count,
-                    &resume,
-                )?;
+            mounted.pending.demand_resolution =
+                Some(VulkanResidentDemandFeedbackResolutionState {
+                    maximum_resolution_count,
+                    resolved_resource_count: 0,
+                    resolved_checkpoints: BTreeMap::new(),
+                });
+            demand
+                .ensure_execution_headroom(&self.device_slices, devices)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            if self.resident_feedback_window_is_complete(devices, &mounted.pending)? {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "demand feedback terminal timeline value {} was already complete before its submission",
+                        mounted.pending.terminal_output_value,
+                    )),
+                ));
             }
+            mounted
+                .submission_template
+                .submit_with_timeline_value_offset(0)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            Ok(mounted.pending)
         })();
         match attempt {
             Ok(pending) => Ok(pending),
@@ -433,6 +404,124 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     ));
                 }
                 Err(error)
+            }
+        }
+    }
+
+    fn resolve_resident_feedback_terminal(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        mut pending: VulkanResidentInProcessPlacedPendingFeedbackWindow,
+    ) -> Result<
+        VulkanResidentFeedbackTerminalDisposition,
+        VulkanResidentInProcessPlacedRuntimeError,
+    > {
+        let feedback_loop = self.resident_feedback_loop.as_ref().ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                "resident feedback terminal resolution has no mounted feedback loop"
+                    .to_string(),
+            ))
+        })?;
+        let completion = feedback_loop
+            .control
+            .completion()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        match resident_feedback_terminal_state(completion, pending.tick_count)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?
+        {
+            VulkanResidentFeedbackTerminalState::Complete => {
+                Ok(VulkanResidentFeedbackTerminalDisposition::Complete(pending))
+            }
+            VulkanResidentFeedbackTerminalState::ResidencyFault => {
+                let demand = feedback_loop.demand_residency.as_ref().ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "resident feedback published a residency fault without demand residency"
+                            .to_string(),
+                    ))
+                })?;
+                let state = pending.demand_resolution.as_mut().ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "resident feedback published a residency fault without resolution state"
+                            .to_string(),
+                    ))
+                })?;
+                let (checkpoint, resource_indices) = demand
+                    .resolve_published_fault(
+                        &self.device_slices,
+                        devices,
+                        pending.tick_count,
+                        VulkanResidentPlacedTokenTickTail::Sample.sequence_variant(),
+                    )?
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "device published a residency fault without one immutable miss record"
+                                .to_string(),
+                        ))
+                    })?;
+                state.resolved_resource_count = state
+                    .resolved_resource_count
+                    .checked_add(
+                        record_demand_feedback_resolution(
+                            &mut state.resolved_checkpoints,
+                            checkpoint,
+                            &resource_indices,
+                        )
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    )
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "demand feedback resolved-resource count overflowed".to_string(),
+                        ))
+                    })?;
+                if state.resolved_resource_count > state.maximum_resolution_count {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "demand feedback exceeded its compiled resource-domain resolution bound of {}",
+                            state.maximum_resolution_count,
+                        )),
+                    ));
+                }
+                pending.demand_resolved_checkpoints =
+                    state.resolved_checkpoints.keys().copied().collect();
+                let resume = self.demand_feedback_tick_resume(checkpoint)?;
+                let mut mounted = self.mount_demand_resident_feedback_continuation(
+                    devices,
+                    pending.start_stream_tick,
+                    pending.tick_count,
+                    &resume,
+                )?;
+                demand
+                    .ensure_execution_headroom(&self.device_slices, devices)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                if self.resident_feedback_window_is_complete(devices, &mounted.pending)? {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "demand feedback continuation timeline value {} was already complete before its submission",
+                            mounted.pending.terminal_output_value,
+                        )),
+                    ));
+                }
+                demand
+                    .reset_pipeline_predicate()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                feedback_loop
+                    .control
+                    .acknowledge_residency_fault()
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                mounted
+                    .submission_template
+                    .submit_with_timeline_value_offset(0)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                mounted
+                    .pending
+                    .transport_stats
+                    .accumulate(&pending.transport_stats);
+                mounted.pending.demand_resolved_checkpoints =
+                    pending.demand_resolved_checkpoints;
+                mounted.pending.demand_resolution = pending.demand_resolution;
+                Ok(VulkanResidentFeedbackTerminalDisposition::Resubmitted(
+                    mounted.pending,
+                ))
             }
         }
     }
@@ -530,6 +619,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 template_replayed: false,
                 transport_stats,
                 demand_resolved_checkpoints: Vec::new(),
+                demand_resolution: None,
             },
         })
     }
@@ -568,6 +658,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 template_replayed: false,
                 transport_stats,
                 demand_resolved_checkpoints: Vec::new(),
+                demand_resolution: None,
             },
         })
     }
@@ -718,6 +809,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             template_replayed,
             transport_stats,
             demand_resolved_checkpoints: Vec::new(),
+            demand_resolution: None,
         })
     }
 
@@ -851,27 +943,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .completion()
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         completion.template_replayed = pending.template_replayed;
-        if completion.executed_tick_count == 0
-            || completion.executed_tick_count > pending.tick_count
-            || completion.sampled_tick_count == 0
-            || completion.sampled_tick_count > completion.executed_tick_count
-        {
-            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                VulkanError(format!(
-                    "resident feedback control completed {} model ticks and {} sampled ticks for a {}-tick window",
-                    completion.executed_tick_count,
-                    completion.sampled_tick_count,
-                    pending.tick_count,
-                )),
-            ));
-        }
-        if !matches!(
-            completion.stop_reason,
-            VULKAN_FEEDBACK_STOP_REASON_NONE
-                | VULKAN_FEEDBACK_STOP_REASON_EOS
-                | VULKAN_FEEDBACK_STOP_REASON_CANCELLED
-        ) || (completion.executed_tick_count < pending.tick_count
-            && completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_NONE)
+        if resident_feedback_terminal_state(completion, pending.tick_count)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?
+            != VulkanResidentFeedbackTerminalState::Complete
         {
             let demand_diagnostic = feedback_loop
                 .demand_residency
@@ -885,10 +959,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 .completion()
                 .map(|completion| {
                     format!(
-                        "executed={},sampled={},stop={}",
+                        "executed={},sampled={},stop={},fault={}",
                         completion.executed_tick_count,
                         completion.sampled_tick_count,
                         completion.stop_reason,
+                        completion.fault_reason,
                     )
                 })
                 .unwrap_or_else(|error| format!("diagnostic_error={error}"));
@@ -899,8 +974,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 .unwrap_or_else(|error| format!("diagnostic_error={error}"));
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                 VulkanError(format!(
-                    "resident feedback control reported invalid stop reason {} after {} of {} ticks; resolved_checkpoints={:?}; pipeline_predicates={demand_diagnostic}; completion_after_predicate_read={completion_after_predicate_read}; feedback_control_header={feedback_control_header}",
+                    "resident feedback control reported invalid terminal state stop={} fault={} after {} of {} ticks; resolved_checkpoints={:?}; pipeline_predicates={demand_diagnostic}; completion_after_predicate_read={completion_after_predicate_read}; feedback_control_header={feedback_control_header}",
                     completion.stop_reason,
+                    completion.fault_reason,
                     completion.executed_tick_count,
                     pending.tick_count,
                     pending.demand_resolved_checkpoints,

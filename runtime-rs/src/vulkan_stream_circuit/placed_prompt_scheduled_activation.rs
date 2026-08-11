@@ -302,6 +302,19 @@ impl VulkanResidentInProcessPlacedPromptStream {
             .pending_scheduler_activation
             .take()
             .expect("pending scheduler activation disappeared after completion");
+        match self.processor.resolve_resident_feedback_terminal(
+            &self.devices,
+            pending.window.window,
+        )? {
+            VulkanResidentFeedbackTerminalDisposition::Complete(window) => {
+                pending.window.window = window;
+            }
+            VulkanResidentFeedbackTerminalDisposition::Resubmitted(window) => {
+                pending.window.window = window;
+                self.pending_scheduler_activation = Some(pending);
+                return Ok(None);
+            }
+        }
         let generated_before = self.active_generated_token_count();
         let mut window_output_events = Vec::new();
         let completion = self.complete_submitted_resident_feedback_window(

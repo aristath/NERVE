@@ -156,7 +156,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
             if suffix_dispatches.len() != generation_tail_dispatch_count + 1 {
                 return Err(VulkanError(format!(
                     "resident feedback generation tail has {generation_tail_dispatch_count} dispatches but terminal suffix has {} commands",
-                    suffix_dispatches.len()
+                    suffix_dispatches.len(),
                 )));
             }
             let generation_tail_start = indirect
@@ -200,6 +200,37 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         }
     }
 
+    fn feedback_sequence_step_count(
+        &self,
+        prefix_dispatch_count: usize,
+        suffix_dispatch_count: usize,
+        sequence_variant: u8,
+        feedback_lane: Option<usize>,
+        demand_resume_gate: Option<usize>,
+    ) -> Result<usize, VulkanMountedPlacedResidentKernelDispatchError> {
+        if let Some(demand) = &self.demand_residency {
+            let feedback_lane = feedback_lane.ok_or_else(|| {
+                VulkanMountedPlacedResidentKernelDispatchError::Vulkan(VulkanError(
+                    "demand feedback snapshot has no sequence lane".to_string(),
+                ))
+            })?;
+            return demand.feedback_sequence_step_count(
+                sequence_variant,
+                feedback_lane,
+                demand_resume_gate,
+            );
+        }
+        prefix_dispatch_count
+            .checked_add(self.dispatch_count)
+            .and_then(|count| count.checked_add(suffix_dispatch_count))
+            .filter(|count| *count != 0)
+            .ok_or_else(|| {
+                VulkanMountedPlacedResidentKernelDispatchError::Vulkan(VulkanError(
+                    "resident feedback snapshot sequence length overflowed".to_string(),
+                ))
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn submit_with_stream_control_and_timeline_semaphores<'a>(
         &self,
@@ -222,14 +253,6 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                 submission_batch,
                 self.feedback_indirect.as_ref(),
             ) {
-                if !snapshot_copies.is_empty() {
-                    return Err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan(
-                        VulkanError(
-                            "demand-resident feedback snapshots require a transactional window baseline"
-                                .to_string(),
-                        ),
-                    ));
-                }
                 if let Some(gate_index) = demand_resume_gate {
                     return demand.enqueue_feedback_resume(
                         device,
@@ -241,6 +264,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                         sequence_variant,
                         feedback_lane,
                         gate_index,
+                        snapshot_copies,
                         wait_points,
                         signal_points,
                         signal_completion,
@@ -256,6 +280,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                     sequence_variant,
                     feedback_lane,
                     indirect,
+                    snapshot_copies,
                     wait_points,
                     signal_points,
                     signal_completion,
@@ -402,23 +427,21 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                 })
             })
             .transpose()?;
-        let commands = prefix_dispatches
-            .iter()
-            .map(|dispatch| (*dispatch, &[][..]))
-            .chain(
-                self.dispatches
-                    .iter()
-                    .zip(&push_constants)
-                    .map(|(dispatch, push_constants)| {
+        let commands =
+            prefix_dispatches
+                .iter()
+                .map(|dispatch| (*dispatch, &[][..]))
+                .chain(self.dispatches.iter().zip(&push_constants).map(
+                    |(dispatch, push_constants)| {
                         (&dispatch.resident_dispatch, push_constants.as_slice())
-                    }),
-            )
-            .chain(
-                suffix_dispatches
-                    .iter()
-                    .map(|dispatch| (*dispatch, &[][..])),
-            )
-            .collect::<Vec<_>>();
+                    },
+                ))
+                .chain(
+                    suffix_dispatches
+                        .iter()
+                        .map(|dispatch| (*dispatch, &[][..])),
+                )
+                .collect::<Vec<_>>();
         let steps = commands
             .iter()
             .enumerate()

@@ -273,6 +273,7 @@ impl VulkanMountedPlacedStreamCircuit {
             activation_overrides,
             &[],
             edge_endpoint_overrides,
+            &[],
             stream_control_override,
             None,
         )
@@ -287,6 +288,7 @@ impl VulkanMountedPlacedStreamCircuit {
         activation_overrides: &[VulkanActivationSlotBufferOverride],
         local_edge_overrides: &[VulkanPlacedLocalEdgeBufferOverride],
         edge_endpoint_overrides: &[VulkanPlacedEdgeEndpointBufferOverride],
+        boundary_overrides: &[VulkanModelBoundaryBufferOverride],
         stream_control_override: Option<Arc<VulkanResidentBuffer>>,
         dynamic_resource_buffers: Option<
             Arc<VulkanDynamicResourceBuffers>,
@@ -301,7 +303,8 @@ impl VulkanMountedPlacedStreamCircuit {
                 activation_overrides,
             )?;
         let boundary_io_plan = VulkanModelBoundaryBufferPlan::from_placed_plan(&placed_plan)?;
-        let boundary_io = boundary_io_plan.allocate_buffers(device)?;
+        let boundary_io =
+            boundary_io_plan.allocate_buffers_with_overrides(device, boundary_overrides)?;
         let edge_io_plan =
             VulkanPlacedEdgeIoPlan::from_placed_resident_plan(&placed_plan.placed_resident_plan)?;
         let (passthrough_local_overrides, passthrough_endpoint_overrides) =
@@ -430,7 +433,30 @@ impl VulkanMountedPlacedStreamCircuit {
         &self,
         manifest: &VulkanReusableKernelArtifactManifest,
     ) -> Result<VulkanMountedPlacedBoundDispatchPlan, VulkanBoundDispatchPlanError> {
-        let placed_bound_plan = self.placed_bound_dispatch_plan(manifest)?;
+        self.mounted_placed_bound_dispatch_plan_with_replaced_parameter_dispatches(
+            manifest,
+            &BTreeSet::new(),
+        )
+    }
+
+    pub fn mounted_placed_bound_dispatch_plan_with_replaced_parameter_dispatches(
+        &self,
+        manifest: &VulkanReusableKernelArtifactManifest,
+        replaced_dispatch_indices: &BTreeSet<usize>,
+    ) -> Result<VulkanMountedPlacedBoundDispatchPlan, VulkanBoundDispatchPlanError> {
+        let prepared_plan = self
+            .prepared_dispatch_plan(manifest)
+            .map_err(VulkanBoundDispatchPlanError::PreparedDispatch)?;
+        let bound_plan =
+            VulkanBoundDispatchPlan::from_prepared_plan_with_replaced_parameter_dispatches(
+                &prepared_plan,
+                &self.buffers,
+                replaced_dispatch_indices,
+            )?;
+        let placed_bound_plan = VulkanPlacedBoundDispatchPlan::from_bound_plan(
+            &bound_plan,
+            &self.placed_plan.placed_resident_plan,
+        );
         VulkanMountedPlacedBoundDispatchPlan::from_placed_bound_plan(
             &placed_bound_plan,
             &self.edge_io,

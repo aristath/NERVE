@@ -118,10 +118,7 @@ fn demand_command_critical_path_phase(
         VulkanDemandResidencyCommand::Dispatch(index) => dispatches
             .get(index)
             .map(|dispatch| {
-                critical_path_phase_for_component_operation(
-                    &dispatch.component_id,
-                    &dispatch.op,
-                )
+                critical_path_phase_for_component_operation(&dispatch.component_id, &dispatch.op)
             })
             .ok_or_else(|| {
                 VulkanError(format!(
@@ -163,7 +160,8 @@ struct VulkanDemandResidencySegment {
     address_table: Arc<VulkanResidentBuffer>,
     address_table_slot_count: usize,
     pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
-    chains: RefCell<BTreeMap<(u8, VulkanDemandResidencyChainLane), VulkanDemandResidencyDispatchChain>>,
+    chains:
+        RefCell<BTreeMap<(u8, VulkanDemandResidencyChainLane), VulkanDemandResidencyDispatchChain>>,
 }
 
 fn exact_demand_miss_resource_indices(
@@ -194,6 +192,26 @@ impl VulkanDemandResidencySegment {
         model_dispatch_count
             .checked_add(self.gate_specs.len())
             .ok_or_else(|| VulkanError("demand feedback dispatch count overflowed".to_string()))
+    }
+
+    fn feedback_sequence_step_count(
+        &self,
+        sequence_variant: u8,
+        feedback_lane: usize,
+        resume_gate_index: Option<usize>,
+    ) -> Result<usize, VulkanMountedPlacedResidentKernelDispatchError> {
+        self.chains
+            .borrow()
+            .get(&(
+                sequence_variant,
+                VulkanDemandResidencyChainLane::Feedback(feedback_lane),
+            ))
+            .ok_or_else(|| {
+                demand_dispatch_error(format!(
+                    "resident feedback demand lane {feedback_lane} was not prepared before snapshot placement"
+                ))
+            })?
+            .sequence_step_count(resume_gate_index)
     }
 
     fn feedback_dispatch_dimensions(
@@ -293,9 +311,7 @@ impl VulkanDemandResidencySegment {
         let checkpoints = schedule
             .checkpoints
             .iter()
-            .filter(|checkpoint| {
-                dispatch_indices.contains(&checkpoint.selection_dispatch_index)
-            })
+            .filter(|checkpoint| dispatch_indices.contains(&checkpoint.selection_dispatch_index))
             .collect::<Vec<_>>();
         if checkpoints.is_empty() {
             return Ok(None);
@@ -318,9 +334,7 @@ impl VulkanDemandResidencySegment {
             let selection_dispatch = mounted_bound_plan
                 .dispatches
                 .iter()
-                .find(|dispatch| {
-                    dispatch.dispatch_index == checkpoint.selection_dispatch_index
-                })
+                .find(|dispatch| dispatch.dispatch_index == checkpoint.selection_dispatch_index)
                 .ok_or_else(|| {
                     demand_dispatch_error(format!(
                         "residency checkpoint {:?} selection dispatch {} is not mounted",
@@ -425,9 +439,7 @@ impl VulkanDemandResidencySegment {
             ));
         }
         let dynamic_resources = mounted.dynamic_resource_buffers.as_ref().ok_or_else(|| {
-            demand_dispatch_error(
-                "demand-resident segment has no mounted dynamic-resource buffers",
-            )
+            demand_dispatch_error("demand-resident segment has no mounted dynamic-resource buffers")
         })?;
         Ok(Some(Self {
             context,
@@ -497,6 +509,7 @@ impl VulkanDemandResidencySegment {
         sequence_variant: u8,
         feedback_lane: usize,
         feedback_indirect: &VulkanResidentFeedbackIndirectSequence,
+        snapshot_copies: &[VulkanResidentKernelSequenceSnapshotCopy<'_>],
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_completion: bool,
@@ -519,6 +532,7 @@ impl VulkanDemandResidencySegment {
                 prefix_dispatches,
                 suffix_dispatches,
                 feedback_indirect,
+                snapshot_copies,
                 wait_points,
                 signal_points,
                 signal_completion,
@@ -538,6 +552,7 @@ impl VulkanDemandResidencySegment {
         sequence_variant: u8,
         feedback_lane: usize,
         gate_index: usize,
+        snapshot_copies: &[VulkanResidentKernelSequenceSnapshotCopy<'_>],
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_completion: bool,
@@ -563,6 +578,7 @@ impl VulkanDemandResidencySegment {
                 suffix_dispatches,
                 feedback_indirect,
                 gate_index,
+                snapshot_copies,
                 wait_points,
                 signal_points,
                 signal_completion,
@@ -580,13 +596,10 @@ impl VulkanDemandResidencySegment {
         sequence_variant: u8,
         lane_capacity: usize,
     ) -> Result<(), VulkanMountedPlacedResidentKernelDispatchError> {
-        for (chain_key, chain_lane) in demand_feedback_chain_keys(
-            sequence_variant,
-            lane_capacity,
-        )
-        .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?
-        .into_iter()
-        .map(|key @ (_, lane)| (key, lane))
+        for (chain_key, chain_lane) in demand_feedback_chain_keys(sequence_variant, lane_capacity)
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?
+            .into_iter()
+            .map(|key @ (_, lane)| (key, lane))
         {
             if self.chains.borrow().contains_key(&chain_key) {
                 continue;
@@ -647,6 +660,26 @@ impl VulkanDemandResidencySegment {
 }
 
 impl VulkanDemandResidencyDispatchChain {
+    fn sequence_step_count(
+        &self,
+        resume_gate_index: Option<usize>,
+    ) -> Result<usize, VulkanMountedPlacedResidentKernelDispatchError> {
+        let start_command_index = resume_gate_index
+            .map(|gate_index| {
+                self.gates
+                    .get(gate_index)
+                    .map(|gate| gate.command_index)
+                    .ok_or_else(|| {
+                        demand_dispatch_error(format!(
+                            "demand snapshot resume gate {gate_index} is out of bounds"
+                        ))
+                    })
+            })
+            .transpose()?
+            .unwrap_or(0);
+        demand_feedback_sequence_step_count(self.commands.len(), start_command_index)
+    }
+
     fn new(
         device: &VulkanComputeDevice,
         dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
@@ -671,9 +704,7 @@ impl VulkanDemandResidencyDispatchChain {
             .collect::<Vec<_>>();
         for (dispatch_index, dispatch) in dispatches.iter().enumerate() {
             commands.push(VulkanDemandResidencyCommand::Dispatch(dispatch_index));
-            if let Some(gate_indices) =
-                gates_after_dispatch.remove(&dispatch.dispatch_index)
-            {
+            if let Some(gate_indices) = gates_after_dispatch.remove(&dispatch.dispatch_index) {
                 commands.extend(
                     gate_indices
                         .into_iter()
@@ -735,30 +766,25 @@ impl VulkanDemandResidencyDispatchChain {
             .map(|gate| gate.selection_count)
             .max()
             .expect("demand segment gates are non-empty");
-        let missing_queue =
-            VulkanGpuResidencyMissQueue::new(device, missing_capacity)
-                .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        let missing_queue = VulkanGpuResidencyMissQueue::new(device, missing_capacity)
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         let gate_shader = vulkan_gpu_residency_gate_spirv_words()
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         let mut gates = Vec::with_capacity(gate_specs.len());
         for (gate_index, spec) in gate_specs.iter().enumerate() {
             let command_index = commands
                 .iter()
-                .position(|command| {
-                    *command == VulkanDemandResidencyCommand::Gate(gate_index)
-                })
+                .position(|command| *command == VulkanDemandResidencyCommand::Gate(gate_index))
                 .expect("expanded command chain contains every gate");
-            let checkpoint_tag = u32::try_from(gate_index + 1).map_err(|_| {
-                demand_dispatch_error("demand gate count exceeds u32")
-            })?;
+            let checkpoint_tag = u32::try_from(gate_index + 1)
+                .map_err(|_| demand_dispatch_error("demand gate count exceeds u32"))?;
             let address_mapping = match &spec.address_mapping {
                 VulkanCompiledSelectorAddressMapping::GroupTable {
                     resource_address_slots,
                     resource_address_slot_offsets,
                 } => VulkanGpuResidencyAddressMapping::GroupTable {
                     resource_address_slots: resource_address_slots.clone(),
-                    resource_address_slot_offsets:
-                        resource_address_slot_offsets.clone(),
+                    resource_address_slot_offsets: resource_address_slot_offsets.clone(),
                 },
                 VulkanCompiledSelectorAddressMapping::PartitionTemplate {
                     member_slot_bases,
@@ -936,10 +962,7 @@ impl VulkanDemandResidencyDispatchChain {
             let gate = &self.gates[gate_index];
             context
                 .store
-                .record_gpu_gate_misses(
-                    &gate.selector_id,
-                    missing.requests.len(),
-                )
+                .record_gpu_gate_misses(&gate.selector_id, missing.requests.len())
                 .map_err(|error| {
                     demand_dispatch_error(format!(
                         "failed to record GPU residency misses for selector {:?}: {error}",
@@ -1006,6 +1029,7 @@ impl VulkanDemandResidencyDispatchChain {
         prefix_dispatches: &[&VulkanResidentKernelDispatch],
         suffix_dispatches: &[&VulkanResidentKernelDispatch],
         feedback_indirect: &VulkanResidentFeedbackIndirectSequence,
+        snapshot_copies: &[VulkanResidentKernelSequenceSnapshotCopy<'_>],
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_completion: bool,
@@ -1021,7 +1045,11 @@ impl VulkanDemandResidencyDispatchChain {
             Some(feedback_indirect),
             |sequence, steps| {
                 device
-                    .record_resident_kernel_sequence(sequence, steps)
+                    .record_resident_kernel_sequence_with_snapshot_copies(
+                        sequence,
+                        steps,
+                        snapshot_copies,
+                    )
                     .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
                 submission_batch
                     .enqueue_recorded_sequence(
@@ -1046,6 +1074,7 @@ impl VulkanDemandResidencyDispatchChain {
         suffix_dispatches: &[&VulkanResidentKernelDispatch],
         feedback_indirect: &VulkanResidentFeedbackIndirectSequence,
         gate_index: usize,
+        snapshot_copies: &[VulkanResidentKernelSequenceSnapshotCopy<'_>],
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
         signal_completion: bool,
@@ -1062,7 +1091,11 @@ impl VulkanDemandResidencyDispatchChain {
             Some(feedback_indirect),
             |sequence, steps| {
                 device
-                    .record_resident_kernel_sequence(sequence, steps)
+                    .record_resident_kernel_sequence_with_snapshot_copies(
+                        sequence,
+                        steps,
+                        snapshot_copies,
+                    )
                     .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
                 submission_batch
                     .enqueue_recorded_sequence(
@@ -1077,9 +1110,7 @@ impl VulkanDemandResidencyDispatchChain {
         )
     }
 
-    fn has_pending_miss(
-        &self,
-    ) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
+    fn has_pending_miss(&self) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
         self.missing_queue
             .notification_epoch()
             .map(|epoch| epoch != self.observed_notification_epoch.get())
@@ -1289,60 +1320,54 @@ impl VulkanDemandResidencyDispatchChain {
     {
         let model_push_constants = dispatches
             .iter()
-            .map(|dispatch| {
-                stream_control_push_constant_bytes(&dispatch.push_constants, control)
-            })
+            .map(|dispatch| stream_control_push_constant_bytes(&dispatch.push_constants, control))
             .collect::<Result<Vec<_>, _>>()?;
-        let (start_command_index, direct_gate_command_index, sequence) =
-            match resume_gate_index {
-                Some(gate_index) => {
-                    let gate = self.gates.get(gate_index).ok_or_else(|| {
-                        demand_dispatch_error(format!(
-                            "demand resume gate {gate_index} is out of bounds"
-                        ))
-                    })?;
-                    (
-                        gate.command_index,
-                        gate.command_index,
-                        match sequence_purpose {
-                            VulkanDemandResidencySequencePurpose::Unprofiled => {
-                                &self.feedback_resume_sequences
-                            }
-                            VulkanDemandResidencySequencePurpose::Profiled => {
-                                &self.profiled_resume_sequences
-                            }
-                        }
-                        .get(gate_index)
-                        .ok_or_else(|| {
-                            demand_dispatch_error(format!(
-                                "demand resume sequence {gate_index} is absent"
-                            ))
-                        })?,
-                    )
-                }
-                None => (
-                    0,
-                    self.first_gate_command_index,
+        let (start_command_index, direct_gate_command_index, sequence) = match resume_gate_index {
+            Some(gate_index) => {
+                let gate = self.gates.get(gate_index).ok_or_else(|| {
+                    demand_dispatch_error(format!(
+                        "demand resume gate {gate_index} is out of bounds"
+                    ))
+                })?;
+                (
+                    gate.command_index,
+                    gate.command_index,
                     match sequence_purpose {
                         VulkanDemandResidencySequencePurpose::Unprofiled => {
-                            &self.feedback_full_sequence
+                            &self.feedback_resume_sequences
                         }
                         VulkanDemandResidencySequencePurpose::Profiled => {
-                            &self.profiled_full_sequence
+                            &self.profiled_resume_sequences
                         }
-                    },
-                ),
-            };
+                    }
+                    .get(gate_index)
+                    .ok_or_else(|| {
+                        demand_dispatch_error(format!(
+                            "demand resume sequence {gate_index} is absent"
+                        ))
+                    })?,
+                )
+            }
+            None => (
+                0,
+                self.first_gate_command_index,
+                match sequence_purpose {
+                    VulkanDemandResidencySequencePurpose::Unprofiled => {
+                        &self.feedback_full_sequence
+                    }
+                    VulkanDemandResidencySequencePurpose::Profiled => &self.profiled_full_sequence,
+                },
+            ),
+        };
         let gate_push_constants = self
             .gates
             .iter()
             .map(|gate| {
-                gate.gate
-                    .push_constants(
-                        gate.selection_count,
-                        gate.checkpoint_tag,
-                        gate.command_index == direct_gate_command_index,
-                    )
+                gate.gate.push_constants(
+                    gate.selection_count,
+                    gate.checkpoint_tag,
+                    gate.command_index == direct_gate_command_index,
+                )
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
@@ -1381,74 +1406,65 @@ impl VulkanDemandResidencyDispatchChain {
                         "demand command {command_index} has no critical-path phase"
                     ))
                 })?;
-            if previous_critical_path_phase
-                .is_some_and(|previous| previous != critical_path_phase)
+            if previous_critical_path_phase.is_some_and(|previous| previous != critical_path_phase)
             {
-                critical_path_region_index = critical_path_region_index
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        demand_dispatch_error(
-                            "demand critical-path region index overflowed",
-                        )
+                critical_path_region_index =
+                    critical_path_region_index.checked_add(1).ok_or_else(|| {
+                        demand_dispatch_error("demand critical-path region index overflowed")
                     })?;
             }
             previous_critical_path_phase = Some(critical_path_phase);
-            let (dispatch, push_constants): (&VulkanResidentKernelDispatch, &[u8]) =
-                match command {
-                    VulkanDemandResidencyCommand::Prefix(index) => (
-                        *prefix_dispatches.get(index).ok_or_else(|| {
+            let (dispatch, push_constants): (&VulkanResidentKernelDispatch, &[u8]) = match command {
+                VulkanDemandResidencyCommand::Prefix(index) => (
+                    *prefix_dispatches.get(index).ok_or_else(|| {
+                        demand_dispatch_error(format!("demand prefix dispatch {index} disappeared"))
+                    })?,
+                    &[],
+                ),
+                VulkanDemandResidencyCommand::Dispatch(index) => (
+                    &dispatches
+                        .get(index)
+                        .ok_or_else(|| {
                             demand_dispatch_error(format!(
-                                "demand prefix dispatch {index} disappeared"
+                                "demand model dispatch {index} disappeared"
                             ))
-                        })?,
-                        &[],
-                    ),
-                    VulkanDemandResidencyCommand::Dispatch(index) => (
-                        &dispatches
-                            .get(index)
-                            .ok_or_else(|| {
-                                demand_dispatch_error(format!(
-                                    "demand model dispatch {index} disappeared"
-                                ))
-                            })?
-                            .resident_dispatch,
-                        model_push_constants
-                            .get(index)
-                            .ok_or_else(|| {
-                                demand_dispatch_error(format!(
-                                    "demand model push constants {index} disappeared"
-                                ))
-                            })?
-                            .as_slice(),
-                    ),
-                    VulkanDemandResidencyCommand::Gate(index) => (
-                        self.gates
-                            .get(index)
-                            .ok_or_else(|| {
-                                demand_dispatch_error(format!(
-                                    "demand gate dispatch {index} disappeared"
-                                ))
-                            })?
-                            .gate
-                            .dispatch(),
-                        gate_push_constants
-                            .get(index)
-                            .ok_or_else(|| {
-                                demand_dispatch_error(format!(
-                                    "demand gate push constants {index} disappeared"
-                                ))
-                            })?
-                            .as_slice(),
-                    ),
-                    VulkanDemandResidencyCommand::Suffix(index) => (
-                        *suffix_dispatches.get(index).ok_or_else(|| {
+                        })?
+                        .resident_dispatch,
+                    model_push_constants
+                        .get(index)
+                        .ok_or_else(|| {
                             demand_dispatch_error(format!(
-                                "demand suffix dispatch {index} disappeared"
+                                "demand model push constants {index} disappeared"
                             ))
-                        })?,
-                        &[],
-                    ),
-                };
+                        })?
+                        .as_slice(),
+                ),
+                VulkanDemandResidencyCommand::Gate(index) => (
+                    self.gates
+                        .get(index)
+                        .ok_or_else(|| {
+                            demand_dispatch_error(format!(
+                                "demand gate dispatch {index} disappeared"
+                            ))
+                        })?
+                        .gate
+                        .dispatch(),
+                    gate_push_constants
+                        .get(index)
+                        .ok_or_else(|| {
+                            demand_dispatch_error(format!(
+                                "demand gate push constants {index} disappeared"
+                            ))
+                        })?
+                        .as_slice(),
+                ),
+                VulkanDemandResidencyCommand::Suffix(index) => (
+                    *suffix_dispatches.get(index).ok_or_else(|| {
+                        demand_dispatch_error(format!("demand suffix dispatch {index} disappeared"))
+                    })?,
+                    &[],
+                ),
+            };
             let step = if let Some(indirect) = feedback_indirect {
                 let byte_offset = *indirect
                     .byte_offsets
@@ -1480,12 +1496,7 @@ impl VulkanDemandResidencyDispatchChain {
                 .flatten();
             steps.push(match conditional_region {
                 Some(region_id) => step
-                    .with_condition(
-                        &self.continuation_predicate,
-                        0,
-                        false,
-                        region_id,
-                    )
+                    .with_condition(&self.continuation_predicate, 0, false, region_id)
                     .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?,
                 None => step,
             });
@@ -1511,6 +1522,14 @@ fn demand_feedback_indirect_command_range(
         )));
     }
     Ok(start_command_index..command_count)
+}
+
+fn demand_feedback_sequence_step_count(
+    command_count: usize,
+    start_command_index: usize,
+) -> Result<usize, VulkanMountedPlacedResidentKernelDispatchError> {
+    demand_feedback_indirect_command_range(command_count, start_command_index)
+        .map(|range| range.len())
 }
 
 fn demand_dispatch_conditional_regions(
@@ -1558,8 +1577,8 @@ fn demand_dispatch_conditional_regions(
             })?;
         }
         regions.push(conditional.then_some(region_id));
-        previous_was_conditional_gate = conditional
-            && matches!(command, VulkanDemandResidencyCommand::Gate(_));
+        previous_was_conditional_gate =
+            conditional && matches!(command, VulkanDemandResidencyCommand::Gate(_));
         if resuming
             && command_index > direct_gate_command_index
             && matches!(command, VulkanDemandResidencyCommand::Gate(_))

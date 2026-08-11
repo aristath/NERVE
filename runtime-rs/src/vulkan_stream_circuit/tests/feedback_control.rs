@@ -31,7 +31,7 @@ fn feedback_control_words_encode_stop_tokens_and_dispatches_without_token_caps()
             1,
             0,
             0,
-            0,
+            VULKAN_FEEDBACK_CONTINUATION_READY,
             0,
         ]
     );

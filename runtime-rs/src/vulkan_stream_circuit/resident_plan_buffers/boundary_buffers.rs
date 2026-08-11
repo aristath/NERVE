@@ -106,9 +106,86 @@ impl VulkanModelBoundaryBufferPlan {
         &self,
         device: &VulkanComputeDevice,
     ) -> Result<VulkanModelBoundaryBuffers, VulkanError> {
+        self.allocate_buffers_with_overrides(device, &[])
+    }
+
+    pub fn allocate_buffers_with_overrides(
+        &self,
+        device: &VulkanComputeDevice,
+        buffer_overrides: &[VulkanModelBoundaryBufferOverride],
+    ) -> Result<VulkanModelBoundaryBuffers, VulkanError> {
         let mut input_buffers = Vec::with_capacity(self.inputs.len());
         let mut output_buffers = Vec::with_capacity(self.outputs.len());
         let mut total_byte_capacity = 0usize;
+        let mut overrides = BTreeMap::new();
+
+        for override_ in buffer_overrides {
+            let key = (
+                override_.direction,
+                override_.component_id.as_str(),
+                override_.signal_id.as_str(),
+            );
+            if overrides.insert(key, override_).is_some() {
+                return Err(VulkanError(format!(
+                    "model boundary buffer override repeats {:?} {}.{} on {:?}",
+                    override_.direction,
+                    override_.component_id,
+                    override_.signal_id,
+                    self.device_id,
+                )));
+            }
+            if !device.owns_resident_buffer(&override_.buffer) {
+                return Err(VulkanError(format!(
+                    "model boundary buffer override for {:?} {}.{} on {:?} belongs to a different Vulkan logical device",
+                    override_.direction,
+                    override_.component_id,
+                    override_.signal_id,
+                    self.device_id,
+                )));
+            }
+            if !override_.buffer.is_shared_host_backed()
+                && !override_.buffer.is_shared_device_memory_backed()
+            {
+                return Err(VulkanError(format!(
+                    "model boundary buffer override for {:?} {}.{} is not backed by shared host or shared device memory",
+                    override_.direction, override_.component_id, override_.signal_id,
+                )));
+            }
+            let boundaries = match override_.direction {
+                VulkanModelBoundaryDirection::Input => &self.inputs,
+                VulkanModelBoundaryDirection::Output => &self.outputs,
+            };
+            let boundary = boundaries
+                .iter()
+                .find(|boundary| {
+                    boundary.component_id == override_.component_id
+                        && boundary.signal_id == override_.signal_id
+                })
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "model boundary buffer override does not address {:?} {}.{} on {:?}",
+                        override_.direction,
+                        override_.component_id,
+                        override_.signal_id,
+                        self.device_id,
+                    ))
+                })?;
+            let required_byte_capacity = boundary.byte_capacity.ok_or_else(|| {
+                VulkanError(format!(
+                    "{} model boundary {:?} has unknown byte capacity",
+                    self.device_id, boundary.signal_id,
+                ))
+            })?;
+            if override_.buffer.byte_capacity() < required_byte_capacity {
+                return Err(VulkanError(format!(
+                    "model boundary buffer override for {:?} {}.{} has {} bytes, needs {required_byte_capacity}",
+                    override_.direction,
+                    override_.component_id,
+                    override_.signal_id,
+                    override_.buffer.byte_capacity(),
+                )));
+            }
+        }
 
         for boundary in &self.inputs {
             let byte_capacity = boundary.byte_capacity.ok_or_else(|| {
@@ -122,10 +199,19 @@ impl VulkanModelBoundaryBufferPlan {
                 byte_capacity,
                 "model input boundary buffer allocation",
             )?;
+            let buffer = overrides
+                .get(&(
+                    VulkanModelBoundaryDirection::Input,
+                    boundary.component_id.as_str(),
+                    boundary.signal_id.as_str(),
+                ))
+                .map(|override_| Arc::clone(&override_.buffer))
+                .map(Ok)
+                .unwrap_or_else(|| device.create_resident_buffer(byte_capacity).map(Arc::new))?;
             input_buffers.push(VulkanModelBoundaryBufferAllocation {
                 boundary: boundary.clone(),
                 byte_capacity,
-                buffer: Arc::new(device.create_resident_buffer(byte_capacity)?),
+                buffer,
             });
         }
 
@@ -143,7 +229,22 @@ impl VulkanModelBoundaryBufferPlan {
                         && input.boundary.shape == boundary.shape
                 })
             });
-            let buffer = if let Some(input) = input_alias {
+            let output_override = overrides.get(&(
+                VulkanModelBoundaryDirection::Output,
+                boundary.component_id.as_str(),
+                boundary.signal_id.as_str(),
+            ));
+            let buffer = if let Some(override_) = output_override {
+                if let Some(input) = input_alias
+                    && !Arc::ptr_eq(&input.buffer, &override_.buffer)
+                {
+                    return Err(VulkanError(format!(
+                        "{} boundary output {:?} must preserve its input-storage alias",
+                        self.device_id, boundary.port_id,
+                    )));
+                }
+                Arc::clone(&override_.buffer)
+            } else if let Some(input) = input_alias {
                 if input.byte_capacity != byte_capacity {
                     return Err(VulkanError(format!(
                         "{} boundary output {:?} aliases input storage with {} bytes but requires {byte_capacity}",
@@ -275,7 +376,14 @@ pub struct VulkanModelBoundaryBufferAllocation {
     pub buffer: Arc<VulkanResidentBuffer>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VulkanModelBoundaryBufferOverride {
+    pub direction: VulkanModelBoundaryDirection,
+    pub component_id: String,
+    pub signal_id: String,
+    pub buffer: Arc<VulkanResidentBuffer>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VulkanModelBoundaryDirection {
     Input,
     Output,

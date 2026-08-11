@@ -421,6 +421,12 @@ fn validate_bound_byte_capacity(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VulkanBoundDispatchPlanError {
     PreparedDispatch(VulkanPreparedDispatchPlanError),
+    MissingReplacedDispatch {
+        dispatch_index: usize,
+    },
+    ReplacedDispatchHasNoPermanentParameters {
+        dispatch_index: usize,
+    },
     EdgeIoDeviceMismatch {
         plan_device_id: String,
         edge_io_device_id: String,
@@ -493,6 +499,14 @@ impl Display for VulkanBoundDispatchPlanError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PreparedDispatch(error) => Display::fmt(error, f),
+            Self::MissingReplacedDispatch { dispatch_index } => write!(
+                f,
+                "cannot replace permanent parameters for missing dispatch {dispatch_index}"
+            ),
+            Self::ReplacedDispatchHasNoPermanentParameters { dispatch_index } => write!(
+                f,
+                "cannot replace permanent parameters for dispatch {dispatch_index}; it has no permanent-parameter descriptors"
+            ),
             Self::EdgeIoDeviceMismatch {
                 plan_device_id,
                 edge_io_device_id,

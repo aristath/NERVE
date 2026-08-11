@@ -199,6 +199,18 @@ impl VulkanBoundDispatchPlan {
         prepared_plan: &VulkanPreparedDispatchPlan,
         buffers: &VulkanStreamCircuitStreamBuffers,
     ) -> Result<Self, VulkanBoundDispatchPlanError> {
+        Self::from_prepared_plan_with_replaced_parameter_dispatches(
+            prepared_plan,
+            buffers,
+            &BTreeSet::new(),
+        )
+    }
+
+    pub fn from_prepared_plan_with_replaced_parameter_dispatches(
+        prepared_plan: &VulkanPreparedDispatchPlan,
+        buffers: &VulkanStreamCircuitStreamBuffers,
+        replaced_dispatch_indices: &BTreeSet<usize>,
+    ) -> Result<Self, VulkanBoundDispatchPlanError> {
         let mut boundary_descriptor_count = 0usize;
         let mut permanent_parameter_descriptor_count = 0usize;
         let mut dynamic_resource_descriptor_count = 0usize;
@@ -206,10 +218,23 @@ impl VulkanBoundDispatchPlan {
         let mut activation_slot_descriptor_count = 0usize;
         let mut selection_telemetry_descriptor_count = 0usize;
         let mut dispatches = Vec::with_capacity(prepared_plan.dispatches.len());
+        let mut replaced_dispatches = BTreeSet::new();
 
         for prepared in &prepared_plan.dispatches {
+            let parameters_are_replaced =
+                replaced_dispatch_indices.contains(&prepared.dispatch_index);
+            let mut replaced_parameter_count = 0usize;
             let mut descriptors = Vec::with_capacity(prepared.descriptors.len());
             for descriptor in &prepared.descriptors {
+                if parameters_are_replaced
+                    && matches!(
+                        descriptor.resource,
+                        VulkanDescriptorResourceAddress::PermanentParameter { .. }
+                    )
+                {
+                    replaced_parameter_count += 1;
+                    continue;
+                }
                 let target =
                     VulkanBoundDescriptorTarget::from_resource(prepared, descriptor, buffers)?;
                 match target {
@@ -248,6 +273,17 @@ impl VulkanBoundDispatchPlan {
                 });
             }
 
+            if parameters_are_replaced {
+                if replaced_parameter_count == 0 {
+                    return Err(
+                        VulkanBoundDispatchPlanError::ReplacedDispatchHasNoPermanentParameters {
+                            dispatch_index: prepared.dispatch_index,
+                        },
+                    );
+                }
+                replaced_dispatches.insert(prepared.dispatch_index);
+            }
+
             dispatches.push(VulkanBoundDispatch {
                 dispatch_index: prepared.dispatch_index,
                 kernel_id: prepared.kernel_id.clone(),
@@ -263,6 +299,15 @@ impl VulkanBoundDispatchPlan {
                 descriptors,
                 push_constants: prepared.push_constants.clone(),
                 stream_control_binding: prepared.stream_control_binding,
+            });
+        }
+
+        if let Some(dispatch_index) = replaced_dispatch_indices
+            .difference(&replaced_dispatches)
+            .next()
+        {
+            return Err(VulkanBoundDispatchPlanError::MissingReplacedDispatch {
+                dispatch_index: *dispatch_index,
             });
         }
 

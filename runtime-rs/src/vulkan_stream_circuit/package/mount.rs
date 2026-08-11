@@ -287,6 +287,21 @@ impl VulkanResidentRuntimeModel {
             .to_resolved_lowered_execution_graph(package_root)
     }
 
+    pub fn resolved_signal_processor_graph(
+        &self,
+        package_root: impl Into<PathBuf>,
+    ) -> Result<ResolvedLoweredExecutionGraph, VulkanResidentTokenModelPackageError> {
+        self.executable_circuit_graph()?
+            .to_signal_processor_graph(package_root)
+    }
+
+    pub fn compiled_resource_residency_contract(
+        &self,
+    ) -> Result<CompiledResourceResidencyContract, VulkanResidentTokenModelPackageError> {
+        instantiate_runtime_resource_contract(self)
+            .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))
+    }
+
     pub fn coalesce_placement_to_device(mut self, device_id: impl Into<String>) -> Self {
         self.placement = StreamCircuitPlacementSpec::new(device_id);
         self

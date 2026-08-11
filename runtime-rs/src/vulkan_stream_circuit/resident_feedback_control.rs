@@ -4,6 +4,11 @@ const VULKAN_FEEDBACK_CONTROL_CANCEL_REQUESTED: u32 = 1 << 1;
 const VULKAN_FEEDBACK_STOP_REASON_NONE: u32 = 0;
 const VULKAN_FEEDBACK_STOP_REASON_EOS: u32 = 1;
 const VULKAN_FEEDBACK_STOP_REASON_CANCELLED: u32 = 2;
+const VULKAN_FEEDBACK_FAULT_NONE: u32 = 0;
+const VULKAN_FEEDBACK_FAULT_RESIDENCY: u32 = 1;
+const VULKAN_FEEDBACK_CONTINUATION_FAULTED: u32 = 0;
+const VULKAN_FEEDBACK_CONTINUATION_READY: u32 = 1;
+const VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET: usize = 10;
 
 pub(crate) struct VulkanResidentFeedbackControlPlane {
     vocabulary_size: usize,
@@ -42,7 +47,82 @@ struct VulkanResidentFeedbackControlCompletion {
     executed_tick_count: usize,
     sampled_tick_count: usize,
     stop_reason: u32,
+    fault_reason: u32,
     template_replayed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanResidentFeedbackTerminalState {
+    Complete,
+    ResidencyFault,
+}
+
+fn resident_feedback_fault_reason_from_continuation(
+    continuation: u32,
+) -> Result<u32, VulkanError> {
+    match continuation {
+        VULKAN_FEEDBACK_CONTINUATION_READY => Ok(VULKAN_FEEDBACK_FAULT_NONE),
+        VULKAN_FEEDBACK_CONTINUATION_FAULTED => Ok(VULKAN_FEEDBACK_FAULT_RESIDENCY),
+        invalid => Err(VulkanError(format!(
+            "resident feedback continuation has invalid device value {invalid}"
+        ))),
+    }
+}
+
+fn resident_feedback_terminal_state(
+    completion: VulkanResidentFeedbackControlCompletion,
+    planned_tick_count: usize,
+) -> Result<VulkanResidentFeedbackTerminalState, VulkanError> {
+    if planned_tick_count == 0 {
+        return Err(VulkanError(
+            "resident feedback terminal state has an empty planned window".to_string(),
+        ));
+    }
+    if completion.executed_tick_count > planned_tick_count
+        || completion.sampled_tick_count > completion.executed_tick_count
+    {
+        return Err(VulkanError(format!(
+            "resident feedback terminal state reported {} executed and {} sampled ticks for a {planned_tick_count}-tick window",
+            completion.executed_tick_count, completion.sampled_tick_count,
+        )));
+    }
+    if !matches!(
+        completion.fault_reason,
+        VULKAN_FEEDBACK_FAULT_NONE | VULKAN_FEEDBACK_FAULT_RESIDENCY
+    ) {
+        return Err(VulkanError(format!(
+            "resident feedback terminal state has unknown device fault {}",
+            completion.fault_reason,
+        )));
+    }
+    if !matches!(
+        completion.stop_reason,
+        VULKAN_FEEDBACK_STOP_REASON_NONE
+            | VULKAN_FEEDBACK_STOP_REASON_EOS
+            | VULKAN_FEEDBACK_STOP_REASON_CANCELLED
+    ) {
+        return Err(VulkanError(format!(
+            "resident feedback terminal state has unknown stop reason {}",
+            completion.stop_reason,
+        )));
+    }
+    if completion.fault_reason == VULKAN_FEEDBACK_FAULT_RESIDENCY {
+        return Ok(VulkanResidentFeedbackTerminalState::ResidencyFault);
+    }
+    if completion.executed_tick_count == 0
+        || completion.sampled_tick_count == 0
+        || (completion.stop_reason == VULKAN_FEEDBACK_STOP_REASON_NONE
+            && completion.executed_tick_count != planned_tick_count)
+    {
+        return Err(VulkanError(format!(
+            "resident feedback terminal state has incomplete ordinary completion: executed={}, sampled={}, planned={}, stop={}",
+            completion.executed_tick_count,
+            completion.sampled_tick_count,
+            planned_tick_count,
+            completion.stop_reason,
+        )));
+    }
+    Ok(VulkanResidentFeedbackTerminalState::Complete)
 }
 
 impl VulkanResidentFeedbackControlPlane {
@@ -342,8 +422,33 @@ impl VulkanResidentFeedbackControlPlane {
                 .read_persistently_mapped_u32_le_at(9 * size_of::<u32>())?
                 as usize,
             stop_reason: buffer.read_persistently_mapped_u32_le_at(2 * size_of::<u32>())?,
+            fault_reason: resident_feedback_fault_reason_from_continuation(
+                buffer.read_persistently_mapped_u32_le_at(
+                    VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET * size_of::<u32>(),
+                )?,
+            )?,
             template_replayed: false,
         })
+    }
+
+    fn acknowledge_residency_fault(&self) -> Result<(), VulkanError> {
+        let buffer = self.host_buffer()?;
+        let continuation = buffer.read_persistently_mapped_u32_le_at(
+            VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET * size_of::<u32>(),
+        )?;
+        if continuation != VULKAN_FEEDBACK_CONTINUATION_FAULTED {
+            return Err(VulkanError(format!(
+                "cannot acknowledge resident feedback continuation state {continuation} as a residency fault"
+            )));
+        }
+        buffer.write_bytes_at(
+            VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET * size_of::<u32>(),
+            &VULKAN_FEEDBACK_CONTINUATION_READY.to_le_bytes(),
+        )
+    }
+
+    fn fault_publication_buffer(&self) -> Result<&VulkanResidentBuffer, VulkanError> {
+        self.host_buffer()
     }
 
     fn diagnostic_header_words(&self) -> Result<Vec<u32>, VulkanError> {
@@ -433,6 +538,7 @@ fn resident_feedback_control_words(
     words[0] = VULKAN_FEEDBACK_CONTROL_ENABLED;
     words[2] = VULKAN_FEEDBACK_STOP_REASON_NONE;
     words[3] = planned_tick_count;
+    words[VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET] = VULKAN_FEEDBACK_CONTINUATION_READY;
     words[4] = u32::try_from(dispatch_word_offset).map_err(|_| {
         VulkanError("resident feedback dispatch word offset exceeds u32".to_string())
     })?;

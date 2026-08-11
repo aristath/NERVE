@@ -61,6 +61,12 @@ fn distributed_component_batch_signal_key(
                 signal_id: activation.signal_id.clone(),
             })
         }
+        VulkanDistributedActivationStorage::BoundaryInput => Ok(
+            VulkanComponentBatchSignalKey::ModelInput(activation.signal_id.clone()),
+        ),
+        VulkanDistributedActivationStorage::BoundaryOutput => Ok(
+            VulkanComponentBatchSignalKey::ModelOutput(activation.signal_id.clone()),
+        ),
         VulkanDistributedActivationStorage::Edge { edge_index, .. } => {
             let candidates = [
                 VulkanComponentBatchSignalKey::LocalEdge(*edge_index),
@@ -265,19 +271,12 @@ impl VulkanDistributedComponentBatchRunners {
                 )?;
             let package_slice = &placed_slices[owner_index].package_slice;
             let batch_slice = &batch_slices[owner_index];
-            let artifact = select_component_batch_kernel_artifact_where(
-                &package_slice.batch_kernels,
-                &planned.component_id,
-                &planned.node_id,
+            let artifact = selected_distributed_component_batch_artifact(
+                devices,
+                package_slice,
+                planned,
                 execution_mode,
                 lane_capacity,
-                |artifact| {
-                    planned.shards.iter().all(|shard| {
-                        devices.get(&shard.device_id).is_some_and(|device| {
-                            batch_kernel_artifact_is_supported(device, artifact)
-                        })
-                    })
-                },
             )
             .ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
@@ -285,14 +284,6 @@ impl VulkanDistributedComponentBatchRunners {
                     planned.component_id, planned.node_id
                 )))
             })?;
-            if artifact.batch_mode != VulkanResidentComponentKernelBatchMode::WeightShared {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                    VulkanError(format!(
-                        "distributed component batch {}.{} requires a weight-shared artifact",
-                        planned.component_id, planned.node_id
-                    )),
-                ));
-            }
             let input_key = distributed_component_batch_signal_key(
                 &planned.input_activation,
                 &batch_slice.signal_buffer_indices,
@@ -939,9 +930,12 @@ impl VulkanDistributedComponentBatchRunners {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let catalog = shard.sequence_catalog.borrow();
-            let sequence = catalog
-                .get(&batch_width)
-                .expect("distributed batch sequence shape was inserted");
+            let sequence = catalog.get(&batch_width).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "distributed component batch sequence for width {batch_width} was not retained on {:?}",
+                    shard.device_id
+                )))
+            })?;
             if !sequence.has_recorded_commands() {
                 device
                     .record_resident_kernel_sequence(sequence, &steps)
@@ -963,9 +957,12 @@ impl VulkanDistributedComponentBatchRunners {
                     device_id: shard.device_id.clone(),
                 }
             })?;
-            let sequence = sequence_catalog
-                .get(&0)
-                .expect("distributed batch sequence shape was inserted");
+            let sequence = sequence_catalog.get(&batch_width).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "distributed component batch sequence for width {batch_width} is missing on {:?}",
+                    shard.device_id
+                )))
+            })?;
             let synchronization = dispatch
                 .helper_synchronization
                 .iter()
@@ -1015,6 +1012,30 @@ impl VulkanDistributedComponentBatchRunners {
         }
         Ok(())
     }
+}
+
+fn selected_distributed_component_batch_artifact<'a>(
+    devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+    package_slice: &'a VulkanResidentModelPackageDeviceSlice,
+    planned: &VulkanDistributedDispatchPlan,
+    execution_mode: VulkanComponentBatchExecutionMode,
+    lane_capacity: usize,
+) -> Option<&'a VulkanResidentComponentBatchKernelArtifact> {
+    select_component_batch_kernel_artifact_where(
+        &package_slice.batch_kernels,
+        &planned.component_id,
+        &planned.node_id,
+        execution_mode,
+        lane_capacity,
+        |artifact| {
+            artifact.batch_mode == VulkanResidentComponentKernelBatchMode::WeightShared
+                && planned.shards.iter().all(|shard| {
+                    devices
+                        .get(&shard.device_id)
+                        .is_some_and(|device| batch_kernel_artifact_is_supported(device, artifact))
+                })
+        },
+    )
 }
 
 fn distributed_component_batch_control_payload_bytes(

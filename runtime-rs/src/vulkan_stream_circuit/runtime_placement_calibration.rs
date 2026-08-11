@@ -13,12 +13,34 @@ pub struct VulkanRuntimePlacementCalibrationTarget {
     pub terminal_node_id: String,
     pub implementation: String,
     pub estimated_decode_work_units: u64,
+    pub planned_resident_parameter_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VulkanRuntimePlacementCalibrationPolicy {
+    pub warmup_units: usize,
+    pub measured_units: usize,
+    pub maximum_duration: Duration,
+    pub maximum_resident_parameter_bytes: usize,
+}
+
+impl Default for VulkanRuntimePlacementCalibrationPolicy {
+    fn default() -> Self {
+        Self {
+            warmup_units: VULKAN_RUNTIME_PLACEMENT_CALIBRATION_WARMUP_UNITS,
+            measured_units: VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MEASURED_UNITS,
+            maximum_duration: VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION,
+            maximum_resident_parameter_bytes: usize::MAX,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanRuntimePlacementCalibrationReport {
     pub physical_device_id: String,
     pub target: VulkanRuntimePlacementCalibrationTarget,
+    pub phase: String,
+    pub activation_batch_width: usize,
     pub shared_prepare_ns: u64,
     pub slice_plan_prepare_ns: u64,
     pub slice_materialize_ns: u64,
@@ -26,6 +48,7 @@ pub struct VulkanRuntimePlacementCalibrationReport {
     pub warmup_execution_ns: u64,
     pub measured_execution_ns: u64,
     pub measured_ns_per_activation: u64,
+    pub measured_windows: Vec<VulkanTargetedComponentThroughputWindow>,
     pub physical_dispatch_count: usize,
     pub output_digest: String,
     pub state_digest: String,
@@ -62,7 +85,7 @@ impl VulkanRuntimePlacementCalibrationSuite {
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
         let started = Instant::now();
         let manifest_dir = manifest_dir.as_ref();
-        let targets = vulkan_runtime_placement_calibration_targets(runtime_model)
+        let mut targets = vulkan_runtime_placement_calibration_targets(runtime_model)
             .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
         let tensor_index = Arc::new(runtime_model.load_runtime_tensor_index(manifest_dir)?);
         let contract = Arc::new(
@@ -76,7 +99,7 @@ impl VulkanRuntimePlacementCalibrationSuite {
             .max(1)
             .min(VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_STATE_ACTIVATIONS);
         let mut sources = Vec::with_capacity(targets.len());
-        for target in &targets {
+        for target in &mut targets {
             let calibration_model = vulkan_runtime_model_with_component_placement(
                 runtime_model,
                 "calibration:unmounted",
@@ -100,6 +123,21 @@ impl VulkanRuntimePlacementCalibrationSuite {
                     "failed to plan runtime placement calibration residency: {error}",
                 ))
             })?;
+            target.planned_resident_parameter_bytes = residency_plan
+                .device_plans
+                .iter()
+                .try_fold(0usize, |total, plan| {
+                    total
+                        .checked_add(plan.parameter_residency.current_resident_bytes)
+                        .and_then(|total| {
+                            total.checked_add(plan.resource_store.maximum_load_wave_payload_bytes)
+                        })
+                })
+                .ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(
+                        "runtime placement calibration transaction bytes overflowed",
+                    )
+                })?;
             sources.push(VulkanRuntimePlacementCalibrationSource {
                 runtime_model: calibration_model,
                 residency_plan,
@@ -261,6 +299,7 @@ pub fn vulkan_runtime_placement_calibration_targets(
             terminal_node_id: terminal.node_id.clone(),
             implementation: execution.implementation.clone(),
             estimated_decode_work_units,
+            planned_resident_parameter_bytes: 0,
         });
     }
     Ok(targets)
@@ -276,13 +315,82 @@ pub fn calibrate_vulkan_runtime_placement_candidate(
     capability_class: &str,
     suite: &mut VulkanRuntimePlacementCalibrationSuite,
 ) -> Result<Vec<VulkanRuntimePlacementCalibrationReport>, VulkanResidentTokenModelPackageError> {
+    calibrate_vulkan_runtime_placement_candidate_with_policy(
+        device,
+        manifest_dir,
+        capability_class,
+        suite,
+        VulkanRuntimePlacementCalibrationPolicy::default(),
+    )
+}
+
+pub fn calibrate_vulkan_runtime_placement_candidate_with_policy(
+    device: Rc<VulkanComputeDevice>,
+    manifest_dir: impl AsRef<Path>,
+    capability_class: &str,
+    suite: &mut VulkanRuntimePlacementCalibrationSuite,
+    policy: VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<Vec<VulkanRuntimePlacementCalibrationReport>, VulkanResidentTokenModelPackageError> {
+    calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
+        device,
+        manifest_dir.as_ref(),
+        capability_class,
+        suite,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        VulkanTargetedComponentExecutionScope::DecodeComponentPrefix,
+        policy,
+    )
+}
+
+pub fn calibrate_vulkan_runtime_prefill_placement_candidate_with_policy(
+    device: Rc<VulkanComputeDevice>,
+    manifest_dir: impl AsRef<Path>,
+    capability_class: &str,
+    suite: &mut VulkanRuntimePlacementCalibrationSuite,
+    activation_batch_width: usize,
+    policy: VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<Vec<VulkanRuntimePlacementCalibrationReport>, VulkanResidentTokenModelPackageError> {
+    if activation_batch_width == 0 {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime prefill placement calibration requires a positive activation batch width",
+        ));
+    }
+    calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
+        device,
+        manifest_dir.as_ref(),
+        capability_class,
+        suite,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width,
+        },
+        VulkanTargetedComponentExecutionScope::Component,
+        policy,
+    )
+}
+
+fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
+    device: Rc<VulkanComputeDevice>,
+    manifest_dir: &Path,
+    capability_class: &str,
+    suite: &mut VulkanRuntimePlacementCalibrationSuite,
+    phase: VulkanTargetedComponentExecutionPhase,
+    scope: VulkanTargetedComponentExecutionScope,
+    policy: VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<Vec<VulkanRuntimePlacementCalibrationReport>, VulkanResidentTokenModelPackageError> {
+    if policy.warmup_units == 0
+        || policy.measured_units == 0
+        || policy.maximum_duration.is_zero()
+        || policy.maximum_resident_parameter_bytes == 0
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime placement calibration policy has invalid zero bounds",
+        ));
+    }
     if suite.targets.is_empty() {
         return Err(VulkanResidentTokenModelPackageError::new(
             "runtime placement calibration requires at least one execution signature",
         ));
     }
-    let started = Instant::now();
-    let manifest_dir = manifest_dir.as_ref();
     let (plans, shared_prepare_ns, slice_plan_prepare_ns) =
         suite.plans_for_device(&device, capability_class, manifest_dir)?;
     let targets = suite.targets.clone();
@@ -296,11 +404,18 @@ pub fn calibrate_vulkan_runtime_placement_candidate(
     let execution_result = (|| {
         let mut reports = Vec::with_capacity(targets.len());
         for (target_index, (target, cached_plan)) in targets.iter().zip(&plans).enumerate() {
-            let remaining = VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION
-                .checked_sub(started.elapsed())
+            if target.planned_resident_parameter_bytes
+                > policy.maximum_resident_parameter_bytes
+            {
+                continue;
+            }
+            let case_started = Instant::now();
+            let remaining = policy
+                .maximum_duration
+                .checked_sub(case_started.elapsed())
                 .ok_or_else(|| {
                     VulkanResidentTokenModelPackageError::new(
-                        "runtime placement calibration exceeded its one-minute bound",
+                        "runtime placement calibration exceeded its configured duration",
                     )
                 })?;
             let slice_materialize_started = Instant::now();
@@ -315,35 +430,50 @@ pub fn calibrate_vulkan_runtime_placement_candidate(
                 slice,
                 &target.component_id,
                 &target.terminal_node_id,
-                VulkanTargetedComponentExecutionPhase::Decode,
-                VulkanTargetedComponentExecutionScope::DecodeComponentPrefix,
+                phase,
+                scope,
                 false,
             )?;
             let session_mount_ns =
                 u64::try_from(session_mount_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let activation_batch_width = phase.activation_batch_width();
+            let warmup_useful_units = policy
+                .warmup_units
+                .checked_mul(activation_batch_width)
+                .ok_or_else(|| VulkanResidentTokenModelPackageError::new(
+                    "runtime placement calibration warmup work overflowed",
+                ))?;
+            let measured_useful_units = policy
+                .measured_units
+                .checked_mul(activation_batch_width)
+                .ok_or_else(|| VulkanResidentTokenModelPackageError::new(
+                    "runtime placement calibration measured work overflowed",
+                ))?;
             let warmup = session.execute(
                 &device,
-                VULKAN_RUNTIME_PLACEMENT_CALIBRATION_WARMUP_UNITS,
+                warmup_useful_units,
                 1,
                 0,
                 remaining,
             )?;
-            let remaining = VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION
-                .checked_sub(started.elapsed())
+            let remaining = policy
+                .maximum_duration
+                .checked_sub(case_started.elapsed())
                 .ok_or_else(|| {
                     VulkanResidentTokenModelPackageError::new(
-                        "runtime placement calibration exceeded its one-minute bound",
+                        "runtime placement calibration exceeded its configured duration",
                     )
                 })?;
             let measured = session.execute(
                 &device,
-                VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MEASURED_UNITS,
-                1,
+                measured_useful_units,
+                policy.measured_units,
                 0,
                 remaining,
             )?;
-            if warmup.output_digest != measured.output_digest
-                || warmup.state_digest != measured.state_digest
+            if warmup_useful_units == measured_useful_units
+                && (warmup.output_digest != measured.output_digest
+                    || warmup.state_digest != measured.state_digest)
             {
                 return targeted_component_error(
                     "runtime placement calibration changed deterministic component output or state",
@@ -352,6 +482,8 @@ pub fn calibrate_vulkan_runtime_placement_candidate(
             reports.push(VulkanRuntimePlacementCalibrationReport {
                 physical_device_id: physical_device_id.clone(),
                 target: target.clone(),
+                phase: measured.phase,
+                activation_batch_width: measured.activation_batch_width,
                 shared_prepare_ns: (target_index == 0)
                     .then_some(shared_prepare_ns)
                     .unwrap_or(0),
@@ -363,9 +495,9 @@ pub fn calibrate_vulkan_runtime_placement_candidate(
                 warmup_execution_ns: warmup.execution_ns,
                 measured_execution_ns: measured.execution_ns,
                 measured_ns_per_activation: measured.execution_ns.saturating_add(
-                    (VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MEASURED_UNITS / 2) as u64,
-                ) / VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MEASURED_UNITS
-                    as u64,
+                    (measured_useful_units / 2) as u64,
+                ) / measured_useful_units as u64,
+                measured_windows: measured.throughput_windows,
                 physical_dispatch_count: measured.physical_dispatch_count,
                 output_digest: measured.output_digest,
                 state_digest: measured.state_digest,

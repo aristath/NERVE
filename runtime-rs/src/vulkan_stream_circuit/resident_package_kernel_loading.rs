@@ -228,14 +228,6 @@ fn load_resident_component_batch_kernels(
                 .iter()
                 .filter(|implementation| batch_implementation_is_supported(device, implementation))
                 .collect::<Vec<_>>();
-            if supported.is_empty() {
-                return Err(VulkanResidentTokenModelPackageError::new(format!(
-                    "component kernel {}.{} has no batch implementation compatible with Vulkan device {:?}",
-                    component.component_id,
-                    kernel.node_id,
-                    device.device_name(),
-                )));
-            }
             for implementation in supported {
                 artifacts.push(VulkanResidentComponentBatchKernelArtifact {
                     component_id: component.component_id.clone(),

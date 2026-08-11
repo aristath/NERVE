@@ -90,10 +90,11 @@ use crate::vulkan_distributed::{
     VulkanDistributedActivationRange, VulkanDistributedActivationSlot,
     VulkanDistributedActivationStorage, VulkanDistributedDependencyClock,
     VulkanDistributedDispatchDistribution, VulkanDistributedDispatchGroup,
-    VulkanDistributedDispatchRunnerError, VulkanDistributedDispatchRunners,
-    VulkanDistributedDispatchSubmission, VulkanDistributedExecutionPlan,
-    VulkanDistributedParameterAllocationPlan, VulkanDistributedParameterBuffers,
-    VulkanDistributedParameterExclusionPlan, VulkanDistributedQueueSynchronization,
+    VulkanDistributedDispatchPlan, VulkanDistributedDispatchRunnerError,
+    VulkanDistributedDispatchRunners, VulkanDistributedDispatchSubmission,
+    VulkanDistributedExecutionPlan, VulkanDistributedParameterAllocationPlan,
+    VulkanDistributedParameterBuffers, VulkanDistributedParameterExclusionPlan,
+    VulkanDistributedQueueSynchronization,
 };
 
 mod package;
@@ -184,6 +185,7 @@ include!("vulkan_stream_circuit/residency_backpressure_scheduler.rs");
 include!("vulkan_stream_circuit/runtime_residency_plan.rs");
 include!("vulkan_stream_circuit/runtime_auto_placement.rs");
 include!("vulkan_stream_circuit/runtime_placement_calibration.rs");
+include!("vulkan_stream_circuit/runtime_distributed_placement_calibration.rs");
 include!("vulkan_stream_circuit/runtime_transfer_calibration.rs");
 include!("vulkan_stream_circuit/resource_backing_store.rs");
 include!("vulkan_stream_circuit/device_resource_residency.rs");

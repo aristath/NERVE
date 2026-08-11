@@ -1,6 +1,5 @@
 struct VulkanResidentDemandFeedbackState {
     predicates_by_device: BTreeMap<String, Arc<VulkanResidentBuffer>>,
-    completion_predicate_device_id: String,
     completion_predicate: Arc<VulkanResidentBuffer>,
 }
 
@@ -26,31 +25,6 @@ struct VulkanPlacedDemandFeedbackTickResume {
 struct VulkanDemandFeedbackResumePlan {
     schedule_start_turn_index: usize,
     next_stage_indices: Vec<usize>,
-}
-
-fn demand_feedback_pipeline_has_pending_miss<'a>(
-    predicates: impl IntoIterator<Item = (&'a str, u32)>,
-) -> Result<bool, VulkanError> {
-    let mut predicate_count = 0usize;
-    let mut has_pending_miss = false;
-    for (device_id, value) in predicates {
-        predicate_count += 1;
-        match value {
-            0 => has_pending_miss = true,
-            1 => {}
-            _ => {
-                return Err(VulkanError(format!(
-                    "demand feedback pipeline predicate on {device_id:?} has invalid value {value}"
-                )));
-            }
-        }
-    }
-    if predicate_count == 0 {
-        return Err(VulkanError(
-            "demand feedback pipeline predicate is absent".to_string(),
-        ));
-    }
-    Ok(has_pending_miss)
 }
 
 fn demand_feedback_resolution_bound(
@@ -461,11 +435,6 @@ fn write_shared_device_predicate_views<'a>(
     predicates: impl IntoIterator<Item = &'a Arc<VulkanResidentBuffer>>,
     enabled: bool,
 ) -> Result<(), VulkanError> {
-    // Every physical device owns a distinct Vulkan buffer view, including when
-    // those views import the same external allocation. A host write through one
-    // view is not a cross-device visibility operation. Explicitly write every
-    // view before submitting another demand attempt so all queues start from
-    // the same continuation state.
     let value = u32::from(enabled).to_le_bytes();
     let mut written_views = BTreeSet::new();
     for predicate in predicates {
@@ -520,7 +489,6 @@ impl VulkanResidentDemandFeedbackState {
             })?;
         Ok(Self {
             predicates_by_device,
-            completion_predicate_device_id: output_device_id.to_string(),
             completion_predicate,
         })
     }
@@ -544,15 +512,17 @@ impl VulkanResidentDemandFeedbackState {
             .collect()
     }
 
-    fn pipeline_has_pending_miss(&self) -> Result<bool, VulkanError> {
-        let bytes = self.completion_predicate.read_bytes(size_of::<u32>())?;
-        let value = u32::from_le_bytes(bytes.try_into().map_err(|_| {
-            VulkanError("demand feedback completion predicate did not contain one u32".to_string())
-        })?);
-        demand_feedback_pipeline_has_pending_miss([(
-            self.completion_predicate_device_id.as_str(),
-            value,
-        )])
+    fn terminal_fault_publication_copy<'a>(
+        &'a self,
+        control: &'a VulkanResidentFeedbackControlPlane,
+    ) -> Result<VulkanResidentBufferRangeCopy<'a>, VulkanError> {
+        VulkanResidentBufferRangeCopy::new(
+            &self.completion_predicate,
+            control.fault_publication_buffer()?,
+            0,
+            VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET * size_of::<u32>(),
+            size_of::<u32>(),
+        )
     }
 
     fn resolution_bound(
@@ -606,7 +576,7 @@ impl VulkanResidentDemandFeedbackState {
             })
     }
 
-    fn resolve_first_miss(
+    fn resolve_published_fault(
         &self,
         device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
@@ -617,16 +587,6 @@ impl VulkanResidentDemandFeedbackState {
         VulkanResidentInProcessPlacedRuntimeError,
     >
     {
-        // Every feedback gate shares one physical continuation predicate. The
-        // terminal output timeline depends on every device visit, so its
-        // output-device view is the synchronized completion value for the
-        // entire window. Keep the per-device diagnostic and detailed queue
-        // scan for the exceptional miss path only.
-        if !self.pipeline_has_pending_miss().map_err(
-            VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
-        )? {
-            return Ok(None);
-        }
         let mut pending = Vec::new();
         for feedback_lane in 0..tick_count {
             for (slice_index, slice) in device_slices.iter().enumerate() {

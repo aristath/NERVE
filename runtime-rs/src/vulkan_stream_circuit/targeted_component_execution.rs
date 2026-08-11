@@ -9,6 +9,7 @@ pub enum VulkanTargetedComponentExecutionPhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VulkanTargetedComponentExecutionScope {
     Node,
+    Component,
     DecodeComponentPrefix,
 }
 
@@ -125,12 +126,14 @@ struct VulkanTargetedDecodeStep {
 }
 
 struct VulkanTargetedPrefillExecution {
+    source_dispatches: Vec<VulkanMountedPlacedBoundDispatch>,
     activation_batch_width: usize,
     signal_buffers: Vec<VulkanComponentBatchSignalBuffer>,
     signal_buffer_indices: BTreeMap<VulkanComponentBatchSignalKey, usize>,
     control_buffers:
         BTreeMap<VulkanResidentComponentBatchControlPayload, VulkanResidentBuffer>,
-    _runtime_token_ids_buffer: VulkanResidentBuffer,
+    stream_control_buffers: Vec<VulkanResidentBuffer>,
+    runtime_token_ids_buffer: VulkanResidentBuffer,
     steps: Vec<VulkanTargetedPrefillStep>,
     sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
     causal_state_snapshots: VulkanCausalStateSnapshotBank,
@@ -138,6 +141,7 @@ struct VulkanTargetedPrefillExecution {
 
 struct VulkanTargetedPrefillStep {
     dispatch: VulkanResidentKernelDispatch,
+    push_constants: Vec<u8>,
     indirect_control: Option<(VulkanResidentComponentBatchControlPayload, usize)>,
 }
 
@@ -160,6 +164,27 @@ fn targeted_component_execution_dispatches(
 ) -> Result<Vec<VulkanMountedPlacedBoundDispatch>, VulkanResidentTokenModelPackageError> {
     match scope {
         VulkanTargetedComponentExecutionScope::Node => Ok(vec![target.clone()]),
+        VulkanTargetedComponentExecutionScope::Component => {
+            let dispatches = plan
+                .dispatches
+                .iter()
+                .filter(|dispatch| {
+                    dispatch.component_id == component_id
+                        && dispatch.dispatch_index <= target.dispatch_index
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if dispatches
+                .last()
+                .is_none_or(|dispatch| dispatch.dispatch_index != target.dispatch_index)
+            {
+                return targeted_component_error(format!(
+                    "component target {component_id}.{} cannot reach terminal dispatch {}",
+                    target.node_id, target.dispatch_index,
+                ));
+            }
+            Ok(dispatches)
+        }
         VulkanTargetedComponentExecutionScope::DecodeComponentPrefix => {
             if phase != VulkanTargetedComponentExecutionPhase::Decode {
                 return targeted_component_error(
@@ -962,7 +987,8 @@ impl VulkanResidentTargetedComponentSession {
                 VulkanTargetedPrefillExecution::new(
                     device,
                     &mounted,
-                    &source_dispatch,
+                    &execution_dispatches,
+                    slice.loaded_manifest(),
                     &slice.batch_kernels,
                     activation_batch_width,
                     dynamic_state_capacity_activations,
@@ -1077,6 +1103,14 @@ impl VulkanResidentTargetedComponentSession {
                         .map(VulkanResidentBuffer::byte_capacity)
                         .sum::<usize>(),
                 )
+                .saturating_add(
+                    execution
+                        .stream_control_buffers
+                        .iter()
+                        .map(VulkanResidentBuffer::byte_capacity)
+                        .sum::<usize>(),
+                )
+                .saturating_add(execution.runtime_token_ids_buffer.byte_capacity())
                 .saturating_add(execution.causal_state_snapshots.total_byte_capacity()),
         }
     }
@@ -1096,26 +1130,26 @@ impl VulkanResidentTargetedComponentSession {
                 self.write_decode_fixture(seed)
             }
             VulkanTargetedComponentExecution::Prefill(execution) => {
-                self.write_prefill_state_fixture(seed)?;
+                self.write_prefill_state_fixture(&execution.source_dispatches, seed)?;
                 execution
                     .causal_state_snapshots
                     .initialize_from_state_buffers(&self.mounted.buffers)
                     .map_err(|error| targeted_component_error_value(format!(
                         "failed to initialize targeted causal state snapshots: {error}"
                     )))?;
-                execution.write_fixture(&self.mounted, &self.source_dispatch, seed)
+                execution.write_fixture(&self.mounted, &execution.source_dispatches, seed)
             }
         }
     }
 
     fn write_prefill_state_fixture(
         &self,
+        dispatches: &[VulkanMountedPlacedBoundDispatch],
         seed: u32,
     ) -> Result<(), VulkanResidentTokenModelPackageError> {
-        let state_buffer_indices = self
-            .source_dispatch
-            .descriptors
+        let state_buffer_indices = dispatches
             .iter()
+            .flat_map(|dispatch| dispatch.descriptors.iter())
             .filter_map(|descriptor| match &descriptor.target {
                 VulkanMountedPlacedBoundDescriptorTarget::Resident {
                     target:
@@ -1597,16 +1631,19 @@ impl VulkanTargetedPrefillExecution {
     fn new(
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
-        dispatch: &VulkanMountedPlacedBoundDispatch,
+        dispatches: &[VulkanMountedPlacedBoundDispatch],
+        loaded_manifest: &VulkanLoadedReusableKernelArtifactManifest,
         batch_kernels: &[VulkanResidentComponentBatchKernelArtifact],
         activation_batch_width: usize,
         dynamic_state_capacity_activations: u32,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        if dispatches.is_empty() {
+            return targeted_component_error(
+                "targeted prefill component has no dispatches",
+            );
+        }
         let (signal_buffer_indices, signal_buffer_plan) =
-            component_batch_signal_buffer_plan(
-                mounted,
-                std::slice::from_ref(dispatch),
-            )
+            component_batch_signal_buffer_plan(mounted, dispatches)
             .map_err(|error| targeted_component_error_value(format!(
                 "failed to plan targeted prefill signals: {error}"
             )))?;
@@ -1631,41 +1668,59 @@ impl VulkanTargetedPrefillExecution {
                 })
             })
             .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
-        let artifact = selected_component_batch_kernel_artifact_for_dispatch(
-            batch_kernels,
-            dispatch,
-            VulkanComponentBatchExecutionMode::CausalSequence,
-            activation_batch_width,
-        )
-        .filter(|artifact| targeted_prefill_batch_mode_is_supported(artifact.batch_mode))
-        .ok_or_else(|| targeted_component_error_value(format!(
-            "dispatch {}.{} has no causal-sequence prefill implementation for width {activation_batch_width}",
-            dispatch.component_id, dispatch.node_id
-        )))?;
-        if artifact.stages.is_empty() {
-            return targeted_component_error(
-                "targeted prefill implementation has no executable stages",
-            );
-        }
-        if artifact.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan
-            && activation_batch_width > artifact.lane_tile_width
-        {
-            return targeted_component_error(format!(
-                "targeted causal scan {}.{} cannot execute {activation_batch_width} lanes with tile width {}",
-                dispatch.component_id, dispatch.node_id, artifact.lane_tile_width,
-            ));
-        }
-        let static_state_write_indices =
-            component_batch_static_state_write_indices(mounted, dispatch)
+        let selected_dispatches = dispatches
+            .iter()
+            .map(|dispatch| {
+                let artifact = selected_component_batch_kernel_artifact_for_dispatch(
+                    batch_kernels,
+                    dispatch,
+                    VulkanComponentBatchExecutionMode::CausalSequence,
+                    activation_batch_width,
+                )
+                .filter(|artifact| {
+                    targeted_prefill_batch_mode_is_supported(artifact.batch_mode)
+                });
+                if let Some(artifact) = artifact {
+                    if artifact.stages.is_empty() {
+                        return targeted_component_error(format!(
+                            "targeted prefill dispatch {}.{} has no executable stages",
+                            dispatch.component_id, dispatch.node_id,
+                        ));
+                    }
+                    if artifact.batch_mode
+                        == VulkanResidentComponentKernelBatchMode::CausalScan
+                        && activation_batch_width > artifact.lane_tile_width
+                    {
+                        return targeted_component_error(format!(
+                            "targeted causal scan {}.{} cannot execute {activation_batch_width} lanes with tile width {}",
+                            dispatch.component_id, dispatch.node_id, artifact.lane_tile_width,
+                        ));
+                    }
+                }
+                Ok((dispatch, artifact))
+            })
+            .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
+        let static_state_write_indices = dispatches
+            .iter()
+            .map(|dispatch| component_batch_static_state_write_indices(mounted, dispatch))
+            .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| targeted_component_error_value(format!(
                     "failed to identify targeted prefill state writers: {error}"
-                )))?;
-        let snapshot_capture_enabled = artifact.batch_mode
-            == VulkanResidentComponentKernelBatchMode::CausalScan
-            && artifact
-                .stages
-                .iter()
-                .any(|stage| stage.state_snapshot_binding.is_some());
+                )))?
+            .into_iter()
+            .flatten()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let snapshot_capture_enabled = selected_dispatches.iter().any(|(_, artifact)| {
+            artifact.is_some_and(|artifact| {
+                artifact.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan
+                    && artifact
+                        .stages
+                        .iter()
+                        .any(|stage| stage.state_snapshot_binding.is_some())
+            })
+        });
         let mut causal_state_snapshots = VulkanCausalStateSnapshotBank::new(
             device,
             activation_batch_width,
@@ -1677,9 +1732,9 @@ impl VulkanTargetedPrefillExecution {
         for state_buffer_index in &static_state_write_indices {
             causal_state_snapshots.require_state_buffer(*state_buffer_index);
         }
-        let control_payloads = artifact
-            .stages
+        let control_payloads = selected_dispatches
             .iter()
+            .flat_map(|(_, artifact)| artifact.into_iter().flat_map(|artifact| &artifact.stages))
             .map(|stage| stage.control.storage_buffer().2)
             .collect::<BTreeSet<_>>();
         let control_buffers = control_payloads
@@ -1701,11 +1756,19 @@ impl VulkanTargetedPrefillExecution {
                 BTreeMap<_, _>,
                 VulkanResidentTokenModelPackageError,
             >>()?;
-        let start_stream_tick = targeted_prefill_start_stream_tick(
-            artifact.batch_mode,
-            activation_batch_width,
-            dynamic_state_capacity_activations as usize,
-        )?;
+        let start_stream_tick = selected_dispatches
+            .iter()
+            .filter_map(|(_, artifact)| artifact.map(|artifact| {
+                targeted_prefill_start_stream_tick(
+                    artifact.batch_mode,
+                    activation_batch_width,
+                    dynamic_state_capacity_activations as usize,
+                )
+            }))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
         let control = component_batch_control_bytes(
             u32::try_from(activation_batch_width).map_err(|_| {
                 targeted_component_error_value(
@@ -1715,25 +1778,39 @@ impl VulkanTargetedPrefillExecution {
             start_stream_tick,
             dynamic_state_capacity_activations,
         );
-        let workgroup_count_y = match artifact.batch_mode {
-            VulkanResidentComponentKernelBatchMode::WeightShared => u32::try_from(
-                activation_batch_width
-                    .checked_add(artifact.lane_tile_width - 1)
-                    .ok_or_else(|| targeted_component_error_value(
-                        "targeted prefill workgroup count overflowed",
-                    ))?
-                    / artifact.lane_tile_width,
-            )
-            .map_err(|_| targeted_component_error_value(
-                "targeted prefill workgroup count exceeds u32",
-            ))?,
-            VulkanResidentComponentKernelBatchMode::CausalScan => 1,
-            VulkanResidentComponentKernelBatchMode::SerialLanes => {
-                return targeted_component_error(
-                    "targeted prefill cannot mount a serial-lane batch artifact",
-                );
-            }
-        };
+        let input_token_ids = vec![0u32; activation_batch_width];
+        let stream_ticks = consecutive_component_batch_stream_ticks(
+            start_stream_tick,
+            activation_batch_width,
+        )
+        .map_err(|error| targeted_component_error_value(error.to_string()))?;
+        let lane_controls = component_batch_lane_stream_control_bytes_for_ticks(
+            &input_token_ids,
+            &stream_ticks,
+            dynamic_state_capacity_activations,
+        )
+        .map_err(|error| targeted_component_error_value(error.to_string()))?;
+        let stream_control_buffers = lane_controls
+            .iter()
+            .map(|control_bytes| {
+                let mut buffer = device
+                    .create_host_visible_resident_buffer(VULKAN_STREAM_CONTROL_BYTE_CAPACITY)
+                    .map_err(|error| targeted_component_error_value(format!(
+                        "failed to allocate targeted prefill stream control: {error}"
+                    )))?;
+                buffer.persistently_map().map_err(|error| {
+                    targeted_component_error_value(format!(
+                        "failed to map targeted prefill stream control: {error}"
+                    ))
+                })?;
+                buffer.write_bytes(control_bytes).map_err(|error| {
+                    targeted_component_error_value(format!(
+                        "failed to initialize targeted prefill stream control: {error}"
+                    ))
+                })?;
+                Ok(buffer)
+            })
+            .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
         let runtime_token_ids_byte_capacity = activation_batch_width
             .checked_mul(size_of::<u32>())
             .ok_or_else(|| targeted_component_error_value(
@@ -1750,125 +1827,236 @@ impl VulkanTargetedPrefillExecution {
             ))
         })?;
         runtime_token_ids_buffer
-            .write_bytes(&vec![0u8; runtime_token_ids_byte_capacity])
+            .write_bytes(
+                &component_batch_runtime_token_id_bytes(&input_token_ids)
+                    .map_err(|error| targeted_component_error_value(error.to_string()))?,
+            )
             .map_err(|error| targeted_component_error_value(format!(
                 "failed to initialize targeted prefill runtime token ids: {error}"
             )))?;
-        let parent_bindings = component_batch_bindings(
-            mounted,
-            dispatch,
-            &signal_buffers,
-            &signal_buffer_indices,
-            None,
-            Some((&runtime_token_ids_buffer, runtime_token_ids_byte_capacity)),
-            None,
-        )
-        .map_err(|error| targeted_component_error_value(format!(
-            "failed to bind targeted prefill signals: {error}"
-        )))?;
-        let mut steps = Vec::with_capacity(artifact.stages.len());
-        for stage in &artifact.stages {
-            let (control_binding, control_bytes, payload) =
-                stage.control.storage_buffer();
-            let mut bindings = component_batch_stage_bindings(
-                &parent_bindings,
-                &stage.descriptor_bindings,
-                control_binding,
-            )
-            .map_err(|error| targeted_component_error_value(format!(
-                "failed to remap targeted prefill bindings: {error}"
-            )))?;
-            if let Some(snapshot_binding) = stage.state_snapshot_binding {
-                if bindings
-                    .iter()
-                    .any(|binding| binding.binding == snapshot_binding)
+        let step_capacity = selected_dispatches
+            .iter()
+            .map(|(_, artifact)| {
+                artifact
+                    .map(|artifact| artifact.stages.len())
+                    .unwrap_or(activation_batch_width)
+            })
+            .sum();
+        let mut steps = Vec::with_capacity(step_capacity);
+        for (dispatch, artifact) in &selected_dispatches {
+            let Some(artifact) = artifact else {
+                let scalar_artifact = loaded_manifest
+                    .artifact(&dispatch.reusable_family_id)
+                    .ok_or_else(|| targeted_component_error_value(format!(
+                        "targeted prefill scalar fallback {}.{} has no loaded artifact",
+                        dispatch.component_id, dispatch.node_id,
+                    )))?;
+                for (lane_index, stream_control_buffer) in
+                    stream_control_buffers.iter().enumerate()
                 {
-                    return targeted_component_error(format!(
-                        "targeted prefill state snapshot binding {snapshot_binding} collides in stage {}",
-                        stage.shader_path,
-                    ));
-                }
-                let (state_buffer_index, snapshot_access) = if let Some(source_binding) =
-                    stage.state_snapshot_source_binding
-                {
-                    (
-                        component_batch_state_buffer_index_at_binding(
-                            mounted,
-                            dispatch,
-                            source_binding,
+                    let bindings = component_batch_bindings(
+                        mounted,
+                        dispatch,
+                        &signal_buffers,
+                        &signal_buffer_indices,
+                        Some(lane_index),
+                        Some((stream_control_buffer, size_of::<u32>())),
+                        dispatch.stream_control_binding.map(|_| stream_control_buffer),
+                    )
+                    .map_err(|error| targeted_component_error_value(format!(
+                        "failed to bind targeted prefill scalar fallback {}.{}: {error}",
+                        dispatch.component_id, dispatch.node_id,
+                    )))?;
+                    let resident = device
+                        .create_resident_kernel_dispatch_labeled(
+                            &scalar_artifact.words,
+                            &bindings,
+                            scalar_artifact.artifact.workgroup_count_x,
+                            scalar_artifact.artifact.local_size_x,
+                            push_constant_byte_count(&dispatch.push_constants).map_err(|error| {
+                                targeted_component_error_value(format!(
+                                    "invalid targeted prefill scalar push constants: {error}"
+                                ))
+                            })?,
+                            Some(vulkan_dispatch_semantic_label(
+                                dispatch,
+                                Some(&format!("targeted_prefill_lane={lane_index}")),
+                            )),
                         )
                         .map_err(|error| targeted_component_error_value(format!(
-                            "failed to resolve targeted snapshot source: {error}"
+                            "failed to create targeted prefill scalar fallback: {error}"
+                        )))?;
+                    steps.push(VulkanTargetedPrefillStep {
+                        dispatch: resident,
+                        push_constants: stream_control_push_constant_bytes(
+                            &dispatch.push_constants,
+                            VulkanMountedPlacedStreamControl {
+                                stream_tick: stream_ticks[lane_index],
+                                control_flags: 0,
+                                dynamic_state_capacity_activations,
+                            },
+                        )
+                        .map_err(|error| targeted_component_error_value(format!(
+                            "failed to bind targeted prefill scalar stream control: {error}"
                         )))?,
-                        VulkanResidentKernelBufferAccess::Read,
-                    )
-                } else {
-                    let [state_buffer_index] = static_state_write_indices.as_slice() else {
-                        return targeted_component_error(format!(
-                            "targeted prefill stage {} snapshots {} static state writers; expected one",
-                            stage.shader_path,
-                            static_state_write_indices.len(),
-                        ));
-                    };
-                    (*state_buffer_index, VulkanResidentKernelBufferAccess::Write)
-                };
-                let snapshot_buffer = causal_state_snapshots
-                    .binding_buffer(device, &mounted.buffers, state_buffer_index)
+                        indirect_control: None,
+                    });
+                }
+                continue;
+            };
+            let parent_bindings = component_batch_bindings(
+                mounted,
+                dispatch,
+                &signal_buffers,
+                &signal_buffer_indices,
+                None,
+                Some((&runtime_token_ids_buffer, runtime_token_ids_byte_capacity)),
+                None,
+            )
+            .map_err(|error| targeted_component_error_value(format!(
+                "failed to bind targeted prefill signals for {}.{}: {error}",
+                dispatch.component_id, dispatch.node_id,
+            )))?;
+            let dispatch_state_write_indices =
+                component_batch_static_state_write_indices(mounted, dispatch)
                     .map_err(|error| targeted_component_error_value(format!(
-                        "failed to bind targeted causal state snapshots: {error}"
+                        "failed to identify targeted prefill state writers for {}.{}: {error}",
+                        dispatch.component_id, dispatch.node_id,
                     )))?;
-                bindings.push(
-                    VulkanResidentKernelBufferBinding::new(
-                        snapshot_binding,
-                        snapshot_buffer,
-                        snapshot_buffer.byte_capacity(),
+            let workgroup_count_y = match artifact.batch_mode {
+                VulkanResidentComponentKernelBatchMode::WeightShared => {
+                    if artifact.lane_tile_width == 0 {
+                        return targeted_component_error(format!(
+                            "targeted prefill artifact {}.{} has zero lane tile width",
+                            dispatch.component_id, dispatch.node_id,
+                        ));
+                    }
+                    u32::try_from(
+                        activation_batch_width
+                            .checked_add(artifact.lane_tile_width - 1)
+                            .ok_or_else(|| targeted_component_error_value(
+                                "targeted prefill workgroup count overflowed",
+                            ))?
+                            / artifact.lane_tile_width,
                     )
-                    .with_access(snapshot_access),
-                );
-            }
-            let control_buffer = control_buffers.get(&payload).ok_or_else(|| {
-                targeted_component_error_value(
-                    "targeted prefill stage has no control buffer",
-                )
-            })?;
-            bindings.push(
-                VulkanResidentKernelBufferBinding::new(
+                    .map_err(|_| targeted_component_error_value(
+                        "targeted prefill workgroup count exceeds u32",
+                    ))?
+                }
+                VulkanResidentComponentKernelBatchMode::CausalScan => 1,
+                VulkanResidentComponentKernelBatchMode::SerialLanes => {
+                    return targeted_component_error(
+                        "targeted prefill cannot mount a serial-lane batch artifact",
+                    );
+                }
+            };
+            for stage in &artifact.stages {
+                let (control_binding, control_bytes, payload) =
+                    stage.control.storage_buffer();
+                let mut bindings = component_batch_stage_bindings(
+                    &parent_bindings,
+                    &stage.descriptor_bindings,
                     control_binding,
-                    control_buffer,
-                    control_bytes as usize,
-                )
-                .with_access(component_batch_control_buffer_access(stage.control)),
-            );
-            let resident = device
-                .create_resident_kernel_dispatch_2d_labeled(
-                    &stage.spirv_words,
-                    &bindings,
-                    stage.workgroup_count_x,
-                    if stage.dispatch_y_from_batch_width {
-                        u32::try_from(activation_batch_width).map_err(|_| {
-                            targeted_component_error_value(
-                                "targeted prefill activation width exceeds u32",
-                            )
-                        })?
-                    } else {
-                        workgroup_count_y
-                    },
-                    stage.local_size_x,
-                    0,
-                    Some(vulkan_dispatch_semantic_label(
-                        dispatch,
-                        Some("targeted_prefill"),
-                    )),
                 )
                 .map_err(|error| targeted_component_error_value(format!(
-                    "failed to create targeted prefill dispatch: {error}"
+                    "failed to remap targeted prefill bindings: {error}"
                 )))?;
-            steps.push(VulkanTargetedPrefillStep {
-                dispatch: resident,
-                indirect_control: stage
-                    .indirect_dispatch_byte_offset
-                    .map(|offset| (payload, offset as usize)),
-            });
+                if let Some(snapshot_binding) = stage.state_snapshot_binding {
+                    if bindings
+                        .iter()
+                        .any(|binding| binding.binding == snapshot_binding)
+                    {
+                        return targeted_component_error(format!(
+                            "targeted prefill state snapshot binding {snapshot_binding} collides in stage {}",
+                            stage.shader_path,
+                        ));
+                    }
+                    let (state_buffer_index, snapshot_access) =
+                        if let Some(source_binding) = stage.state_snapshot_source_binding {
+                            (
+                                component_batch_state_buffer_index_at_binding(
+                                    mounted,
+                                    dispatch,
+                                    source_binding,
+                                )
+                                .map_err(|error| targeted_component_error_value(format!(
+                                    "failed to resolve targeted snapshot source: {error}"
+                                )))?,
+                                VulkanResidentKernelBufferAccess::Read,
+                            )
+                        } else {
+                            let [state_buffer_index] =
+                                dispatch_state_write_indices.as_slice()
+                            else {
+                                return targeted_component_error(format!(
+                                    "targeted prefill stage {} snapshots {} static state writers in {}.{}; expected one",
+                                    stage.shader_path,
+                                    dispatch_state_write_indices.len(),
+                                    dispatch.component_id,
+                                    dispatch.node_id,
+                                ));
+                            };
+                            (*state_buffer_index, VulkanResidentKernelBufferAccess::Write)
+                        };
+                    let snapshot_buffer = causal_state_snapshots
+                        .binding_buffer(device, &mounted.buffers, state_buffer_index)
+                        .map_err(|error| targeted_component_error_value(format!(
+                            "failed to bind targeted causal state snapshots: {error}"
+                        )))?;
+                    bindings.push(
+                        VulkanResidentKernelBufferBinding::new(
+                            snapshot_binding,
+                            snapshot_buffer,
+                            snapshot_buffer.byte_capacity(),
+                        )
+                        .with_access(snapshot_access),
+                    );
+                }
+                let control_buffer = control_buffers.get(&payload).ok_or_else(|| {
+                    targeted_component_error_value(
+                        "targeted prefill stage has no control buffer",
+                    )
+                })?;
+                bindings.push(
+                    VulkanResidentKernelBufferBinding::new(
+                        control_binding,
+                        control_buffer,
+                        control_bytes as usize,
+                    )
+                    .with_access(component_batch_control_buffer_access(stage.control)),
+                );
+                let resident = device
+                    .create_resident_kernel_dispatch_2d_labeled(
+                        &stage.spirv_words,
+                        &bindings,
+                        stage.workgroup_count_x,
+                        if stage.dispatch_y_from_batch_width {
+                            u32::try_from(activation_batch_width).map_err(|_| {
+                                targeted_component_error_value(
+                                    "targeted prefill activation width exceeds u32",
+                                )
+                            })?
+                        } else {
+                            workgroup_count_y
+                        },
+                        stage.local_size_x,
+                        0,
+                        Some(vulkan_dispatch_semantic_label(
+                            dispatch,
+                            Some("targeted_prefill"),
+                        )),
+                    )
+                    .map_err(|error| targeted_component_error_value(format!(
+                        "failed to create targeted prefill dispatch: {error}"
+                    )))?;
+                steps.push(VulkanTargetedPrefillStep {
+                    dispatch: resident,
+                    push_constants: Vec::new(),
+                    indirect_control: stage
+                        .indirect_dispatch_byte_offset
+                        .map(|offset| (payload, offset as usize)),
+                });
+            }
         }
         causal_state_snapshots
             .mount_commit_batches(device, &mounted.buffers)
@@ -1888,11 +2076,13 @@ impl VulkanTargetedPrefillExecution {
                 )))?;
         }
         Ok(Self {
+            source_dispatches: dispatches.to_vec(),
             activation_batch_width,
             signal_buffers,
             signal_buffer_indices,
             control_buffers,
-            _runtime_token_ids_buffer: runtime_token_ids_buffer,
+            stream_control_buffers,
+            runtime_token_ids_buffer,
             steps,
             sequence_catalog: RefCell::new(BTreeMap::new()),
             causal_state_snapshots,
@@ -2007,7 +2197,7 @@ impl VulkanTargetedPrefillExecution {
                     } else {
                         VulkanResidentKernelSequenceStep::new(
                             &step.dispatch,
-                            &[],
+                            &step.push_constants,
                         )
                     };
                 sequence_steps.push(sequence_step);
@@ -2027,55 +2217,81 @@ impl VulkanTargetedPrefillExecution {
     fn write_fixture(
         &self,
         mounted: &VulkanMountedPlacedStreamCircuit,
-        dispatch: &VulkanMountedPlacedBoundDispatch,
+        dispatches: &[VulkanMountedPlacedBoundDispatch],
         seed: u32,
     ) -> Result<(), VulkanResidentTokenModelPackageError> {
-        for descriptor in &dispatch.descriptors {
-            if !matches!(
-                descriptor.usage,
-                VulkanKernelDescriptorUsage::InputSignal
-                    | VulkanKernelDescriptorUsage::OutputSignal
-            ) {
-                continue;
-            }
-            let Some((key, frame_byte_capacity)) =
+        for signal in &self.signal_buffers {
+            signal
+                .buffer
+                .write_bytes(&vec![0; signal.buffer.byte_capacity()])
+                .map_err(|error| targeted_component_error_value(format!(
+                    "failed to clear targeted prefill signal buffer: {error}"
+                )))?;
+        }
+        let produced_signals = dispatches
+            .iter()
+            .flat_map(|dispatch| dispatch.descriptors.iter())
+            .filter(|descriptor| {
+                descriptor.usage == VulkanKernelDescriptorUsage::OutputSignal
+            })
+            .filter_map(|descriptor| {
                 component_batch_signal_target_with_mounted(mounted, descriptor)
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| targeted_component_error_value(format!(
+                "failed to resolve targeted prefill outputs: {error}"
+            )))?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect::<BTreeSet<_>>();
+        let mut initialized_inputs = BTreeSet::new();
+        for dispatch in dispatches {
+            for descriptor in dispatch.descriptors.iter().filter(|descriptor| {
+                descriptor.usage == VulkanKernelDescriptorUsage::InputSignal
+            }) {
+                let Some((key, frame_byte_capacity)) =
+                    component_batch_signal_target_with_mounted(mounted, descriptor)
+                        .map_err(|error| targeted_component_error_value(format!(
+                            "failed to resolve targeted prefill input: {error}"
+                        )))?
+                else {
+                    if targeted_signal_accepts_fixture_mutation(descriptor) {
+                        return targeted_component_error(format!(
+                            "targeted prefill input {} has no signal buffer",
+                            descriptor.name,
+                        ));
+                    }
+                    continue;
+                };
+                if produced_signals.contains(&key) || !initialized_inputs.insert(key.clone()) {
+                    continue;
+                }
+                let buffer_index = *self.signal_buffer_indices.get(&key).ok_or_else(|| {
+                    targeted_component_error_value(format!(
+                        "targeted prefill input {key:?} was not allocated",
+                    ))
+                })?;
+                let byte_count = frame_byte_capacity
+                    .checked_mul(self.activation_batch_width)
+                    .ok_or_else(|| targeted_component_error_value(
+                        "targeted prefill fixture size overflowed",
+                    ))?;
+                let fixture_seed = seed.wrapping_add(
+                    u32::try_from(dispatch.dispatch_index).unwrap_or(u32::MAX),
+                );
+                self.signal_buffers[buffer_index]
+                    .buffer
+                    .write_bytes(&targeted_fixture_bytes(
+                        byte_count,
+                        fixture_seed,
+                        descriptor.binding,
+                    ))
                     .map_err(|error| targeted_component_error_value(format!(
-                        "failed to resolve targeted prefill signal: {error}"
-                    )))?
-            else {
-                if targeted_signal_accepts_fixture_mutation(descriptor) {
-                    return targeted_component_error(format!(
-                        "targeted prefill descriptor {} has no signal buffer",
-                        descriptor.name,
-                    ));
-                }
-                continue;
-            };
-            let buffer_index = *self.signal_buffer_indices.get(&key).ok_or_else(|| {
-                targeted_component_error_value(format!(
-                    "targeted prefill signal {key:?} was not allocated",
-                ))
-            })?;
-            let buffer = &self.signal_buffers[buffer_index].buffer;
-            let byte_count = frame_byte_capacity
-                .checked_mul(self.activation_batch_width)
-                .ok_or_else(|| targeted_component_error_value(
-                    "targeted prefill fixture size overflowed",
-                ))?;
-            let bytes = match descriptor.usage {
-                VulkanKernelDescriptorUsage::InputSignal => {
-                    targeted_fixture_bytes(byte_count, seed, descriptor.binding)
-                }
-                VulkanKernelDescriptorUsage::OutputSignal => vec![0; byte_count],
-                _ => unreachable!(),
-            };
-            buffer.write_bytes(&bytes).map_err(|error| {
-                targeted_component_error_value(format!(
-                    "failed to initialize targeted prefill signal {}: {error}",
-                    descriptor.name
-                ))
-            })?;
+                        "failed to initialize targeted prefill input {}: {error}",
+                        descriptor.name
+                    )))?;
+            }
         }
         Ok(())
     }

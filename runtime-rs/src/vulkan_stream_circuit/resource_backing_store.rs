@@ -354,8 +354,7 @@ impl CompiledResourceLoadTicket {
         })?
     }
 
-    #[cfg(test)]
-    fn wait_timeout(
+    pub fn wait_timeout(
         self,
         timeout: Duration,
     ) -> Result<

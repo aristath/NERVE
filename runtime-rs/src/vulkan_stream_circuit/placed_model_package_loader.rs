@@ -1407,14 +1407,125 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &mut distributed_activation_buffers,
             &device_for,
         )?;
+        let mut distributed_dispatch_indices = BTreeMap::<&str, BTreeSet<usize>>::new();
+        for group in &self.distributed_execution_plan.dispatch_groups {
+            distributed_dispatch_indices
+                .entry(group.owner_device_id.as_str())
+                .or_default()
+                .extend(group.dispatch_indices());
+        }
+        let local_dispatch_count = self.device_slices.iter().try_fold(
+            0usize,
+            |total, slice| {
+                let distributed = distributed_dispatch_indices
+                    .get(slice.device_id.as_str());
+                let model_dispatch_count = slice
+                    .prepared_plan()
+                    .dispatches
+                    .iter()
+                    .filter(|dispatch| {
+                        distributed.is_none_or(|indices| {
+                            !indices.contains(&dispatch.dispatch_index)
+                        })
+                    })
+                    .count();
+                let checkpoint_count = slice
+                    .physical_residency_schedule()
+                    .demand_gate_count(self.resource_residency_policy);
+                total
+                    .checked_add(model_dispatch_count)
+                    .and_then(|count| count.checked_add(checkpoint_count))
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "resident feedback planned local dispatch count overflowed"
+                                .to_string(),
+                        ))
+                    })
+            },
+        )?;
+        let distributed_shard_count = self
+            .distributed_execution_plan
+            .dispatch_groups
+            .iter()
+            .try_fold(0usize, |total, group| {
+                total
+                    .checked_add(
+                        group
+                            .leader()
+                            .shards
+                            .len()
+                            .checked_mul(group.dispatches.len())
+                            .ok_or_else(|| {
+                                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                    VulkanError(
+                                        "resident feedback distributed shard count overflowed"
+                                            .to_string(),
+                                    ),
+                                )
+                            })?,
+                    )
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "resident feedback distributed dispatch count overflowed"
+                                .to_string(),
+                        ))
+                    })
+            })?;
+        let sampler_dispatch_count = VulkanResidentSamplerRunner::feedback_dispatch_count_for_spec(
+            &self.sampler_kernels,
+            &self.sampler_spec,
+        );
+        let feedback_dispatch_capacity = local_dispatch_count
+            .checked_add(distributed_shard_count)
+            .and_then(|count| count.checked_add(1))
+            .and_then(|count| count.checked_add(2))
+            .and_then(|count| count.checked_add(sampler_dispatch_count))
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    "resident feedback dispatch capacity overflowed".to_string(),
+                ))
+            })?;
+        let vocabulary_size = self.sampler_spec.logits_byte_capacity / size_of::<f32>();
+        let mut feedback_control = VulkanResidentFeedbackControlPlane::new(
+            &self.device_ids,
+            &self.output_device_id,
+            vocabulary_size,
+            feedback_dispatch_capacity,
+            &device_for,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let demand_feedback_predicates =
             create_demand_feedback_pipeline_predicates(self, &device_for)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let mut distributed_dispatch_runners = VulkanDistributedDispatchRunners::create(
+            &self.distributed_execution_plan,
+            &self.distributed_parameter_buffers,
+            &distributed_activation_buffers,
+            &self.distributed_loaded_manifest,
+            |device_id| device_for(device_id),
+        )
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to mount distributed Vulkan dispatches: {error}"
+                )),
+            )
+        })?;
+        if distributed_dispatch_runners.shard_count != distributed_shard_count {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "resident feedback planned {distributed_shard_count} distributed shards but mounted {}",
+                    distributed_dispatch_runners.shard_count,
+                )),
+            ));
+        }
         let mut devices = Vec::with_capacity(self.device_slices.len());
         for package_slice in &self.device_slices {
             let device = device_for(&package_slice.device_id)?;
             let activation_overrides = distributed_activation_buffers
                 .activation_overrides_for_owner_device(&package_slice.device_id);
+            let boundary_overrides = distributed_activation_buffers
+                .boundary_overrides_for_owner_device(&package_slice.device_id);
             let shared_local_edge_ids = shared_local_edge_overrides
                 .get(&package_slice.device_id)
                 .into_iter()
@@ -1454,6 +1565,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         .get(&package_slice.device_id)
                         .map(Vec::as_slice)
                         .unwrap_or_default(),
+                    &boundary_overrides,
                     stream_control_buffers
                         .get(&package_slice.device_id)
                         .cloned(),
@@ -1471,11 +1583,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )
                 })?;
             let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
-            let mounted_bound = mounted
-                .mounted_placed_bound_dispatch_plan(&reusable_manifest)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BoundDispatchPlan)?;
-            let tick_plan =
-                VulkanMountedPlacedStreamTickPlan::from_mounted_bound_plan(&mounted_bound);
             let distributed_dispatch_groups = self
                 .distributed_execution_plan
                 .dispatch_groups
@@ -1483,11 +1590,22 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .filter(|group| group.owner_device_id == package_slice.device_id)
                 .map(|group| group.dispatch_indices())
                 .collect::<Vec<_>>();
-            let demand_context = if self.resource_residency_policy.is_demand_loaded()
-                && !package_slice
-                    .physical_residency_schedule()
-                    .checkpoints
-                    .is_empty()
+            let replaced_parameter_dispatches = distributed_dispatch_groups
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let mounted_bound = mounted
+                .mounted_placed_bound_dispatch_plan_with_replaced_parameter_dispatches(
+                    &reusable_manifest,
+                    &replaced_parameter_dispatches,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BoundDispatchPlan)?;
+            let tick_plan =
+                VulkanMountedPlacedStreamTickPlan::from_mounted_bound_plan(&mounted_bound);
+            let demand_context = if package_slice
+                .physical_residency_schedule()
+                .requires_demand_execution(self.resource_residency_policy)
             {
                 let store = self
                     .compiled_resource_device_stores
@@ -1550,20 +1668,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 demand_residency_context: demand_context,
             });
         }
-        let mut distributed_dispatch_runners = VulkanDistributedDispatchRunners::create(
-            &self.distributed_execution_plan,
-            &self.distributed_parameter_buffers,
-            &distributed_activation_buffers,
-            &self.distributed_loaded_manifest,
-            |device_id| device_for(device_id),
-        )
-        .map_err(|error| {
-            VulkanResidentInProcessPlacedRuntimeError::Package(
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to mount distributed Vulkan dispatches: {error}"
-                )),
-            )
-        })?;
         let inherited = source
             .map(|source| inherit_matching_placed_stream_state(&devices, &source.device_slices))
             .transpose()
@@ -1633,7 +1737,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 &self.output_transducer_spec,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
-        let local_dispatch_count = devices.iter().try_fold(0usize, |total, slice| {
+        let mounted_local_dispatch_count = devices.iter().try_fold(0usize, |total, slice| {
             total
                 .checked_add(
                     slice
@@ -1647,29 +1751,13 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     ))
                 })
         })?;
-        let sampler_dispatch_count = VulkanResidentSamplerRunner::feedback_dispatch_count_for_spec(
-            &self.sampler_kernels,
-            &self.sampler_spec,
-        );
-        let feedback_dispatch_capacity = local_dispatch_count
-            .checked_add(distributed_dispatch_runners.shard_count)
-            .and_then(|count| count.checked_add(1))
-            .and_then(|count| count.checked_add(2))
-            .and_then(|count| count.checked_add(sampler_dispatch_count))
-            .ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                    "resident feedback dispatch capacity overflowed".to_string(),
-                ))
-            })?;
-        let vocabulary_size = self.sampler_spec.logits_byte_capacity / size_of::<f32>();
-        let mut feedback_control = VulkanResidentFeedbackControlPlane::new(
-            &self.device_ids,
-            &self.output_device_id,
-            vocabulary_size,
-            feedback_dispatch_capacity,
-            &device_for,
-        )
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        if mounted_local_dispatch_count != local_dispatch_count {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "resident feedback planned {local_dispatch_count} local dispatches but mounted {mounted_local_dispatch_count}"
+                )),
+            ));
+        }
         let sampler =
             VulkanResidentSamplerRunner::from_output_transducer_with_spec_and_feedback_control(
                 output_device,

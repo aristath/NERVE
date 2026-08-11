@@ -775,7 +775,12 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
             demand_dispatches_are_pipeline_guarded: !has_demand_checkpoints
                 || device_slices.iter().all(|slice| {
                     slice.resident_execution_plan.distributed_dispatch_count == 0
-            }),
+                        && slice
+                            .resident_execution_plan
+                            .dispatch_segments
+                            .iter()
+                            .all(|segment| segment.demand_residency.is_some())
+                }),
             demand_checkpoint_resume_is_unambiguous,
             every_edge_is_resident_replayable,
             feedback_stream_control_is_resident_replayable,

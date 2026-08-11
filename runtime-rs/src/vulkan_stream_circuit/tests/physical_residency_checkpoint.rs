@@ -113,6 +113,27 @@ fn physical_residency_schedule_derives_generic_selected_execution_boundaries() {
 }
 
 #[test]
+fn physical_residency_schedule_materializes_gates_only_for_demand_policies() {
+    let (contract, dispatches) = physical_checkpoint_fixture();
+    let schedule = VulkanPhysicalResidencySchedule::from_dispatches(
+        &contract,
+        "target".to_string(),
+        &dispatches,
+    )
+    .unwrap();
+
+    assert_eq!(schedule.demand_gate_count(ResourceResidencyPolicy::Eager), 0);
+    assert!(!schedule.requires_demand_execution(ResourceResidencyPolicy::Eager));
+    for policy in [
+        ResourceResidencyPolicy::DemandRetained,
+        ResourceResidencyPolicy::DemandPaged,
+    ] {
+        assert_eq!(schedule.demand_gate_count(policy), 1);
+        assert!(schedule.requires_demand_execution(policy));
+    }
+}
+
+#[test]
 fn physical_residency_checkpoint_resolves_topk_indices_to_atomic_groups() {
     let (contract, dispatches) = physical_checkpoint_fixture();
     let schedule =
