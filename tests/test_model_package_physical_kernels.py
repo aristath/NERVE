@@ -450,6 +450,9 @@ def test_input_column_physical_shaders_render_and_compile(tmp_path: Path) -> Non
         assert "PartitionControl" in source
         assert "binding = 2, std430" in source
         assert "gl_WorkGroupID.y" in source
+        assert "batch_index * (partition_control.input_count / 2u)" in source
+        assert "batch_index * TOTAL_INPUT_WORDS" not in source
+        assert "batch_index * (TOTAL_INPUT_SIZE / 2u)" not in source
         assert "batch_index * OUTPUT_SIZE" in source
         assert "{{" not in source
 

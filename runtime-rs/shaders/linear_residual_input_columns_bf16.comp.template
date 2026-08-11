@@ -16,10 +16,8 @@ layout(push_constant) uniform PartitionControl {
 } partition_control;
 
 const uint BLOCK_COLUMNS = {{BLOCK_COLUMNS}}u;
-const uint TOTAL_INPUT_SIZE = {{INPUT_SIZE}}u;
 const uint OUTPUT_SIZE = {{OUTPUT_SIZE}}u;
 const uint BLOCK_WORDS = BLOCK_COLUMNS / 2u;
-const uint TOTAL_INPUT_WORDS = TOTAL_INPUT_SIZE / 2u;
 
 shared float subgroup_lo[64];
 shared float subgroup_hi[64];
@@ -41,7 +39,9 @@ void main() {
         const uint block = input_word / BLOCK_WORDS;
         const uint word_in_block = input_word % BLOCK_WORDS;
         const uint input_pair =
-            input_frame.words[batch_index * TOTAL_INPUT_WORDS + input_word];
+            input_frame.words[
+                batch_index * (partition_control.input_count / 2u) + input_word
+            ];
         const uint lo_weight_pair = weight.words[
             block * OUTPUT_SIZE * BLOCK_WORDS + lo_row * BLOCK_WORDS + word_in_block
         ];
