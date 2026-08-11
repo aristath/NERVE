@@ -392,6 +392,7 @@ fn mounted_three_device_fanout_uses_one_physical_source_and_publishes_every_edge
     let slices = vec![Arc::new(gpu0), Arc::new(gpu1), Arc::new(gpu2)];
     let empty_plan = VulkanDistributedActivationBufferPlan {
         allocations: Vec::new(),
+        reduction_allocations: Vec::new(),
         allocation_count: 0,
         import_count: 0,
         reference_count: 0,

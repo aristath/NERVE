@@ -497,6 +497,35 @@ mod tests {
                 partial_byte_capacity: 16,
             })
         );
+        let buffer_plan =
+            VulkanDistributedActivationBufferPlan::from_execution_plan(&plan).unwrap();
+        assert_eq!(buffer_plan.allocation_count, 3);
+        assert_eq!(buffer_plan.import_count, 7);
+        assert_eq!(buffer_plan.reference_count, 6);
+        assert_eq!(buffer_plan.total_shared_byte_capacity, 80);
+        assert_eq!(
+            buffer_plan
+                .allocation("owner", "component", 1)
+                .unwrap()
+                .device_ids,
+            ["owner"]
+        );
+        assert_eq!(
+            buffer_plan.reduction_allocation("owner", 3).unwrap(),
+            &VulkanDistributedReductionBufferAllocation {
+                owner_device_id: "owner".to_string(),
+                dispatch_index: 3,
+                component_id: "component".to_string(),
+                node_id: "down-partial".to_string(),
+                plane_byte_capacity: 16,
+                byte_capacity: 48,
+                device_ids: vec![
+                    "owner".to_string(),
+                    "helper-a".to_string(),
+                    "helper-b".to_string(),
+                ],
+            }
+        );
         assert_eq!(
             planned
                 .shards
