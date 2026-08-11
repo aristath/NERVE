@@ -11,6 +11,24 @@ fn stable_resource_address_contract_validates_alignment_and_layout() {
             .memory_domain,
         VulkanStableResourceMemoryDomain::HostVisible
     );
+    assert!(
+        VulkanStableResourceArenaConfig::new(8192, 8)
+            .unwrap()
+            .with_preferred_slab_byte_capacity(4096)
+            .is_ok()
+    );
+    assert!(
+        VulkanStableResourceArenaConfig::new(8192, 8)
+            .unwrap()
+            .with_preferred_slab_byte_capacity(0)
+            .is_err()
+    );
+    assert!(
+        VulkanStableResourceArenaConfig::new(8192, 8)
+            .unwrap()
+            .with_preferred_slab_byte_capacity(8200)
+            .is_err()
+    );
     assert_eq!(
         std::mem::size_of::<VulkanStableResourceAddressRecord>(),
         VULKAN_STABLE_RESOURCE_ADDRESS_RECORD_BYTE_COUNT
@@ -34,6 +52,28 @@ fn stable_resource_address_contract_validates_alignment_and_layout() {
             0x44, 0x43, 0x42, 0x41,
         ]
     );
+}
+
+#[test]
+fn stable_resource_slab_free_ranges_split_and_coalesce_without_overlap() {
+    let mut free_ranges = BTreeMap::from([(0, 4096)]);
+
+    reserve_stable_resource_chunk_range(&mut free_ranges, 1024, 1024).unwrap();
+    assert_eq!(free_ranges, BTreeMap::from([(0, 1024), (2048, 2048)]));
+    reserve_stable_resource_chunk_range(&mut free_ranges, 0, 512).unwrap();
+    assert_eq!(
+        free_ranges,
+        BTreeMap::from([(512, 512), (2048, 2048)])
+    );
+
+    release_stable_resource_chunk_range(&mut free_ranges, 1024, 1024, 4096).unwrap();
+    assert_eq!(free_ranges, BTreeMap::from([(512, 3584)]));
+    assert!(
+        release_stable_resource_chunk_range(&mut free_ranges, 768, 256, 4096).is_err(),
+        "double-free overlap must fail closed",
+    );
+    release_stable_resource_chunk_range(&mut free_ranges, 0, 512, 4096).unwrap();
+    assert_eq!(free_ranges, BTreeMap::from([(0, 4096)]));
 }
 
 #[test]

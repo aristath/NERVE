@@ -253,6 +253,7 @@ impl VulkanCompiledResourceDeviceStore {
             0,
             0,
             true,
+            VulkanCompiledResourceEvictionGranularity::AllocationBlock,
         )?;
         Ok(())
     }
@@ -445,39 +446,54 @@ impl VulkanCompiledResourceDeviceStore {
         required_device_bytes: usize,
         required_host_visible_bytes: usize,
         require_full_capacity: bool,
+        granularity: VulkanCompiledResourceEvictionGranularity,
     ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
         let mut address_state = self.address_state.lock().map_err(|_| {
             VulkanCompiledResourceDeviceStoreError::new(
                 "compiled resource address state was poisoned",
             )
         })?;
-        let mut chunk_byte_capacities = BTreeMap::new();
-        for cohort in address_state.chunk_groups.keys() {
-            let arena = match cohort.tier {
-                VulkanCompiledResourceMemoryTier::Device => &self.device_arena,
-                VulkanCompiledResourceMemoryTier::HostVisible => {
-                    self.host_visible_arena.as_ref().ok_or_else(|| {
-                        VulkanCompiledResourceDeviceStoreError::new(
-                            "host-visible allocation cohort has no stable arena",
-                        )
-                    })?
+        let selection = {
+            let (group_cohorts, cohort_groups) = match granularity {
+                VulkanCompiledResourceEvictionGranularity::AllocationBlock => {
+                    (&address_state.group_blocks, &address_state.block_groups)
+                }
+                VulkanCompiledResourceEvictionGranularity::PhysicalSlab => {
+                    (&address_state.group_chunks, &address_state.chunk_groups)
                 }
             };
-            let byte_capacity = arena
-                .committed_byte_capacity_for_chunk(cohort.chunk_id)
+            let mut cohort_byte_capacities = BTreeMap::new();
+            for cohort in cohort_groups.keys() {
+                let arena = match cohort.tier {
+                    VulkanCompiledResourceMemoryTier::Device => &self.device_arena,
+                    VulkanCompiledResourceMemoryTier::HostVisible => {
+                        self.host_visible_arena.as_ref().ok_or_else(|| {
+                            VulkanCompiledResourceDeviceStoreError::new(
+                                "host-visible allocation cohort has no stable arena",
+                            )
+                        })?
+                    }
+                };
+                let byte_capacity = match granularity {
+                    VulkanCompiledResourceEvictionGranularity::AllocationBlock => arena
+                        .allocation_cohort_byte_capacity(cohort.chunk_id),
+                    VulkanCompiledResourceEvictionGranularity::PhysicalSlab => arena
+                        .committed_byte_capacity_for_chunk(cohort.chunk_id),
+                }
                 .map_err(compiled_device_store_vulkan_error)?;
-            chunk_byte_capacities.insert(*cohort, byte_capacity);
-        }
-        let selection = compiled_resource_lru_eviction_selection(
-            candidates,
-            &address_state.group_chunks,
-            &address_state.chunk_groups,
-            &chunk_byte_capacities,
-            protected_group_ids,
-            required_payload_bytes,
-            required_device_bytes,
-            required_host_visible_bytes,
-        )?;
+                cohort_byte_capacities.insert(*cohort, byte_capacity);
+            }
+            compiled_resource_lru_eviction_selection(
+                candidates,
+                group_cohorts,
+                cohort_groups,
+                &cohort_byte_capacities,
+                protected_group_ids,
+                required_payload_bytes,
+                required_device_bytes,
+                required_host_visible_bytes,
+            )?
+        };
         if require_full_capacity
             && (selection.payload_bytes < required_payload_bytes
                 || selection.device_bytes < required_device_bytes
@@ -526,22 +542,15 @@ impl VulkanCompiledResourceDeviceStore {
         for group_id in &selected_group_ids {
             address_state.promoted_representations.remove(group_id);
             address_state.publications.remove(group_id);
-            let chunks = address_state
-                .group_chunks
-                .remove(group_id)
-                .unwrap_or_default();
-            for chunk_id in chunks {
-                let remove_chunk =
-                    if let Some(groups) = address_state.chunk_groups.get_mut(&chunk_id) {
-                        groups.remove(group_id);
-                        groups.is_empty()
-                    } else {
-                        false
-                    };
-                if remove_chunk {
-                    address_state.chunk_groups.remove(&chunk_id);
-                }
-            }
+            let VulkanCompiledResourceDeviceAddressState {
+                group_chunks,
+                chunk_groups,
+                group_blocks,
+                block_groups,
+                ..
+            } = &mut *address_state;
+            detach_compiled_resource_group_cohorts(group_id, group_chunks, chunk_groups);
+            detach_compiled_resource_group_cohorts(group_id, group_blocks, block_groups);
         }
         let release = eviction.release();
         drop(eviction);
@@ -563,41 +572,39 @@ impl VulkanCompiledResourceDeviceStore {
         Ok(reusable_device_bytes)
     }
 
-    fn reclaim_inactive_device_memory(
+    fn prepare_inactive_device_memory_reclamation(
         &self,
         requested_bytes: usize,
-    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
         if requested_bytes == 0 || !self.residency_policy.evicts_inactive_resources() {
-            return Ok(0);
+            return Ok(());
         }
         let _mutation = self.residency_mutation.lock().map_err(|_| {
             VulkanCompiledResourceDeviceStoreError::new(
                 "compiled resource residency mutation lock was poisoned",
             )
         })?;
-        let mut released_device_bytes = self
-            .reclaim_promoted_representation_capacity(requested_bytes)?;
-        if released_device_bytes >= requested_bytes {
-            self.instrumentation
-                .record_released_device_bytes(released_device_bytes);
-            return Ok(released_device_bytes);
-        }
-        released_device_bytes = released_device_bytes
-            .checked_add(
-                self
+        self.prepare_promoted_representation_reclamation(requested_bytes)?;
+        let representation_reclaimable_bytes = self
+            .representation_arena
+            .as_ref()
+            .map(VulkanStableResourceArena::inactive_backing_byte_capacity)
+            .transpose()
+            .map_err(compiled_device_store_vulkan_error)?
+            .unwrap_or(0);
+        let device_reclaimable_bytes = self
             .device_arena
-                    .trim_inactive_backing(requested_bytes - released_device_bytes)
-                    .map_err(compiled_device_store_vulkan_error)?,
-            )
+            .inactive_backing_byte_capacity()
+            .map_err(compiled_device_store_vulkan_error)?;
+        let reclaimable_bytes = representation_reclaimable_bytes
+            .checked_add(device_reclaimable_bytes)
             .ok_or_else(|| {
                 VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled resource released device capacity overflowed",
+                    "compiled resource reclaimable capacity overflowed",
                 )
             })?;
-        if released_device_bytes >= requested_bytes {
-            self.instrumentation
-                .record_released_device_bytes(released_device_bytes);
-            return Ok(released_device_bytes);
+        if reclaimable_bytes >= requested_bytes {
+            return Ok(());
         }
         let protected_group_ids = BTreeSet::new();
         let candidates = self
@@ -608,14 +615,40 @@ impl VulkanCompiledResourceDeviceStore {
             &candidates,
             &protected_group_ids,
             0,
-            requested_bytes.saturating_sub(released_device_bytes),
+            requested_bytes.saturating_sub(reclaimable_bytes),
             0,
             false,
+            VulkanCompiledResourceEvictionGranularity::PhysicalSlab,
         )?;
+        Ok(())
+    }
+
+    fn reclaim_inactive_device_memory(
+        &self,
+        quiescence: &crate::vulkan_compute::VulkanDeviceLocalMemoryQuiescence<'_>,
+        requested_bytes: usize,
+    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        if requested_bytes == 0 || !self.residency_policy.evicts_inactive_resources() {
+            return Ok(0);
+        }
+        let _mutation = self.residency_mutation.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource residency mutation lock was poisoned",
+            )
+        })?;
+        let mut released_device_bytes = 0usize;
+        if let Some(arena) = &self.representation_arena {
+            released_device_bytes = arena
+                .trim_inactive_backing_after_quiescence(quiescence, requested_bytes)
+                .map_err(compiled_device_store_vulkan_error)?;
+        }
         released_device_bytes = released_device_bytes
             .checked_add(
                 self.device_arena
-                    .trim_inactive_backing(requested_bytes.saturating_sub(released_device_bytes))
+                    .trim_inactive_backing_after_quiescence(
+                        quiescence,
+                        requested_bytes.saturating_sub(released_device_bytes),
+                    )
                     .map_err(compiled_device_store_vulkan_error)?,
             )
             .ok_or_else(|| {
@@ -628,96 +661,6 @@ impl VulkanCompiledResourceDeviceStore {
                 .record_released_device_bytes(released_device_bytes);
         }
         Ok(released_device_bytes)
-    }
-
-    fn reclaim_inactive_shared_host_memory(
-        &self,
-        requested_bytes: usize,
-    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
-        if requested_bytes == 0
-            || !self.residency_policy.evicts_inactive_resources()
-            || self.shared_host_cache.is_none()
-        {
-            return Ok(0);
-        }
-        let _mutation = self.residency_mutation.lock().map_err(|_| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "compiled resource residency mutation lock was poisoned",
-            )
-        })?;
-        self.reclaim_inactive_shared_host_memory_locked(requested_bytes)
-    }
-
-    fn reclaim_inactive_shared_host_memory_locked(
-        &self,
-        requested_bytes: usize,
-    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
-        let host_visible_arena = self.host_visible_arena.as_ref().ok_or_else(|| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "shared compiled-resource host cache store has no host-visible arena",
-            )
-        })?;
-        let mut released_bytes = host_visible_arena
-            .trim_inactive_backing(requested_bytes)
-            .map_err(compiled_device_store_vulkan_error)?;
-        if released_bytes >= requested_bytes {
-            return Ok(released_bytes);
-        }
-        let protected_group_ids = BTreeSet::new();
-        let candidates = self
-            .manager
-            .eviction_candidates(&protected_group_ids)
-            .map_err(compiled_device_store_residency_error)?;
-        let host_group_ids = {
-            let memory_plan = self
-                .memory_plan
-                .as_ref()
-                .ok_or_else(|| {
-                    VulkanCompiledResourceDeviceStoreError::new(
-                        "shared compiled-resource host cache store has no tier plan",
-                    )
-                })?
-                .lock()
-                .map_err(|_| {
-                    VulkanCompiledResourceDeviceStoreError::new(
-                        "compiled resource memory plan was poisoned",
-                    )
-                })?;
-            candidates
-                .iter()
-                .filter_map(|candidate| {
-                    (memory_plan.tier_for_group(&candidate.group_id).ok()
-                        == Some(VulkanCompiledResourceMemoryTier::HostVisible))
-                    .then(|| candidate.group_id.clone())
-                })
-                .collect::<BTreeSet<_>>()
-        };
-        let host_candidates = candidates
-            .into_iter()
-            .filter(|candidate| host_group_ids.contains(&candidate.group_id))
-            .collect::<Vec<_>>();
-        if !host_candidates.is_empty() {
-            self.evict_inactive_capacity(
-                &host_candidates,
-                &protected_group_ids,
-                0,
-                0,
-                requested_bytes.saturating_sub(released_bytes),
-                false,
-            )?;
-            released_bytes = released_bytes
-                .checked_add(
-                    host_visible_arena
-                        .trim_inactive_backing(requested_bytes.saturating_sub(released_bytes))
-                        .map_err(compiled_device_store_vulkan_error)?,
-                )
-                .ok_or_else(|| {
-                    VulkanCompiledResourceDeviceStoreError::new(
-                        "compiled resource released host-visible capacity overflowed",
-                    )
-                })?;
-        }
-        Ok(released_bytes)
     }
 
     fn evict_for_compiled_resource_wave(
@@ -857,72 +800,19 @@ impl VulkanCompiledResourceDeviceStore {
             required_device_bytes,
             0,
             true,
+            VulkanCompiledResourceEvictionGranularity::AllocationBlock,
         )?;
-        let mut settled_requirement = residency_requirement()?;
+        let settled_requirement = residency_requirement()?;
         if settled_requirement.2 > 0 {
             return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
                 "compiled resource eviction left {} payload bytes above the residency budget",
                 settled_requirement.2,
             )));
         }
-        if settled_requirement.4 > 0 {
-            if let Some(representation_arena) = &self.representation_arena {
-                let released = representation_arena
-                    .trim_inactive_backing(settled_requirement.4)
-                    .map_err(compiled_device_store_vulkan_error)?;
-                if released > 0 {
-                    self.instrumentation.record_released_device_bytes(released);
-                    settled_requirement = residency_requirement()?;
-                }
-            }
-        }
-        if settled_requirement.4 > 0 {
-            // A differently shaped wave may not fit any retained inactive
-            // chunk. Only this explicit arena-rebalancing path releases
-            // physical backing; ordinary expert replacement reuses it.
-            let released = self
-                .device_arena
-                .trim_inactive_backing(settled_requirement.4)
-                .map_err(compiled_device_store_vulkan_error)?;
-            if released > 0 {
-                self.instrumentation.record_released_device_bytes(released);
-            }
-            settled_requirement = residency_requirement()?;
-            if released > 0 && settled_requirement.2 == 0 && settled_requirement.4 > 0 {
-                let arena = self
-                    .device_arena
-                    .stats()
-                    .map_err(compiled_device_store_vulkan_error)?;
-                let arena_available_device_bytes = self
-                    .device_arena
-                    .config()
-                    .committed_byte_capacity
-                    .saturating_sub(arena.committed_byte_capacity);
-                wait_for_rebalanced_compiled_resource_device_capacity(
-                    settled_requirement.3,
-                    arena_available_device_bytes,
-                    COMPILED_RESOURCE_DEVICE_CAPACITY_SETTLEMENT_TIMEOUT,
-                    || {
-                        usize::try_from(
-                            device
-                                .device_local_memory_accounting()
-                                .map_err(compiled_device_store_vulkan_error)?
-                                .admissible_remaining_bytes,
-                        )
-                        .map_err(|_| {
-                            VulkanCompiledResourceDeviceStoreError::new(
-                                "available Vulkan device-local capacity exceeds the host address space",
-                            )
-                        })
-                    },
-                )?;
-                settled_requirement = residency_requirement()?;
-            }
-        }
         let new_device_bytes = settled_requirement.3;
         if settled_requirement.2 > 0 || settled_requirement.4 > 0 {
             return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-                "compiled resource eviction and arena rebalance left {} payload and {} device bytes unavailable",
+                "compiled resource logical eviction left {} payload and {} retained-slab bytes unavailable; physical slab destruction is forbidden during an active load",
                 settled_requirement.2, settled_requirement.4,
             )));
         }
@@ -1066,51 +956,19 @@ impl VulkanCompiledResourceDeviceStore {
                             (loaded[*index].0.resource_slots.as_slice(), byte_counts.as_slice())
                         })
                         .collect::<Vec<_>>();
-                    let mut required_bytes = host_visible_arena
+                    let required_bytes = host_visible_arena
                         .additional_committed_byte_capacity_for_groups(
                             device,
                             &allocation_requests,
                             self.upload_alignment,
                         )
                         .map_err(compiled_device_store_vulkan_error)?;
-                    if required_bytes > 0 {
-                        let released_bytes = host_visible_arena
-                            .trim_inactive_backing(required_bytes)
-                            .map_err(compiled_device_store_vulkan_error)?;
-                        mutation.release_store_capacity(&self.device_id, released_bytes)?;
-                        required_bytes = host_visible_arena
-                            .additional_committed_byte_capacity_for_groups(
-                                device,
-                                &allocation_requests,
-                                self.upload_alignment,
-                            )
-                            .map_err(compiled_device_store_vulkan_error)?;
-                    }
-                    let mut committed_before = host_visible_arena
+                    let committed_before = host_visible_arena
                         .stats()
                         .map_err(compiled_device_store_vulkan_error)?
                         .committed_byte_capacity;
-                    let reservation = match mutation
-                        .reserve_capacity(&self.device_id, required_bytes)
-                    {
-                        Ok(reservation) => reservation,
-                        Err(initial_error) => {
-                            let released_bytes = self
-                                .reclaim_inactive_shared_host_memory_locked(required_bytes)?;
-                            mutation.release_store_capacity(
-                                &self.device_id,
-                                released_bytes,
-                            )?;
-                            if released_bytes == 0 {
-                                return Err(initial_error);
-                            }
-                            committed_before = host_visible_arena
-                                .stats()
-                                .map_err(compiled_device_store_vulkan_error)?
-                                .committed_byte_capacity;
-                            mutation.reserve_capacity(&self.device_id, required_bytes)?
-                        }
-                    };
+                    let reservation =
+                        mutation.reserve_capacity(&self.device_id, required_bytes)?;
                     Some((
                         reservation,
                         committed_before,
@@ -1147,6 +1005,8 @@ impl VulkanCompiledResourceDeviceStore {
             publications: resident_publications,
             group_chunks,
             chunk_groups,
+            group_blocks,
+            block_groups,
             ..
         } = &mut *state;
         let device_capacity_permit = match device_capacity_permit {
@@ -1279,18 +1139,32 @@ impl VulkanCompiledResourceDeviceStore {
                             })
                     })
                     .collect::<BTreeSet<_>>();
+                let blocks = group
+                    .resources()
+                    .iter()
+                    .filter_map(|resource| {
+                        resource
+                            .payload()
+                            .stable_allocation_cohort_id()
+                            .map(|block_id| VulkanCompiledResourceAllocationCohort {
+                                tier,
+                                chunk_id: block_id,
+                            })
+                    })
+                    .collect::<BTreeSet<_>>();
                 (
                     plan.descriptor.id.clone(),
                     permit,
                     group,
                     publications,
                     chunks,
+                    blocks,
                 )
             })
             .collect::<Vec<_>>();
         while !staged.is_empty() {
-            let (group_id, permit, group, publications, chunks) = staged.remove(0);
-            if chunks.is_empty() {
+            let (group_id, permit, group, publications, chunks, blocks) = staged.remove(0);
+            if chunks.is_empty() || blocks.is_empty() {
                 return Err(VulkanCompiledResourceDeviceStoreError::new(
                     "stable compiled resource publication has no allocation cohort",
                 ));
@@ -1305,12 +1179,19 @@ impl VulkanCompiledResourceDeviceStore {
                             .or_default()
                             .insert(group_id.clone());
                     }
+                    group_blocks.insert(group_id.clone(), blocks.clone());
+                    for block_id in blocks {
+                        block_groups
+                            .entry(block_id)
+                            .or_default()
+                            .insert(group_id.clone());
+                    }
                     admission.newly_assigned_group_ids.remove(&group_id);
                     drop(lease);
                 }
                 Err(error) => {
                     let mut unpublished = publications;
-                    for (_, _, _, remaining_publications, _) in &staged {
+                    for (_, _, _, remaining_publications, _, _) in &staged {
                         unpublished.extend(remaining_publications.iter().cloned());
                     }
                     address_table
@@ -1330,18 +1211,5 @@ impl VulkanCompiledResourceDeviceStore {
             arena.committed_byte_capacity,
         );
         Ok(())
-    }
-}
-
-impl VulkanCompiledResourceSharedHostCacheReclaimer for VulkanCompiledResourceDeviceStore {
-    fn shared_host_cache_store_id(&self) -> &str {
-        &self.device_id
-    }
-
-    fn reclaim_shared_host_capacity(
-        &self,
-        requested_bytes: usize,
-    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
-        self.reclaim_inactive_shared_host_memory(requested_bytes)
     }
 }

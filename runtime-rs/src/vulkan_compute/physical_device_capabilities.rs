@@ -18,7 +18,7 @@ impl VulkanComputeDevice {
                 "compute queue quiescence",
                 |error| self.vulkan_operation_error("failed to quiesce compute queue", error),
             )
-        })?;
+        })??;
         if self.transfer_queue_is_distinct {
             self.transfer_queue_submission.with_exclusive(|queue| {
                 quiesce_vulkan_queue_with_progress_watchdog(
@@ -28,17 +28,44 @@ impl VulkanComputeDevice {
                     "transfer queue quiescence",
                     |error| self.vulkan_operation_error("failed to quiesce transfer queue", error),
                 )
-            })?;
+            })??;
         }
         Ok(())
+    }
+
+    /// Excludes every submission made through any logical device opened for
+    /// this physical target, drains this device's queues, and keeps submission
+    /// excluded until `operation` returns. The proof passed to `operation` is
+    /// the only authority that may destroy retained Vulkan memory backing.
+    fn with_quiescent_memory_reclamation<T>(
+        &self,
+        operation: impl FnOnce(
+            &VulkanDeviceLocalMemoryQuiescence<'_>,
+        ) -> Result<T, VulkanError>,
+    ) -> Result<T, VulkanError> {
+        let memory_lifecycle = self.compute_queue_submission.memory_lifecycle.clone();
+        let guard = memory_lifecycle
+            .write()
+            .map_err(|_| VulkanError("Vulkan memory lifecycle was poisoned".to_string()))?;
+        let queue_quiescers = VulkanDeviceLocalMemoryBudgetTracker::live_queue_quiescers(
+            &self.device_local_memory_budget_tracker,
+        )?;
+        if queue_quiescers.is_empty() {
+            return Err(VulkanError(
+                "physical memory reclamation has no registered Vulkan queues".to_string(),
+            ));
+        }
+        for quiescer in queue_quiescers {
+            quiescer.quiesce_during_memory_reclamation()?;
+        }
+        operation(&VulkanDeviceLocalMemoryQuiescence {
+            _memory_lifecycle: guard,
+        })
     }
 }
 
 impl Drop for VulkanComputeDevice {
     fn drop(&mut self) {
-        if !self.device_health.is_quarantined() {
-            let _ = self.quiesce();
-        }
         if self.device_health.is_quarantined() {
             if let Some(sequence) = self.immediate_kernel_sequence.get_mut().take() {
                 std::mem::forget(sequence);
@@ -52,6 +79,34 @@ impl Drop for VulkanComputeDevice {
             std::mem::forget(Arc::clone(&self.context));
             return;
         }
+        let memory_lifecycle = self.compute_queue_submission.memory_lifecycle.clone();
+        let Ok(_memory_lifecycle) = memory_lifecycle.write() else {
+            if let Some(sequence) = self.immediate_kernel_sequence.get_mut().take() {
+                std::mem::forget(sequence);
+            }
+            std::mem::forget(Arc::clone(&self.context));
+            return;
+        };
+        let queue_quiescers = VulkanDeviceLocalMemoryBudgetTracker::live_queue_quiescers(
+            &self.device_local_memory_budget_tracker,
+        );
+        let quiesced = queue_quiescers.as_ref().is_ok_and(|quiescers| {
+            quiescers
+                .iter()
+                .all(|quiescer| quiescer.quiesce_during_memory_reclamation().is_ok())
+        });
+        if !quiesced {
+            if let Some(sequence) = self.immediate_kernel_sequence.get_mut().take() {
+                std::mem::forget(sequence);
+            }
+            if let Some(mut activity_lease) = self.activity_lease.get_mut().take() {
+                let _ = activity_lease.stop();
+            }
+            std::mem::forget(Arc::clone(&self.context));
+            return;
+        }
+        drop(queue_quiescers);
+        self.physical_queue_quiescer.take();
         unsafe {
             self.immediate_kernel_sequence.get_mut().take();
             for (_, pipeline) in self.generic_storage_pipelines.get_mut().drain() {
@@ -1237,7 +1292,7 @@ unsafe fn copy_buffer_immediately(
                 "immediate staging copy",
                 |error| VulkanError(format!("failed waiting for staging copy: {error:?}")),
             )
-        })
+        })?
     })();
     if !device_health.is_quarantined() {
         unsafe { device.destroy_command_pool(command_pool, None) };

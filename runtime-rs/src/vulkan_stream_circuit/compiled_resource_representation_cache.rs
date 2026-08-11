@@ -204,7 +204,7 @@ impl VulkanCompiledResourceDeviceStore {
                     self.upload_alignment,
                 )
                 .map_err(compiled_device_store_vulkan_error)?;
-            let mut globally_available_device_bytes = usize::try_from(
+            let globally_available_device_bytes = usize::try_from(
                 device
                     .device_local_memory_accounting()
                     .map_err(compiled_device_store_vulkan_error)?
@@ -214,37 +214,12 @@ impl VulkanCompiledResourceDeviceStore {
             let arena_stats = arena
                 .stats()
                 .map_err(compiled_device_store_vulkan_error)?;
-            let mut arena_available_device_bytes = arena
+            let arena_available_device_bytes = arena
                 .config()
                 .committed_byte_capacity
                 .saturating_sub(arena_stats.committed_byte_capacity);
-            let mut store_available_device_bytes =
+            let store_available_device_bytes =
                 self.available_representation_store_device_bytes()?;
-            if required_device_bytes > store_available_device_bytes {
-                arena
-                    .trim_inactive_backing(
-                        required_device_bytes - store_available_device_bytes,
-                    )
-                    .map_err(compiled_device_store_vulkan_error)?;
-                store_available_device_bytes =
-                    self.available_representation_store_device_bytes()?;
-                arena_available_device_bytes = arena
-                    .config()
-                    .committed_byte_capacity
-                    .saturating_sub(
-                        arena
-                            .stats()
-                            .map_err(compiled_device_store_vulkan_error)?
-                            .committed_byte_capacity,
-                    );
-                globally_available_device_bytes = usize::try_from(
-                    device
-                        .device_local_memory_accounting()
-                        .map_err(compiled_device_store_vulkan_error)?
-                        .admissible_remaining_bytes,
-                )
-                .unwrap_or(usize::MAX);
-            }
             if required_device_bytes
                 > globally_available_device_bytes
                     .min(arena_available_device_bytes)
@@ -498,18 +473,19 @@ impl VulkanCompiledResourceDeviceStore {
         Ok(restored_resident_bytes)
     }
 
-    fn reclaim_promoted_representation_capacity(
+    fn prepare_promoted_representation_reclamation(
         &self,
         requested_bytes: usize,
-    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
         let Some(arena) = &self.representation_arena else {
-            return Ok(0);
+            return Ok(());
         };
-        let mut released_bytes = arena
-            .trim_inactive_backing(requested_bytes)
-            .map_err(compiled_device_store_vulkan_error)?;
-        if released_bytes >= requested_bytes {
-            return Ok(released_bytes);
+        if arena
+            .inactive_backing_byte_capacity()
+            .map_err(compiled_device_store_vulkan_error)?
+            >= requested_bytes
+        {
+            return Ok(());
         }
         let mut state = self.address_state.lock().map_err(|_| {
             VulkanCompiledResourceDeviceStoreError::new(
@@ -530,15 +506,14 @@ impl VulkanCompiledResourceDeviceStore {
         candidates.sort_by(|left, right| {
             (left.0, left.1.as_str()).cmp(&(right.0, right.1.as_str()))
         });
-        let mut selected = Vec::new();
-        let mut selected_payload_bytes = 0usize;
-        for (_, group_id, payload_bytes) in candidates {
-            if released_bytes.saturating_add(selected_payload_bytes) >= requested_bytes {
-                break;
-            }
-            selected.push(group_id);
-            selected_payload_bytes = selected_payload_bytes.saturating_add(payload_bytes);
-        }
+        // Representation allocations share retained slabs. Restoring only one
+        // logical group cannot make a slab physically reclaimable when a
+        // sibling remains, so a pressure boundary restores the full derived
+        // cache as one physical cohort.
+        let selected = candidates
+            .into_iter()
+            .map(|(_, group_id, _)| group_id)
+            .collect::<Vec<_>>();
         self.restore_promoted_representations_locked(&mut state, &selected)?;
         drop(state);
         if !selected.is_empty() {
@@ -551,17 +526,6 @@ impl VulkanCompiledResourceDeviceStore {
                 })?
                 .reclaimed_since_boundary = true;
         }
-        released_bytes = released_bytes
-            .checked_add(
-                arena
-                    .trim_inactive_backing(requested_bytes.saturating_sub(released_bytes))
-                    .map_err(compiled_device_store_vulkan_error)?,
-            )
-            .ok_or_else(|| {
-                VulkanCompiledResourceDeviceStoreError::new(
-                    "compiled representation released capacity overflowed",
-                )
-            })?;
-        Ok(released_bytes)
+        Ok(())
     }
 }

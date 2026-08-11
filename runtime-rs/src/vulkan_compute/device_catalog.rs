@@ -344,12 +344,12 @@ impl VulkanComputeDeviceCatalog {
                     tracker
                 }
             };
-            let device_local_memory_budget = device_local_memory_budget_tracker
-                .lock()
-                .map_err(|_| {
+            let (device_local_memory_budget, memory_lifecycle) = {
+                let tracker = device_local_memory_budget_tracker.lock().map_err(|_| {
                     VulkanError("device-local memory budget tracker was poisoned".to_string())
-                })?
-                .budget;
+                })?;
+                (tracker.budget, tracker.memory_lifecycle())
+            };
             let device_coherent_memory_supported =
                 physical_device_supports_device_coherent_memory(
                     instance,
@@ -739,7 +739,7 @@ impl VulkanComputeDeviceCatalog {
             let subgroup_size = subgroup_support.subgroup_size;
             let pci_address =
                 physical_device_pci_address(instance, physical_device);
-            let (activity_lease, device_health) =
+            let (mut activity_lease, device_health) =
                 if permitted_device.vendor_id == AMD_PCI_VENDOR_ID {
                     let (render_major, render_minor) =
                         match physical_device_drm_render_node(instance, physical_device) {
@@ -772,7 +772,25 @@ impl VulkanComputeDeviceCatalog {
                 };
 
             let (compute_queue_submission, transfer_queue_submission) =
-                VulkanQueueSubmissionGate::paired(queue, transfer_queue);
+                VulkanQueueSubmissionGate::paired(queue, transfer_queue, memory_lifecycle);
+            let physical_queue_quiescer = Arc::new(VulkanPhysicalQueueQuiescer {
+                physical_device_id: permitted_device.physical_device_id.clone(),
+                device: device.clone(),
+                compute: compute_queue_submission.clone(),
+                transfer: transfer_queue_submission.clone(),
+                transfer_is_distinct: transfer_queue_is_distinct,
+                device_health: device_health.clone(),
+            });
+            if let Err(error) = VulkanDeviceLocalMemoryBudgetTracker::register_queue_quiescer(
+                &device_local_memory_budget_tracker,
+                &physical_queue_quiescer,
+            ) {
+                if let Some(lease) = &mut activity_lease {
+                    let _ = lease.stop();
+                }
+                device.destroy_device(None);
+                return Err(error);
+            }
             Ok(VulkanComputeDevice {
                 context: Arc::clone(&self.context),
                 physical_device,
@@ -781,6 +799,7 @@ impl VulkanComputeDeviceCatalog {
                 transfer_queue_is_distinct,
                 compute_queue_submission,
                 transfer_queue_submission,
+                physical_queue_quiescer: Some(physical_queue_quiescer),
                 activity_lease: RefCell::new(activity_lease),
                 device_health,
                 buffer_device_address_supported,

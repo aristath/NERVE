@@ -26,8 +26,10 @@ struct VulkanCompiledResourcePayloadExchange {
 struct VulkanCompiledResourceCohortExchange {
     device_group_id: String,
     host_group_id: String,
-    device_cohorts: BTreeSet<VulkanCompiledResourceAllocationCohort>,
-    host_cohorts: BTreeSet<VulkanCompiledResourceAllocationCohort>,
+    device_chunks: BTreeSet<VulkanCompiledResourceAllocationCohort>,
+    host_chunks: BTreeSet<VulkanCompiledResourceAllocationCohort>,
+    device_blocks: BTreeSet<VulkanCompiledResourceAllocationCohort>,
+    host_blocks: BTreeSet<VulkanCompiledResourceAllocationCohort>,
 }
 
 struct VulkanPreparedCompiledResourceRetieringExchange {
@@ -722,44 +724,62 @@ fn prepare_compiled_resource_allocation_cohort_exchange(
             "compiled resource cohort exchange names the same group twice",
         ));
     }
-    let device_cohorts = state.group_chunks.get(device_group_id).cloned().ok_or_else(|| {
-        VulkanCompiledResourceDeviceStoreError::new(
-            "device-tier compiled resource has no allocation cohort",
-        )
-    })?;
-    let host_cohorts = state.group_chunks.get(host_group_id).cloned().ok_or_else(|| {
-        VulkanCompiledResourceDeviceStoreError::new(
-            "host-tier compiled resource has no allocation cohort",
-        )
-    })?;
-    for cohort in &device_cohorts {
-        if !state
-            .chunk_groups
-            .get(cohort)
-            .is_some_and(|groups| groups.contains(device_group_id))
-        {
-            return Err(VulkanCompiledResourceDeviceStoreError::new(
-                "device-tier compiled resource cohort membership is inconsistent",
-            ));
-        }
-    }
-    for cohort in &host_cohorts {
-        if !state
-            .chunk_groups
-            .get(cohort)
-            .is_some_and(|groups| groups.contains(host_group_id))
-        {
-            return Err(VulkanCompiledResourceDeviceStoreError::new(
-                "host-tier compiled resource cohort membership is inconsistent",
-            ));
-        }
-    }
+    let device_chunks = validated_compiled_resource_group_cohorts(
+        device_group_id,
+        &state.group_chunks,
+        &state.chunk_groups,
+        "device-tier slab",
+    )?;
+    let host_chunks = validated_compiled_resource_group_cohorts(
+        host_group_id,
+        &state.group_chunks,
+        &state.chunk_groups,
+        "host-tier slab",
+    )?;
+    let device_blocks = validated_compiled_resource_group_cohorts(
+        device_group_id,
+        &state.group_blocks,
+        &state.block_groups,
+        "device-tier allocation block",
+    )?;
+    let host_blocks = validated_compiled_resource_group_cohorts(
+        host_group_id,
+        &state.group_blocks,
+        &state.block_groups,
+        "host-tier allocation block",
+    )?;
     Ok(VulkanCompiledResourceCohortExchange {
         device_group_id: device_group_id.to_string(),
         host_group_id: host_group_id.to_string(),
-        device_cohorts,
-        host_cohorts,
+        device_chunks,
+        host_chunks,
+        device_blocks,
+        host_blocks,
     })
+}
+
+fn validated_compiled_resource_group_cohorts(
+    group_id: &str,
+    group_cohorts: &BTreeMap<String, BTreeSet<VulkanCompiledResourceAllocationCohort>>,
+    cohort_groups: &BTreeMap<VulkanCompiledResourceAllocationCohort, BTreeSet<String>>,
+    label: &str,
+) -> Result<BTreeSet<VulkanCompiledResourceAllocationCohort>, VulkanCompiledResourceDeviceStoreError>
+{
+    let cohorts = group_cohorts.get(group_id).cloned().ok_or_else(|| {
+        VulkanCompiledResourceDeviceStoreError::new(format!(
+            "compiled resource {group_id:?} has no {label} cohort",
+        ))
+    })?;
+    if cohorts.iter().any(|cohort| {
+        !cohort_groups
+            .get(cohort)
+            .is_some_and(|groups| groups.contains(group_id))
+    }) {
+        return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+            "compiled resource {group_id:?} has inconsistent {label} membership",
+        )));
+    }
+    Ok(cohorts)
 }
 
 fn commit_compiled_resource_allocation_cohort_exchange(
@@ -769,27 +789,51 @@ fn commit_compiled_resource_allocation_cohort_exchange(
     let VulkanCompiledResourceCohortExchange {
         device_group_id,
         host_group_id,
-        device_cohorts,
-        host_cohorts,
+        device_chunks,
+        host_chunks,
+        device_blocks,
+        host_blocks,
     } = exchange;
+    swap_compiled_resource_group_cohorts(
+        &device_group_id,
+        &host_group_id,
+        device_chunks,
+        host_chunks,
+        &mut state.group_chunks,
+        &mut state.chunk_groups,
+    );
+    swap_compiled_resource_group_cohorts(
+        &device_group_id,
+        &host_group_id,
+        device_blocks,
+        host_blocks,
+        &mut state.group_blocks,
+        &mut state.block_groups,
+    );
+}
+
+fn swap_compiled_resource_group_cohorts(
+    device_group_id: &str,
+    host_group_id: &str,
+    device_cohorts: BTreeSet<VulkanCompiledResourceAllocationCohort>,
+    host_cohorts: BTreeSet<VulkanCompiledResourceAllocationCohort>,
+    group_cohorts: &mut BTreeMap<String, BTreeSet<VulkanCompiledResourceAllocationCohort>>,
+    cohort_groups: &mut BTreeMap<VulkanCompiledResourceAllocationCohort, BTreeSet<String>>,
+) {
     for cohort in &device_cohorts {
-        if let Some(groups) = state.chunk_groups.get_mut(cohort) {
-            groups.remove(&device_group_id);
-            groups.insert(host_group_id.clone());
+        if let Some(groups) = cohort_groups.get_mut(cohort) {
+            groups.remove(device_group_id);
+            groups.insert(host_group_id.to_string());
         }
     }
     for cohort in &host_cohorts {
-        if let Some(groups) = state.chunk_groups.get_mut(cohort) {
-            groups.remove(&host_group_id);
-            groups.insert(device_group_id.clone());
+        if let Some(groups) = cohort_groups.get_mut(cohort) {
+            groups.remove(host_group_id);
+            groups.insert(device_group_id.to_string());
         }
     }
-    state
-        .group_chunks
-        .insert(device_group_id, host_cohorts);
-    state
-        .group_chunks
-        .insert(host_group_id, device_cohorts);
+    group_cohorts.insert(device_group_id.to_string(), host_cohorts);
+    group_cohorts.insert(host_group_id.to_string(), device_cohorts);
 }
 
 #[cfg(test)]

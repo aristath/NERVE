@@ -32,6 +32,41 @@ fn compiled_resource_backing_workers_follow_wave_width_without_oversubscribing_c
 }
 
 #[test]
+fn compiled_resource_stable_slabs_are_heap_scaled_bounded_and_wave_safe() {
+    let gibibyte = 1024 * 1024 * 1024;
+    assert_eq!(
+        compiled_resource_stable_slab_payload_bytes_for_heap(
+            32 * gibibyte as u64,
+            8 * gibibyte,
+            64 * 1024 * 1024,
+            256,
+        )
+        .unwrap(),
+        gibibyte,
+    );
+    assert_eq!(
+        compiled_resource_stable_slab_payload_bytes_for_heap(
+            32 * gibibyte as u64,
+            192 * 1024 * 1024,
+            64 * 1024 * 1024,
+            256,
+        )
+        .unwrap(),
+        192 * 1024 * 1024,
+    );
+    assert_eq!(
+        compiled_resource_stable_slab_payload_bytes_for_heap(
+            32 * gibibyte as u64,
+            2 * gibibyte,
+            1536 * 1024 * 1024,
+            256,
+        )
+        .unwrap(),
+        1536 * 1024 * 1024,
+    );
+}
+
+#[test]
 fn device_capacity_settlement_waits_for_the_driver_acknowledgement() {
     let mut remaining = VecDeque::from([1usize, 7, 32]);
     let acknowledged = wait_for_compiled_resource_device_capacity(
@@ -53,52 +88,6 @@ fn device_capacity_settlement_never_invents_capacity_at_the_deadline() {
     assert!(error.to_string().contains("did not settle"));
     assert!(error.to_string().contains("needs 16 bytes"));
     assert!(error.to_string().contains("only 15 bytes"));
-}
-
-struct SharedHostCacheFakeReclaimer {
-    store_id: String,
-    reclaimable_bytes: std::sync::atomic::AtomicUsize,
-    reclaim_calls: std::sync::atomic::AtomicUsize,
-}
-
-impl VulkanCompiledResourceSharedHostCacheReclaimer for SharedHostCacheFakeReclaimer {
-    fn shared_host_cache_store_id(&self) -> &str {
-        &self.store_id
-    }
-
-    fn reclaim_shared_host_capacity(
-        &self,
-        requested_bytes: usize,
-    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
-        self.reclaim_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut available = self
-            .reclaimable_bytes
-            .load(std::sync::atomic::Ordering::Acquire);
-        loop {
-            let released = available.min(requested_bytes);
-            match self.reclaimable_bytes.compare_exchange_weak(
-                available,
-                available - released,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            ) {
-                Ok(_) => return Ok(released),
-                Err(updated) => available = updated,
-            }
-        }
-    }
-}
-
-fn shared_host_cache_fake_store(
-    store_id: &str,
-    reclaimable_bytes: usize,
-) -> Arc<SharedHostCacheFakeReclaimer> {
-    Arc::new(SharedHostCacheFakeReclaimer {
-        store_id: store_id.to_string(),
-        reclaimable_bytes: std::sync::atomic::AtomicUsize::new(reclaimable_bytes),
-        reclaim_calls: std::sync::atomic::AtomicUsize::new(0),
-    })
 }
 
 fn shared_host_cache_commit(
@@ -146,50 +135,35 @@ fn shared_host_cache_allocation_transactions_are_serialized() {
 }
 
 #[test]
-fn shared_host_cache_borrows_capacity_from_the_least_recently_used_store() {
+fn shared_host_cache_active_admission_never_reclaims_another_store() {
     let cache = Arc::new(VulkanCompiledResourceSharedHostCache::new("fixture", 100).unwrap());
-    let first = shared_host_cache_fake_store("first", 60);
-    let second = shared_host_cache_fake_store("second", 40);
-    let first_registration: Arc<dyn VulkanCompiledResourceSharedHostCacheReclaimer> = first.clone();
-    let second_registration: Arc<dyn VulkanCompiledResourceSharedHostCacheReclaimer> = second.clone();
-    cache.register_store(&first_registration).unwrap();
-    cache.register_store(&second_registration).unwrap();
+    cache.register_store("first").unwrap();
+    cache.register_store("second").unwrap();
 
     shared_host_cache_commit(&cache, "first", 60, 60);
     shared_host_cache_commit(&cache, "second", 40, 40);
-    {
-        let mutation = cache.begin_mutation().unwrap();
-        mutation.touch_store("second").unwrap();
-        mutation
-            .reserve_capacity("second", 20)
-            .unwrap()
-            .settle(20)
-            .unwrap();
-    }
+    let mutation = cache.begin_mutation().unwrap();
+    let error = mutation.reserve_capacity("second", 20).err().unwrap();
 
     let snapshot = cache.snapshot().unwrap();
     assert_eq!(snapshot.capacity_bytes, 100);
     assert_eq!(snapshot.committed_bytes, 100);
-    assert_eq!(snapshot.committed_bytes_by_store["first"], 40);
-    assert_eq!(snapshot.committed_bytes_by_store["second"], 60);
-    assert_eq!(first.reclaim_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(snapshot.committed_bytes_by_store["first"], 60);
+    assert_eq!(snapshot.committed_bytes_by_store["second"], 40);
+    assert!(error.to_string().contains("active admission cannot destroy"));
 }
 
 #[test]
-fn shared_host_cache_rejects_growth_when_no_other_store_can_yield_capacity() {
+fn shared_host_cache_rejects_active_growth_beyond_its_physical_bound() {
     let cache = Arc::new(VulkanCompiledResourceSharedHostCache::new("fixture", 100).unwrap());
-    let first = shared_host_cache_fake_store("first", 0);
-    let second = shared_host_cache_fake_store("second", 0);
-    let first_registration: Arc<dyn VulkanCompiledResourceSharedHostCacheReclaimer> = first.clone();
-    let second_registration: Arc<dyn VulkanCompiledResourceSharedHostCacheReclaimer> = second.clone();
-    cache.register_store(&first_registration).unwrap();
-    cache.register_store(&second_registration).unwrap();
+    cache.register_store("first").unwrap();
+    cache.register_store("second").unwrap();
     shared_host_cache_commit(&cache, "first", 100, 100);
 
     let mutation = cache.begin_mutation().unwrap();
     let error = mutation.reserve_capacity("second", 1).err().unwrap();
 
-    assert!(error.to_string().contains("no other registered store can yield capacity"));
+    assert!(error.to_string().contains("active admission cannot destroy"));
     let snapshot = cache.snapshot().unwrap();
     assert_eq!(snapshot.committed_bytes, 100);
     assert_eq!(snapshot.committed_bytes_by_store["first"], 100);
@@ -199,9 +173,7 @@ fn shared_host_cache_rejects_growth_when_no_other_store_can_yield_capacity() {
 #[test]
 fn shared_host_cache_rolls_back_an_unsettled_physical_reservation() {
     let cache = Arc::new(VulkanCompiledResourceSharedHostCache::new("fixture", 100).unwrap());
-    let store = shared_host_cache_fake_store("store", 0);
-    let registration: Arc<dyn VulkanCompiledResourceSharedHostCacheReclaimer> = store;
-    cache.register_store(&registration).unwrap();
+    cache.register_store("store").unwrap();
 
     let mutation = cache.begin_mutation().unwrap();
     drop(mutation.reserve_capacity("store", 60).unwrap());
@@ -212,9 +184,7 @@ fn shared_host_cache_rolls_back_an_unsettled_physical_reservation() {
 #[test]
 fn shared_host_cache_settlement_keeps_only_the_physically_committed_bytes() {
     let cache = Arc::new(VulkanCompiledResourceSharedHostCache::new("fixture", 100).unwrap());
-    let store = shared_host_cache_fake_store("store", 0);
-    let registration: Arc<dyn VulkanCompiledResourceSharedHostCacheReclaimer> = store;
-    cache.register_store(&registration).unwrap();
+    cache.register_store("store").unwrap();
 
     let mutation = cache.begin_mutation().unwrap();
     mutation
@@ -279,39 +249,6 @@ fn shared_host_cache_logical_capacity_never_exceeds_combined_physical_capacity()
     assert_eq!(capacities.host_visible_payload_bytes, 20);
     assert!(demand_paged_shared_tier_capacities(100, 100, 20).is_err());
     assert!(demand_paged_shared_tier_capacities(100, 60, 0).is_err());
-}
-
-#[test]
-fn rebalanced_device_capacity_waits_for_driver_acknowledgement_before_reallocation() {
-    let mut observations = [63usize, 64].into_iter();
-    let acknowledged = wait_for_rebalanced_compiled_resource_device_capacity(
-        64,
-        64,
-        Duration::from_millis(10),
-        || Ok(observations.next().unwrap_or(64)),
-    )
-    .unwrap();
-
-    assert_eq!(acknowledged, 64);
-    assert_eq!(observations.next(), None);
-}
-
-#[test]
-fn rebalanced_device_capacity_never_waits_past_the_arena_hard_bound() {
-    let mut polled = false;
-    let error = wait_for_rebalanced_compiled_resource_device_capacity(
-        65,
-        64,
-        Duration::from_millis(10),
-        || {
-            polled = true;
-            Ok(usize::MAX)
-        },
-    )
-    .unwrap_err();
-
-    assert!(!polled);
-    assert!(error.to_string().contains("arena bytes"));
 }
 
 #[test]
@@ -842,6 +779,50 @@ fn eviction_closes_transitively_over_shared_allocation_chunks() {
         selected,
         BTreeSet::from(["a".to_string(), "b".to_string(), "c".to_string()])
     );
+}
+
+#[test]
+fn logical_block_eviction_does_not_evict_other_groups_in_the_same_slab() {
+    let cohort = |block_id| VulkanCompiledResourceAllocationCohort {
+        tier: VulkanCompiledResourceMemoryTier::Device,
+        chunk_id: block_id,
+    };
+    let first_block = cohort(100);
+    let second_block = cohort(101);
+    let candidates = vec![
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "oldest".to_string(),
+            byte_count: 16,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "newer".to_string(),
+            byte_count: 16,
+            last_access_epoch: 2,
+        },
+    ];
+    let group_blocks = BTreeMap::from([
+        ("oldest".to_string(), BTreeSet::from([first_block])),
+        ("newer".to_string(), BTreeSet::from([second_block])),
+    ]);
+    let block_groups = BTreeMap::from([
+        (first_block, BTreeSet::from(["oldest".to_string()])),
+        (second_block, BTreeSet::from(["newer".to_string()])),
+    ]);
+    let capacities = BTreeMap::from([(first_block, 16), (second_block, 16)]);
+
+    let selected = compiled_resource_lru_eviction_groups(
+        &candidates,
+        &group_blocks,
+        &block_groups,
+        &capacities,
+        &BTreeSet::new(),
+        16,
+        16,
+    )
+    .unwrap();
+
+    assert_eq!(selected, BTreeSet::from(["oldest".to_string()]));
 }
 
 #[test]
@@ -1400,10 +1381,14 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         .unwrap()
         .committed_byte_capacity;
     assert!(cohort_committed_bytes > 0);
+    cohort_store
+        .prepare_inactive_device_memory_reclamation(1)
+        .unwrap();
     assert_eq!(
-        cohort_store
-            .reclaim_inactive_device_memory(1)
-            .unwrap(),
+        crate::vulkan_compute::with_test_device_local_memory_quiescence(|quiescence| {
+            cohort_store.reclaim_inactive_device_memory(quiescence, 1)
+        })
+        .unwrap(),
         cohort_committed_bytes
     );
     assert_eq!(
@@ -1696,8 +1681,14 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
         .unwrap()
         .committed_byte_capacity;
     assert!(committed_device_bytes > 0);
+    tiered_store
+        .prepare_inactive_device_memory_reclamation(1)
+        .unwrap();
     assert_eq!(
-        tiered_store.reclaim_inactive_device_memory(1).unwrap(),
+        crate::vulkan_compute::with_test_device_local_memory_quiescence(|quiescence| {
+            tiered_store.reclaim_inactive_device_memory(quiescence, 1)
+        })
+        .unwrap(),
         committed_device_bytes,
         "retiered logical ownership must release the physical device allocation"
     );
@@ -2485,7 +2476,16 @@ fn adaptive_representation_cache_promotes_restores_and_tears_down_atomically() {
             > artifact.len()
     );
 
-    assert!(store.reclaim_inactive_device_memory(1).unwrap() > 0);
+    store
+        .prepare_inactive_device_memory_reclamation(1)
+        .unwrap();
+    assert!(
+        crate::vulkan_compute::with_test_device_local_memory_quiescence(|quiescence| {
+            store.reclaim_inactive_device_memory(quiescence, 1)
+        })
+        .unwrap()
+            > 0
+    );
     {
         let state = store.address_state.lock().unwrap();
         assert!(state.promoted_representations.is_empty());

@@ -968,9 +968,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     })?,
                 );
                 if let Some(cache) = &store_shared_host_cache {
-                    let reclaimer: Arc<dyn VulkanCompiledResourceSharedHostCacheReclaimer> =
-                        store.clone();
-                    cache.register_store(&reclaimer).map_err(|error| {
+                    cache.register_store(&store_id).map_err(|error| {
                         VulkanResidentInProcessPlacedRuntimeError::Package(
                             VulkanResidentTokenModelPackageError::new(format!(
                                 "failed to register shared host-cache store for physical slices {logical_device_ids:?}: {error}"

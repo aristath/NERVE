@@ -53,6 +53,11 @@ impl VulkanResidentCompiledResource {
         self.stable_allocation()
             .map(|allocation| allocation.chunk_id())
     }
+
+    fn stable_allocation_cohort_id(&self) -> Option<u64> {
+        self.stable_allocation()
+            .map(|allocation| allocation.allocation_cohort_id())
+    }
 }
 
 impl DeviceResidentResourcePayload for VulkanResidentCompiledResource {

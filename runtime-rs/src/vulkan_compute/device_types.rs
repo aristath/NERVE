@@ -6,6 +6,7 @@ pub struct VulkanComputeDevice {
     transfer_queue_is_distinct: bool,
     compute_queue_submission: VulkanQueueSubmissionGate,
     transfer_queue_submission: VulkanQueueSubmissionGate,
+    physical_queue_quiescer: Option<Arc<VulkanPhysicalQueueQuiescer>>,
     activity_lease: RefCell<Option<VulkanDeviceActivityLease>>,
     device_health: VulkanDeviceHealth,
     buffer_device_address_supported: bool,

@@ -103,29 +103,37 @@ where
     }
 }
 
-fn wait_for_rebalanced_compiled_resource_device_capacity<F>(
-    required_bytes: usize,
-    arena_available_bytes: usize,
-    timeout: Duration,
-    remaining_bytes: F,
-) -> Result<usize, VulkanCompiledResourceDeviceStoreError>
-where
-    F: FnMut() -> Result<usize, VulkanCompiledResourceDeviceStoreError>,
-{
-    if arena_available_bytes < required_bytes {
-        return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-            "compiled resource rebalance needs {required_bytes} device bytes but only {arena_available_bytes} arena bytes are available"
-        )));
-    }
-    wait_for_compiled_resource_device_capacity(required_bytes, timeout, remaining_bytes)
-}
-
 #[derive(Debug)]
 struct VulkanCompiledResourceEvictionSelection {
     group_ids: BTreeSet<String>,
     payload_bytes: usize,
     device_bytes: usize,
     host_visible_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanCompiledResourceEvictionGranularity {
+    AllocationBlock,
+    PhysicalSlab,
+}
+
+fn detach_compiled_resource_group_cohorts(
+    group_id: &str,
+    group_cohorts: &mut BTreeMap<String, BTreeSet<VulkanCompiledResourceAllocationCohort>>,
+    cohort_groups: &mut BTreeMap<VulkanCompiledResourceAllocationCohort, BTreeSet<String>>,
+) {
+    let cohorts = group_cohorts.remove(group_id).unwrap_or_default();
+    for cohort in cohorts {
+        let remove_cohort = if let Some(groups) = cohort_groups.get_mut(&cohort) {
+            groups.remove(group_id);
+            groups.is_empty()
+        } else {
+            false
+        };
+        if remove_cohort {
+            cohort_groups.remove(&cohort);
+        }
+    }
 }
 
 fn compiled_resource_lru_eviction_selection(
@@ -412,6 +420,8 @@ struct VulkanCompiledResourceDeviceAddressState {
     publications: BTreeMap<String, Vec<VulkanStableResourceAddressPublication>>,
     group_chunks: BTreeMap<String, BTreeSet<VulkanCompiledResourceAllocationCohort>>,
     chunk_groups: BTreeMap<VulkanCompiledResourceAllocationCohort, BTreeSet<String>>,
+    group_blocks: BTreeMap<String, BTreeSet<VulkanCompiledResourceAllocationCohort>>,
+    block_groups: BTreeMap<VulkanCompiledResourceAllocationCohort, BTreeSet<String>>,
     promoted_representations:
         BTreeMap<String, VulkanCompiledResourcePromotedRepresentation>,
 }
@@ -427,6 +437,7 @@ enum VulkanCompiledResourceStoreLifecycleState {
 struct VulkanCompiledResourceStoreLifecycle {
     state: VulkanCompiledResourceStoreLifecycleState,
     active_load_operation_count: usize,
+    memory_reclamation_in_progress: bool,
     teardown_in_progress: bool,
     terminal_failure: Option<String>,
     pending_release: DeviceResourceResidencyRelease,
@@ -454,6 +465,10 @@ struct VulkanCompiledResourceDeviceMemoryReclaimer {
     store: std::sync::Weak<VulkanCompiledResourceDeviceStore>,
 }
 
+struct VulkanCompiledResourceDeviceMemoryReclamation {
+    store: Arc<VulkanCompiledResourceDeviceStore>,
+}
+
 impl std::fmt::Debug for VulkanCompiledResourceDeviceMemoryReclaimer {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -462,18 +477,58 @@ impl std::fmt::Debug for VulkanCompiledResourceDeviceMemoryReclaimer {
     }
 }
 
+impl std::fmt::Debug for VulkanCompiledResourceDeviceMemoryReclamation {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VulkanCompiledResourceDeviceMemoryReclamation")
+            .field("store_id", &self.store.device_id)
+            .finish()
+    }
+}
+
 impl VulkanDeviceLocalMemoryReclaimer for VulkanCompiledResourceDeviceMemoryReclaimer {
-    fn reclaim_device_local_memory(
+    fn begin_device_local_memory_reclamation(
         &self,
-        _quiescence: crate::vulkan_compute::VulkanDeviceLocalMemoryQuiescence,
         requested_bytes: usize,
-    ) -> Result<usize, VulkanError> {
+    ) -> Result<
+        Box<dyn crate::vulkan_compute::VulkanDeviceLocalMemoryReclamation>,
+        VulkanError,
+    > {
         let Some(store) = self.store.upgrade() else {
-            return Ok(0);
+            return Err(VulkanError(
+                "compiled-resource memory reclaimer outlived its store".to_string(),
+            ));
         };
         store
-            .reclaim_inactive_device_memory(requested_bytes)
+            .begin_memory_reclamation_boundary()
+            .map_err(|error| VulkanError(error.to_string()))?;
+        if let Err(error) = store.prepare_inactive_device_memory_reclamation(requested_bytes) {
+            store.finish_memory_reclamation_boundary();
+            return Err(VulkanError(error.to_string()));
+        }
+        Ok(Box::new(VulkanCompiledResourceDeviceMemoryReclamation {
+            store,
+        }))
+    }
+}
+
+impl crate::vulkan_compute::VulkanDeviceLocalMemoryReclamation
+    for VulkanCompiledResourceDeviceMemoryReclamation
+{
+    fn reclaim_device_local_memory(
+        &self,
+        quiescence: &crate::vulkan_compute::VulkanDeviceLocalMemoryQuiescence<'_>,
+        requested_bytes: usize,
+    ) -> Result<usize, VulkanError> {
+        self.store
+            .reclaim_inactive_device_memory(quiescence, requested_bytes)
             .map_err(|error| VulkanError(error.to_string()))
+    }
+}
+
+impl Drop for VulkanCompiledResourceDeviceMemoryReclamation {
+    fn drop(&mut self) {
+        self.store.finish_memory_reclamation_boundary();
     }
 }
 
@@ -694,9 +749,19 @@ impl VulkanCompiledResourceDeviceStore {
             &allowed_selector_ids,
             CompiledResourceRepresentation::ResidentDerivation,
         )?;
+        let preferred_device_slab_byte_capacity =
+            compiled_resource_stable_slab_payload_bytes(
+                device,
+                available_dynamic_device_bytes,
+                store_residency.maximum_load_wave_payload_bytes,
+                upload_alignment,
+            )
+            .map_err(|error| VulkanCompiledResourceDeviceStoreError::new(error.to_string()))?;
         let device_arena = VulkanStableResourceArena::new(
             device,
             VulkanStableResourceArenaConfig::new(available_dynamic_device_bytes, upload_alignment)
+                .map_err(compiled_device_store_vulkan_error)?
+                .with_preferred_slab_byte_capacity(preferred_device_slab_byte_capacity)
                 .map_err(compiled_device_store_vulkan_error)?,
             &sparse_group_layouts,
         )
@@ -712,6 +777,8 @@ impl VulkanCompiledResourceDeviceStore {
                         available_dynamic_device_bytes,
                         upload_alignment,
                     )
+                    .map_err(compiled_device_store_vulkan_error)?
+                    .with_preferred_slab_byte_capacity(preferred_device_slab_byte_capacity)
                     .map_err(compiled_device_store_vulkan_error)?,
                     &representation_group_layouts,
                 )
@@ -782,6 +849,18 @@ impl VulkanCompiledResourceDeviceStore {
                     VulkanStableResourceArenaConfig::new(
                         host_visible_allocation_capacity,
                         upload_alignment,
+                    )
+                    .map_err(compiled_device_store_vulkan_error)?
+                    .with_preferred_slab_byte_capacity(
+                        compiled_resource_stable_slab_payload_bytes(
+                            device,
+                            host_visible_allocation_capacity,
+                            store_residency.maximum_load_wave_payload_bytes,
+                            upload_alignment,
+                        )
+                        .map_err(|error| {
+                            VulkanCompiledResourceDeviceStoreError::new(error.to_string())
+                        })?,
                     )
                     .map_err(compiled_device_store_vulkan_error)?
                     .host_visible(),
@@ -880,6 +959,8 @@ impl VulkanCompiledResourceDeviceStore {
                 publications: BTreeMap::new(),
                 group_chunks: BTreeMap::new(),
                 chunk_groups: BTreeMap::new(),
+                group_blocks: BTreeMap::new(),
+                block_groups: BTreeMap::new(),
                 promoted_representations: BTreeMap::new(),
             }),
             residency_mutation: std::sync::Mutex::new(()),
@@ -911,6 +992,7 @@ impl VulkanCompiledResourceDeviceStore {
             lifecycle: std::sync::Mutex::new(VulkanCompiledResourceStoreLifecycle {
                 state: VulkanCompiledResourceStoreLifecycleState::Active,
                 active_load_operation_count: 0,
+                memory_reclamation_in_progress: false,
                 teardown_in_progress: false,
                 terminal_failure: None,
                 pending_release: DeviceResourceResidencyRelease::default(),
@@ -1142,9 +1224,6 @@ impl VulkanCompiledResourceDeviceStore {
             return Err(VulkanCompiledResourceDeviceStoreError::new(
                 "compiled resource load batch is empty",
             ));
-        }
-        if let Some(mutation) = shared_host_mutation {
-            mutation.touch_store(&self.device_id)?;
         }
         let mut plans_by_group = BTreeMap::new();
         for resource_index in resource_indices {
@@ -1700,6 +1779,13 @@ impl VulkanCompiledResourceDeviceStore {
             )
         })?;
         loop {
+            while lifecycle.memory_reclamation_in_progress {
+                lifecycle = self.lifecycle_changed.wait(lifecycle).map_err(|_| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource store lifecycle was poisoned while waiting for memory reclamation",
+                    )
+                })?;
+            }
             match lifecycle.state {
                 VulkanCompiledResourceStoreLifecycleState::Unloaded => {
                     return Ok(false);
@@ -1826,6 +1912,8 @@ impl VulkanCompiledResourceDeviceStore {
             state.publications.clear();
             state.group_chunks.clear();
             state.chunk_groups.clear();
+            state.group_blocks.clear();
+            state.block_groups.clear();
         }
         state.promoted_representations.clear();
         drop(state);
@@ -2017,6 +2105,15 @@ impl VulkanCompiledResourceDeviceStore {
                 "compiled resource store lifecycle was poisoned",
             )
         })?;
+        while lifecycle.state == VulkanCompiledResourceStoreLifecycleState::Active
+            && lifecycle.memory_reclamation_in_progress
+        {
+            lifecycle = self.lifecycle_changed.wait(lifecycle).map_err(|_| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource store lifecycle was poisoned while waiting for memory reclamation",
+                )
+            })?;
+        }
         if lifecycle.state != VulkanCompiledResourceStoreLifecycleState::Active {
             let terminal_failure = lifecycle
                 .terminal_failure
@@ -2037,6 +2134,56 @@ impl VulkanCompiledResourceDeviceStore {
                 )
             })?;
         Ok(VulkanCompiledResourceStoreLoadGuard { store: self })
+    }
+
+    fn begin_memory_reclamation_boundary(
+        &self,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        let mut lifecycle = self.lifecycle.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource store lifecycle was poisoned",
+            )
+        })?;
+        while lifecycle.state == VulkanCompiledResourceStoreLifecycleState::Active
+            && lifecycle.memory_reclamation_in_progress
+        {
+            lifecycle = self.lifecycle_changed.wait(lifecycle).map_err(|_| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource store lifecycle was poisoned while serializing memory reclamation",
+                )
+            })?;
+        }
+        if lifecycle.state != VulkanCompiledResourceStoreLifecycleState::Active {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource store {:?} is {:?} and cannot begin memory reclamation",
+                self.device_id, lifecycle.state,
+            )));
+        }
+        lifecycle.memory_reclamation_in_progress = true;
+        while lifecycle.active_load_operation_count != 0 {
+            lifecycle = self.lifecycle_changed.wait(lifecycle).map_err(|_| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource store lifecycle was poisoned while draining loads for memory reclamation",
+                )
+            })?;
+        }
+        if lifecycle.state != VulkanCompiledResourceStoreLifecycleState::Active {
+            lifecycle.memory_reclamation_in_progress = false;
+            self.lifecycle_changed.notify_all();
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource store {:?} became {:?} while draining loads for memory reclamation",
+                self.device_id, lifecycle.state,
+            )));
+        }
+        Ok(())
+    }
+
+    fn finish_memory_reclamation_boundary(&self) {
+        let Ok(mut lifecycle) = self.lifecycle.lock() else {
+            return;
+        };
+        lifecycle.memory_reclamation_in_progress = false;
+        self.lifecycle_changed.notify_all();
     }
 
     fn resolve_selector_resource(

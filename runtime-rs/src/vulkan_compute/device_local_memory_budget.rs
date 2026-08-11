@@ -73,9 +73,9 @@ pub struct VulkanDeviceLocalMemoryPressure {
 /// before a reclamation transaction began. Construction is deliberately kept
 /// inside the Vulkan compute layer so observation and ordinary allocation code
 /// cannot release physical backing.
-#[derive(Clone, Copy, Debug)]
-pub struct VulkanDeviceLocalMemoryQuiescence {
-    _private: (),
+#[derive(Debug)]
+pub struct VulkanDeviceLocalMemoryQuiescence<'a> {
+    _memory_lifecycle: std::sync::RwLockWriteGuard<'a, ()>,
 }
 
 #[derive(Debug)]
@@ -86,16 +86,31 @@ struct VulkanDeviceLocalMemoryBudgetTracker {
     allocation_generation: u64,
     execution_memory_observation: Option<(Instant, u64, u64)>,
     pressure: VulkanDeviceLocalMemoryPressure,
+    memory_lifecycle: Arc<std::sync::RwLock<()>>,
+    next_queue_quiescer_id: u64,
+    queue_quiescers: BTreeMap<u64, std::sync::Weak<VulkanPhysicalQueueQuiescer>>,
     next_reclaimer_id: u64,
     reclaimers: BTreeMap<u64, std::sync::Weak<dyn VulkanDeviceLocalMemoryReclaimer>>,
 }
 
-pub trait VulkanDeviceLocalMemoryReclaimer: std::fmt::Debug + Send + Sync {
+pub trait VulkanDeviceLocalMemoryReclamation: std::fmt::Debug + Send + Sync {
+    /// Releases only backing made inactive before this transaction was
+    /// created. No queue submission is permitted while the proof is held.
     fn reclaim_device_local_memory(
         &self,
-        quiescence: VulkanDeviceLocalMemoryQuiescence,
+        quiescence: &VulkanDeviceLocalMemoryQuiescence<'_>,
         requested_bytes: usize,
     ) -> Result<usize, VulkanError>;
+}
+
+pub trait VulkanDeviceLocalMemoryReclaimer: std::fmt::Debug + Send + Sync {
+    /// Retires inactive logical residency while queue submission is still
+    /// permitted and returns a transaction which prevents new residency work
+    /// until physical reclamation completes or is abandoned.
+    fn begin_device_local_memory_reclamation(
+        &self,
+        requested_bytes: usize,
+    ) -> Result<Box<dyn VulkanDeviceLocalMemoryReclamation>, VulkanError>;
 }
 
 #[derive(Debug)]
@@ -126,9 +141,52 @@ impl VulkanDeviceLocalMemoryBudgetTracker {
             allocation_generation: 0,
             execution_memory_observation: None,
             pressure: VulkanDeviceLocalMemoryPressure::default(),
+            memory_lifecycle: Arc::new(std::sync::RwLock::new(())),
+            next_queue_quiescer_id: 0,
+            queue_quiescers: BTreeMap::new(),
             next_reclaimer_id: 0,
             reclaimers: BTreeMap::new(),
         }
+    }
+
+    fn memory_lifecycle(&self) -> Arc<std::sync::RwLock<()>> {
+        Arc::clone(&self.memory_lifecycle)
+    }
+
+    fn register_queue_quiescer(
+        tracker: &Arc<Mutex<Self>>,
+        quiescer: &Arc<VulkanPhysicalQueueQuiescer>,
+    ) -> Result<(), VulkanError> {
+        let mut state = tracker.lock().map_err(|_| {
+            VulkanError("device-local memory budget tracker was poisoned".to_string())
+        })?;
+        let quiescer_id = state.next_queue_quiescer_id;
+        state.next_queue_quiescer_id = state
+            .next_queue_quiescer_id
+            .checked_add(1)
+            .ok_or_else(|| VulkanError("physical queue quiescer ids exhausted".to_string()))?;
+        state
+            .queue_quiescers
+            .insert(quiescer_id, Arc::downgrade(quiescer));
+        Ok(())
+    }
+
+    fn live_queue_quiescers(
+        tracker: &Arc<Mutex<Self>>,
+    ) -> Result<Vec<Arc<VulkanPhysicalQueueQuiescer>>, VulkanError> {
+        let mut state = tracker.lock().map_err(|_| {
+            VulkanError("device-local memory budget tracker was poisoned".to_string())
+        })?;
+        let mut live = Vec::with_capacity(state.queue_quiescers.len());
+        state.queue_quiescers.retain(|_, quiescer| {
+            if let Some(quiescer) = quiescer.upgrade() {
+                live.push(quiescer);
+                true
+            } else {
+                false
+            }
+        });
+        Ok(live)
     }
 
     fn register_reclaimer(
@@ -384,8 +442,8 @@ fn start_device_local_memory_observer(
 
 fn restore_protected_device_local_headroom(
     budget: VulkanDeviceLocalMemoryBudget,
-    reclaimers: Vec<Arc<dyn VulkanDeviceLocalMemoryReclaimer>>,
-    quiescence: VulkanDeviceLocalMemoryQuiescence,
+    reclamations: Vec<Box<dyn VulkanDeviceLocalMemoryReclamation>>,
+    quiescence: &VulkanDeviceLocalMemoryQuiescence<'_>,
     settlement_timeout: Duration,
     mut current_accounting: impl FnMut() -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError>,
 ) -> Result<VulkanDeviceLocalMemoryAccounting, VulkanError> {
@@ -394,7 +452,7 @@ fn restore_protected_device_local_headroom(
     if deficit == 0 {
         return Ok(initial);
     }
-    if reclaimers.is_empty() {
+    if reclamations.is_empty() {
         return Err(VulkanError(format!(
             "device-local execution refused: only {} bytes are currently available, below the protected {}-byte headroom ({} bytes of counter tolerance), and no evictable residency store is registered",
             initial.currently_available_bytes,
@@ -404,9 +462,9 @@ fn restore_protected_device_local_headroom(
     }
     let mut reclaimed_bytes = 0usize;
     let mut reclaimer_errors = Vec::new();
-    for reclaimer in reclaimers {
+    for reclamation in reclamations {
         let requested_bytes = usize::try_from(deficit).unwrap_or(usize::MAX);
-        match reclaimer.reclaim_device_local_memory(quiescence, requested_bytes) {
+        match reclamation.reclaim_device_local_memory(quiescence, requested_bytes) {
             Ok(reclaimed) => reclaimed_bytes = reclaimed_bytes.saturating_add(reclaimed),
             Err(error) => reclaimer_errors.push(error.to_string()),
         }

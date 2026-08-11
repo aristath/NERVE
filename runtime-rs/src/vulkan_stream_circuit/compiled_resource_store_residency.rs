@@ -1,4 +1,7 @@
 const VULKAN_COMPILED_RESOURCE_TRANSFER_STAGING_SLOT_COUNT: usize = 2;
+const VULKAN_COMPILED_RESOURCE_SLAB_HEAP_FRACTION: u64 = 32;
+const VULKAN_COMPILED_RESOURCE_MINIMUM_SLAB_BYTES: usize = 16 * 1024 * 1024;
+const VULKAN_COMPILED_RESOURCE_MAXIMUM_SLAB_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct VulkanCompiledResourceStoreResidencyBytes {
@@ -31,6 +34,52 @@ impl VulkanCompiledResourceStoreResidencyBytes {
             "compiled resource store maximum extra device bytes",
         )
     }
+}
+
+fn compiled_resource_stable_slab_payload_bytes(
+    device: &VulkanComputeDevice,
+    arena_byte_capacity: usize,
+    maximum_load_wave_payload_bytes: usize,
+    alignment: usize,
+) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    compiled_resource_stable_slab_payload_bytes_for_heap(
+        device.device_local_memory_bytes(),
+        arena_byte_capacity,
+        maximum_load_wave_payload_bytes,
+        alignment,
+    )
+}
+
+fn compiled_resource_stable_slab_payload_bytes_for_heap(
+    device_local_memory_bytes: u64,
+    arena_byte_capacity: usize,
+    maximum_load_wave_payload_bytes: usize,
+    alignment: usize,
+) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    if arena_byte_capacity == 0
+        || maximum_load_wave_payload_bytes == 0
+        || !alignment.is_power_of_two()
+    {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "compiled resource stable-slab inputs are invalid".to_string(),
+        ));
+    }
+    let heap_scaled = usize::try_from(
+        device_local_memory_bytes / VULKAN_COMPILED_RESOURCE_SLAB_HEAP_FRACTION,
+    )
+    .unwrap_or(usize::MAX);
+    let desired = heap_scaled
+        .max(VULKAN_COMPILED_RESOURCE_MINIMUM_SLAB_BYTES)
+        .min(VULKAN_COMPILED_RESOURCE_MAXIMUM_SLAB_BYTES)
+        .max(maximum_load_wave_payload_bytes)
+        .min(arena_byte_capacity);
+    let aligned = desired - (desired % alignment);
+    if aligned < maximum_load_wave_payload_bytes {
+        return Err(VulkanRuntimeResidencyPlanError(format!(
+            "compiled resource arena admits {arena_byte_capacity} bytes but one aligned load wave needs {maximum_load_wave_payload_bytes} bytes",
+        )));
+    }
+    Ok(aligned)
 }
 
 fn compiled_resource_contract_minimum_upload_alignment(

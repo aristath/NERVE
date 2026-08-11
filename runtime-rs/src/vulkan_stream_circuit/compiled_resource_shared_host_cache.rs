@@ -1,12 +1,3 @@
-trait VulkanCompiledResourceSharedHostCacheReclaimer: Send + Sync {
-    fn shared_host_cache_store_id(&self) -> &str;
-
-    fn reclaim_shared_host_capacity(
-        &self,
-        requested_bytes: usize,
-    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError>;
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VulkanCompiledResourceSharedHostCacheSnapshot {
     capacity_bytes: usize,
@@ -15,16 +6,13 @@ struct VulkanCompiledResourceSharedHostCacheSnapshot {
 }
 
 struct VulkanCompiledResourceSharedHostCacheStoreState {
-    reclaimer: std::sync::Weak<dyn VulkanCompiledResourceSharedHostCacheReclaimer>,
     committed_bytes: usize,
-    last_access_epoch: u64,
 }
 
 #[derive(Default)]
 struct VulkanCompiledResourceSharedHostCacheState {
     stores: BTreeMap<String, VulkanCompiledResourceSharedHostCacheStoreState>,
     committed_bytes: usize,
-    access_epoch: u64,
 }
 
 struct VulkanCompiledResourceSharedHostCache {
@@ -97,9 +85,8 @@ impl VulkanCompiledResourceSharedHostCache {
 
     fn register_store(
         &self,
-        reclaimer: &Arc<dyn VulkanCompiledResourceSharedHostCacheReclaimer>,
+        store_id: &str,
     ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
-        let store_id = reclaimer.shared_host_cache_store_id().to_string();
         if store_id.trim().is_empty() {
             return Err(VulkanCompiledResourceDeviceStoreError::new(
                 "shared compiled-resource host cache cannot register an empty store identity",
@@ -110,49 +97,17 @@ impl VulkanCompiledResourceSharedHostCache {
                 "shared compiled-resource host cache state was poisoned",
             )
         })?;
-        if state.stores.contains_key(&store_id) {
+        if state.stores.contains_key(store_id) {
             return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
                 "shared compiled-resource host cache store {store_id:?} was registered twice"
             )));
         }
-        state.access_epoch = state.access_epoch.checked_add(1).ok_or_else(|| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "shared compiled-resource host cache access epoch overflowed",
-            )
-        })?;
-        let access_epoch = state.access_epoch;
         state.stores.insert(
-            store_id,
+            store_id.to_string(),
             VulkanCompiledResourceSharedHostCacheStoreState {
-                reclaimer: Arc::downgrade(reclaimer),
                 committed_bytes: 0,
-                last_access_epoch: access_epoch,
             },
         );
-        Ok(())
-    }
-
-    fn touch_store_uncoordinated(
-        &self,
-        store_id: &str,
-    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
-        let mut state = self.state.lock().map_err(|_| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "shared compiled-resource host cache state was poisoned",
-            )
-        })?;
-        state.access_epoch = state.access_epoch.checked_add(1).ok_or_else(|| {
-            VulkanCompiledResourceDeviceStoreError::new(
-                "shared compiled-resource host cache access epoch overflowed",
-            )
-        })?;
-        let access_epoch = state.access_epoch;
-        let store = state.stores.get_mut(store_id).ok_or_else(|| {
-            VulkanCompiledResourceDeviceStoreError::new(format!(
-                "shared compiled-resource host cache has no registered store {store_id:?}"
-            ))
-        })?;
-        store.last_access_epoch = access_epoch;
         Ok(())
     }
 
@@ -176,81 +131,44 @@ impl VulkanCompiledResourceSharedHostCache {
                 self.capacity_bytes,
             )));
         }
-        let mut attempted_victims = BTreeSet::new();
-        loop {
-            let victim = {
-                let mut state = self.state.lock().map_err(|_| {
-                    VulkanCompiledResourceDeviceStoreError::new(
-                        "shared compiled-resource host cache state was poisoned",
-                    )
-                })?;
-                if !state.stores.contains_key(store_id) {
-                    return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-                        "shared compiled-resource host cache has no registered store {store_id:?}"
-                    )));
-                }
-                let required_end = state
-                    .committed_bytes
-                    .checked_add(requested_bytes)
-                    .ok_or_else(|| {
-                        VulkanCompiledResourceDeviceStoreError::new(
-                            "shared compiled-resource host cache capacity overflowed",
-                        )
-                    })?;
-                if required_end <= self.capacity_bytes {
-                    state.committed_bytes = required_end;
-                    let store = state
-                        .stores
-                        .get_mut(store_id)
-                        .expect("requesting shared host store was validated");
-                    store.committed_bytes = store
-                        .committed_bytes
-                        .checked_add(requested_bytes)
-                        .ok_or_else(|| {
-                            VulkanCompiledResourceDeviceStoreError::new(
-                                "shared compiled-resource host store capacity overflowed",
-                            )
-                        })?;
-                    break;
-                }
-                state
-                    .stores
-                    .iter()
-                    .filter(|(candidate_id, candidate)| {
-                        candidate_id.as_str() != store_id
-                            && candidate.committed_bytes != 0
-                            && !attempted_victims.contains(candidate_id.as_str())
-                    })
-                    .min_by_key(|(candidate_id, candidate)| {
-                        (candidate.last_access_epoch, candidate_id.as_str())
-                    })
-                    .map(|(candidate_id, candidate)| {
-                        (
-                            candidate_id.clone(),
-                            candidate.reclaimer.clone(),
-                            required_end - self.capacity_bytes,
-                        )
-                    })
-            };
-            let Some((victim_id, victim, required_bytes)) = victim else {
-                let snapshot = self.snapshot()?;
-                return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-                    "shared compiled-resource host cache cannot reserve {requested_bytes} bytes for {store_id:?}: {}/{} bytes are committed and no other registered store can yield capacity",
-                    snapshot.committed_bytes, snapshot.capacity_bytes,
-                )));
-            };
-            attempted_victims.insert(victim_id.clone());
-            let Some(victim) = victim.upgrade() else {
-                continue;
-            };
-            let released_bytes = victim.reclaim_shared_host_capacity(required_bytes)?;
-            if released_bytes == 0 {
-                continue;
-            }
-            self.release_store_capacity_uncoordinated(&victim_id, released_bytes)?;
-            attempted_victims.clear();
+        let mut state = self.state.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "shared compiled-resource host cache state was poisoned",
+            )
+        })?;
+        if !state.stores.contains_key(store_id) {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "shared compiled-resource host cache has no registered store {store_id:?}"
+            )));
         }
-        self.touch_store_uncoordinated(store_id)?;
+        let required_end = state
+            .committed_bytes
+            .checked_add(requested_bytes)
+            .ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "shared compiled-resource host cache capacity overflowed",
+                )
+            })?;
+        if required_end > self.capacity_bytes {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "shared compiled-resource host cache cannot reserve {requested_bytes} bytes for {store_id:?}: {}/{} bytes are already committed; active admission cannot destroy another store's Vulkan backing",
+                state.committed_bytes, self.capacity_bytes,
+            )));
+        }
+        state.committed_bytes = required_end;
+        let store = state
+            .stores
+            .get_mut(store_id)
+            .expect("requesting shared host store was validated");
+        store.committed_bytes = store
+            .committed_bytes
+            .checked_add(requested_bytes)
+            .ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "shared compiled-resource host store capacity overflowed",
+                )
+            })?;
+        drop(state);
         Ok(VulkanCompiledResourceSharedHostCacheReservation {
             cache: Arc::clone(self),
             store_id: store_id.to_string(),
@@ -318,13 +236,6 @@ impl VulkanCompiledResourceSharedHostCache {
 }
 
 impl VulkanCompiledResourceSharedHostCacheMutation<'_> {
-    fn touch_store(
-        &self,
-        store_id: &str,
-    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
-        self.cache.touch_store_uncoordinated(store_id)
-    }
-
     fn reserve_capacity(
         &self,
         store_id: &str,

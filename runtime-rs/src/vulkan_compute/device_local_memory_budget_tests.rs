@@ -123,17 +123,26 @@ fn device_local_memory_reservations_are_bounded_and_released_by_lifetime() {
 
 #[test]
 fn device_local_memory_reclaimer_registration_is_shared_and_lifetime_bounded() {
-    #[derive(Debug)]
+    #[derive(Clone, Debug)]
     struct CountingReclaimer(Arc<AtomicU64>);
 
-    impl VulkanDeviceLocalMemoryReclaimer for CountingReclaimer {
+    impl VulkanDeviceLocalMemoryReclamation for CountingReclaimer {
         fn reclaim_device_local_memory(
             &self,
-            _quiescence: VulkanDeviceLocalMemoryQuiescence,
+            _quiescence: &VulkanDeviceLocalMemoryQuiescence<'_>,
             requested_bytes: usize,
         ) -> Result<usize, VulkanError> {
             self.0.fetch_add(1, Ordering::AcqRel);
             Ok(requested_bytes)
+        }
+    }
+
+    impl VulkanDeviceLocalMemoryReclaimer for CountingReclaimer {
+        fn begin_device_local_memory_reclamation(
+            &self,
+            _requested_bytes: usize,
+        ) -> Result<Box<dyn VulkanDeviceLocalMemoryReclamation>, VulkanError> {
+            Ok(Box::new(self.clone()))
         }
     }
 
@@ -148,15 +157,14 @@ fn device_local_memory_reclaimer_registration_is_shared_and_lifetime_bounded() {
     .unwrap();
     let live = VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(&tracker).unwrap();
     assert_eq!(live.len(), 1);
-    assert_eq!(
-        live[0]
-            .reclaim_device_local_memory(
-                VulkanDeviceLocalMemoryQuiescence { _private: () },
-                17,
-            )
-            .unwrap(),
-        17,
-    );
+    let reclamation = live[0]
+        .begin_device_local_memory_reclamation(17)
+        .unwrap();
+    assert_eq!(with_test_device_local_memory_quiescence(|quiescence| {
+        reclamation
+            .reclaim_device_local_memory(quiescence, 17)
+            .unwrap()
+    }), 17);
     assert_eq!(calls.load(Ordering::Acquire), 1);
 
     drop(live);
@@ -170,17 +178,26 @@ fn device_local_memory_reclaimer_registration_is_shared_and_lifetime_bounded() {
 
 #[test]
 fn device_local_memory_observation_never_invokes_reclamation_and_uses_hysteresis() {
-    #[derive(Debug)]
+    #[derive(Clone, Debug)]
     struct CountingReclaimer(Arc<AtomicU64>);
 
-    impl VulkanDeviceLocalMemoryReclaimer for CountingReclaimer {
+    impl VulkanDeviceLocalMemoryReclamation for CountingReclaimer {
         fn reclaim_device_local_memory(
             &self,
-            _quiescence: VulkanDeviceLocalMemoryQuiescence,
+            _quiescence: &VulkanDeviceLocalMemoryQuiescence<'_>,
             requested_bytes: usize,
         ) -> Result<usize, VulkanError> {
             self.0.fetch_add(1, Ordering::AcqRel);
             Ok(requested_bytes)
+        }
+    }
+
+    impl VulkanDeviceLocalMemoryReclaimer for CountingReclaimer {
+        fn begin_device_local_memory_reclamation(
+            &self,
+            _requested_bytes: usize,
+        ) -> Result<Box<dyn VulkanDeviceLocalMemoryReclamation>, VulkanError> {
+            Ok(Box::new(self.clone()))
         }
     }
 
@@ -240,10 +257,10 @@ fn device_local_execution_pressure_reclaims_until_protected_headroom_is_restored
         calls: Arc<AtomicU64>,
     }
 
-    impl VulkanDeviceLocalMemoryReclaimer for RestoringReclaimer {
+    impl VulkanDeviceLocalMemoryReclamation for RestoringReclaimer {
         fn reclaim_device_local_memory(
             &self,
-            _quiescence: VulkanDeviceLocalMemoryQuiescence,
+            _quiescence: &VulkanDeviceLocalMemoryQuiescence<'_>,
             requested_bytes: usize,
         ) -> Result<usize, VulkanError> {
             self.calls.fetch_add(1, Ordering::AcqRel);
@@ -259,21 +276,19 @@ fn device_local_execution_pressure_reclaims_until_protected_headroom_is_restored
     let tracker = VulkanDeviceLocalMemoryBudgetTracker::new(budget);
     let available_bytes = Arc::new(AtomicU64::new(100_000));
     let calls = Arc::new(AtomicU64::new(0));
-    let accounting = restore_protected_device_local_headroom(
-        budget,
-        vec![Arc::new(RestoringReclaimer {
-            available_bytes: Arc::clone(&available_bytes),
-            calls: Arc::clone(&calls),
-        })],
-        VulkanDeviceLocalMemoryQuiescence { _private: () },
-        Duration::ZERO,
-        || {
-            Ok(tracker.accounting_at(
-                available_bytes.load(Ordering::Acquire),
-            ))
-        },
-    )
-    .unwrap();
+    let accounting = with_test_device_local_memory_quiescence(|quiescence| {
+        restore_protected_device_local_headroom(
+            budget,
+            vec![Box::new(RestoringReclaimer {
+                available_bytes: Arc::clone(&available_bytes),
+                calls: Arc::clone(&calls),
+            })],
+            quiescence,
+            Duration::ZERO,
+            || Ok(tracker.accounting_at(available_bytes.load(Ordering::Acquire))),
+        )
+        .unwrap()
+    });
 
     assert_eq!(calls.load(Ordering::Acquire), 1);
     assert_eq!(accounting.currently_available_bytes, 150_000);
@@ -285,10 +300,10 @@ fn device_local_execution_pressure_fails_closed_when_release_does_not_settle() {
     #[derive(Debug)]
     struct UnsettledReclaimer;
 
-    impl VulkanDeviceLocalMemoryReclaimer for UnsettledReclaimer {
+    impl VulkanDeviceLocalMemoryReclamation for UnsettledReclaimer {
         fn reclaim_device_local_memory(
             &self,
-            _quiescence: VulkanDeviceLocalMemoryQuiescence,
+            _quiescence: &VulkanDeviceLocalMemoryQuiescence<'_>,
             requested_bytes: usize,
         ) -> Result<usize, VulkanError> {
             Ok(requested_bytes)
@@ -297,14 +312,16 @@ fn device_local_execution_pressure_fails_closed_when_release_does_not_settle() {
 
     let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
     let tracker = VulkanDeviceLocalMemoryBudgetTracker::new(budget);
-    let error = restore_protected_device_local_headroom(
-        budget,
-        vec![Arc::new(UnsettledReclaimer)],
-        VulkanDeviceLocalMemoryQuiescence { _private: () },
-        Duration::ZERO,
-        || Ok(tracker.accounting_at(100_000)),
-    )
-    .unwrap_err();
+    let error = with_test_device_local_memory_quiescence(|quiescence| {
+        restore_protected_device_local_headroom(
+            budget,
+            vec![Box::new(UnsettledReclaimer)],
+            quiescence,
+            Duration::ZERO,
+            || Ok(tracker.accounting_at(100_000)),
+        )
+        .unwrap_err()
+    });
 
     assert!(error.0.contains("execution refused"));
     assert!(error.0.contains("still lacks 50000 bytes"));
@@ -314,14 +331,16 @@ fn device_local_execution_pressure_fails_closed_when_release_does_not_settle() {
 fn device_local_execution_pressure_requires_an_evictable_store() {
     let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
     let tracker = VulkanDeviceLocalMemoryBudgetTracker::new(budget);
-    let error = restore_protected_device_local_headroom(
-        budget,
-        Vec::new(),
-        VulkanDeviceLocalMemoryQuiescence { _private: () },
-        Duration::ZERO,
-        || Ok(tracker.accounting_at(100_000)),
-    )
-    .unwrap_err();
+    let error = with_test_device_local_memory_quiescence(|quiescence| {
+        restore_protected_device_local_headroom(
+            budget,
+            Vec::new(),
+            quiescence,
+            Duration::ZERO,
+            || Ok(tracker.accounting_at(100_000)),
+        )
+        .unwrap_err()
+    });
 
     assert!(error.0.contains("execution refused"));
     assert!(error.0.contains("no evictable residency store"));
@@ -638,4 +657,13 @@ fn live_addressable_buffers_are_registered_for_device_fault_attribution() {
             .resolve(address)
             .is_none()
     );
+}
+pub(crate) fn with_test_device_local_memory_quiescence<T>(
+    operation: impl FnOnce(&VulkanDeviceLocalMemoryQuiescence<'_>) -> T,
+) -> T {
+    let memory_lifecycle = std::sync::RwLock::new(());
+    let quiescence = VulkanDeviceLocalMemoryQuiescence {
+        _memory_lifecycle: memory_lifecycle.write().unwrap(),
+    };
+    operation(&quiescence)
 }

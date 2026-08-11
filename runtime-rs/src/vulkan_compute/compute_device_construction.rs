@@ -211,17 +211,29 @@ impl VulkanComputeDevice {
         {
             return Ok(recent);
         }
-        self.quiesce()?;
         let reclaimers = VulkanDeviceLocalMemoryBudgetTracker::live_reclaimers(
             &self.device_local_memory_budget_tracker,
         )?;
-        restore_protected_device_local_headroom(
-            self.device_local_memory_budget,
-            reclaimers,
-            VulkanDeviceLocalMemoryQuiescence { _private: () },
-            Duration::from_millis(250),
-            || self.device_local_memory_accounting(),
+        let requested_bytes = usize::try_from(
+            self.device_local_memory_budget
+                .protected_headroom_deficit_at(recent.currently_available_bytes),
         )
+        .unwrap_or(usize::MAX);
+        let reclamations = reclaimers
+            .into_iter()
+            .map(|reclaimer| {
+                reclaimer.begin_device_local_memory_reclamation(requested_bytes)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.with_quiescent_memory_reclamation(|quiescence| {
+            restore_protected_device_local_headroom(
+                self.device_local_memory_budget,
+                reclamations,
+                quiescence,
+                Duration::from_millis(250),
+                || self.device_local_memory_accounting(),
+            )
+        })
     }
 
     fn reserve_device_local_memory(
