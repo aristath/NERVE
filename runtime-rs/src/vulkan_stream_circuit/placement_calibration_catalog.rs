@@ -1,5 +1,5 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v1";
+    "nerve.vulkan_placement_calibration_catalog.v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,11 +33,79 @@ pub struct VulkanPlacementDispatchGeometry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VulkanPlacementOperationGeometry {
+    Dispatch {
+        geometry: VulkanPlacementDispatchGeometry,
+    },
+    DirectedTransfer {
+        contract_id: String,
+        byte_count: usize,
+    },
+    Reduction {
+        contract_id: String,
+        element_count: usize,
+        element_byte_count: usize,
+        participant_count: usize,
+    },
+    LazyLoadWave {
+        contract_id: String,
+        resource_count: usize,
+        byte_count: usize,
+    },
+}
+
+impl VulkanPlacementOperationGeometry {
+    fn contract_id(&self) -> &str {
+        match self {
+            Self::Dispatch { geometry } => &geometry.contract_id,
+            Self::DirectedTransfer { contract_id, .. }
+            | Self::Reduction { contract_id, .. }
+            | Self::LazyLoadWave { contract_id, .. } => contract_id,
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        match self {
+            Self::Dispatch { geometry } => {
+                !geometry.contract_id.is_empty()
+                    && geometry.logical_extent > 0
+                    && geometry.sampled_extent > 0
+                    && geometry.sampled_extent <= geometry.logical_extent
+                    && geometry.input_width > 0
+                    && geometry.workgroup_count_x > 0
+                    && geometry.local_size_x > 0
+            }
+            Self::DirectedTransfer {
+                contract_id,
+                byte_count,
+            } => !contract_id.is_empty() && *byte_count > 0,
+            Self::Reduction {
+                contract_id,
+                element_count,
+                element_byte_count,
+                participant_count,
+            } => {
+                !contract_id.is_empty()
+                    && *element_count > 0
+                    && *element_byte_count > 0
+                    && *participant_count >= 2
+            }
+            Self::LazyLoadWave {
+                contract_id,
+                resource_count,
+                byte_count,
+            } => !contract_id.is_empty() && *resource_count > 0 && *byte_count > 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VulkanPlacementShapeClass {
     pub activation_batch_width: usize,
     pub input_byte_capacity: usize,
     pub output_byte_capacity: usize,
-    pub dispatches: Vec<VulkanPlacementDispatchGeometry>,
+    pub operations: Vec<VulkanPlacementOperationGeometry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -303,7 +371,7 @@ fn validate_behavior_identity(
         || behavior.shape.activation_batch_width == 0
         || behavior.shape.input_byte_capacity == 0
         || behavior.shape.output_byte_capacity == 0
-        || behavior.shape.dispatches.is_empty()
+        || behavior.shape.operations.is_empty()
         || !valid_sha256_digest(&behavior.input_fixture_digest)
     {
         return Err(VulkanPlacementCalibrationCatalogError(
@@ -319,9 +387,9 @@ fn validate_behavior_identity(
             .any(|digest| !valid_sha256_digest(digest))
         || behavior
             .shape
-            .dispatches
+            .operations
             .iter()
-            .any(|dispatch| !behavior.contract_ids.contains(&dispatch.contract_id))
+            .any(|operation| !behavior.contract_ids.iter().any(|id| id == operation.contract_id()))
     {
         return Err(VulkanPlacementCalibrationCatalogError(
             "placement behavior identity is not canonical or digest-complete".to_string(),
@@ -329,17 +397,9 @@ fn validate_behavior_identity(
     }
     if behavior
         .shape
-        .dispatches
+        .operations
         .iter()
-        .any(|dispatch| {
-            dispatch.contract_id.is_empty()
-                || dispatch.logical_extent == 0
-                || dispatch.sampled_extent == 0
-                || dispatch.sampled_extent > dispatch.logical_extent
-                || dispatch.input_width == 0
-                || dispatch.workgroup_count_x == 0
-                || dispatch.local_size_x == 0
-        })
+        .any(|operation| !operation.is_valid())
     {
         return Err(VulkanPlacementCalibrationCatalogError(
             "placement shape contains an invalid dispatch geometry".to_string(),
@@ -496,13 +556,15 @@ mod placement_calibration_catalog_tests {
                 activation_batch_width: 1,
                 input_byte_capacity: 16,
                 output_byte_capacity: 16,
-                dispatches: vec![VulkanPlacementDispatchGeometry {
-                    contract_id: "contract".to_string(),
-                    logical_extent: 8,
-                    sampled_extent: 8,
-                    input_width: 8,
-                    workgroup_count_x: 1,
-                    local_size_x: 64,
+                operations: vec![VulkanPlacementOperationGeometry::Dispatch {
+                    geometry: VulkanPlacementDispatchGeometry {
+                        contract_id: "contract".to_string(),
+                        logical_extent: 8,
+                        sampled_extent: 8,
+                        input_width: 8,
+                        workgroup_count_x: 1,
+                        local_size_x: 64,
+                    },
                 }],
             },
             input_fixture_digest: format!("sha256:{}", "c".repeat(64)),
@@ -678,7 +740,7 @@ mod placement_calibration_catalog_tests {
     #[test]
     fn catalog_deserialization_rejects_a_stale_schema() {
         let mut catalog = catalog_with_reference();
-        catalog.schema = "nerve.vulkan_placement_calibration_catalog.v0".to_string();
+        catalog.schema = "nerve.vulkan_placement_calibration_catalog.v1".to_string();
         let payload = serde_json::to_vec(&catalog).unwrap();
         assert!(
             VulkanPlacementCalibrationCatalog::from_json_slice(&payload)
@@ -705,5 +767,77 @@ mod placement_calibration_catalog_tests {
                 .duration_ns,
             10,
         );
+    }
+
+    #[test]
+    fn typed_non_dispatch_transactions_validate_without_fake_shader_geometry() {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        for (suffix, operation) in [
+            (
+                "transfer",
+                VulkanPlacementOperationGeometry::DirectedTransfer {
+                    contract_id: "contract".to_string(),
+                    byte_count: 4096,
+                },
+            ),
+            (
+                "reduction",
+                VulkanPlacementOperationGeometry::Reduction {
+                    contract_id: "contract".to_string(),
+                    element_count: 1024,
+                    element_byte_count: 4,
+                    participant_count: 3,
+                },
+            ),
+            (
+                "load",
+                VulkanPlacementOperationGeometry::LazyLoadWave {
+                    contract_id: "contract".to_string(),
+                    resource_count: 6,
+                    byte_count: 8192,
+                },
+            ),
+        ] {
+            let mut behavior = behavior();
+            behavior.execution_graph_digest = format!(
+                "sha256:{}",
+                match suffix {
+                    "transfer" => "1",
+                    "reduction" => "2",
+                    _ => "3",
+                }
+                .repeat(64),
+            );
+            behavior.shape.operations = vec![operation];
+            catalog
+                .record_reference(VulkanPlacementCanonicalReference {
+                    behavior,
+                    output_digest: format!("output-{suffix}"),
+                    state_digest: format!("state-{suffix}"),
+                })
+                .unwrap();
+        }
+        catalog.validate().unwrap();
+    }
+
+    #[test]
+    fn typed_transactions_reject_invalid_reduction_and_unknown_contract() {
+        let mut invalid_reduction = behavior();
+        invalid_reduction.shape.operations = vec![VulkanPlacementOperationGeometry::Reduction {
+            contract_id: "contract".to_string(),
+            element_count: 128,
+            element_byte_count: 4,
+            participant_count: 1,
+        }];
+        assert!(validate_behavior_identity(&invalid_reduction).is_err());
+
+        let mut unknown_contract = behavior();
+        unknown_contract.shape.operations = vec![
+            VulkanPlacementOperationGeometry::DirectedTransfer {
+                contract_id: "other-contract".to_string(),
+                byte_count: 16,
+            },
+        ];
+        assert!(validate_behavior_identity(&unknown_contract).is_err());
     }
 }

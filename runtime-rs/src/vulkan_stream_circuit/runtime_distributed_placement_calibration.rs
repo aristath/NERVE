@@ -342,7 +342,7 @@ fn distributed_calibration_execution_case(
     let contract_ids = contract_digests.keys().cloned().collect::<Vec<_>>();
     let implementation_digests = contract_digests.values().cloned().collect::<Vec<_>>();
 
-    let mut dispatches = Vec::with_capacity(execution_plan.dispatches.len());
+    let mut operations = Vec::with_capacity(execution_plan.dispatches.len());
     let mut shards = Vec::new();
     for (dispatch_ordinal, (dispatch, work)) in execution_plan
         .dispatches
@@ -365,13 +365,15 @@ fn distributed_calibration_execution_case(
                 )
             })
         })?;
-        dispatches.push(VulkanPlacementDispatchGeometry {
-            contract_id: dispatch.physical_execution_contract_id.clone(),
-            logical_extent: work.full_rows,
-            sampled_extent: work.sampled_rows,
-            input_width: dispatch.input_width,
-            workgroup_count_x,
-            local_size_x: artifact.artifact.local_size_x,
+        operations.push(VulkanPlacementOperationGeometry::Dispatch {
+            geometry: VulkanPlacementDispatchGeometry {
+                contract_id: dispatch.physical_execution_contract_id.clone(),
+                logical_extent: work.full_rows,
+                sampled_extent: work.sampled_rows,
+                input_width: dispatch.input_width,
+                workgroup_count_x,
+                local_size_x: artifact.artifact.local_size_x,
+            },
         });
         for shard in &dispatch.shards {
             let parameter_bytes = shard.parameters.iter().try_fold(
@@ -445,7 +447,7 @@ fn distributed_calibration_execution_case(
         activation_batch_width: phase.activation_batch_width(),
         input_byte_capacity: first_island.leader().input_byte_capacity,
         output_byte_capacity: last_island.tail().output_byte_capacity,
-        dispatches,
+        operations,
     };
     let execution_phase = match phase {
         VulkanTargetedComponentExecutionPhase::Decode => {
