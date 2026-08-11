@@ -177,6 +177,7 @@ def test_contract_owns_the_input_column_shader_and_physical_weight(
         "kind": "add_bf16_residual_to_bf16",
         "residual_binding": 1,
     }
+    assert distributed["phases"] == ["decode", "prefill"]
     assert distributed["equivalence"]["output"] == "absolute_relative_tolerance"
     assert distributed["local_intermediates"] == []
 
@@ -446,6 +447,8 @@ def test_input_column_physical_shaders_render_and_compile(tmp_path: Path) -> Non
         source = (tmp_path / shader_file).read_text()
         assert "PartitionControl" in source
         assert "binding = 2, std430" in source
+        assert "gl_WorkGroupID.y" in source
+        assert "batch_index * OUTPUT_SIZE" in source
         assert "{{" not in source
 
     compile_shader_artifacts(tmp_path)

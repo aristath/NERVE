@@ -46,8 +46,8 @@ float read_bf16_word(uint packed, uint index) {
     return bf16_to_f32(packed >> ((index & 1u) * 16u));
 }
 
-vec4 read_inputx4(uint column) {
-    const uint offset = column >> 1u;
+vec4 read_inputx4(uint batch_index, uint column) {
+    const uint offset = batch_index * (TOTAL_INPUT_SIZE / 2u) + (column >> 1u);
     const uint lo = input_frame.words[offset];
     const uint hi = input_frame.words[offset + 1u];
     return vec4(
@@ -81,11 +81,12 @@ void main() {
     const uint lane = gl_LocalInvocationID.x;
     const uint cluster = lane >> 5u;
     const uint cluster_lane = lane & 31u;
+    const uint batch_index = gl_WorkGroupID.y;
     const uint input_blocks = partition_control.input_count / BLOCK_COLUMNS;
     const uint input_words = partition_control.input_count / 4u;
     for (uint block = cluster; block < input_blocks; block += 32u) {
         const uint word = block * BLOCK_FP8_WORDS + cluster_lane;
-        const vec4 input_value = read_inputx4(word * 4u);
+        const vec4 input_value = read_inputx4(batch_index, word * 4u);
         const float lane_max = max(
             max(abs(input_value.x), abs(input_value.y)),
             max(abs(input_value.z), abs(input_value.w))
@@ -126,6 +127,6 @@ void main() {
         && row < OUTPUT_SIZE
         && gl_SubgroupInvocationID == 0u
     ) {
-        output_partials.values[row] = sum;
+        output_partials.values[batch_index * OUTPUT_SIZE + row] = sum;
     }
 }

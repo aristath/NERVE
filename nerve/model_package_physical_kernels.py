@@ -209,7 +209,7 @@ def physical_kernel_implementations_for_node(
             "local_size_x": local_size_x,
             "workgroup_count_x": (output_rows + output_tile_rows - 1)
             // output_tile_rows,
-            "phases": ["decode"],
+            "phases": ["decode", "prefill"],
             "formats": {
                 "storage": storage,
                 "compute": compute,

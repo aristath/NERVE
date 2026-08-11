@@ -2785,6 +2785,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             "linear_residual_input_columns_bf16.comp.template",
             {
                 "BLOCK_COLUMNS": str(block_columns),
+                "INPUT_SIZE": str(input_size),
                 "OUTPUT_SIZE": str(output_size),
             },
         )
