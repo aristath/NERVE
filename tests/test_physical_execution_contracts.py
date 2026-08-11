@@ -400,7 +400,7 @@ def test_compiler_does_not_guess_distribution_for_unsupported_storage(tmp_path: 
     assert {contract["strategy"] for contract in contracts} == {"single_device"}
 
 
-def test_prefill_distribution_uses_one_strongest_compatible_batch_partition(
+def test_batch_distribution_uses_one_finest_compatible_partition_per_phase(
     tmp_path: Path,
 ) -> None:
     node, circuit, tensor_index, kernel = projection_compiler_fixture(tmp_path)
@@ -435,9 +435,12 @@ def test_prefill_distribution_uses_one_strongest_compatible_batch_partition(
         and contract["phases"] == ["prefill"]
     ]
     assert len(distributed_prefill) == 1
-    assert distributed_prefill[0]["partition_extent"]["alignment_elements"] == 32
-    assert distributed_prefill[0]["geometry"]["dimensions"]["workgroup_count_x"] == 8
-    assert distributed_prefill[0]["artifacts"][0]["path"] == alternative_path.name
+    assert distributed_prefill[0]["partition_extent"]["alignment_elements"] == 2
+    assert distributed_prefill[0]["geometry"]["dimensions"]["workgroup_count_x"] == 128
+    assert (
+        distributed_prefill[0]["artifacts"][0]["path"]
+        == "shaders/parallel_projection_batch_bf16.spv"
+    )
     distributed_decode = [
         contract
         for contract in contracts

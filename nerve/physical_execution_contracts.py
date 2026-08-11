@@ -420,7 +420,7 @@ def build_kernel_physical_execution_contracts(
                 sorted(
                     candidates,
                     key=lambda contract: (
-                        -int(contract["partition_extent"]["alignment_elements"]),
+                        int(contract["partition_extent"]["alignment_elements"]),
                         contract["artifacts"][0]["path"],
                     ),
                 )[0]
