@@ -3,724 +3,410 @@
 ## Goal
 
 Compile and run `/mnt/models/models/deepseek-v4/flash-0731/safetensors` as a
-daily-driver NERVE model. Preserve source behavior, keep sparse routed experts
-independently demand-resident, expose runtime per-component representation
-selection, and optimize real multi-turn agentic inference past 30 tok/s and
-toward 50 tok/s without regressing supported Qwen models.
+daily-driver NERVE model while preserving source behavior and the architecture
+defined in `CONCEPT.md`.
 
-All implementation must remain capability- and graph-driven. Model-specific
-facts belong in the self-contained compiled package, never in runtime model-name
-branches. Normal chat is the benchmark path: 128K context, a 65,536-token output
-allowance, package-owned thinking and sampling behavior, complete-conversation
-warmup, turn recall, and exact teardown. Tests and model gates run sequentially.
+The performance target is **17-20 useful decode tokens per second** for the
+fully warm, demand-resident DeepSeek conversation workload:
 
-## Current evidence
+- 17 tok/s is the primary completion target;
+- 20 tok/s is the optimization target, not a mandatory artificial stopping
+  point; and
+- results below 17 tok/s indicate that material work remains unless hardware
+  measurements prove a lower physical ceiling.
 
-- The August 11 workstation failure was an AMD TTM LRU-list corruption reached
-  from kernel swapout during a long, near-capacity NERVE inference run; it was
-  not an application OOM or a Vulkan ring timeout. The runtime no longer lets
-  the 25 ms memory observer or an active allocation retry destroy Vulkan
-  backing. Dynamic expert and representation storage now uses heap-scaled,
-  retained slabs with independent logical allocation cohorts and coalescing
-  free ranges. Pressure recovery is a two-phase transaction: it first blocks
-  new store loads, drains existing loads, retires logical residency and updates
-  address tables while submission is legal; it then excludes submissions from
-  every NERVE logical device on that physical target, drains every registered
-  compute/transfer queue, and releases only fully inactive slabs. Shared
-  host-cache admission cannot reclaim another store's Vulkan allocation on an
-  active path. Exact sequential hardware-neutral tests cover observer
-  non-reclamation and hysteresis, pressure failure/settlement, physical queue
-  exclusion, slab sizing and free-range coalescing, logical-block versus
-  physical-slab eviction, and shared-cache fail-closed behavior. All-target
-  Vulkan/tokenizer compilation and formatting pass. No inference was rerun
-  after the crash; controlled live validation remains intentionally deferred
-  until it is explicitly authorized.
-- The accepted zero-load DeepSeek truth conversation is now 8.6600 decode tok/s
-  and 8.7912 prefill tok/s. It followed three discarded complete conversations
-  whose residency loads converged from 9,997 to 382 to zero; the measured fourth
-  conversation had zero reads, uploads, reloads, evictions, or residency
-  blocking. The demand-resident stream now commits the valid causal prefix at a
-  fault and resumes only the uncommitted suffix; it no longer creates model and
-  sampler baselines or restores and clean-replays the whole token. All 24
-  responses, generated-token digests, and resident-state digests matched the
-  prior package exactly. The cold path executed 1,548 fewer expert selections;
-  all three warmed conversations retained the exact 1,149,648 selections. Mean
-  decode improved 0.79% and prefill improved 1.51%, and every GPU returned to
-  its exact pre-run reservation. Qwen3.6-35B-A3B passed at 72.6436 versus
-  72.4232 decode tok/s and Qwen3.5-9B passed at 48.7490 versus 48.6914, with
-  byte-exact responses, zero measured paging, and exact teardown. The exact
-  tile-overlap attention transaction
-  reduced the real 2,224-token sampled attention-read phase from 26.785 to
-  19.150 ms per window and attention-score from 12.783 to 11.840 ms per window.
-  Decode improved 0.11%; the 0.37% prefill difference is below run variance.
-  NVMe paging is therefore not the steady-state limiter.
-- Re-attribution after the accepted attention transaction closes the standalone
-  hot-kernel pass. On the 2,224-token truth turn, hyper-connections now consume
-  20.138 ms per sampled window, attention read 19.150 ms, expert gate/up 17.904
-  ms, state commit 15.123 ms, attention score 11.840 ms, expert down 10.081 ms,
-  and dense projection 9.805 ms. Exact local scalar hyper/expert alternatives
-  are exhausted; their remaining material opportunities require cross-component
-  resident transactions or proposal-lane matrix amortization. Those concerns
-  are carried by the persistent-transaction, device-owned-residency, and DSpark
-  items below rather than another isolated-kernel rearrangement.
-- A fresh schema-v10 compilation with explicit fixed-source MXFP4 dispatch
-  contracts passed a complete four-conversation product gate, preserved behavior
-  and turn recall, and restored every GPU reservation, but its zero-load truth
-  conversation reached only 7.4952 decode and 7.8016 prefill tok/s. The same
-  10,004 -> 414 -> 8 -> 0 load convergence proves the 11.01% decode regression
-  is not paging. Device time regressed broadly rather than in one host phase:
-  the 2,224-token truth turn measured 74.625 seconds of attention read, 52.927
-  seconds of hyper-connections, 50.215 seconds of expert gate/up, 32.073 seconds
-  of attention score, 28.071 seconds of expert down, and 27.590 seconds of dense
-  projection. Keep 8.5828/8.6922 as the acceptance baseline until an equivalent
-  complete gate beats it.
-- Equal layer counts are not an execution-cost-equivalent placement on the live
-  workstation even across five nominally identical R9700s. The exact sequential
-  six-expert compact-MXFP4 microcase measured 0.586, 1.194, 0.415, 0.418, and
-  1.375 ms on PCI 03, 07, 0a, 0d, and 21 respectively. A width-six native
-  compact batch took 2.480 ms on 0d versus 5.040 ms on 21, while preexpanded FP8
-  was essentially tied at 1.392 versus 1.362 ms. Links were all PCIe 5.0 x16 and
-  reservations were restored exactly. Placement and representation therefore
-  need a live, implementation-specific cost signal; device name and capability
-  class are insufficient.
-- Complete host critical-path instrumentation covers 99.99% of wall time. The
-  prior fully timestamped 2,224-token DeepSeek truth turn incurred only 4.788
-  seconds of residency blocking while attributing 70.598 seconds to attention
-  read, 49.812 seconds to hyper-connections, 45.682 seconds to expert gate/up,
-  29.396 seconds to attention score, 26.420 seconds to dense projection, 25.478
-  seconds to expert down, 8.505 seconds to state memory, and 6.972 seconds to
-  grouped projection. That diagnosis established that the host predominantly
-  waits for device work; keeping expensive per-dispatch timestamps on every
-  token was no longer justified.
-- Normal chat now records detailed device phases for the first execution window
-  and then one bounded sample every 128 windows. Profiled and unprofiled command
-  sequences and submission templates have distinct identities, deferred paths
-  never emit timestamps that their completion path cannot consume, and reports
-  no longer mislabel a sampled duration as a full-stream per-token cost. On the
-  same fixed topology and current package, DeepSeek improved from 7.8596 to
-  8.0284 decode tok/s and from 7.8136 to 7.9794 prefill tok/s. The zero-load
-  truth conversation preserved behavior and recall and restored all five exact
-  reservations. Qwen3.6-35B-A3B improved from a matched 70.8880 to 71.4034
-  decode tok/s, while Qwen3.5-9B reached 48.8568; both had zero measured paging
-  and exact teardown. The remaining DeepSeek gap is device execution, not
-  always-on telemetry.
-- Semantic attribution separates genuine sparse-expert operations from grouped
-  attention projections and distinguishes expert gate/up, down and reduction,
-  dense/grouped projections, normalization, quantization, state memory, index
-  transforms, attention score, selection and read, positional encoding,
-  hyper-connections, and pointwise activation. Cross-device device time is
-  sampled by a bounded rotating probe at completed prompt boundaries; production
-  transfers remain timestamp-free and have zero host waits. Automatic placement
-  now derives every cut payload and direction from the compiled graph, measures
-  the production-compatible physical route for each ordered device pair after
-  one discarded replay, and includes the exact payload-specific cost in the
-  contiguous-partition objective. Missing measurements fail placement instead
-  of becoming a zero-cost edge, and non-chain wiring remains an explicit graph
-  concern rather than being flattened. The real Qwen boundary is 4,096 bytes;
-  its staged route measured 23.16 microseconds from PCI 0a to 0d and 22.12
-  microseconds in the reverse direction, confirming that physical activation
-  movement is not a material steady-state limiter.
-- The refined instrumentation passed exact sequential tests plus complete
-  thinking-enabled regression gates. Qwen3.6-35B-A3B measured 60.6544 decode and
-  45.8668 prefill tok/s. A fresh Qwen3.5-9B package now discovers its producer's
-  unambiguous documented sampling policy when its machine-readable generation
-  file omits one; the package-owned warmed gate measured 48.8240 decode and
-  142.5696 prefill tok/s with correct turn recall, zero measured residency
-  activity, and exact pre-workload VRAM restoration. Conflicting documented
-  profiles are not guessed, explicit machine metadata always wins, and no model
-  name participates in discovery.
-- The current real six-expert MXFP4 microbenchmark measures 1.00392 ms for
-  gate/up and 0.43088 ms for down. A host-visible-weight path is 3.912x slower.
-  Gate/up is the first sparse-expert kernel target. Two alternative indexed
-  attention schedules were rejected: subgroup-per-token changed product output,
-  while an exact reduction-order-preserving tiled version was slower at both
-  tiny and production geometry (1.79814 vs 1.57616 ms).
-- A third indexed-attention candidate cached each packed BF16 key/value word in
-  workgroup memory and reused it for score and value accumulation. At the exact
-  q64/kv1/d512/r128/k8192 geometry it was byte-exact on the local fixture and
-  reduced best device time from 19.96104 to 8.73592 ms, but the authoritative
-  complete gate rejected it. With the accepted contiguous five-GPU placement,
-  three complete warmups, and a zero-load measured conversation, decode fell
-  from 8.4228 to 8.3290 tok/s and generated behavior changed. The shader,
-  compiler selection, and tests were removed. Shared-memory reuse is therefore
-  not promotion evidence unless every reachable geometry and the full product
-  path remain exact and faster.
-- Splitting indexed attention into an exact score transaction followed by a
-  value transaction was also rejected after two complete product gates. The
-  reduction-order-preserving score kernel was byte-exact and faster in isolation:
-  0.35104 versus 0.47208 ms at a 4K live context, 1.29800 versus 2.79764 ms at
-  128K, and 7.02364 versus 20.05572 ms at the compiled maximum. Nevertheless,
-  static maximum dispatch produced only 7.9582 mean decode tok/s, and a generic
-  context-capacity-bound dispatch reduced the authoritative zero-load truth run
-  further to 7.7540 decode and 7.9702 prefill tok/s. The latter had zero reads,
-  uploads, reloads, evictions, or residency blocking, retained coherent answers
-  and turn recall, and restored every GPU reservation. Both implementations were
-  removed. A full F32 score plane, an added dispatch and buffer transaction, and
-  duplicated score/value traversal cost more in the complete stream than the
-  locally faster score kernel saves. The next attention design must fuse score,
-  selection, and value consumption into one compiled transaction and improve the
-  whole attributed attention phase; do not materialize all scores between
-  independently scheduled kernels.
-- Caching one paged-state base address per token in the existing fused indexed-
-  attention workgroup was byte-exact and 10.9% faster in the exact
-  q64/kv1/d512/r128/k8192 microbenchmark (2.67260 versus 3.00004 ms), but it too
-  failed the complete product gate. After three full warmup conversations, the
-  measured conversation was fully resident, preserved coherent answers and turn
-  recall, and restored every GPU reservation, yet reached only 7.9096 decode and
-  7.9520 prefill tok/s versus the accepted 8.4228/8.3570 baseline. The 6.09%
-  decode regression proves that removing redundant address translation inside
-  this barrier topology does not improve the complete stream. The shader,
-  renderer selection, exact fixture, and compiled package were removed. Do not
-  retry state-base caching without also replacing the serial full-width reduction
-  and barrier schedule as one materially different fused transaction.
-- A fused 16-head by 16-token cooperative-matrix indexed-attention transaction
-  eliminated the scalar 512-wide score reduction and reused each latent state
-  tile across score and value multiplication. At q64/kv1/d512/r128/k8192 it
-  reduced the representative 128K device microcase from 3.07856 to 1.44916 ms,
-  but rounding online-softmax weights to BF16 changed the output (0.00048828
-  maximum and 0.00001689 RMS error). The real product path confirmed the
-  numerical change was not acceptable promotion evidence: a 1,615-token
-  zero-new-load warmup turn sustained only 6.424 decode tok/s versus the
-  accepted 8.4228 baseline. The gate was stopped immediately, all five exact
-  pre-run VRAM reservations were restored, and the shader, selection logic,
-  tests, and compiled package were removed. A future matrix-tiled attention
-  transaction must retain F32 online-softmax weights and exact BF16 outputs;
-  raw cooperative-matrix throughput does not compensate for an altered stream.
-- Three further exact local-kernel candidates were rejected after the refined
-  trace. Paired packed-BF16 state reads were 1.1% slower, and parallel tile
-  exponentials were 0.5% slower; both preserved every BF16 output bit. A
-  subgroup-tree hyper-connection reduction was 36% faster in isolation (0.16316
-  vs 0.25456 ms) and byte-exact, but failed the complete product gate at 7.800
-  mean decode tok/s versus the accepted 8.4228 baseline. It was removed from
-  source and the compiled package was restored. Local shader wins are not
-  promotion evidence when the complete routed stream does not improve.
-- A grouped-query-head indexed-attention schedule inspired by the row blocking
-  in llama.cpp's Vulkan flash-attention path was also rejected locally before a
-  product gate. It reused each latent KV read across independent query heads
-  while preserving every head's existing reduction, online-softmax order, and
-  every BF16 output bit at q64/kv1/d512/r128/k8192. Four heads per workgroup took
-  30.46644 ms versus 19.16268 ms for the scalar-head kernel; even two heads took
-  23.33104 ms versus 19.77996 ms. Serial 512-wide reductions and their register/
-  shared-state pressure cost more than the duplicate read traffic. The shader,
-  renderer, and exact fixture were removed. Future head-row blocking must split
-  dimensions across smaller subgroups or use matrix tiles; do not repeat several
-  full-width head reductions inside one workgroup.
-- Folding the 512 dimensions onto a 256-thread workgroup was likewise
-  byte-exact but slower at the same real geometry. On the target's native
-  64-lane subgroups, each lane handled two dimensions while each original
-  subgroup reduction and the eight-partial serial sum retained their exact
-  order. It still took 24.44188 ms versus 19.75720 ms, a 23.71% regression.
-  The candidate and exact fixture were removed. Maximum dimension parallelism
-  is useful here; reducing resident waves does not pay for serial folded loads
-  and reductions.
-- Four compact-expert representation candidates were also rejected on the same
-  discrete AMD GPU and real six-expert geometry. Resolving and caching dynamic
-  addresses once per workgroup preserved output but made gate/up 54% slower
-  (0.67512 vs 0.43760 ms). Raising the gate tile from 32 to 128 rows was slower
-  (0.86488 vs 0.43760 ms). A byte-exact once-per-route FP8 intermediate plus a
-  prequantized down dispatch was slower than the fused down path (0.28520 vs
-  0.24268 ms). Finally, llama.cpp-style MXFP4-to-signed-INT8 decode and packed
-  INT8 dot products preserved a representable conformance input but improved
-  gate/up by only 2.9% (0.42648 vs 0.43876 ms), which cannot justify changing
-  the activation representation and model numerics. All four candidates were
-  removed; no experimental runtime path remains.
-- A generic mounted execution-graph phase now records all of its component
-  dispatches as one ordered resident sequence. Exact Vulkan tests prove byte-for-
-  byte output and state equivalence while reducing a colocated graph from one
-  host submission per dispatch to one submission for the phase. In the identical
-  cold DeepSeek `hi` probe this reduced direct sequence submissions from 4,276 to
-  3,284 and total host queue-submit calls from 5,430 to 4,438 without changing
-  generated tokens or residency decisions. It is one transaction segment, not
-  completion of the persistent stream transaction.
-- Device-to-host output ranges can now be mounted as a reusable packed readback
-  transaction with retained command resources and persistently mapped staging.
-  The attached parallel decoder uses one two-range transaction for token and
-  confidence outputs instead of rebuilding two independent read paths. Its exact
-  test replays changed source data twice with one transfer per replay. The
-  deterministic cold DeepSeek probe improved from 2.027 to 2.077 decode tok/s and
-  reduced host synchronization from 17.763 to 17.310 seconds. Qwen3.6-35B-A3B
-  passed at 59.4312 decode tok/s and Qwen3.5-9B at 48.6694, with correct recall
-  and exact VRAM restoration.
-- A follow-up decoder experiment proved that fewer host submissions are not, by
-  themselves, a resident transaction. It grouped input, ingress copy,
-  demand-resident processing, egress copy, conditional output, and packed
-  readback as five `SubmitInfo2` records in one `queue_submit2` call. On the
-  zero-load DeepSeek truth conversation it cut sequence queue submissions from
-  60,634 to 21,655 and fence waits from 64,965 to 25,986, but regressed decode
-  from 8.4228 to 7.8368 tok/s. Removing a redundant host rewrite of the demand
-  predicate recovered only 8.0160 tok/s. Both variants preserved exact tokens,
-  zero-load residency, recall, teardown, and VRAM reservations, so the measured
-  regression is in the device execution topology rather than paging or model
-  behavior. The experiment was removed in full. Do not retry multi-command
-  queue batching as if it were command fusion.
-- A stricter follow-up recorded input, ingress, demand-resident processing,
-  egress, guarded output, and packed readback into one primary Vulkan command
-  buffer. The fourth complete conversation, after three discarded warmups, was
-  fully resident and behaviorally exact but measured 8.0284 mean decode tok/s
-  versus the accepted 8.4228 baseline: a 4.68% regression. Its result is nearly
-  identical to the rejected multi-command queue batch despite eliminating the
-  intermediate submissions. Serializing independent transfer and compute work
-  into one queue therefore destroys useful device overlap. The integration was
-  removed; the generic retained-copy and owned-invocation primitives remain as
-  building blocks for an asynchronous hardware execution graph.
-- Splitting each device's existing per-token command graph between independent
-  compute and transfer queues was also rejected. An initial bridge-submission
-  topology was behaviorally exact but measured 7.9682 mean decode tok/s. A
-  direct timeline-handoff version removed the empty compute bridges and reached
-  only 8.1466 tok/s, still 3.28% below the accepted 8.4228 baseline after three
-  complete warmups and with zero measured residency loads. Both variants
-  restored every GPU reservation exactly and were removed in full. Two queue
-  submissions per device per token cost more than the roughly 0.1-ms staged
-  activation edge can recover; independent hardware queues only become useful
-  when a bounded resident window exposes genuine inter-token or inter-stream
-  overlap instead of repartitioning the current serialized token schedule.
-- Replaying the stable initial demand-gated feedback topology was also tested
-  and removed. The implementation correctly keyed fresh-input and carried-input
-  shapes separately, survived real miss rollback/resume, replayed three warmed
-  calibration windows, preserved exact long-form behavior and recall, and
-  restored every GPU reservation. It still measured only 8.1736 mean decode
-  tok/s versus the accepted 8.4228 baseline. Normal adaptive execution selected
-  scalar decode after calibration, so the cached transaction was absent from
-  steady-state truth turns and could not improve them. Do not add more caching
-  around an execution candidate that does not win; the resident transaction
-  itself must remove device work or expose useful overlap before replay matters.
-- Demand-paged residency correctness, immutable miss records, causal suffix
-  resume, complete-conversation convergence, shared bounded host caching, and
-  exact teardown are implemented. Resident FP8 coexistence is also implemented
-  and measured, but the complete matched trial rejected it because several real
-  geometries regressed and its footprint was worse than native compact MXFP4.
-- Package-derived placement calibration now measures six real execution
-  signatures once, reuses prepared tensor/slice plans across all targets, and
-  finishes the five-device sweep in under one minute. A capacity-constrained
-  contiguous dynamic program jointly selects device order and boundaries from
-  those component costs. Demand-paged placement enforces both lower and upper
-  retained-byte quotas around the capacity-proportional share; the rejected
-  upper-only variant caused pathological paging, while the bounded variant
-  completed the cold DeepSeek conversation without evictions.
-- Demand-paged prefix selection now distinguishes physical executability from
-  the best compatible residency plan. It keeps adding caller-ranked compatible
-  devices while their aggregate safe capacity can eliminate addressable-set
-  paging, then applies the paged working-set quota before live latency ranking.
-  The real Qwen3.6-35B-A3B auto-placement moved from a calibration-sensitive
-  31/9-layer split with 312 loads and 39.6642 decode tok/s to a stable 19/21
-  split with zero measured loads, reloads, or evictions and 69.2016 decode
-  tok/s. Qwen3.5-9B still selected one GPU and measured 48.8308 decode tok/s.
-  The unchanged fixed DeepSeek control completed three discarded conversations
-  followed by a zero-load, zero-reload truth conversation at 7.9334 decode and
-  7.8914 prefill tok/s with correct recall. Every selected GPU returned to its
-  exact recorded pre-workload reservation.
-- The first endpoint-aware, timeline-only DeepSeek product probe exposed and
-  corrected two completion-lifecycle defects rather than hiding them: retained
-  stream-edge copies now permit timeline-ordered simultaneous replay without an
-  internal host completion, and completed deferred resources retire an observed
-  monotonic value before reuse after a downstream epoch join. Exact sequential
-  Vulkan tests cover both cases. The runtime Vulkan execution module now contains
-  no binary-fence create/reset/wait path and no unbounded device-idle teardown;
-  every selected GPU returned to its exact pre-probe reservation.
-- With those fixes, four fresh thinking-enabled `hi` conversations completed in
-  one mounted DeepSeek process. Decode progressed from 2.47 cold, to 5.14, 7.01,
-  and 9.31 tok/s. The fourth sustained windows were 10.02, 9.69, 9.06, and 8.80
-  tok/s. The process retained 6,159 expert units / 82.34 GB of payload, but the
-  first ten-layer store reached 26.73/27.18 GB while other stores retained 7--13
-  GB of headroom, causing 12 evictions and 11 reloads. Static component cost and
-  addressable-byte balance therefore remain insufficient: observed per-component
-  sparse working-set pressure must participate in boundary selection at safe
-  stream/conversation epochs.
-- The first authoritative gate of that placement exposed a deterministic host
-  completion failure at the recall turn. Device timestamps proved all 484
-  recorded dispatches (59,904,077 work units and 22.63 GB of estimated traffic)
-  had reached both TOP_OF_PIPE and BOTTOM_OF_PIPE in about 5.29 ms, while the
-  reusable binary fence remained unsignaled. No ring timeout, reset, allocation
-  leak, or reservation loss occurred. Direct sequence replay is therefore being
-  migrated to monotonically increasing timeline completion; reusable binary
-  fence reset is not a valid persistent-stream completion protocol.
-- Payload-aware transfer pricing passed exact sequential graph, direction,
-  missing-measurement, and non-chain-wiring tests plus real thinking-enabled
-  gates. Qwen3.6-35B-A3B measured 69.7402 decode tok/s, Qwen3.5-9B measured
-  48.7356, and the unchanged explicit DeepSeek control measured 7.8666 decode
-  and 7.9348 prefill tok/s after three discarded complete conversations. All
-  truth sets had zero loads, misses, reloads, evictions, and residency blocking,
-  preserved behavior and recall, and restored every exact pre-run reservation.
-- Runtime placement can now learn exact per-component and per-resource hot-set
-  pressure from selector activity, distinguish selected/resident/addressable
-  bytes without double-counting aliased resources, and evaluate a contiguous
-  boundary change only at a completed conversation checkpoint. The objective
-  prices calibrated execution, exact graph-derived directional transfers, new
-  admission, and the complete hot set lost from every changed physical store.
-  Unchanged physical stores retain the same validated store object and residency
-  across remount; partial aliases and incompatible mounts are rejected rather
-  than silently reused. Exact sequential tests cover positive and negative net
-  benefit, partial aliasing, compatibility rejection, retained residency, final
-  teardown, and shared-package refusal. Thinking-enabled product gates remained
-  healthy: Qwen3.6-35B-A3B measured 69.6690 decode tok/s, Qwen3.5-9B measured
-  48.8408, and the explicit fixed-topology DeepSeek control measured 7.8162
-  decode and 7.8300 prefill tok/s after three discarded complete conversations.
-  The DeepSeek truth set recorded 1,149,648 resident hits and zero loads, misses,
-  evictions, reloads, or transfer stalls; behavior, turn recall, and exact NERVE
-  allocation release were preserved. Explicit placement never invokes the
-  adaptive remounter.
-- The compiler now recognizes a graph- and capability-proven
-  hyper-connection/RMS/FP8 transaction and emits one exact scalar decode shader
-  for it. A fresh DeepSeek package contracts 43 pre and 43 post/pre regions,
-  reducing the compiled stream from 1,560 to 1,474 dispatches per pass without a
-  model-name branch. All six measured-turn token digests are identical to the
-  unfused package. After three complete warmup conversations the zero-load truth
-  set measured 7.9570 decode and 7.8618 prefill tok/s, versus the matched current
-  fixed-topology control's 7.8596 and 7.8136. Qwen3.6-35B-A3B measured 71.4898
-  decode tok/s and Qwen3.5-9B measured 48.7954 with no paging or behavioral
-  regression. Every pre-run GPU reservation was restored exactly. This is a
-  valid compiled-transaction building block, but it does not beat the 8.4228
-  accepted DeepSeek baseline and therefore does not complete the device-kernel
-  or persistent-stream work.
-- Fusing inverse RoPE with a reusable exact FP8 representation for its grouped
-  projection consumer was rejected by a complete product gate. The graph-driven
-  implementation contracted all 43 eligible producer/consumer pairs and every
-  measured response digest remained byte-identical, but mean decode fell from
-  the matched 7.9570 to 7.7696 tok/s and prefill fell from 7.8618 to 7.8238.
-  The measured fourth conversation had 1,149,648 resident hits and zero loads,
-  misses, evictions, reloads, transfers, or residency blocking, and teardown
-  restored all five pre-run GPU reservations exactly. Materializing and reading
-  a full reusable quantized representation costs more than the grouped kernel's
-  local on-the-fly conversion. The shaders, compiler path, runtime shape support,
-  tests, and compiled package were removed; do not move a local conversion into
-  a global representation pass unless multiple consumers amortize that pass.
+The target applies to real multi-turn agentic inference, not a synthetic token
+loop. The product gate uses 128K context, a 65,536-token output allowance,
+package-owned thinking and sampling behavior, complete-conversation warmup,
+turn recall, and exact teardown. Useful DSpark-accepted tokens count; rejected
+proposals do not.
 
-- A graph- and capability-discovered mixed normalization/RoPE transaction now
-  combines the independent unscaled query-head branch and weighted, exact-FP8-QDQ
-  key/value branch without materializing their BF16 intermediates. The compiler
-  contracts 43 four-node regions into 43 transactions and reduces the DeepSeek
-  stream from 1,474 to 1,345 dispatches per pass without a model-name or layer-index
-  branch. Discovery refuses shared intermediates, mismatched numerical contracts,
-  unsupported targets, and any graph whose earlier consumer would be moved behind
-  the transaction. After three complete discarded conversations, the measured
-  fourth conversation reached 8.1540 decode and 8.3784 prefill tok/s versus the
-  matched current package's 7.9570/7.8618. All five response digests were identical,
-  recall was correct, and the truth conversation recorded 1,149,648 resident hits
-  with zero loads, misses, evictions, reloads, transfers, or residency blocking.
-  Qwen3.6-35B-A3B passed at 72.0300 decode and 148.8120 prefill tok/s versus
-  71.4898/140.1718, while Qwen3.5-9B remained within run variance at 48.7338 decode
-  and 141.0704 prefill tok/s versus 48.7954/141.5648; every response digest matched.
-  All selected GPUs restored their exact pre-run reservations. The transaction
-  remains a universal compiler building block; its product high-water mark is
-  now superseded by the accepted score pipeline described below.
-- Fusing indexed sparse attention with its sole inverse-RoPE consumer was
-  rejected by the complete product gate despite an exact local win. The generic
-  graph transaction contracted all 43 eligible pairs, removed one dispatch and
-  one 64-by-512 BF16 intermediate write/read per sparse-attention component, and
-  preserved every measured response byte. At the real q64/kv1/d512/r128/k8192
-  geometry it was byte-exact and reduced the two-operation microcase from
-  19.80100 to 19.18656 ms, a 3.10% improvement. After three complete discarded
-  conversations, however, the zero-load truth set reached only 8.1876 decode and
-  8.3302 prefill tok/s: decode improved just 0.41% over the matched current
-  package's 8.1540 while prefill regressed 0.58%, and decode remained 2.79% below
-  the accepted 8.4228 high-water mark. All five measured responses were
-  byte-identical, the truth set recorded only resident hits, and teardown restored
-  every exact pre-run GPU reservation. The transaction, tests, and compiled
-  package were removed. Do not fuse inverse RoPE onto the existing serial
-  full-width attention schedule as an isolated dispatch-elimination exercise;
-  positional post-processing must be part of a materially different attention
-  topology that improves the complete product path.
-- A genuinely blocked indexed-attention schedule was rejected locally before
-  package compilation. One native 64-lane subgroup owned each query head, eight
-  heads shared a 512-thread workgroup, and every state vector was loaded once
-  into shared memory for all eight heads. Each lane retained eight strided
-  dimensions, and eight subgroup reductions reproduced the accepted 512-wide
-  score accumulation order exactly. The real q64/kv1/d512/r128/k8192 fixture
-  preserved every BF16 output bit, but took 22.80848 ms versus 19.12952 ms for
-  the accepted scalar-head kernel, a 19.23% regression. Exact arithmetic across
-  eight reductions plus strided accumulators creates more register/shared-memory
-  pressure than the amortized KV reads save. The shader and conformance test
-  were removed immediately; no model package or product gate was run.
-- The exact fused indexed-attention score pipeline is the new accepted
-  transaction. The existing 512 score workers retain the original eight
-  subgroup reductions while a ninth controller region finalizes token N as the
-  workers reduce token N+1 through a double-buffered score plane. This removes
-  one full-workgroup barrier per score token without materializing scores outside
-  the attention transaction or changing softmax/value arithmetic. The shader
-  derives its reduction count from `gl_SubgroupSize`; compiler selection depends
-  only on graph geometry, subgroup operations, and a 576-invocation workgroup,
-  never a model or layer name. It is byte-exact and faster at both reachable
-  compressed geometries: r4/k512 improved by 15.42% and r128/k8192 by 11.15% in
-  the final device microgate. The compiler selected it for all 41 compressed
-  attention components and retained the established kernel for the two
-  local-only components. After three full discarded conversations, the
-  zero-load truth set reached 8.5828 decode and 8.6922 prefill tok/s, respectively
-  1.90% and 4.01% above the prior accepted high-water marks, with every response
-  byte preserved. Qwen3.6-35B-A3B reached 72.2308 and 71.7204 decode tok/s in two
-  independent regression gates versus 72.0300, while Qwen3.5-9B reached 48.7832
-  versus 48.7338; all responses matched, measured residency deltas were zero,
-  and teardown restored exact reservations.
-- Moving the demand-window state and sampler baseline copies from synchronous
-  host calls into the first device submission was rejected after a complete
-  product gate. All 24 responses were byte-identical to the accepted package,
-  load deltas converged from 9,991 to 370 to zero, the measured fourth
-  conversation had zero reads, uploads, reloads, evictions, or residency
-  blocking, and all five GPU reservations were restored exactly. Nevertheless,
-  mean decode fell from 8.5924 to 8.4578 tok/s (1.57%) and prefill fell from
-  8.6604 to 8.6426 tok/s. Queueing the same full-state copies removes a host-side
-  wait but leaves their memory traffic on the critical device queue. The
-  experiment was removed completely. Do not retry asynchronous bulk snapshots;
-  the resident transaction must avoid creating the baseline copy in the first
-  place.
-- Replacing the compact all-hit predicate check with direct scans of every
-  persistently mapped `(feedback lane, demand segment)` miss-queue epoch was
-  rejected after the same complete gate. Behavior, token and state digests,
-  9,997 -> 382 -> 0 load convergence, zero-load truth, teardown, and exact GPU
-  reservations all matched. Copy submissions and waits were effectively
-  unchanged, proving the predicate check was not the source of those transfers,
-  while truth decode regressed from 8.6600 to 8.3782 tok/s and prefill from
-  8.7912 to 8.4948 tok/s. The experiment was removed completely. Preserve the
-  one compact predicate check until a normal completion/commit record can prove
-  all-hit status without scanning every queue.
-- Reusing the sampler's resident `executed_tick_count` as that all-hit proof and
-  carrying the same completion snapshot into commit was also rejected by the
-  complete gate. All 24 responses, generated-token digests, resident-state
-  digests, 9,997 -> 382 -> 0 load convergence, zero-load truth behavior,
-  teardown, and exact GPU reservations matched, but truth decode regressed from
-  8.6600 to 8.3478 tok/s and prefill from 8.7912 to 8.3982 tok/s. Reading the
-  larger shared completion record on every attempt costs more than the compact
-  predicate it replaces. The experiment was removed completely; keep completion
-  records terminal and do not turn them into another hot-path polling surface.
-- Treating execution epochs as allocation-free lifetime pins and moving physical
-  heap-headroom observation exclusively to residency mutations was rejected by
-  the complete gate. The narrow causal-continuation, disjoint-fault, and active-
-  execution reclamation tests passed, and the product run retained the accepted
-  9,997 -> 382 -> 0 load convergence with a zero-load truth conversation and
-  exact teardown. It nevertheless reduced truth decode from 8.6600 to 8.1942
-  tok/s and prefill from 8.7912 to 8.4184 tok/s. All five GPU reservations were
-  restored byte-for-byte and the experiment was removed completely. Preserve
-  the current execution-epoch admission boundary until the device-owned
-  residency transaction removes the epoch round trip itself; deleting its
-  device-budget observation in isolation is not a product-path optimization.
-- Serializing every bounded per-device submission group against consumer-queue
-  address publication, then removing the demand-feedback execution epochs, was
-  rejected by the authoritative gate. The queue-identity contract, causal-
-  continuation tests, and disjoint-fault tests passed; all conversations stayed
-  coherent, load deltas converged through 9,996 -> 383 -> 0, the truth set had
-  zero loads, and teardown restored all five GPU reservations exactly. Truth
-  decode nevertheless fell from 8.6600 to 8.4594 tok/s (2.32%) and prefill from
-  8.7912 to 8.6088 tok/s. Host queue exclusion makes allocation retirement
-  correct but does not make residency device-owned, and its per-window locking
-  is another orchestration cost. The implementation was removed completely.
-  Do not substitute a queue mutex for the resident generation/timeline protocol
-  required by item 1.
-- Making a permanently selected scalar/resident adaptive-feedback winner stop
-  maintaining its attached DSpark state was also rejected by the authoritative
-  gate. The candidate was behaviorally exact, retained the accepted
-  9,997 -> 382 -> 0 load convergence, and made the measured all-hit path remove
-  every `speculative_draft` host call. It cut sequence submissions from 15,786
-  to 13,155, copy submissions from 31,729 to 21,211, and copy waits from 10,706
-  to 190. Despite those large orchestration reductions, truth decode regressed
-  from 8.6600 to 8.4492 tok/s and prefill from 8.7912 to 8.2090 tok/s. All five
-  GPU reservations were restored exactly and the lifecycle machinery was removed
-  completely. Those decoder-maintenance commands were asynchronously overlapped,
-  not the limiting wall-clock path. Do not add dormant-decoder state or remount
-  policy solely to reduce host counters; DSpark must instead become a winning,
-  device-owned proposal/verification transaction under item 5.
-- A known-input causal-verification wavefront was rejected after exact state
-  tests and the authoritative product gate. It queued the target's speculative
-  lanes as one causal device-major transaction, kept full-state and sampler
-  checkpoints off the all-hit path, and fell back to exact scalar continuation
-  only when a real demand fault invalidated the cross-device wavefront. Full
-  state, partial-prefix commit, and fault-fallback tests passed. The complete
-  run converged through 10,087 -> 304 -> 196 -> 0 loads; its measured
-  conversation had zero reads, uploads, reloads, evictions, or blocking, and
-  every response was byte-identical to the accepted gate. Truth decode was
-  nevertheless 8.6288 versus 8.6600 tok/s and prefill was 8.7452 versus
-  8.7912 tok/s. Every GPU returned to its exact reservation and the shader,
-  transaction state, fallback plumbing, tests, and obsolete-path displacement
-  were removed completely. Preserving causal correctness across lanes is not
-  sufficient: the next verification topology must overlap useful proposal or
-  target work rather than serially queueing the same scalar token dependency.
-- Deferring demand-fault discovery to the ordinary scheduler completion path
-  was also rejected and removed completely. It eliminated the separate compact
-  all-hit predicate read and moved miss continuation behind the existing
-  terminal value, while preserving every response byte, exact causal state,
-  9,995 -> 384 -> 0 warmup convergence, a zero-load truth conversation, and
-  byte-exact GPU reservation restoration. It nevertheless reached only 8.6174
-  decode / 8.8102 prefill tok/s versus the accepted 8.7166 / 8.7574. This
-  rearranged the same fragmented submission graph and turned the scheduler's
-  normal completion boundary into the residency state machine; it did not make
-  the bounded transaction persistent. Do not retry host-side completion
-  inference as a substitute for a device-side fault branch.
+NERVE must remain model-independent. DeepSeek is the first demanding proof of
+the architecture, not a runtime special case. Model-specific structure and
+facts belong in the self-contained compiled package. Runtime execution,
+placement, transport, residency, representation selection, and planning must
+be driven by typed contracts and graph structure rather than model names.
+
+## Architectural direction
+
+NERVE will use **hybrid physical execution islands** beneath its stable logical
+execution graph.
+
+A layer remains a standalone logical component with typed ports, state, and
+editable wiring. Its selected physical realization may use:
+
+- one device;
+- serialized components or regions on different devices;
+- tensor parallelism inside selected operations or connected regions;
+- whole-expert parallelism;
+- tensor parallelism within selected experts;
+- replicated hot experts or other resources;
+- independently demand-resident cold resources; or
+- a measured combination of these strategies.
+
+TP is neither globally enabled nor globally forbidden. The runtime selects it
+only where a complete, output-valid measurement shows that it wins for the
+actual execution contract, geometry, device group, owner, split, and transport.
+
+The compiler describes legal implementation and partition contracts. It does
+not assign physical devices. The runtime resolves those contracts against the
+currently selected targets, their reservations and safe remaining capacity,
+the local placement calibration, and the mounted graph.
+
+## Current baseline and constraints
+
+- The latest accepted fully warm DeepSeek product gate recorded 8.7166 decode
+  tok/s and 8.7574 prefill tok/s with byte-identical responses, zero truth
+  loads, and exact reservation restoration. The detailed phase attribution
+  below comes from the preceding 8.6600 decode tok/s zero-load truth run.
+- That sampled hot decode path spends approximately 20.138 ms in
+  hyper-connections, 19.150 ms in attention reads, 17.904 ms in expert gate/up,
+  15.123 ms in state commit, 11.840 ms in attention score, 10.081 ms in expert
+  down, and 9.805 ms in dense projection. The 17 tok/s target requires about
+  58.8 ms per useful token; 20 tok/s requires 50 ms.
+- NVMe paging is not the warm steady-state limiter. Lazy expert loading remains
+  required for capacity and cold execution, but warm decode optimization must
+  focus on the device execution graph and its critical path.
+- Equal layer counts and nominally identical GPUs are not equal-cost placement.
+  Execution cost depends on the selected implementation, format, geometry,
+  device, transport, current reservation, and surrounding execution island.
+- `nerve-gpu-bench/placement-benchmark.json` invalidates the old assumption
+  that serialization is always preferable on this workstation. Across its 910
+  equal-work forced-split comparisons, TP wins 835. On the five R9700s, FP8,
+  INT4, and MXFP4 results show that the winning strategy changes with format,
+  target group, and participant count.
+- The same benchmark also proves that TP is not universally faster. Some pairs
+  and formats favor serialization, and the fastest absolute group is often
+  smaller than the largest available group.
+- Cross-vendor device-local external memory may allocate successfully while
+  producing invalid shader results. Transport routes must be output-validated;
+  shared-host transport remains a valid measured fallback.
+- The August 11 failure reached AMD TTM LRU corruption during a long,
+  near-capacity run. Do not resume live inference without explicit
+  authorization. The first authorized validation must record every selected
+  target's pre-run reservation, stop on the first kernel or driver anomaly, and
+  prove exact release of NERVE-owned capacity without disturbing pre-existing
+  allocations.
+- All tests and model gates run sequentially. Every Rust test command uses
+  `-- --test-threads=1`; Vulkan tests are selected and executed individually.
+
+The following phase budget is a diagnostic guide, not a collection of isolated
+microbenchmark targets. Overlap changes the critical path, so the complete
+transaction remains authoritative:
+
+| Effective critical-path phase | Current | 17 tok/s guide | 20 tok/s guide |
+| --- | ---: | ---: | ---: |
+| Hyper-connections | 20.1 ms | 10 ms | 8 ms |
+| Attention read and score | 31.0 ms | 18 ms | 15 ms |
+| Expert gate/up and down | 28.0 ms | 13 ms | 11 ms |
+| State commit | 15.1 ms | 8 ms | 7 ms |
+| Dense projection | 9.8 ms | 5 ms | 4 ms |
+| Remaining work | about 11.4 ms | about 5 ms | about 5 ms |
+
+## Completion discipline
+
+For every numbered item below:
+
+1. Define its behavioral, residency, placement, and performance acceptance
+   criteria before implementation.
+2. Add canonical unit and integration coverage, including unhappy paths and
+   teardown.
+3. Run a fast exact microbenchmark using one warmup and only enough calls to
+   answer whether the candidate wins. A microbenchmark taking more than one
+   minute is itself a failed design.
+4. Run the complete DeepSeek product gate after the candidate passes locally.
+5. Run the Qwen3.6-35B-A3B, Qwen3.6-27B, and Qwen3.5-9B regression gates before
+   committing a runtime-performance milestone. Maintain a broader
+   hardware-neutral compile and contract-smoke matrix for every supported
+   architecture so shared runtime work cannot silently become DeepSeek-shaped.
+6. Reject and remove candidates that change behavior, regress the complete
+   stream, violate placement or residency, destabilize a GPU, or fail to
+   restore exact pre-workload reservations.
+7. Remove the TODO item only after an adversarial review confirms that every
+   acceptance criterion is satisfied.
 
 ## Work queue
 
-1. Make a resident sparse-expert hit completely device-owned. This is a hard
-   prerequisite of the persistent stream transaction: a bounded transaction
-   cannot be persistent while its normal all-hit path leaves the device.
+### 1. Define typed physical execution contracts
 
-   - Eliminate the remaining compact host all-hit predicate read and terminal
-     completion wait. Selector-to-resource addresses and generation metadata
-     are already resident, and physical allocation lifetime is now ordered by
-     consumer-queue address publication rather than a host execution epoch. An
-     all-hit gate must continue directly into expert execution without a host
-     fence or notification read.
-     Normal predicate restoration is now performed by the directly executed
-     residency gate, and normal completion reads only the synchronized output
-     device's view of the one shared predicate rather than resetting and reading
-     every device view. The complete DeepSeek gate remained byte-identical with
-     zero truth loads at 8.7166 decode / 8.7574 prefill tok/s; Qwen 35B and 9B
-     regression gates were also byte-identical and all-hit. The remaining
-     boundary is exactly one compact output-view read plus the terminal wait;
-     remove that boundary rather than broadening the host completion snapshot.
-   - Only a real miss may publish an immutable fault record and stop at the exact
-     causal checkpoint. Resume only the uncommitted suffix after the host updates
-     the address table and acknowledges the fault.
-   - The causal gate now stops before an unavailable resource is consumed and
-     resumes only the uncommitted graph suffix and feedback lanes. This removed
-     per-window model/sampler snapshots and the final clean replay: state before
-     the gate is already valid committed progress, while no state after the gate
-     has executed. Do not reintroduce shadow/versioned full-state pages for
-     ordinary residency faults. True cancellation or device failure belongs to
-     the supervised transaction boundary in item 7, where the failed stream is
-     quarantined rather than silently reused from partially advanced state.
-   - Complete durable coverage for the remaining device-owned path: all-hit
-     windows without host predicate reads, disjoint misses, eviction,
-     address-version changes, repeated faults,
-     cancellation, poisoned-worker isolation, and teardown. All-hit and
-     miss/resume must produce identical committed tokens, routed experts,
-     sampler state, and state digests from the same checkpoint.
+- Introduce a model-independent contract identifying:
+  - operation or connected-region family;
+  - compiled artifact and implementation digest;
+  - decode or prefill phase;
+  - physical storage, compute, and accumulation formats;
+  - exact geometry or representative compiler-emitted shape class;
+  - parameter partition dimension and aligned shard boundaries;
+  - replicated, sharded, or routed inputs;
+  - concatenated, reduced, routed, or locally retained outputs;
+  - legal local-intermediate flow;
+  - persistent, transient, KV/state, and lazy-resource requirements; and
+  - canonical numerical and state-equivalence requirements.
+- Make the compiler emit legal contracts and alternate implementations without
+  selecting devices or embedding workstation policy in the package.
+- Fail closed when the selected artifact does not declare a valid partition
+  contract. Do not infer distribution from operation names, descriptor counts,
+  tensor names, or model-level dtype.
+- Use the same typed contract definitions in the compiler, runtime, benchmark,
+  and tests.
 
-2. Make cross-device transfers part of the compiled transaction. This is the
-   second hard prerequisite of the persistent stream transaction; device-local
-   execution cannot be composed while every graph edge remains a host-scheduled
-   operation.
+### 2. Add a resolved physical execution-island plan
 
-   - Preserve arbitrary ordered visits, including `gpu0 -> gpu1 -> gpu0`, with
-     persistent activation rings and timeline dependencies. A 32-KiB edge must not
-     cause a host wait.
-   - Select direct peer or staged transfer from measured capabilities and costs.
-     Keep contiguous layer/component placement by default and never use tensor
-     parallelism on this workstation.
-   - First optimize single-stream latency. Pipeline independent streams across
-   otherwise idle segments only after that path is correct and measured.
+- Keep the logical runtime graph and its standalone layer/node boundaries
+  intact. A physical island implements one node or a compatible connected
+  region without changing observable ports, state, duplication, bypass, or
+  rewiring semantics.
+- Replace the insufficient owner-plus-`component_shard_devices` description
+  with a resolved plan that records, per node instance or region:
+  - implementation contract;
+  - entry and exit targets;
+  - participant devices and roles;
+  - owner/coordinator;
+  - shard ranges or expert ownership;
+  - transport and synchronization routes;
+  - phase-specific execution schedule; and
+  - exact residency and transient-memory requirements.
+- TP participants are physical implementation roles, not new logical graph
+  nodes. Expert resources remain internal independently selectable groups, not
+  hundreds of peer layer components in the public graph.
+- Permit a decode and prefill schedule to differ while sharing parameter
+  residency when doing so does not remount tensors or invalidate stream state.
 
-3. Compile a persistent per-device stream transaction that preserves measured
-   asynchronous device overlap after the device-owned residency and transfer
-   primitives above are complete.
+### 3. Make placement calibration safe for runtime consumption
 
-   - Turn each ordered physical-device component segment into a stable bounded
-     hardware execution topology. Preserve independent compute and transfer
-     streams and synchronize them with device-side timeline dependencies and
-     exact range hazards. Do not force independent engines through one serial
-     primary command buffer, and do not disguise existing serialization as
-     several `SubmitInfo2` records in one host call.
-   - Put ticks, token IDs, dispatch dimensions, router results, expert addresses,
-     sampler state, stop/cancel flags, causal frontiers, and commit records in
-     GPU-resident control buffers consumed through predicates and indirect
-     dispatch. Normal token values, context growth, expert choices, and
-     address-table updates must not require command re-recording or a host return.
-   - Submit one bounded stream window and watchdog quantum as a small fixed set of
-     asynchronous device streams. Prove zero-miss host submissions and waits scale
-     with devices, windows, and the fixed stream topology—not tokens, layers,
-     selected experts, or graph nodes. Command-buffer caching alone is not
-     completion; a previous template experiment reused almost every command buffer
-     but fell to 1.205 tok/s because it retained the fragmented submission graph.
-     Do not retry the rejected per-token compute/transfer split: even direct
-     timeline handoffs regressed the complete gate to 8.1466 tok/s. The next
-     topology must span a bounded resident window and overlap independent token
-     streams or proposal lanes before paying for additional queue submissions.
-     Caching the current demand-gated resident window is likewise exhausted: it
-     replayed correctly but remained slower than scalar execution and the
-     complete gate fell to 8.1736 tok/s. Change the executed device topology,
-     not merely how the losing topology is recorded.
-     A terminal-wait-only one-tick demand path was also rejected and removed in
-     full. It preserved coherent output and exact teardown, but a repeated turn
-     reached only 4.403 decode tok/s with 826 incremental loads; even subtracting
-     all measured residency blocking leaves an estimated upper bound near 5.6
-     tok/s. It still regrouped the scalar graph into the rejected per-device
-     batch topology. Do not revive it as a mode or fallback.
-   - The mounted input and output graph phases and packed host readback are now
-     reusable transaction segments. Compose their dispatches, ingress/egress
-     copies, demand gates, processor dispatches, and terminal readback into the
-     bounded asynchronous topology. Preserve the accepted path until that topology
-     wins the complete product gate; neither rejected decoder transaction may
-     remain as a fallback, hidden mode, or future target shape.
+- Keep the existing placement artifact as evidence only until its schema
+  preserves exact execution-case identity. Do not consume its current
+  format-only ranking directly in automatic placement.
+- Make benchmark cases execute the same artifacts and partition contracts that
+  inference can select. Synthetic data may surround the real contract, but the
+  benchmark must not contain an approximate second implementation of TP.
+- Preserve every valid non-dominated candidate rather than only the locally
+  fastest owner or transport. A slightly slower local owner may remove the next
+  graph boundary and produce the fastest complete plan.
+- Key observations by contract, phase, shape class, device group, split,
+  input target, output target, owner, transport, and relevant driver/artifact
+  identity.
+- Measure representative compiler-emitted geometries rather than one arbitrary
+  payload or an expensive size sweep. One warmup and one or two timed calls are
+  sufficient to decide whether a candidate is faster.
+- Measure complete single-device, serialized, TP, expert-parallel, hybrid,
+  directed-boundary, reduction, and lazy-load-wave transactions. Include all
+  computation, synchronization, transport, and collection needed before the
+  output is usable.
+- Do not hardcode a four-device architectural limit. Use staged candidate
+  expansion: measure singles and pairs, expand promising groups, and directly
+  validate every final group the planner may select.
+- Record only canonically output-valid observations. Missing or stale
+  observations make that candidate unavailable rather than free or assumed.
 
-4. Make temporal prefill a real multi-token device transaction. Execute prompt
-   blocks through the same resident gates, ordered segments, transfers, attention
-   updates, and terminal completion without a host loop per token. Choose block
-   width from context geometry, transient-state capacity, residency headroom, and
-   measured hardware behavior. Verify every causal state against scalar prefill
-   and report time-to-first-token separately from decode.
+### 4. Complete the dense FFN tensor-parallel substrate
 
-5. Rebuild attached DSpark execution on the persistent transaction. The compiler
-   already discovers the package-owned `parallel_backbone_markov` decoder and its
-   trained five-token minimum and legal seven-token execution width without model
-   names. Fuse proposal, target verification, confidence-prefix comparison,
-   accepted-state selection, commit/rollback, and draft catch-up into one
-   device-owned transaction. Promote it automatically only when exact proposal,
-   accepted-prefix, routed-expert, sampler, and state equivalence pass and useful
-   committed tokens per complete cycle beat scalar chat. The current 33.33%
-   acceptance and 2.853/0.967 useful tok/s width-five/width-seven results are a
-   rejected baseline, not a mode to force.
+- Implement and validate the complete gate/up-to-down island:
+  1. Publish or distribute the normalized hidden input.
+  2. Compute aligned gate/up output-row shards.
+  3. Keep every activated intermediate shard local.
+  4. Consume the matching down-projection input-column shard locally.
+  5. Produce full-width F32 partial outputs.
+  6. Reduce once on the selected coordinator.
+  7. Convert and add the residual exactly once.
+- Ensure every participant stores only its assigned permanent tensor ranges;
+  the owner must not retain a redundant full tensor.
+- Support decode and prefill through artifact-declared BF16, FP8, MXFP4, INT4,
+  and other valid representations. A format without a correct distributed
+  contract remains single-device or serialized.
+- Validate immediate component output, persistent state, parameter residency,
+  transient peak, transport, cancellation, and teardown against the canonical
+  single-device execution.
 
-6. Optimize deterministic attention scoring and selection after the attention-read
-   path. Evaluate fused score/select, deterministic radix-prefix, blockwise or
-   hierarchical selection, and avoiding full-score materialization. Preserve
-   exact tie ordering and score-descending output. Measure progressively larger
-   real contexts rather than hiding growth behind a short benchmark.
+### 5. Implement lazy whole-expert parallelism
 
-7. Preserve bounded failure handling without putting it on the hot path. Isolate
-   Vulkan execution behind supervised per-device workers carrying complete stream
-   transactions, not component calls. Retain bounded watchdog progress, quarantine
-   only the poisoned worker, preserve the first failure and last causal checkpoint,
-   and keep all other workers and the UI responsive without per-token IPC.
+- Execute the router once on the layer coordinator and keep routing metadata on
+  the device.
+- Dispatch the six selected routed experts concurrently to their owners. Run
+  each expert's gate/up, activation, weighting, and down projection on the same
+  device so its intermediate never crosses a device boundary.
+- Execute the shared expert concurrently when dependencies allow, then reduce
+  routed and shared expert results exactly once on the selected coordinator.
+- Keep each expert independently demand-resident. An unavailable expert may
+  publish an immutable fault at the exact causal checkpoint; resident experts
+  and already committed graph progress must not be replayed.
+- Use atomic residency groups for a tensor-sharded expert. It is runnable only
+  when all required fragments are resident, and eviction must never leave a
+  partially resident unusable expert.
+- Add optional intra-expert TP as a separately measured candidate. Do not shard
+  every expert merely because the mechanism exists.
+- Use marginal expert frequency and joint co-selection telemetry to place and
+  replicate hot experts. Optimize concurrent per-device expert makespan, not
+  the sum of six independent expected costs.
+- Allow a compiler-declared predictable router dependency to trigger safe
+  prefetch or preselection without a DeepSeek-specific runtime branch.
 
-8. Complete capability-driven per-component representation selection. Preserve
-    the native source representation whenever it wins on the assigned target.
-    Add dense or exactly valid structured INT4, FP8, INT8, and FP16 candidates only
-    through device-local measurement and behavioral-equivalence evidence. Promotion
-    must account for the whole routed working set, resident footprint, reload
-    traffic, representation boundaries, and live headroom; capability advertises a
-    candidate but never selects it by itself.
+### 6. Build the hybrid placement and scheduling optimizer
 
-9. Extend the generic product gate with a representative tool-call round trip,
-    malformed-output rollback, and long-stream continuity. Use package-owned chat
-    behavior and sampling defaults, official thinking behavior, agentic context,
-    complete-conversation warmup, coherent final answers, turn recall, and exact
-    teardown without model-name branches.
+- Enumerate legal single-device, serialized, expert-parallel, TP, replicated,
+  demand-resident, and hybrid execution-island candidates from the mounted
+  graph and compiled contracts.
+- Treat every detected compatible target as eligible unless the caller
+  explicitly excludes it. Current allocations are reservations: inspect each
+  target immediately before planning and use only its measured safe remaining
+  capacity.
+- Attach exact permanent, transient-peak, KV/state, cache-quota, and atomic
+  load-wave byte vectors to every candidate.
+- Optimize **scheduled critical-path time**, not a simple sum of operation
+  durations. Model compute and transfer queues, dependency edges, collectives,
+  independent expert branches, resource contention, and legal overlap.
+- Use a hierarchical solve:
+  1. place the persistent backbone and layer coordinators;
+  2. assign expert banks, replicas, and lazy cache quotas;
+  3. choose local physical implementations and shard groups; and
+  4. construct the resource-constrained execution schedule.
+- Use Pareto/resource-constrained dynamic programming for the canonical ordered
+  graph while retaining a general DAG/island interface for custom NERVE wiring.
+  Never discard a partial plan solely because it is locally slower when it has
+  different remaining capacity, output placement, residency, or future routing
+  options.
+- Optimize warm decode, prefill/TTFT, and cold/miss behavior as separate measured
+  objectives. Do not hide severe miss latency inside one average or remount the
+  model merely to switch phases.
+- Replan when reservations, selected targets, graph wiring, or implementation
+  contracts change. Expert hotness may adapt online without rebuilding the
+  stable backbone plan per token.
 
-10. Complete heterogeneous cost-based placement. Keep the existing smallest
-    capacity-safe contiguous device prefix, partial-reservation handling, integrated
-    GPU exclusion, explicit-wiring preservation, and representation/placement
-    fixed-point solve. Add compiler-emitted compatible BF16/INT8 alternatives and
-    measured cross-class execution/transfer ranking so a graph may spill to a
-    compatible discrete Intel GPU or CPU without recompilation when AMD capacity is
-    exhausted.
+### 7. Make hybrid execution device-owned
 
-    - Rank physical instances inside the same capability class with a fast live
-      calibration of the package's actual implementation families. The probe must
-      use one fixed warmup and enough useful work to leave transient idle clocks,
-      finish in under one minute for the whole candidate set, preserve pre-existing
-      reservations, and report representation-specific costs rather than a single
-      synthetic FLOP score. Feed those costs into the representation/placement
-      fixed point so native MXFP4 work can avoid a device that is only competitive
-      for FP8, without changing graph order or introducing tensor parallelism.
-    - Optimize the contiguous partition for predicted serial stream latency subject
-      to exact per-device capacity and communication cost. Do not equate component
-      count, advertised capability, or free bytes with execution cost. Retain the
-      smallest device prefix only among placements that do not create avoidable
-      paging or a materially slower serial bottleneck.
-11. Gate every runtime-performance milestone before commit. Run exact sequential
-    tests, then full DeepSeek, Qwen3.6-35B-A3B, and Qwen3.5-9B conversations on
-    equivalent allowlisted discrete AMD placement. DeepSeek truth starts only after
-    a complete zero-load conversation. Reject microbenchmark-only wins, behavioral
-    changes, Qwen regressions, placement violations, GPU faults, or failure to
-    restore every pre-workload VRAM reservation. Reach 30 decode tok/s, continue
-    toward 50, and stop only when the attributed path has no material avoidable host
-    round trip, GPU bubble, conversion, or unfused memory pass.
+- Make a resident sparse-expert hit continue directly into expert execution
+  without a host predicate read, fence, or terminal wait. Only a real miss may
+  stop the bounded transaction and publish a fault record.
+- Make cross-device edges, TP fan-out/collection, expert dispatch/reduction,
+  and arbitrary ordered visits such as `gpu0 -> gpu1 -> gpu0` part of the
+  compiled transaction through persistent activation rings and timeline
+  dependencies.
+- Preserve independent compute and transfer engines. Do not serialize them into
+  one primary command buffer or disguise the same serial topology as multiple
+  submissions in one host call.
+- Put ticks, token IDs, dispatch dimensions, router results, expert addresses,
+  state, sampler control, stop/cancel flags, causal frontiers, and commit records
+  in device-resident control buffers consumed through predicates and indirect
+  dispatch.
+- Prove that the fully resident hot path scales host submissions and waits with
+  bounded windows and physical execution streams—not tokens, layers, selected
+  experts, shards, or graph nodes.
+- Preserve bounded watchdog and failure handling outside the hot path. A failed
+  worker is quarantined at the last causal checkpoint without corrupting other
+  devices, streams, or the UI.
 
-    - Do not resume live inference after the August 11 TTM failure without
-      explicit authorization. The first authorized validation must record every
-      selected target's pre-run reservation, exercise retained-slab reuse and a
-      quiescent pressure boundary separately, stop on the first kernel/driver
-      anomaly, and prove both NERVE-acquired capacity release and preservation of
-      pre-existing allocations before any long benchmark is attempted.
+### 8. Reduce the remaining non-expert critical path
 
-12. Perform a final adversarial review against `CONCEPT.md`. Compiled artifacts
-    must remain self-contained and model-specific; compiler discovery, runtime
-    operators, graph wiring, placement, representation, residency, and stream
-    transactions must remain reusable by unseen models. Finish with an empty TODO,
-    a clean owned worktree, and every milestone committed and pushed.
+- Add measured execution-island candidates for the four-way hyper-connection
+  structure. Evaluate branch parallelism, local fusion, and selective TP while
+  preserving Sinkhorn, reduction, and residual ordering.
+- Treat attention as its own partition family. Define legal query/head,
+  indexer, latent-state, KV/state, output-projection, and reduction contracts
+  rather than reusing the FFN partition rules.
+- Improve attention read and score as one complete transaction. Do not
+  materialize a full F32 score plane or split score and value into independently
+  scheduled kernels when the complete stream loses.
+- Reduce state-commit cost by publishing only authoritative causal changes
+  through the persistent transaction. Do not reintroduce full-state baseline
+  copies, clean replay, or hot-path completion polling.
+- Re-evaluate dense projections inside the surrounding island so local outputs
+  can feed their next consumer without unnecessary publication or conversion.
+
+### 9. Make temporal prefill a true multi-token transaction
+
+- Execute prompt blocks through the same resident gates, execution islands,
+  transfers, attention updates, and terminal completion without a host loop per
+  token.
+- Choose block width from exact context geometry, transient-state capacity,
+  residency headroom, and measured hardware behavior.
+- Verify every causal state transition against scalar prefill and report TTFT,
+  prompt throughput, and decode separately.
+
+### 10. Rebuild DSpark on the hybrid persistent engine
+
+- Use the package-discovered `parallel_backbone_markov` contract and its legal
+  proposal widths; do not identify DSpark through a model-name branch.
+- Fuse proposal, target verification, confidence-prefix comparison,
+  accepted-state selection, commit/rollback, and draft catch-up into a
+  device-owned multi-lane transaction.
+- Let DSpark exploit otherwise idle execution islands and GPUs without slowing
+  the scalar target critical path.
+- Promote it automatically only when proposal state, accepted prefix, routed
+  experts, sampler state, final stream state, and generated behavior pass the
+  canonical gate and useful committed tokens per complete cycle improve.
+- Report proposal throughput, acceptance distribution, verification cost, and
+  useful tok/s. Do not count generated-but-rejected draft tokens as throughput.
+
+### 11. Complete capability-driven representation selection
+
+- Preserve the native source representation whenever it is supported and wins
+  on the assigned target.
+- Add alternative structured INT4, FP8, INT8, FP16, BF16, or other formats only
+  through compiler-emitted legal contracts and behavioral-equivalence evidence.
+- Select representation and placement together. Account for whole-island
+  execution, conversion boundaries, resident footprint, lazy reload traffic,
+  transient peak, and current headroom—not an isolated kernel or advertised
+  TOPS figure.
+- Reuse the mechanism for unseen compatible models; no DeepSeek, Qwen, vendor,
+  or device-name branches belong in runtime selection.
+
+### 12. Complete the product and regression gate
+
+- Extend the generic product gate with a representative tool-call round trip,
+  malformed-output rollback, cancellation, repeated residency faults, eviction,
+  long-stream continuity, and turn recall.
+- Test single-target, serialized multi-target, TP, expert-parallel, and selected
+  hybrid plans with equivalent model work. Multi-target measurements include
+  computation, synchronization, transfers, and collectives.
+- Warm DeepSeek with complete conversations until one full conversation has zero
+  residency loads. Discard all warmup timings and measure the following complete
+  conversation without unloading or remounting the model.
+- Require coherent answers, package-owned thinking and sampling, identical
+  accepted behavior and state digests where exactness is required, and exact
+  post-run restoration of every selected target's pre-workload reservation.
+- Require at least 17 useful decode tok/s, continue optimizing toward 20 tok/s,
+  and investigate any regression before accepting a milestone.
+- Run equivalent fully warmed Qwen3.6-35B-A3B, Qwen3.6-27B, and Qwen3.5-9B
+  conversations before each runtime-performance milestone is committed.
+- Before final completion, compile and run the generic product smoke gate for
+  every downloaded architecture NERVE claims to support, except a model the
+  caller has explicitly excluded. Unsupported structures must fail through a
+  typed missing contract, never a model-name branch or silent fallback.
+
+### 13. Perform the final adversarial review
+
+- Verify the implementation against `CONCEPT.md` and the goal at the top of this
+  file.
+- Confirm that the compiled package remains self-contained and model-specific,
+  while compiler discovery, runtime operators, physical execution islands,
+  graph wiring, placement, transport, representation, residency, and stream
+  transactions remain reusable by unseen models.
+- Confirm that no global serialization, global TP, fixed device count, vendor
+  assumption, model-name branch, format-only ranking, or synthetic benchmark
+  shortcut controls production placement.
+- Confirm that the 17-20 useful tok/s result is from the normal chat path with
+  the required warmup, context, output allowance, thinking behavior, recall,
+  safety checks, and exact teardown.
+- Remove completed work from this file. Completion means the work queue is empty,
+  tests and product gates pass sequentially, the owned worktree is clean, and all
+  accepted milestones are committed and pushed.
+
+## Rejected shortcuts and non-regression guardrails
+
+- A faster isolated shader is not promotion evidence. The complete routed stream
+  must remain behaviorally correct and faster.
+- Do not reconstruct TP cost from advertised compute or independent bandwidth
+  numbers. Measure the complete executable contract.
+- Do not replace the old global-serialization assumption with global TP.
+- Do not make every expert tensor-parallel. Prefer whole-expert concurrency when
+  it wins, then selectively shard only the experts or shared paths that benefit.
+- Do not treat successful allocation or external-memory import as proof of valid
+  cross-device execution.
+- Do not serialize independent compute and transfer work into one queue merely
+  to reduce submission counts.
+- Do not add host-visible expert weights, full-state snapshots, clean token
+  replay, full-score materialization, or new hot-path polling surfaces.
+- Do not force DSpark when accepted useful tokens per cycle lose to scalar chat.
+- Do not optimize for an arbitrary token cap, short context, disabled thinking,
+  synthetic text generation, cold-run timing, or benchmark-only success.
+- Do not keep rejected experimental modes or compatibility fallbacks in this
+  unreleased codebase.
