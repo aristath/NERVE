@@ -694,7 +694,19 @@ def _distributed_kernel_contract(
                 }
             ],
             inputs=[
-                {"binding": 0, "distribution": "replicated"},
+                {
+                    "binding": 0,
+                    "distribution": (
+                        "routed"
+                        if op == "independent_sparse_moe_down"
+                        else "replicated"
+                    ),
+                    **(
+                        {"dimension": 0, "alignment_elements": 1}
+                        if op == "independent_sparse_moe_down"
+                        else {}
+                    ),
+                },
                 *[
                     {
                         "binding": binding,

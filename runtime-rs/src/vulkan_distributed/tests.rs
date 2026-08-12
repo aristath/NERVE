@@ -1962,11 +1962,30 @@ mod tests {
         producer.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
         producer.output_activation = producer.input_activation.clone();
         producer.output_activation.binding = 1;
+        producer.output_activation.signal_id = "expert-intermediate".to_string();
+        producer.output_activation.slot += 1;
+        producer.output_collection = OutputCollection::Routed;
+        producer.local_intermediates = vec![
+            nerve_execution_contracts::LocalIntermediateContract {
+                signal: producer.output_activation.signal_id.clone(),
+                producer_binding: 1,
+                consumer_binding: 0,
+                format: "bf16".to_string(),
+            },
+        ];
         let mut consumer = producer.clone();
         consumer.dispatch_index = 8;
         consumer.node_id = "consumer".to_string();
         consumer.input_activation = producer.output_activation.clone();
         consumer.input_activation.binding = 0;
+        consumer.input_distribution = InputDistribution::Routed;
+        consumer.output_activation.signal_id = "expert-output".to_string();
+        consumer.output_activation.slot += 1;
+        for (producer_shard, consumer_shard) in
+            producer.shards.iter().zip(&mut consumer.shards)
+        {
+            consumer_shard.input_range.byte_count = producer_shard.output_byte_count;
+        }
 
         let groups = resolved_physical_execution_islands(
             &[producer.clone(), consumer.clone()],
@@ -1975,10 +1994,17 @@ mod tests {
         .unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].dispatch_indices(), vec![7, 8]);
-        assert!(groups[0].transient_memory.iter().all(|requirement| {
-            requirement.kind
-                == VulkanPhysicalExecutionTransientMemoryKind::SharedActivationAllocation
-        }));
+        assert_eq!(
+            groups[0]
+                .transient_memory
+                .iter()
+                .filter(|requirement| {
+                    requirement.kind
+                        == VulkanPhysicalExecutionTransientMemoryKind::PrivateShardIntermediate
+                })
+                .count(),
+            producer.shards.len(),
+        );
 
         let mut non_adjacent = consumer.clone();
         non_adjacent.dispatch_index = 9;
@@ -2036,6 +2062,17 @@ mod tests {
         producer.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
         producer.output_activation = producer.input_activation.clone();
         producer.output_activation.binding = 1;
+        producer.output_activation.signal_id = "expert-intermediate".to_string();
+        producer.output_activation.slot += 1;
+        producer.output_collection = OutputCollection::Routed;
+        producer.local_intermediates = vec![
+            nerve_execution_contracts::LocalIntermediateContract {
+                signal: producer.output_activation.signal_id.clone(),
+                producer_binding: 1,
+                consumer_binding: 0,
+                format: "bf16".to_string(),
+            },
+        ];
         let mut route = producer.input_activation.clone();
         route.binding = 8;
         route.signal_id = "expert-routes".to_string();
@@ -2073,9 +2110,17 @@ mod tests {
         consumer.node_id = "expert-down".to_string();
         consumer.input_activation = producer.output_activation.clone();
         consumer.input_activation.binding = 0;
+        consumer.input_distribution = InputDistribution::Routed;
+        consumer.output_activation.signal_id = "expert-output".to_string();
+        consumer.output_activation.slot += 1;
         consumer.selected_resource_partitions[0].parameters_per_resource = 1;
         consumer.selected_resource_partitions[0].address_table_binding = 6;
         consumer.selected_resource_partitions[0].parameter_slots_binding = 7;
+        for (producer_shard, consumer_shard) in
+            producer.shards.iter().zip(&mut consumer.shards)
+        {
+            consumer_shard.input_range.byte_count = producer_shard.output_byte_count;
+        }
 
         let grouped = resolved_physical_execution_islands(
             &[producer.clone(), consumer.clone()],
@@ -2084,6 +2129,46 @@ mod tests {
         .unwrap();
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].dispatch_indices(), [7, 8]);
+        assert_eq!(
+            grouped[0]
+                .transient_memory
+                .iter()
+                .filter(|requirement| {
+                    requirement.kind
+                        == VulkanPhysicalExecutionTransientMemoryKind::PrivateShardIntermediate
+                })
+                .count(),
+            producer.shards.len(),
+        );
+        let execution_plan = VulkanDistributedExecutionPlan {
+            device_ids: producer
+                .shards
+                .iter()
+                .map(|shard| shard.device_id.clone())
+                .collect(),
+            storage_buffer_offset_alignment: 4,
+            dispatches: vec![producer.clone(), consumer.clone()],
+            execution_islands: grouped.clone(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: producer.input_byte_capacity,
+            shared_output_byte_capacity: consumer.output_byte_capacity,
+            distributed_parameter_byte_count: 0,
+        };
+        let activation_plan =
+            VulkanDistributedActivationBufferPlan::from_execution_plan(&execution_plan)
+                .unwrap();
+        assert_eq!(activation_plan.private_intermediate_allocations.len(), 1);
+        assert_eq!(
+            activation_plan.private_intermediate_allocations[0]
+                .devices
+                .len(),
+            producer.shards.len(),
+        );
+        assert!(activation_plan.allocations.iter().all(|allocation| {
+            !allocation
+                .signal_ids
+                .contains(&producer.output_activation.signal_id)
+        }));
 
         let mut missing_checkpoint = consumer.clone();
         missing_checkpoint.selected_resource_partitions.clear();

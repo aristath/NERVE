@@ -552,7 +552,7 @@ impl VulkanDistributedDispatchRunners {
                             ))
                         })?;
                     let private_input = if dispatch_offset > 0
-                        && dense_local_shard_handoff(
+                        && local_shard_handoff(
                             &planned_island.dispatches[dispatch_offset - 1],
                             planned_dispatch,
                         )
@@ -581,7 +581,7 @@ impl VulkanDistributedDispatchRunners {
                     };
                     let private_output = if dispatch_offset + 1
                         < planned_island.dispatches.len()
-                        && dense_local_shard_handoff(
+                        && local_shard_handoff(
                             planned_dispatch,
                             &planned_island.dispatches[dispatch_offset + 1],
                         )

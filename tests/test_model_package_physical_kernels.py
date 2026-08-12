@@ -592,7 +592,12 @@ def test_independent_experts_compile_selector_partition_contracts(
         }
     ]
     assert distributed["inputs"] == [
-        {"binding": 0, "distribution": "replicated"},
+        {
+            "binding": 0,
+            "distribution": "routed",
+            "dimension": 0,
+            "alignment_elements": 1,
+        },
         {
             "binding": 1,
             "distribution": "routed",

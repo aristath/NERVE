@@ -333,7 +333,7 @@ impl VulkanDistributedActivationBufferPlan {
             for pair in island.dispatches.windows(2) {
                 let producer = &pair[0];
                 let consumer = &pair[1];
-                if !dense_local_shard_handoff(producer, consumer) {
+                if !local_shard_handoff(producer, consumer) {
                     continue;
                 }
                 if !private_producer_dispatches.insert(producer.dispatch_index)

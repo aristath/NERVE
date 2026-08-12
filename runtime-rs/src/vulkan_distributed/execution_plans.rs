@@ -1123,14 +1123,14 @@ fn resolved_physical_execution_island(
         (String, VulkanPhysicalExecutionResidencyKind, String),
         usize,
     >::new();
-    let dense_private_producers = dispatches
+    let private_handoff_producers = dispatches
         .windows(2)
-        .filter(|pair| dense_local_shard_handoff(&pair[0], &pair[1]))
+        .filter(|pair| local_shard_handoff(&pair[0], &pair[1]))
         .map(|pair| pair[0].dispatch_index)
         .collect::<BTreeSet<_>>();
-    let dense_private_consumers = dispatches
+    let private_handoff_consumers = dispatches
         .windows(2)
-        .filter(|pair| dense_local_shard_handoff(&pair[0], &pair[1]))
+        .filter(|pair| local_shard_handoff(&pair[0], &pair[1]))
         .map(|pair| pair[1].dispatch_index)
         .collect::<BTreeSet<_>>();
 
@@ -1165,11 +1165,11 @@ fn resolved_physical_execution_island(
             }
         }
         let activations = std::iter::once(&dispatch.input_activation)
-            .filter(|_| !dense_private_consumers.contains(&dispatch.dispatch_index))
+            .filter(|_| !private_handoff_consumers.contains(&dispatch.dispatch_index))
             .chain(&dispatch.auxiliary_input_activations)
             .chain(
                 std::iter::once(&dispatch.output_activation)
-                    .filter(|_| !dense_private_producers.contains(&dispatch.dispatch_index)),
+                    .filter(|_| !private_handoff_producers.contains(&dispatch.dispatch_index)),
             );
         for activation in activations {
             let allocation_device_id = distributed_activation_owner_device_id(
@@ -1327,7 +1327,7 @@ fn resolved_physical_execution_island(
     for pair in dispatches.windows(2) {
         let producer = &pair[0];
         let consumer = &pair[1];
-        if dense_local_shard_handoff(producer, consumer) {
+        if local_shard_handoff(producer, consumer) {
             for (producer_shard, consumer_shard) in
                 producer.shards.iter().zip(&consumer.shards)
             {
@@ -1479,16 +1479,17 @@ fn distributed_dispatches_can_share_sequence(
     if producer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
         && consumer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
     {
-        return selected_resource_expert_handoff(producer, consumer)
-            && producer
-            .shards
-            .iter()
-            .zip(&consumer.shards)
-            .all(|(producer, consumer)| {
-                producer.base_workgroup_z == consumer.base_workgroup_z
-            });
+        return expert_local_shard_handoff(producer, consumer);
     }
     dense_local_shard_handoff(producer, consumer)
+}
+
+fn local_shard_handoff(
+    producer: &VulkanDistributedDispatchPlan,
+    consumer: &VulkanDistributedDispatchPlan,
+) -> bool {
+    dense_local_shard_handoff(producer, consumer)
+        || expert_local_shard_handoff(producer, consumer)
 }
 
 /// Proves that two adjacent expert kernels consume the same atomic expert
@@ -1585,6 +1586,50 @@ fn distributed_selected_resource_activation<'a>(
     matching.next().is_none().then_some(activation)
 }
 
+fn expert_local_shard_handoff(
+    producer: &VulkanDistributedDispatchPlan,
+    consumer: &VulkanDistributedDispatchPlan,
+) -> bool {
+    producer.owner_device_id == consumer.owner_device_id
+        && producer.component_id == consumer.component_id
+        && producer.dispatch_index.checked_add(1) == Some(consumer.dispatch_index)
+        && producer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
+        && consumer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
+        && producer.output_collection == OutputCollection::Routed
+        && consumer.input_distribution == InputDistribution::Routed
+        && same_distributed_activation(
+            &producer.output_activation,
+            &consumer.input_activation,
+        )
+        && selected_resource_expert_handoff(producer, consumer)
+        && producer.shards.len() == consumer.shards.len()
+        && producer.shards.iter().zip(&consumer.shards).all(
+            |(producer_shard, consumer_shard)| {
+                producer_shard.device_id == consumer_shard.device_id
+                    && producer_shard.row_start == consumer_shard.row_start
+                    && producer_shard.row_count == consumer_shard.row_count
+                    && producer_shard.base_workgroup_z == consumer_shard.base_workgroup_z
+                    && producer_shard.output_byte_count
+                        == consumer_shard.input_range.byte_count
+            },
+        )
+        && declared_local_shard_handoff(producer, consumer)
+}
+
+fn declared_local_shard_handoff(
+    producer: &VulkanDistributedDispatchPlan,
+    consumer: &VulkanDistributedDispatchPlan,
+) -> bool {
+    producer.local_intermediates.iter().any(|intermediate| {
+        intermediate.signal == producer.output_activation.signal_id
+            && usize::try_from(intermediate.producer_binding).ok()
+                == Some(producer.output_activation.binding)
+            && usize::try_from(intermediate.consumer_binding).ok()
+                == Some(consumer.input_activation.binding)
+            && consumer.local_intermediates.contains(intermediate)
+    })
+}
+
 fn dense_local_shard_handoff(
     producer: &VulkanDistributedDispatchPlan,
     consumer: &VulkanDistributedDispatchPlan,
@@ -1613,14 +1658,7 @@ fn dense_local_shard_handoff(
                         == consumer_shard.input_range.byte_count
             },
         )
-        && producer.local_intermediates.iter().any(|intermediate| {
-            intermediate.signal == producer.output_activation.signal_id
-                && usize::try_from(intermediate.producer_binding).ok()
-                    == Some(producer.output_activation.binding)
-                && usize::try_from(intermediate.consumer_binding).ok()
-                    == Some(consumer.input_activation.binding)
-                && consumer.local_intermediates.contains(intermediate)
-        })
+        && declared_local_shard_handoff(producer, consumer)
 }
 
 fn same_distributed_activation(
