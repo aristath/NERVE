@@ -165,7 +165,11 @@ fn non_dominated_target_orders(measurements: &[MeasuredTargetOrder]) -> Vec<Vec<
 fn same_future_state(left: &MeasuredTargetOrder, right: &MeasuredTargetOrder) -> bool {
     left.owner_target_id == right.owner_target_id
         && left.output_target_id == right.output_target_id
-        && left.order.iter().collect::<BTreeSet<_>>() == right.order.iter().collect::<BTreeSet<_>>()
+        // Participant order is physical state, not presentation. Contract
+        // lowering assigns shard ordinals, tensor ranges, and whole experts
+        // from this order. Two permutations of the same target set can
+        // therefore expose different work and transports when expanded.
+        && left.order == right.order
         && left.contract_ids == right.contract_ids
         && left.strategy == right.strategy
 }
@@ -222,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn pruning_only_compares_candidates_with_the_same_future_state() {
+    fn pruning_preserves_distinct_participant_orders() {
         let measurements = vec![
             measured(&["a", "b", "c"], 10, &[("a", 5)], &[("a", 2)]),
             measured(&["a", "c", "b"], 20, &[("a", 5)], &[("a", 2)]),
@@ -234,11 +238,39 @@ mod tests {
             vec![
                 vec!["a", "b", "c"],
                 vec!["a", "b", "d"],
+                vec!["a", "c", "b"],
                 vec!["b", "a", "c"],
             ]
             .into_iter()
             .map(|order| order.into_iter().map(str::to_string).collect())
             .collect::<Vec<Vec<String>>>(),
+        );
+    }
+
+    #[test]
+    fn slower_expert_ownership_permutation_remains_expandable() {
+        let fast_contiguous = measured(
+            &["owner", "helper-a", "helper-b"],
+            10,
+            &[("owner", 5)],
+            &[("owner", 2)],
+        );
+        let mut hot_expert_friendly = measured(
+            &["owner", "helper-b", "helper-a"],
+            20,
+            &[("owner", 5)],
+            &[("owner", 2)],
+        );
+        hot_expert_friendly.strategy = VulkanPlacementExecutionStrategy::WholeExpertParallel;
+        let mut fast_contiguous = fast_contiguous;
+        fast_contiguous.strategy = VulkanPlacementExecutionStrategy::WholeExpertParallel;
+
+        assert_eq!(
+            non_dominated_target_orders(&[
+                fast_contiguous.clone(),
+                hot_expert_friendly.clone(),
+            ]),
+            vec![fast_contiguous.order, hot_expert_friendly.order],
         );
     }
 
