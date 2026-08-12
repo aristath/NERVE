@@ -156,6 +156,15 @@ For every numbered item below:
 
 ### 4. Prove dense FFN tensor parallelism on mounted execution
 
+- Hardware-neutral acceptance is complete for the compiler/runtime boundary:
+  BF16 and FP8 gate/up output-row shards connect to input-column down shards by
+  a participant-private BF16 handoff for immediate decode and package-supported
+  prefill; FP8 scale partitions preserve their logical row alignment; F32
+  partial collection is accounted at its true byte width; fully distributed
+  physical resources exclude redundant canonical owner tensors while a mixed
+  canonical use prevents exclusion; and a natively supported format without a
+  distributed implementation remains local. The remaining acceptance below is
+  the explicitly authorized mounted real-model proof.
 - On an explicitly selected real transformer component, compare immediate
   decode and package-supported prefill output plus persistent state against the
   canonical single-device execution. Exercise the compiler-declared BF16 and

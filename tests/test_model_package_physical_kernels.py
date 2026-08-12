@@ -83,6 +83,66 @@ def bf16_down_fixture(tmp_path: Path) -> tuple[dict, dict, dict, bytes]:
     return node, circuit, tensor_index, payload
 
 
+def fp8_down_fixture(
+    tmp_path: Path,
+    *,
+    output_rows: int = 4,
+    input_columns: int = 256,
+) -> tuple[dict, dict, dict, np.ndarray]:
+    if output_rows % 2 or input_columns % TP_INPUT_BLOCK_COLUMNS:
+        raise ValueError("FP8 fixture dimensions must satisfy the physical ABI")
+    weight_values = np.arange(
+        output_rows * input_columns,
+        dtype="u1",
+    ).reshape(output_rows, input_columns)
+    scale_values = np.arange(
+        2 * (input_columns // TP_INPUT_BLOCK_COLUMNS),
+        dtype="<u2",
+    ).reshape(2, input_columns // TP_INPUT_BLOCK_COLUMNS)
+    tensor_index: dict = {"tensors": {}}
+    for name, dtype, values in (
+        ("down.weight", "F8_E4M3", weight_values),
+        ("down.weight_scale_inv", "BF16", scale_values),
+    ):
+        payload = values.tobytes(order="C")
+        source = tmp_path / f"{name}.safetensors"
+        header = compiled_safetensors_header(
+            name,
+            dtype=dtype,
+            shape=list(values.shape),
+            byte_count=len(payload),
+            layout="row_major",
+        )
+        source.write_bytes(struct.pack("<Q", len(header)) + header + payload)
+        tensor_index["tensors"][name] = {
+            "dtype": dtype,
+            "shape": list(values.shape),
+            "parameter_count": int(values.size),
+            "byte_count": len(payload),
+            "layout": "row_major",
+            "source_file": str(source),
+            "source_header_bytes": len(header),
+            "data_offsets": [0, len(payload)],
+        }
+    node = {
+        "id": "down_residual",
+        "op": "linear_residual",
+        "inputs": ["activated", "residual"],
+        "outputs": ["hidden"],
+        "params": ["down", "down_scale"],
+    }
+    circuit = {
+        "nodes": [node],
+        "parameters": {
+            "refs": {
+                "down": {"tensor": "down.weight"},
+                "down_scale": {"tensor": "down.weight_scale_inv"},
+            }
+        },
+    }
+    return node, circuit, tensor_index, scale_values
+
+
 def test_compiler_derives_contiguous_input_block_major_weights(tmp_path: Path) -> None:
     _, circuit, tensor_index, payload = bf16_down_fixture(tmp_path)
     lowered_dir = tmp_path / "lowered"
@@ -507,49 +567,7 @@ def test_compiler_declares_expert_intermediate_private_on_both_kernels() -> None
 def test_compiler_derives_fp8_weight_and_scale_physical_resources(
     tmp_path: Path,
 ) -> None:
-    weight_values = np.arange(4 * 256, dtype="u1").reshape(4, 256)
-    scale_values = np.arange(4, dtype="<u2").reshape(2, 2)
-    tensor_index = {"tensors": {}}
-    for name, dtype, values in (
-        ("down.weight", "F8_E4M3", weight_values),
-        ("down.weight_scale_inv", "BF16", scale_values),
-    ):
-        payload = values.tobytes(order="C")
-        source = tmp_path / f"{name}.safetensors"
-        header = compiled_safetensors_header(
-            name,
-            dtype=dtype,
-            shape=list(values.shape),
-            byte_count=len(payload),
-            layout="row_major",
-        )
-        source.write_bytes(struct.pack("<Q", len(header)) + header + payload)
-        tensor_index["tensors"][name] = {
-            "dtype": dtype,
-            "shape": list(values.shape),
-            "parameter_count": int(values.size),
-            "byte_count": len(payload),
-            "layout": "row_major",
-            "source_file": str(source),
-            "source_header_bytes": len(header),
-            "data_offsets": [0, len(payload)],
-        }
-    node = {
-        "id": "down_residual",
-        "op": "linear_residual",
-        "inputs": ["activated", "residual"],
-        "outputs": ["hidden"],
-        "params": ["down", "down_scale"],
-    }
-    circuit = {
-        "nodes": [node],
-        "parameters": {
-            "refs": {
-                "down": {"tensor": "down.weight"},
-                "down_scale": {"tensor": "down.weight_scale_inv"},
-            }
-        },
-    }
+    node, circuit, tensor_index, scale_values = fp8_down_fixture(tmp_path)
     lowered_dir = tmp_path / "lowered"
     lowered_dir.mkdir()
     (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
@@ -585,6 +603,203 @@ def test_compiler_derives_fp8_weight_and_scale_physical_resources(
         scale_destination.read_bytes()[8 + scale_header_bytes :], dtype="<u2"
     ).reshape(2, 2)
     np.testing.assert_array_equal(actual_scale, scale_values.T)
+
+
+def test_fp8_dense_ffn_pair_declares_one_local_tp_island_for_decode_and_prefill(
+    tmp_path: Path,
+) -> None:
+    down, circuit, tensor_index, _ = fp8_down_fixture(
+        tmp_path,
+        output_rows=256,
+    )
+    gate_up = {
+        "id": "gate_up",
+        "op": "parallel_linear_silu_multiply",
+        "inputs": ["normalized"],
+        "outputs": ["activated"],
+        "params": ["gate", "gate_scale", "up", "up_scale"],
+    }
+    circuit["nodes"].insert(0, gate_up)
+    circuit["parameters"]["refs"].update(
+        {
+            "gate": {"tensor": "gate.weight"},
+            "gate_scale": {"tensor": "gate.weight_scale_inv"},
+            "up": {"tensor": "up.weight"},
+            "up_scale": {"tensor": "up.weight_scale_inv"},
+        }
+    )
+    for projection in ("gate", "up"):
+        tensor_index["tensors"][f"{projection}.weight"] = {
+            "dtype": "F8_E4M3",
+            "shape": [256, 256],
+            "parameter_count": 256 * 256,
+            "byte_count": 256 * 256,
+            "layout": "row_major",
+        }
+        tensor_index["tensors"][f"{projection}.weight_scale_inv"] = {
+            "dtype": "BF16",
+            "shape": [2, 2],
+            "parameter_count": 4,
+            "byte_count": 8,
+            "layout": "row_major",
+        }
+
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
+    derive_tensor_parallel_linear_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered_dir,
+        tensor_index,
+        target=NativeTarget(),  # type: ignore[arg-type]
+    )
+
+    shader_dir = tmp_path / "shaders"
+    shader_dir.mkdir()
+    gate_shader = shader_dir / "parallel_linear_silu_multiply_fp8_e4m3.spv"
+    gate_batch_shader = (
+        shader_dir / "parallel_linear_silu_multiply_batch16_fp8_e4m3.spv"
+    )
+    down_shader = shader_dir / "linear_residual_fp8_e4m3.spv"
+    gate_shader.write_bytes(b"gate-up decode")
+    gate_batch_shader.write_bytes(b"gate-up prefill")
+    down_shader.write_bytes(b"canonical down")
+    [down_implementation] = physical_kernel_implementations_for_node(
+        circuit,
+        down,
+        tensor_index,
+    )
+    down_implementation["shader_path"] = down_implementation["shader_path"].replace(
+        ".comp", ".spv"
+    )
+    physical_down_shader = tmp_path / down_implementation["shader_path"]
+    physical_down_shader.write_bytes(b"partitioned input-column down")
+
+    gate_contracts = build_kernel_physical_execution_contracts(
+        node=gate_up,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        kernel={
+            "source_node_ids": ["gate_up"],
+            "semantic_module_ids": ["layer.feed_forward.gate_up"],
+            "shader_path": str(gate_shader.relative_to(tmp_path)),
+            "local_size_x": 64,
+            "workgroup_count_x": 2,
+            "batch_implementations": [
+                {
+                    "execution_domain": "decode_and_prefill",
+                    "lane_tile_width": 16,
+                    "stages": [
+                        {
+                            "shader_path": str(gate_batch_shader.relative_to(tmp_path)),
+                            "local_size_x": 64,
+                            "workgroup_count_x": 2,
+                        }
+                    ],
+                }
+            ],
+            "physical_implementations": [],
+        },
+        package_dir=tmp_path,
+    )
+    down_contracts = build_kernel_physical_execution_contracts(
+        node=down,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        kernel={
+            "source_node_ids": ["down_residual"],
+            "semantic_module_ids": ["layer.feed_forward.down_residual"],
+            "shader_path": str(down_shader.relative_to(tmp_path)),
+            "local_size_x": 64,
+            "workgroup_count_x": 128,
+            "batch_implementations": [],
+            "physical_implementations": [down_implementation],
+        },
+        package_dir=tmp_path,
+    )
+
+    gate_distributed = [
+        contract
+        for contract in gate_contracts
+        if contract["strategy"] == "tensor_parallel"
+    ]
+    [down_distributed] = [
+        contract
+        for contract in down_contracts
+        if contract["execution_form"] == "partitioned_input_partial_output"
+    ]
+    expected_handoff = [
+        {
+            "signal": "activated",
+            "producer_binding": 1,
+            "consumer_binding": 0,
+            "format": "bf16",
+        }
+    ]
+    assert {
+        (tuple(contract["phases"]), contract["execution_shape"])
+        for contract in gate_distributed
+    } == {
+        (("decode",), "single_lane"),
+        (("decode",), "multi_lane"),
+        (("prefill",), "multi_lane"),
+    }
+    assert all(
+        contract["execution_form"] == "replicated_input_partitioned_output"
+        and contract["local_intermediates"] == expected_handoff
+        and contract["partition_extent"]["elements"] == 256
+        and contract["outputs"][0]["collection"] == "concatenated"
+        for contract in gate_distributed
+    )
+    assert down_distributed["phases"] == ["decode", "prefill"]
+    assert down_distributed["execution_shape"] == "single_and_multi_lane"
+    assert down_distributed["local_intermediates"] == expected_handoff
+    assert down_distributed["partition_extent"] == {
+        "dimension_name": "input_columns",
+        "elements": 256,
+        "alignment_elements": TP_INPUT_BLOCK_COLUMNS,
+    }
+    assert down_distributed["inputs"][0]["distribution"] == "sharded"
+    assert down_distributed["outputs"][0]["reduction"]["operation"] == "sum_f32"
+    assert down_distributed["formats"] == {
+        "storage": "f8_e4m3+bf16:input_block_major",
+        "compute": "fp8_e4m3",
+        "accumulation": "f32",
+    }
+
+
+def test_compiler_does_not_relabel_an_unsupported_dense_format_as_tp(
+    tmp_path: Path,
+) -> None:
+    node, circuit, tensor_index, _ = bf16_down_fixture(tmp_path)
+    tensor_index["tensors"]["down.weight"]["dtype"] = "F16"
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
+
+    class TargetWithNativeF16:
+        def supports_native_dtype(self, _dtype: str) -> bool:
+            return True
+
+    derive_tensor_parallel_linear_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered_dir,
+        tensor_index,
+        target=TargetWithNativeF16(),  # type: ignore[arg-type]
+    )
+
+    assert (
+        input_block_major_tensor_name("down.weight", TP_INPUT_BLOCK_COLUMNS)
+        not in tensor_index["tensors"]
+    )
+    assert (
+        physical_kernel_implementations_for_node(
+            circuit,
+            node,
+            tensor_index,
+        )
+        == []
+    )
 
 
 def test_partitioned_packaging_seals_each_derived_matrix_range(
