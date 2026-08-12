@@ -112,7 +112,7 @@ impl VulkanDistributedSelectedResourceGate {
                 resource_count: *resource_count,
             },
         };
-        let owned_resource_indices = store
+        let addressable_resource_indices = store
             .owned_selector_resource_indices(&selector.id)
             .cloned()
             .ok_or_else(|| {
@@ -121,6 +121,20 @@ impl VulkanDistributedSelectedResourceGate {
                     selector.id
                 ))
             })?;
+        let owned_resource_indices = distributed_shard_selected_resource_ownership(
+            &dispatch.shards,
+            &partition.selector_id,
+            partition.resource_count,
+            logical_device_id,
+            &dispatch.component_id,
+            &dispatch.node_id,
+        )?;
+        if !owned_resource_indices.is_subset(&addressable_resource_indices) {
+            return Err(VulkanDistributedDispatchRunnerError(format!(
+                "distributed selected-resource shard on {logical_device_id:?} executes selector {:?} resources outside its physical store addressability",
+                selector.id,
+            )));
+        }
         let selection_count = selector
             .encoding
             .selection_count_per_activation
@@ -415,6 +429,75 @@ impl VulkanDistributedSelectedResourceGate {
     }
 
 }
+
+pub(crate) fn distributed_shard_selected_resource_ownership(
+    shards: &[VulkanDistributedDispatchShard],
+    selector_id: &str,
+    resource_count: usize,
+    logical_device_id: &str,
+    component_id: &str,
+    node_id: &str,
+) -> Result<BTreeSet<usize>, VulkanDistributedDispatchRunnerError> {
+    let matching = shards
+        .iter()
+        .filter(|shard| shard.device_id == logical_device_id)
+        .collect::<Vec<_>>();
+    let [shard] = matching.as_slice() else {
+        return Err(VulkanDistributedDispatchRunnerError(format!(
+            "distributed selected-resource dispatch {}.{} resolves {} shards on {logical_device_id:?}",
+            component_id,
+            node_id,
+            matching.len(),
+        )));
+    };
+    let whole = shard
+        .selected_resource_indices
+        .get(selector_id)
+        .cloned()
+        .unwrap_or_default();
+    let fragments = shard
+        .selected_resource_fragments
+        .get(selector_id)
+        .map(|fragments| {
+            fragments
+                .iter()
+                .map(|fragment| fragment.resource_index)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if whole.is_empty() == fragments.is_empty() {
+        return Err(VulkanDistributedDispatchRunnerError(format!(
+            "distributed selected-resource shard on {logical_device_id:?} must own whole resources or tensor fragments for selector {:?}",
+            selector_id,
+        )));
+    }
+    let ownership = whole
+        .into_iter()
+        .chain(fragments)
+        .collect::<BTreeSet<_>>();
+    if ownership.is_empty()
+        || ownership.len()
+            != shard
+                .selected_resource_indices
+                .get(selector_id)
+                .map_or_else(
+                    || {
+                        shard
+                            .selected_resource_fragments
+                            .get(selector_id)
+                            .map_or(0, Vec::len)
+                    },
+                    Vec::len,
+                )
+        || ownership.iter().any(|index| *index >= resource_count)
+    {
+        return Err(VulkanDistributedDispatchRunnerError(format!(
+            "distributed selected-resource shard on {logical_device_id:?} has duplicate or out-of-range ownership for selector {:?}",
+            selector_id,
+        )));
+    }
+    Ok(ownership)
+}
 pub(crate) fn resolve_distributed_selected_resource_misses<'a>(
     gates: &[(&'a VulkanDistributedSelectedResourceGate, &'a VulkanComputeDevice)],
 ) -> Result<Vec<(usize, VulkanDistributedSelectedResourceResolvedMiss)>, VulkanDistributedDispatchRunnerError>
@@ -533,4 +616,138 @@ pub(crate) fn resolve_distributed_selected_resource_misses<'a>(
                 .map(|miss| (observation_index, miss))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod distributed_selected_resource_gate_tests {
+    use super::*;
+
+    fn shard(
+        device_id: &str,
+        whole: Vec<usize>,
+        fragments: Vec<usize>,
+    ) -> VulkanDistributedDispatchShard {
+        VulkanDistributedDispatchShard {
+            device_id: device_id.to_string(),
+            selected_resource_indices: (!whole.is_empty())
+                .then(|| ("experts".to_string(), whole))
+                .into_iter()
+                .collect(),
+            selected_resource_fragments: (!fragments.is_empty())
+                .then(|| {
+                    (
+                        "experts".to_string(),
+                        fragments
+                            .into_iter()
+                            .map(|resource_index| {
+                                VulkanDistributedSelectedResourceFragmentPlan {
+                                    resource_index,
+                                    atomic_group_id: format!("expert-{resource_index}"),
+                                    logical_start: 0,
+                                    logical_count: 4,
+                                    parameters: Vec::new(),
+                                }
+                            })
+                            .collect(),
+                    )
+                })
+                .into_iter()
+                .collect(),
+            row_start: 0,
+            row_count: 4,
+            workgroup_count_x: 1,
+            base_workgroup_z: 0,
+            input_range: VulkanDistributedActivationRange {
+                byte_offset: 0,
+                byte_count: 8,
+            },
+            auxiliary_input_ranges: Vec::new(),
+            output_byte_offset: 0,
+            output_byte_count: 8,
+            parameters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn execution_ownership_comes_from_the_exact_dispatch_shard() {
+        let shards = vec![shard("gpu0", vec![0, 2], Vec::new()), shard("gpu1", vec![1, 3], Vec::new())];
+
+        assert_eq!(
+            distributed_shard_selected_resource_ownership(
+                &shards,
+                "experts",
+                4,
+                "gpu0",
+                "layer",
+                "gate-up",
+            )
+            .unwrap(),
+            BTreeSet::from([0, 2]),
+        );
+        assert_eq!(
+            distributed_shard_selected_resource_ownership(
+                &shards,
+                "experts",
+                4,
+                "gpu1",
+                "layer",
+                "gate-up",
+            )
+            .unwrap(),
+            BTreeSet::from([1, 3]),
+        );
+    }
+
+    #[test]
+    fn execution_ownership_accepts_tensor_fragments_but_rejects_ambiguity() {
+        let fragmented = vec![
+            shard("gpu0", Vec::new(), vec![0, 1]),
+            shard("gpu1", Vec::new(), vec![0, 1]),
+        ];
+        assert_eq!(
+            distributed_shard_selected_resource_ownership(
+                &fragmented,
+                "experts",
+                2,
+                "gpu0",
+                "layer",
+                "gate-up",
+            )
+            .unwrap(),
+            BTreeSet::from([0, 1]),
+        );
+
+        let mixed = vec![VulkanDistributedDispatchShard {
+            selected_resource_fragments: fragmented[0]
+                .selected_resource_fragments
+                .clone(),
+            ..shard("gpu0", vec![0], Vec::new())
+        }];
+        assert!(
+            distributed_shard_selected_resource_ownership(
+                &mixed,
+                "experts",
+                2,
+                "gpu0",
+                "layer",
+                "gate-up",
+            )
+            .unwrap_err()
+            .0
+            .contains("whole resources or tensor fragments")
+        );
+        assert!(
+            distributed_shard_selected_resource_ownership(
+                &fragmented,
+                "experts",
+                2,
+                "missing",
+                "layer",
+                "gate-up",
+            )
+            .unwrap_err()
+            .0
+            .contains("resolves 0 shards")
+        );
+    }
 }

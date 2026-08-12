@@ -243,6 +243,16 @@ For every numbered item below:
   mount now consumes exact calibration but uses a uniform prior; warm
   adaptation must not replace the stable layer coordinators or dense/attention
   execution islands, remount the model, or disable hybrid physical execution.
+  The hardware-neutral reconfiguration planner is complete: it validates exact
+  selector, telemetry, execution-class, device, phase, and capacity identities;
+  rescoring never trusts stale plan summaries; joint telemetry influences the
+  proposed makespan; and every move reports its destination load cost plus the
+  exact cold break-even activation count. Residency gates now derive arithmetic
+  ownership from the concrete dispatch shard rather than the physical store's
+  broader addressability. The remaining work is a quiescent-boundary executor
+  that changes the expert islands and cache quotas transactionally without
+  remounting the backbone, while preventing addressable replicas from executing
+  duplicate arithmetic.
 - Allow a compiler-declared predictable router dependency to trigger safe
   prefetch or preselection without a DeepSeek-specific runtime branch.
 

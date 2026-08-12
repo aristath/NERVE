@@ -272,6 +272,27 @@ pub struct VulkanSelectedResourcePlacementPlan {
     pub maximum_second_moment_ns2: u128,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanSelectedResourcePlacementMove {
+    pub resource_index: usize,
+    pub source_device_id: String,
+    pub destination_device_id: String,
+    pub payload_bytes: usize,
+    pub destination_load_duration_ns: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanSelectedResourceReconfigurationPlan {
+    pub selector_id: String,
+    pub observed_activation_count: u64,
+    pub current_duration_ns_per_activation: u128,
+    pub proposed_duration_ns_per_activation: u128,
+    pub migration_critical_path_ns: u128,
+    pub break_even_activation_count: u128,
+    pub moves: Vec<VulkanSelectedResourcePlacementMove>,
+    pub proposed: VulkanSelectedResourcePlacementPlan,
+}
+
 #[derive(Clone, Debug)]
 struct VulkanSelectedResourceMutableDeviceLoad {
     device_id: String,
@@ -335,7 +356,6 @@ pub fn try_plan_selected_resource_placement(
         devices,
         phase,
     )?;
-
     let joint_selection_totals = (0..partition.resource_count)
         .map(|resource_index| {
             (0..partition.resource_count)
@@ -573,6 +593,350 @@ pub fn try_plan_selected_resource_placement(
         maximum_first_moment_ns,
         maximum_second_moment_ns2,
     }))
+}
+
+/// Plans a quiescent-boundary ownership change from exact warm selection
+/// telemetry. This function never mutates a mounted package. It accepts a
+/// candidate only when the same measured execution classes predict a strict
+/// reduction in per-activation serialized device work, and exposes the exact
+/// cold migration break-even point to the runtime scheduler.
+#[allow(clippy::too_many_arguments)]
+pub fn try_plan_warm_selected_resource_reconfiguration(
+    component_id: &str,
+    partition: &VulkanDistributedSelectedResourcePartitionPlan,
+    execution_classes: &VulkanSelectedResourceExecutionClassPlan,
+    telemetry: &crate::vulkan_stream_circuit::VulkanSelectionTelemetryDomainSnapshot,
+    devices: &[VulkanSelectedResourcePlacementDevice],
+    residency_policy: crate::vulkan_stream_circuit::ResourceResidencyPolicy,
+    phase: nerve_execution_contracts::ExecutionPhase,
+    current: &VulkanSelectedResourcePlacementPlan,
+) -> Result<Option<VulkanSelectedResourceReconfigurationPlan>, VulkanDistributedPlanError> {
+    validate_selected_resource_placement_problem(
+        component_id,
+        partition,
+        execution_classes,
+        telemetry,
+        devices,
+        phase,
+    )?;
+    if current.selector_id != partition.selector_id {
+        return Err(VulkanDistributedPlanError(format!(
+            "current selected-resource placement belongs to selector {:?}, expected {:?}",
+            current.selector_id, partition.selector_id,
+        )));
+    }
+    let observed_selection_count = telemetry
+        .selection_counts
+        .iter()
+        .try_fold(0u64, |total, count| total.checked_add(*count))
+        .ok_or_else(|| {
+            VulkanDistributedPlanError(
+                "selected-resource observed selection count overflowed".to_string(),
+            )
+        })?;
+    let selections_per_activation = u64::try_from(partition.selection_count_per_activation)
+        .map_err(|_| {
+            VulkanDistributedPlanError(
+                "selected-resource selection width exceeds u64".to_string(),
+            )
+        })?;
+    if selections_per_activation == 0
+        || observed_selection_count == 0
+        || observed_selection_count % selections_per_activation != 0
+    {
+        return Err(VulkanDistributedPlanError(format!(
+            "selected-resource telemetry for selector {:?} does not contain a complete activation history",
+            partition.selector_id,
+        )));
+    }
+    let observed_activation_count = observed_selection_count / selections_per_activation;
+    let current = score_selected_resource_assignments(
+        component_id,
+        partition,
+        execution_classes,
+        telemetry,
+        devices,
+        residency_policy,
+        phase,
+        &current.assignments,
+    )?;
+    let Some(proposed) = try_plan_selected_resource_placement(
+        component_id,
+        partition,
+        execution_classes,
+        telemetry,
+        devices,
+        residency_policy,
+        phase,
+    )?
+    else {
+        return Ok(None);
+    };
+    if current.assignments == proposed.assignments {
+        return Ok(None);
+    }
+    let activations = u128::from(observed_activation_count);
+    let current_duration_ns_per_activation = current.maximum_first_moment_ns.div_ceil(activations);
+    let proposed_duration_ns_per_activation =
+        proposed.maximum_first_moment_ns.div_ceil(activations);
+    let Some(improvement_ns_per_activation) = current_duration_ns_per_activation
+        .checked_sub(proposed_duration_ns_per_activation)
+        .filter(|improvement| *improvement > 0)
+    else {
+        return Ok(None);
+    };
+    let current_owners = current
+        .assignments
+        .iter()
+        .map(|assignment| (assignment.resource_index, assignment.device_id.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let devices_by_id = devices
+        .iter()
+        .map(|device| (device.device_id.as_str(), device))
+        .collect::<BTreeMap<_, _>>();
+    let mut moves = Vec::new();
+    let mut migration_ns_by_destination = BTreeMap::<String, u128>::new();
+    for assignment in &proposed.assignments {
+        let source_device_id = current_owners
+            .get(&assignment.resource_index)
+            .copied()
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "current selected-resource placement does not cover every resource"
+                        .to_string(),
+                )
+            })?;
+        if source_device_id == assignment.device_id {
+            continue;
+        }
+        let destination = devices_by_id
+            .get(assignment.device_id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "proposed selected-resource placement references an unknown device"
+                        .to_string(),
+                )
+            })?;
+        let class_id = &execution_classes.resource_execution_class_ids[assignment.resource_index];
+        let load_duration = destination.measured_costs_by_execution_class[class_id]
+            .lazy_load_wave_duration_ns;
+        let destination_total = migration_ns_by_destination
+            .entry(assignment.device_id.clone())
+            .or_default();
+        *destination_total = destination_total
+            .checked_add(u128::from(load_duration))
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "selected-resource migration duration overflowed".to_string(),
+                )
+            })?;
+        moves.push(VulkanSelectedResourcePlacementMove {
+            resource_index: assignment.resource_index,
+            source_device_id: source_device_id.to_string(),
+            destination_device_id: assignment.device_id.clone(),
+            payload_bytes: partition.atomic_group_byte_counts[assignment.resource_index],
+            destination_load_duration_ns: load_duration,
+        });
+    }
+    if moves.is_empty() {
+        return Ok(None);
+    }
+    moves.sort_by_key(|movement| movement.resource_index);
+    let migration_critical_path_ns = migration_ns_by_destination
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let break_even_activation_count =
+        migration_critical_path_ns.div_ceil(improvement_ns_per_activation);
+    Ok(Some(VulkanSelectedResourceReconfigurationPlan {
+        selector_id: partition.selector_id.clone(),
+        observed_activation_count,
+        current_duration_ns_per_activation,
+        proposed_duration_ns_per_activation,
+        migration_critical_path_ns,
+        break_even_activation_count,
+        moves,
+        proposed,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_selected_resource_assignments(
+    component_id: &str,
+    partition: &VulkanDistributedSelectedResourcePartitionPlan,
+    execution_classes: &VulkanSelectedResourceExecutionClassPlan,
+    telemetry: &crate::vulkan_stream_circuit::VulkanSelectionTelemetryDomainSnapshot,
+    devices: &[VulkanSelectedResourcePlacementDevice],
+    residency_policy: crate::vulkan_stream_circuit::ResourceResidencyPolicy,
+    phase: nerve_execution_contracts::ExecutionPhase,
+    assignments: &[VulkanSelectedResourceAssignment],
+) -> Result<VulkanSelectedResourcePlacementPlan, VulkanDistributedPlanError> {
+    validate_selected_resource_placement_problem(
+        component_id,
+        partition,
+        execution_classes,
+        telemetry,
+        devices,
+        phase,
+    )?;
+    if assignments.len() != partition.resource_count {
+        return Err(VulkanDistributedPlanError(
+            "selected-resource assignment does not cover the complete resource domain"
+                .to_string(),
+        ));
+    }
+    let devices_by_id = devices
+        .iter()
+        .map(|device| (device.device_id.as_str(), device))
+        .collect::<BTreeMap<_, _>>();
+    let mut owner_by_resource = vec![None; partition.resource_count];
+    for assignment in assignments {
+        if assignment.resource_index >= partition.resource_count
+            || !devices_by_id.contains_key(assignment.device_id.as_str())
+            || owner_by_resource[assignment.resource_index]
+                .replace(assignment.device_id.as_str())
+                .is_some()
+        {
+            return Err(VulkanDistributedPlanError(
+                "selected-resource assignment repeats a resource or references an unknown device"
+                    .to_string(),
+            ));
+        }
+    }
+    if owner_by_resource.iter().any(Option::is_none) {
+        return Err(VulkanDistributedPlanError(
+            "selected-resource assignment leaves an unowned resource".to_string(),
+        ));
+    }
+    let mut loads = devices
+        .iter()
+        .map(|device| (device.device_id.as_str(), Vec::<usize>::new()))
+        .collect::<BTreeMap<_, _>>();
+    for (resource_index, owner) in owner_by_resource.iter().enumerate() {
+        loads
+            .get_mut(owner.expect("resource ownership was validated"))
+            .expect("assignment owners were validated")
+            .push(resource_index);
+    }
+    let mut device_loads = Vec::with_capacity(devices.len());
+    for device in devices {
+        let owned_resource_indices = loads.remove(device.device_id.as_str()).unwrap_or_default();
+        let addressable_bytes = owned_resource_indices.iter().try_fold(0usize, |total, index| {
+            total
+                .checked_add(partition.atomic_group_byte_counts[*index])
+                .ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "selected-resource addressable byte count overflowed".to_string(),
+                    )
+                })
+        })?;
+        let maximum_load_wave_bytes = selected_resource_maximum_load_wave_bytes(
+            partition,
+            owned_resource_indices.iter().copied(),
+        )?;
+        let required_resident_bytes = match residency_policy {
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager
+            | crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandRetained => {
+                addressable_bytes
+            }
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged => {
+                maximum_load_wave_bytes
+            }
+        };
+        if required_resident_bytes > device.resident_payload_capacity_bytes {
+            return Err(VulkanDistributedPlanError(format!(
+                "selected-resource assignment exceeds resident capacity on {:?}",
+                device.device_id,
+            )));
+        }
+        let first_moment_ns = owned_resource_indices.iter().try_fold(0u128, |total, index| {
+            let class_id = &execution_classes.resource_execution_class_ids[*index];
+            u128::from(telemetry.selection_counts[*index])
+                .checked_mul(u128::from(
+                    device.measured_costs_by_execution_class[class_id].execution_duration_ns,
+                ))
+                .and_then(|contribution| total.checked_add(contribution))
+                .ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "selected-resource first moment overflowed".to_string(),
+                    )
+                })
+        })?;
+        let mut second_moment_ns2 = owned_resource_indices.iter().try_fold(
+            0u128,
+            |total, index| {
+                let class_id = &execution_classes.resource_execution_class_ids[*index];
+                let duration = u128::from(
+                    device.measured_costs_by_execution_class[class_id].execution_duration_ns,
+                );
+                u128::from(telemetry.selection_counts[*index])
+                    .checked_mul(duration)
+                    .and_then(|value| value.checked_mul(duration))
+                    .and_then(|contribution| total.checked_add(contribution))
+                    .ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "selected-resource second moment overflowed".to_string(),
+                        )
+                    })
+            },
+        )?;
+        for (offset, left) in owned_resource_indices.iter().enumerate() {
+            let left_class = &execution_classes.resource_execution_class_ids[*left];
+            let left_duration = u128::from(
+                device.measured_costs_by_execution_class[left_class].execution_duration_ns,
+            );
+            for right in owned_resource_indices.iter().skip(offset + 1) {
+                let right_class = &execution_classes.resource_execution_class_ids[*right];
+                let right_duration = u128::from(
+                    device.measured_costs_by_execution_class[right_class].execution_duration_ns,
+                );
+                let joint = u128::from(
+                    telemetry
+                        .co_selection_count(*left, *right)
+                        .unwrap_or(0),
+                );
+                second_moment_ns2 = joint
+                    .checked_mul(left_duration)
+                    .and_then(|value| value.checked_mul(right_duration))
+                    .and_then(|value| value.checked_mul(2))
+                    .and_then(|contribution| second_moment_ns2.checked_add(contribution))
+                    .ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "selected-resource joint second moment overflowed".to_string(),
+                        )
+                    })?;
+            }
+        }
+        device_loads.push(VulkanSelectedResourceDeviceLoad {
+            device_id: device.device_id.clone(),
+            addressable_bytes,
+            maximum_load_wave_bytes,
+            first_moment_ns,
+            second_moment_ns2,
+            owned_resource_indices,
+        });
+    }
+    let maximum_first_moment_ns = device_loads
+        .iter()
+        .map(|load| load.first_moment_ns)
+        .max()
+        .unwrap_or(0);
+    let maximum_second_moment_ns2 = device_loads
+        .iter()
+        .map(|load| load.second_moment_ns2)
+        .max()
+        .unwrap_or(0);
+    let mut assignments = assignments.to_vec();
+    assignments.sort_by_key(|assignment| assignment.resource_index);
+    Ok(VulkanSelectedResourcePlacementPlan {
+        selector_id: partition.selector_id.clone(),
+        assignments,
+        device_loads,
+        maximum_first_moment_ns,
+        maximum_second_moment_ns2,
+    })
 }
 
 fn selected_resource_maximum_load_wave_bytes(
@@ -1312,5 +1676,175 @@ mod selected_resource_placement_tests {
         )
         .unwrap_err();
         assert!(error.0.contains("execution classes"));
+    }
+
+    #[test]
+    fn warm_reconfiguration_reports_exact_moves_and_cold_break_even() {
+        let partition = partition(4, 2);
+        let classes = execution_classes(&partition);
+        let telemetry = telemetry(vec![100, 100, 1, 1], vec![100, 0, 0, 0, 0, 1]);
+        let devices = devices(4, 40);
+        let current = score_selected_resource_assignments(
+            "layer",
+            &partition,
+            &classes,
+            &telemetry,
+            &devices,
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            &[
+                VulkanSelectedResourceAssignment {
+                    resource_index: 0,
+                    device_id: "a".to_string(),
+                },
+                VulkanSelectedResourceAssignment {
+                    resource_index: 1,
+                    device_id: "a".to_string(),
+                },
+                VulkanSelectedResourceAssignment {
+                    resource_index: 2,
+                    device_id: "b".to_string(),
+                },
+                VulkanSelectedResourceAssignment {
+                    resource_index: 3,
+                    device_id: "b".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let plan = try_plan_warm_selected_resource_reconfiguration(
+            "layer",
+            &partition,
+            &classes,
+            &telemetry,
+            &devices,
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            &current,
+        )
+        .unwrap()
+        .expect("co-selected hot experts should move to different devices");
+
+        assert_eq!(plan.observed_activation_count, 101);
+        assert!(
+            plan.proposed_duration_ns_per_activation
+                < plan.current_duration_ns_per_activation
+        );
+        assert!(!plan.moves.is_empty());
+        assert!(plan.moves.iter().all(|movement| {
+            movement.source_device_id != movement.destination_device_id
+                && movement.payload_bytes == 10
+                && movement.destination_load_duration_ns == 20
+        }));
+        assert!(plan.migration_critical_path_ns > 0);
+        assert!(plan.break_even_activation_count > 0);
+        assert_ne!(plan.proposed.assignments, current.assignments);
+    }
+
+    #[test]
+    fn warm_reconfiguration_rejects_noise_and_incomplete_activation_history() {
+        let partition = partition(4, 2);
+        let classes = execution_classes(&partition);
+        let devices = devices(4, 40);
+        let balanced_telemetry = telemetry(vec![100; 4], vec![100, 0, 0, 0, 0, 100]);
+        let current = plan_selected_resource_placement(
+            "layer",
+            &partition,
+            &classes,
+            &balanced_telemetry,
+            &devices,
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+            nerve_execution_contracts::ExecutionPhase::Decode,
+        )
+        .unwrap();
+        assert!(
+            try_plan_warm_selected_resource_reconfiguration(
+                "layer",
+                &partition,
+                &classes,
+                &balanced_telemetry,
+                &devices,
+                crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+                nerve_execution_contracts::ExecutionPhase::Decode,
+                &current,
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        let incomplete = telemetry(vec![2, 2, 2, 1], vec![0; 6]);
+        let error = try_plan_warm_selected_resource_reconfiguration(
+            "layer",
+            &partition,
+            &classes,
+            &incomplete,
+            &devices,
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            &current,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("complete activation history"));
+    }
+
+    #[test]
+    fn warm_reconfiguration_rejects_invalid_current_ownership_and_capacity() {
+        let partition = partition(4, 2);
+        let classes = execution_classes(&partition);
+        let telemetry = telemetry(vec![2; 4], vec![0; 6]);
+        let devices = devices(4, 20);
+        let invalid = VulkanSelectedResourcePlacementPlan {
+            selector_id: partition.selector_id.clone(),
+            assignments: vec![
+                VulkanSelectedResourceAssignment {
+                    resource_index: 0,
+                    device_id: "a".to_string(),
+                },
+                VulkanSelectedResourceAssignment {
+                    resource_index: 1,
+                    device_id: "a".to_string(),
+                },
+                VulkanSelectedResourceAssignment {
+                    resource_index: 2,
+                    device_id: "a".to_string(),
+                },
+                VulkanSelectedResourceAssignment {
+                    resource_index: 3,
+                    device_id: "b".to_string(),
+                },
+            ],
+            device_loads: Vec::new(),
+            maximum_first_moment_ns: 0,
+            maximum_second_moment_ns2: 0,
+        };
+
+        let error = try_plan_warm_selected_resource_reconfiguration(
+            "layer",
+            &partition,
+            &classes,
+            &telemetry,
+            &devices,
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            &invalid,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("exceeds resident capacity"));
+
+        let mut wrong_selector = invalid;
+        wrong_selector.selector_id = "another-selector".to_string();
+        let error = try_plan_warm_selected_resource_reconfiguration(
+            "layer",
+            &partition,
+            &classes,
+            &telemetry,
+            &devices,
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            &wrong_selector,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("belongs to selector"));
     }
 }
