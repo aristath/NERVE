@@ -562,6 +562,9 @@ fn selected_runtime_component_overlay_mounts_only_its_independent_region() {
         candidate_id: implementation.candidate_id.clone(),
         instance_ids: vec!["layer_00".to_string()],
         scope_ids: implementation.scope_ids.clone(),
+        source_contract_digests: implementation
+            .source_contract_digests
+            .clone(),
         mount_adapter_id:
             crate::VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER.to_string(),
         predicate,
@@ -577,6 +580,22 @@ fn selected_runtime_component_overlay_mounts_only_its_independent_region() {
         boundary_count: 0,
         decision_reason: "verified fixture alternative".to_string(),
     };
+    let semantic_contract_id =
+        vulkan_runtime_implementation_semantic_contract_id(&selected).unwrap();
+    let mut other_artifact_for_same_source = selected.clone();
+    other_artifact_for_same_source.implementation_id = "another_artifact".to_string();
+    assert_eq!(
+        vulkan_runtime_implementation_semantic_contract_id(&other_artifact_for_same_source)
+            .unwrap(),
+        semantic_contract_id,
+    );
+    let mut different_source_contract = selected.clone();
+    different_source_contract.source_contract_digests =
+        vec!["different_source_contract".to_string()];
+    assert_ne!(
+        vulkan_runtime_implementation_semantic_contract_id(&different_source_contract).unwrap(),
+        semantic_contract_id,
+    );
     let report = crate::RuntimeImplementationSelectionReport {
         package_id: runtime_model.package.package_id.clone(),
         execution: crate::RuntimeExecutionEnvelope {

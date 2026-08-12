@@ -694,6 +694,10 @@ fn selector_replaces_only_incompatible_exact_instances() {
 
     assert_eq!(report.selected.len(), 1);
     assert_eq!(report.selected[0].instance_ids, ["layer0"]);
+    assert_eq!(
+        report.selected[0].source_contract_digests,
+        ["digest_scope_replaceable"]
+    );
     assert_eq!(report.exact_instance_ids, ["layer1"]);
 }
 

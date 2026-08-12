@@ -253,6 +253,7 @@ fn eligible_applications<'a>(
                     candidate_id: loaded.implementation.candidate_id.clone(),
                     instance_ids,
                     scope_ids: loaded.implementation.scope_ids.clone(),
+                    source_contract_digests: loaded.implementation.source_contract_digests.clone(),
                     mount_adapter_id: loaded.mount_plan.adapter_id.clone(),
                     predicate: loaded.implementation.runtime_predicate.clone(),
                     representation: loaded.implementation.representation.clone(),

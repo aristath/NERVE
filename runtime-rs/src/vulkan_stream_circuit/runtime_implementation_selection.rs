@@ -25,6 +25,37 @@ struct VulkanRuntimeDraftOutputTransducerOverlay {
     output_transducer: VulkanResidentDraftOutputTransducerPackageSpec,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct VulkanRuntimeHybridRepresentationApplication {
+    pub runtime_model: VulkanResidentRuntimeModel,
+    pub selection: crate::RuntimeImplementationSelectionReport,
+    pub semantic_contract_id: String,
+}
+
+pub fn vulkan_runtime_implementation_semantic_contract_id(
+    selected: &crate::RuntimeSelectedImplementation,
+) -> Result<String, VulkanResidentTokenModelPackageError> {
+    if selected.source_contract_digests.is_empty()
+        || selected.source_contract_digests.iter().any(String::is_empty)
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime implementation has no source-semantic contract",
+        ));
+    }
+    let mut source_contract_digests = selected.source_contract_digests.clone();
+    source_contract_digests.sort();
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "schema": "nerve.runtime_source_semantic_contract.v1",
+        "source_contract_digests": source_contract_digests,
+    }))
+    .map_err(|error| {
+        VulkanResidentTokenModelPackageError::new(format!(
+            "failed to encode runtime source-semantic contract: {error}",
+        ))
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(payload)))
+}
+
 impl crate::RuntimeSelectionRequest {
     pub fn from_vulkan_runtime_model(
         runtime_model: &VulkanResidentRuntimeModel,
@@ -287,6 +318,100 @@ impl VulkanResidentRuntimeModel {
             )?);
         }
         Ok(variants)
+    }
+
+    /// Mounts every independently applicable, compiler-validated
+    /// signal-processor representation. The hybrid solver consumes these as
+    /// indivisible semantic applications; unrelated exact components remain
+    /// present only so each mounted model is a valid self-contained package.
+    pub fn hybrid_signal_representation_applications(
+        &self,
+        package_root: impl AsRef<Path>,
+        profiles_by_logical_device: &BTreeMap<String, crate::HardwareProcessProfile>,
+        execution: crate::RuntimeExecutionEnvelope,
+    ) -> Result<Vec<VulkanRuntimeHybridRepresentationApplication>, VulkanResidentTokenModelPackageError>
+    {
+        let package_root = package_root.as_ref().canonicalize().map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to resolve runtime package root: {error}",
+            ))
+        })?;
+        let catalog = self
+            .package
+            .implementation_catalog(&package_root)
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to load runtime implementation catalog: {error}",
+                ))
+            })?;
+        // Each independent application is only a candidate. Exact-baseline
+        // coverage is enforced after the hybrid graph chooses a complete
+        // non-overlapping representation/placement route.
+        let request = crate::RuntimeSelectionRequest::from_vulkan_runtime_model(
+            self,
+            profiles_by_logical_device,
+            execution,
+            BTreeSet::new(),
+        )?;
+        let reports = catalog
+            .independent_application_selections(&request)
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to enumerate hybrid runtime representations: {error}",
+                ))
+            })?;
+        let roles_by_instance = self
+            .circuit_graph
+            .components
+            .iter()
+            .map(|component| (component.component_id.as_str(), component.runtime_role))
+            .collect::<BTreeMap<_, _>>();
+        let mut applications = Vec::new();
+        for report in reports {
+            let [selected] = report.selected.as_slice() else {
+                return Err(VulkanResidentTokenModelPackageError::new(
+                    "independent runtime representation selection did not contain exactly one application",
+                ));
+            };
+            let roles = selected
+                .instance_ids
+                .iter()
+                .map(|instance_id| {
+                    roles_by_instance.get(instance_id.as_str()).copied().ok_or_else(|| {
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "runtime representation references unknown mounted instance {instance_id:?}",
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if roles.iter().all(|role| role.is_signal_processor()) {
+                let semantic_contract_id =
+                    vulkan_runtime_implementation_semantic_contract_id(selected)?;
+                let runtime_model = self.clone().apply_runtime_implementation_catalog_selection(
+                    &package_root,
+                    &catalog,
+                    report.clone(),
+                )?;
+                applications.push(VulkanRuntimeHybridRepresentationApplication {
+                    runtime_model,
+                    selection: report,
+                    semantic_contract_id,
+                });
+            } else if roles.iter().any(|role| role.is_signal_processor()) {
+                return Err(VulkanResidentTokenModelPackageError::new(
+                    "runtime representation application crosses the signal-processor physical-island boundary",
+                ));
+            }
+        }
+        applications.sort_by(|left, right| {
+            let left = &left.selection.selected[0];
+            let right = &right.selection.selected[0];
+            (left.instance_ids.as_slice(), left.implementation_id.as_str()).cmp(&(
+                right.instance_ids.as_slice(),
+                right.implementation_id.as_str(),
+            ))
+        });
+        Ok(applications)
     }
 
     fn apply_runtime_implementation_catalog_selection(
@@ -973,6 +1098,8 @@ fn validate_selected_implementation(
 ) -> Result<(), VulkanResidentTokenModelPackageError> {
     if selected.candidate_id != loaded.implementation.candidate_id
         || selected.scope_ids != loaded.implementation.scope_ids
+        || selected.source_contract_digests
+            != loaded.implementation.source_contract_digests
         || selected.predicate != loaded.implementation.runtime_predicate
         || selected.mount_adapter_id != loaded.mount_plan.adapter_id
         || selected.representation != loaded.implementation.representation

@@ -412,8 +412,13 @@ For every numbered item below:
   TP realizations may compete for the same graph range only when they carry the
   same explicit semantic contract plus the same phase, shape, and input-fixture
   cohort. A faster artifact cannot claim equivalence merely by sharing graph
-  geometry. Runtime implementation applications still need to supply these
-  identities and mount the winning representation set.
+  geometry. Runtime implementation applications now carry their immutable
+  source-contract digests into the physical planner. The joint candidate graph
+  mounts each independently validated signal application, preserves
+  multi-component applications as indivisible contiguous regions, removes an
+  incompatible exact baseline, and selects the fastest complete measured
+  representation/placement route. The winning representation set still needs
+  to be composed into one validated mount transaction before normal chat.
 - Preserve the native source representation whenever it is supported and wins
   on the assigned target.
 - Add alternative structured INT4, FP8, INT8, FP16, BF16, or other formats only

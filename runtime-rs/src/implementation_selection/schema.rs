@@ -351,6 +351,11 @@ pub struct RuntimeSelectedImplementation {
     pub candidate_id: String,
     pub instance_ids: Vec<String>,
     pub scope_ids: Vec<String>,
+    /// Immutable semantic contracts of the exact source regions this
+    /// implementation was validated to replace. Physical planners use these
+    /// identities to compare different compiled representations without
+    /// confusing artifact signatures with model behavior.
+    pub source_contract_digests: Vec<String>,
     pub mount_adapter_id: String,
     pub predicate: RuntimeImplementationPredicate,
     pub representation: Value,

@@ -10,6 +10,12 @@ pub struct VulkanRuntimeHybridOrderedPlacement {
     >,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct VulkanRuntimeHybridRepresentationPlacement {
+    pub ordered_placement: VulkanRuntimeHybridOrderedPlacement,
+    pub selected_implementations: Vec<crate::RuntimeSelectedImplementation>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanRuntimeHybridPhaseSetPlacement {
     pub decode: VulkanRuntimeHybridOrderedPlacement,
@@ -50,6 +56,8 @@ struct VulkanRuntimeHybridCandidateGraph {
         VulkanPlacementExecutionCaseIdentity,
         VulkanPlacementRegionExecutionCalibration,
     >,
+    representation_selections_by_candidate_id:
+        BTreeMap<String, Vec<crate::RuntimeSelectedImplementation>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +112,96 @@ pub fn try_plan_vulkan_runtime_hybrid_ordered_graph(
         phase,
         None,
     )
+}
+
+/// Jointly chooses compiler-validated signal representations and measured
+/// physical execution cases. Every representation application remains an
+/// indivisible semantic region; a complete route cannot retain an exact
+/// baseline on an instance known to be incompatible with its placement.
+pub fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_representations(
+    runtime_model: &VulkanResidentRuntimeModel,
+    applications: &[VulkanRuntimeHybridRepresentationApplication],
+    exact_baseline_incompatible_instance_ids: &BTreeSet<String>,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<Option<VulkanRuntimeHybridRepresentationPlacement>, VulkanRuntimeHybridPlacementError>
+{
+    let candidates = runtime_hybrid_representation_candidate_graph(
+        runtime_model,
+        applications,
+        exact_baseline_incompatible_instance_ids,
+        catalog,
+        phase,
+        None,
+    )?;
+    let plan = try_plan_vulkan_hybrid_ordered_graph(
+        catalog,
+        candidates.component_ids.len(),
+        &candidates.region_candidates,
+        &candidates.boundary_candidates,
+        capacity,
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let Some(plan) = plan else {
+        return Ok(None);
+    };
+    let mut selected_implementations = Vec::new();
+    for step in &plan.steps {
+        let VulkanHybridScheduledStep::Region { candidate_id, .. } = step else {
+            continue;
+        };
+        if let Some(selected) = candidates
+            .representation_selections_by_candidate_id
+            .get(candidate_id)
+        {
+            selected_implementations.extend(selected.iter().cloned());
+        }
+    }
+    selected_implementations.sort_by(|left, right| {
+        (left.instance_ids.as_slice(), left.implementation_id.as_str()).cmp(&(
+            right.instance_ids.as_slice(),
+            right.implementation_id.as_str(),
+        ))
+    });
+    let mut covered = BTreeSet::new();
+    for selected in &selected_implementations {
+        if selected
+            .instance_ids
+            .iter()
+            .any(|instance_id| !covered.insert(instance_id.clone()))
+        {
+            return runtime_hybrid_error(
+                "joint representation placement selected overlapping implementation applications",
+            );
+        }
+    }
+    if !exact_baseline_incompatible_instance_ids.is_subset(&covered) {
+        return runtime_hybrid_error(
+            "joint representation placement retained an incompatible exact baseline",
+        );
+    }
+    let selected_region_executions = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            VulkanHybridScheduledStep::Region { execution_case, .. } => candidates
+                .region_executions_by_case
+                .get(execution_case)
+                .map(|calibration| (execution_case.clone(), calibration.clone())),
+            VulkanHybridScheduledStep::Boundary { .. } => None,
+        })
+        .collect();
+    Ok(Some(VulkanRuntimeHybridRepresentationPlacement {
+        ordered_placement: VulkanRuntimeHybridOrderedPlacement {
+            component_ids: candidates.component_ids,
+            execution_phase: candidates.execution_phase,
+            activation_batch_width: candidates.activation_batch_width,
+            plan,
+            region_executions_by_case: selected_region_executions,
+        },
+        selected_implementations,
+    }))
 }
 
 /// Selects the best complete measured layer-serial route. This is the
@@ -589,7 +687,179 @@ fn runtime_hybrid_candidate_graph(
         region_candidates,
         boundary_candidates,
         region_executions_by_case,
+        representation_selections_by_candidate_id: BTreeMap::new(),
     })
+}
+
+fn runtime_hybrid_representation_candidate_graph(
+    runtime_model: &VulkanResidentRuntimeModel,
+    applications: &[VulkanRuntimeHybridRepresentationApplication],
+    exact_baseline_incompatible_instance_ids: &BTreeSet<String>,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    phase: VulkanTargetedComponentExecutionPhase,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
+) -> Result<VulkanRuntimeHybridCandidateGraph, VulkanRuntimeHybridPlacementError> {
+    let mut combined = runtime_hybrid_candidate_graph(
+        runtime_model,
+        catalog,
+        phase,
+        required_owner_by_component,
+        VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+    )?;
+    let component_index_by_id = combined
+        .component_ids
+        .iter()
+        .enumerate()
+        .map(|(index, component_id)| (component_id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    if exact_baseline_incompatible_instance_ids
+        .iter()
+        .any(|instance_id| !component_index_by_id.contains_key(instance_id.as_str()))
+    {
+        return runtime_hybrid_error(
+            "joint representation placement incompatibility must reference signal-processor instances",
+        );
+    }
+    let mut semantic_contract_by_range = BTreeMap::<(usize, usize), String>::new();
+    for (application_index, application) in applications.iter().enumerate() {
+        let [selected] = application.selection.selected.as_slice() else {
+            return runtime_hybrid_error(
+                "joint representation candidate must contain one indivisible implementation application",
+            );
+        };
+        if application.semantic_contract_id.is_empty() {
+            return runtime_hybrid_error(
+                "joint representation candidate has no source-semantic contract",
+            );
+        }
+        let mut indices = selected
+            .instance_ids
+            .iter()
+            .map(|instance_id| {
+                component_index_by_id
+                    .get(instance_id.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        VulkanRuntimeHybridPlacementError(format!(
+                            "joint representation application references non-signal instance {instance_id:?}",
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        indices.sort_unstable();
+        indices.dedup();
+        let Some(component_start) = indices.first().copied() else {
+            return runtime_hybrid_error(
+                "joint representation application has no runtime instances",
+            );
+        };
+        let component_end = component_start + indices.len();
+        if indices.iter().copied().ne(component_start..component_end) {
+            return runtime_hybrid_error(
+                "joint representation application is not one contiguous ordered graph region",
+            );
+        }
+        let range = (component_start, component_end);
+        if semantic_contract_by_range
+            .get(&range)
+            .is_some_and(|semantic| semantic != &application.semantic_contract_id)
+        {
+            return runtime_hybrid_error(
+                "joint representation alternatives for one graph range disagree on source semantics",
+            );
+        }
+        semantic_contract_by_range
+            .entry(range)
+            .or_insert_with(|| application.semantic_contract_id.clone());
+        for candidate in combined
+            .region_candidates
+            .iter_mut()
+            .filter(|candidate| {
+                candidate.component_start == component_start
+                    && candidate.component_end == component_end
+                    && !combined
+                        .representation_selections_by_candidate_id
+                        .contains_key(&candidate.candidate_id)
+            })
+        {
+            candidate.semantic_contract_id = application.semantic_contract_id.clone();
+        }
+
+        let alternative = runtime_hybrid_candidate_graph(
+            &application.runtime_model,
+            catalog,
+            phase,
+            required_owner_by_component,
+            VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+        )?;
+        if alternative.component_ids != combined.component_ids {
+            return runtime_hybrid_error(
+                "joint representation application changed the logical component graph",
+            );
+        }
+        for mut candidate in alternative
+            .region_candidates
+            .into_iter()
+            .filter(|candidate| {
+                candidate.component_start == component_start
+                    && candidate.component_end == component_end
+            })
+        {
+            candidate.candidate_id = format!(
+                "representation:{application_index}:{}",
+                candidate.candidate_id,
+            );
+            candidate.semantic_contract_id = application.semantic_contract_id.clone();
+            combined.representation_selections_by_candidate_id.insert(
+                candidate.candidate_id.clone(),
+                application.selection.selected.clone(),
+            );
+            if let Some(calibration) = alternative
+                .region_executions_by_case
+                .get(&candidate.execution_case)
+            {
+                match combined
+                    .region_executions_by_case
+                    .insert(candidate.execution_case.clone(), calibration.clone())
+                {
+                    Some(existing) if existing != *calibration => {
+                        return runtime_hybrid_error(
+                            "joint representation candidates disagree on one exact region execution",
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            combined.region_candidates.push(candidate);
+        }
+    }
+    combined.region_candidates.retain(|candidate| {
+        let uses_incompatible_exact = combined
+            .component_ids
+            .get(candidate.component_start..candidate.component_end)
+            .is_some_and(|component_ids| {
+                component_ids.iter().any(|component_id| {
+                    exact_baseline_incompatible_instance_ids.contains(component_id)
+                })
+            });
+        !uses_incompatible_exact
+            || combined
+                .representation_selections_by_candidate_id
+                .contains_key(&candidate.candidate_id)
+    });
+    combined.region_candidates.sort_by(|left, right| {
+        (
+            left.component_start,
+            left.component_end,
+            left.candidate_id.as_str(),
+        )
+            .cmp(&(
+                right.component_start,
+                right.component_end,
+                right.candidate_id.as_str(),
+            ))
+    });
+    Ok(combined)
 }
 
 pub fn vulkan_runtime_hybrid_phase_is_calibrated(

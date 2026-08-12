@@ -517,6 +517,108 @@ fn hybrid_test_catalog(model: &VulkanResidentRuntimeModel) -> VulkanPlacementCal
     catalog
 }
 
+fn hybrid_test_selected_representation(
+    instance_ids: &[&str],
+) -> crate::RuntimeSelectedImplementation {
+    crate::RuntimeSelectedImplementation {
+        implementation_id: "int4_representation".to_string(),
+        candidate_id: "int4_candidate".to_string(),
+        instance_ids: instance_ids
+            .iter()
+            .map(|instance_id| (*instance_id).to_string())
+            .collect(),
+        scope_ids: vec!["source_scope".to_string()],
+        source_contract_digests: vec!["source_contract".to_string()],
+        mount_adapter_id: crate::VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER.to_string(),
+        predicate: crate::RuntimeImplementationPredicate {
+            schema: crate::RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA.to_string(),
+            predicate_id: "fixture".to_string(),
+            hardware: crate::RuntimeHardwarePredicate {
+                measured_profile_ids: Vec::new(),
+                capability_classes: Vec::new(),
+                device_kinds: Vec::new(),
+                apis: Vec::new(),
+                required_processes: Vec::new(),
+                required_features: Vec::new(),
+            },
+            execution: crate::RuntimeExecutionPredicate {
+                phases: vec!["decode".to_string()],
+                alternative_phases: vec!["decode".to_string()],
+                source_retained_phases: Vec::new(),
+                activation_batch: crate::RuntimeInclusiveRange {
+                    minimum: 1,
+                    maximum: 1,
+                },
+                context_activations: crate::RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: 128,
+                },
+                state_activations: crate::RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: 128,
+                },
+                speculative_draft_token_counts: vec![0],
+                residency_policies: vec!["eager".to_string()],
+            },
+            placement: crate::RuntimePlacementPredicate {
+                mode: "local".to_string(),
+                minimum_device_count: 1,
+                maximum_device_count: 1,
+                required_interconnects: Vec::new(),
+            },
+        },
+        representation: serde_json::json!({"kind": "int4"}),
+        provenance: serde_json::json!({"fixture": true}),
+        benchmark_id: "benchmark".to_string(),
+        validation_id: "validation".to_string(),
+        validation_status: "passed".to_string(),
+        speedup_ppm: 500_000,
+        estimated_saved_ns: 5,
+        conversion_ns: 0,
+        conversion_bytes: 0,
+        boundary_count: 0,
+        decision_reason: "fixture".to_string(),
+    }
+}
+
+fn hybrid_test_representation_application(
+    runtime_model: VulkanResidentRuntimeModel,
+    instance_ids: &[&str],
+) -> VulkanRuntimeHybridRepresentationApplication {
+    let selected = hybrid_test_selected_representation(instance_ids);
+    VulkanRuntimeHybridRepresentationApplication {
+        runtime_model,
+        semantic_contract_id: "source-contract".to_string(),
+        selection: crate::RuntimeImplementationSelectionReport {
+            package_id: "fixture".to_string(),
+            execution: crate::RuntimeExecutionEnvelope {
+                phases: vec!["decode".to_string()],
+                activation_batch: crate::RuntimeInclusiveRange {
+                    minimum: 1,
+                    maximum: 1,
+                },
+                context_activations: crate::RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: 128,
+                },
+                state_activations: crate::RuntimeInclusiveRange {
+                    minimum: 0,
+                    maximum: 128,
+                },
+                speculative_draft_tokens: 0,
+                residency_policy: "eager".to_string(),
+            },
+            selected: vec![selected],
+            exact_instance_ids: Vec::new(),
+            rejected: Vec::new(),
+            total_estimated_saved_ns: 5,
+            total_conversion_ns: 0,
+            total_conversion_bytes: 0,
+            total_boundary_count: 0,
+        },
+    }
+}
+
 fn hybrid_test_distributed_catalog(
     model: &VulkanResidentRuntimeModel,
 ) -> VulkanPlacementCalibrationCatalog {
@@ -1085,6 +1187,117 @@ fn runtime_hybrid_physical_resolution_carries_measured_tp_into_normal_execution(
         .0
         .contains("unbound physical device")
     );
+}
+
+#[test]
+fn runtime_hybrid_jointly_selects_a_faster_compatible_representation() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let mut alternative = model.clone();
+    alternative
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .implementation = "int4_representation".to_string();
+    let alternative_signature = vulkan_runtime_placement_calibration_target_for_component(
+        &alternative,
+        "layer_00",
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap()
+    .signature_id;
+    let mut catalog = hybrid_test_catalog(&model);
+    let behavior = hybrid_test_behavior(&alternative_signature);
+    catalog
+        .record_reference(VulkanPlacementCanonicalReference {
+            behavior: behavior.clone(),
+            output_digest: "output".to_string(),
+            output_artifact: None,
+            state_digest: "state".to_string(),
+        })
+        .unwrap();
+    catalog
+        .record_observation(hybrid_test_observation(behavior, "gpu0", 4))
+        .unwrap();
+    let application = hybrid_test_representation_application(alternative, &["layer_00"]);
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+
+    let placement = try_plan_vulkan_runtime_hybrid_ordered_graph_with_representations(
+        &model,
+        &[application],
+        &BTreeSet::from(["layer_00".to_string()]),
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap()
+    .expect("the alternative must cover the incompatible baseline");
+
+    assert_eq!(placement.ordered_placement.plan.predicted_duration_ns_per_activation, 24);
+    assert_eq!(placement.selected_implementations.len(), 1);
+    assert_eq!(
+        placement.selected_implementations[0].instance_ids,
+        ["layer_00"]
+    );
+    assert!(matches!(
+        &placement.ordered_placement.plan.steps[0],
+        VulkanHybridScheduledStep::Region { candidate_id, .. }
+            if candidate_id.starts_with("representation:0:")
+    ));
+}
+
+#[test]
+fn runtime_hybrid_rejects_noncontiguous_representation_applications() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let application = hybrid_test_representation_application(
+        model.clone(),
+        &["layer_00", "layer_00_tail"],
+    );
+    let catalog = hybrid_test_catalog(&model);
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([(hybrid_test_device("gpu0"), 100)]),
+        host_available_bytes: 100,
+    };
+
+    let error = try_plan_vulkan_runtime_hybrid_ordered_graph_with_representations(
+        &model,
+        &[application],
+        &BTreeSet::new(),
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap_err();
+
+    assert!(error.0.contains("contiguous ordered graph region"));
+}
+
+#[test]
+fn runtime_hybrid_cannot_retain_an_uncovered_incompatible_baseline() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let catalog = hybrid_test_catalog(&model);
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([(hybrid_test_device("gpu0"), 100)]),
+        host_available_bytes: 100,
+    };
+
+    let placement = try_plan_vulkan_runtime_hybrid_ordered_graph_with_representations(
+        &model,
+        &[],
+        &BTreeSet::from(["layer_00".to_string()]),
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+
+    assert!(placement.is_none());
 }
 
 #[test]
