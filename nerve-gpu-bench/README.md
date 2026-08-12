@@ -233,7 +233,7 @@ cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
   merge-catalogs \
   --input /path/to/owner-a.json \
   --input /path/to/owner-b.json \
-  --output /path/to/merged-placement-catalog.json
+  --output /path/to/compiled/optimization/placement-calibration-catalog.json
 ```
 
 Merging is transactional and order-independent. Distinct exact cases are
@@ -241,6 +241,17 @@ retained. Repeated measurements of the same exact case must agree on behavior,
 resources, output, state, and call shape; the merge keeps the slower complete
 duration as conservative planning evidence. Conflicts fail without replacing
 an already published output.
+
+`optimization/placement-calibration-catalog.json` is the canonical production
+location inside a self-contained compiled package. Normal NERVE chat discovers
+it automatically; there is no profiling-only inference mode or placement JSON
+argument. The runtime merges fresh directed-transfer evidence, rejects corrupt
+or ambiguous cohorts, filters stale device/API/driver cases out through the
+live capacity envelope, and only selects a distributed case when its exact
+compiled signature, phase, batch width, resources, output, and state match the
+mounted package. Keeping temporary per-candidate catalogs outside the package
+is fine, but they are not runtime inputs after the canonical merged catalog is
+published.
 
 The final JSON contains completed, validated comparisons only. A missing target
 or combination was not a usable measured path.

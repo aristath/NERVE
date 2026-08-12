@@ -290,17 +290,27 @@ execution, and clean release remain mandatory. Existing AMD workloads are
 recorded reservations, not device-level exclusions: NERVE may use the measured
 unreserved VRAM while preserving those workloads.
 
-Automatic optimizer placement measures each compatible AMD device's current
-VRAM usage and asks every linked runtime executable for the authoritative
-device-local memory policy. All executables must agree or optimization fails
-before device work begins. The current policy reserves at most 80% of the
-opening free capacity and leaves the remaining 20% outside NERVE's stable
-budget. Placement then selects the smallest admissible device set and partitions
-the ordered component stream proportionally to those per-device capacities.
-Components stay contiguous to minimize cross-device edges, while devices are
-ordered by physical PCI topology. The lease lock serializes NERVE optimizers
-only; it never claims exclusive ownership of a physical GPU or evicts another
+Automatic placement inspects every compatible selected target immediately
+before planning, including its existing reservations, safe remaining capacity,
+driver identity, and package compatibility. Existing allocations are preserved
+reservations rather than device-level exclusions. Without exact distributed
+evidence, the runtime uses its validated capacity-packed component placement.
+With exact evidence, it solves the ordered graph across legal physical islands
+and measured directed boundaries under the live per-device and host capacity
+envelope. Device count, vendor, and split strategy are runtime decisions rather
+than model-family rules. The lease lock serializes NERVE optimizers only; it
+never claims exclusive ownership of a physical target or evicts another
 process.
+
+Post-compiler hardware placement evidence lives at
+`optimization/placement-calibration-catalog.json` inside the compiled package.
+Normal chat discovers this exact catalog automatically and may realize each
+logical component as a measured single-device, serialized, tensor-parallel, or
+expert-parallel physical island. Decode owns the stable component backbone;
+prefill may use different measured helpers without remounting or changing the
+logical graph. Missing evidence makes that physical candidate unavailable,
+while corrupt or ambiguous evidence fails closed. The compact standalone GPU
+ranking is diagnostic evidence and is never consumed as an inference plan.
 
 ### Adding a representation provider
 
