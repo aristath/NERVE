@@ -3,7 +3,8 @@ use std::error::Error;
 use std::path::Path;
 
 use nerve_runtime::{
-    VulkanPlacementCalibrationCatalog, VulkanRuntimeDistributedPlacementCalibrationReport,
+    VulkanPlacementCalibrationCatalog, VulkanPlacementExecutionStrategy,
+    VulkanRuntimeDistributedPlacementCalibrationReport,
 };
 
 use crate::boundary_calibration::measure_boundary_candidate;
@@ -11,7 +12,7 @@ use crate::calibration_package::CalibrationPackage;
 use crate::calibration_suite_plan::{expand_target_orders, plan_calibration_suite};
 use crate::load_wave_calibration::measure_load_wave_candidate;
 use crate::output::write_atomic;
-use crate::package_calibration::measure_package_candidate;
+use crate::package_calibration::measure_package_candidates;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MeasuredTargetOrder {
@@ -22,6 +23,8 @@ struct MeasuredTargetOrder {
     resident_bytes: BTreeMap<String, usize>,
     transient_bytes: BTreeMap<String, usize>,
     host_transient_bytes: usize,
+    contract_ids: Vec<String>,
+    strategy: VulkanPlacementExecutionStrategy,
 }
 
 pub fn run_calibration_suite(
@@ -46,15 +49,17 @@ pub fn run_calibration_suite(
     for case in &plan.component_cases {
         let mut current_width_measurements = Vec::new();
         for order in &plan.initial_target_orders {
-            let measurement = measure_package_candidate(&package, &case.target, case.phase, order)?;
-            let Some(measurement) = measurement else {
+            let measurement =
+                measure_package_candidates(&package, &case.target, case.phase, order)?;
+            if measurement.reports.is_empty() {
                 unavailable_component_candidates += 1;
                 continue;
-            };
+            }
             catalog.merge(&measurement.catalog)?;
-            measured_component_candidates += 1;
+            measured_component_candidates += measurement.reports.len();
             if order.len() == 2 {
-                current_width_measurements.push(measured_target_order(&measurement.report));
+                current_width_measurements
+                    .extend(measurement.reports.iter().map(measured_target_order));
             }
         }
 
@@ -65,14 +70,15 @@ pub fn run_calibration_suite(
             let mut next_width_measurements = Vec::new();
             for order in expanded {
                 let measurement =
-                    measure_package_candidate(&package, &case.target, case.phase, &order)?;
-                let Some(measurement) = measurement else {
+                    measure_package_candidates(&package, &case.target, case.phase, &order)?;
+                if measurement.reports.is_empty() {
                     unavailable_component_candidates += 1;
                     continue;
-                };
+                }
                 catalog.merge(&measurement.catalog)?;
-                measured_component_candidates += 1;
-                next_width_measurements.push(measured_target_order(&measurement.report));
+                measured_component_candidates += measurement.reports.len();
+                next_width_measurements
+                    .extend(measurement.reports.iter().map(measured_target_order));
             }
             current_width_measurements = next_width_measurements;
             width += 1;
@@ -133,6 +139,8 @@ fn measured_target_order(
         resident_bytes: report.resident_parameter_bytes_by_device.clone(),
         transient_bytes: report.resident_transient_bytes_by_device.clone(),
         host_transient_bytes: report.resident_host_transient_bytes,
+        contract_ids: report.execution_case.behavior.contract_ids.clone(),
+        strategy: report.execution_case.strategy,
     }
 }
 
@@ -158,6 +166,8 @@ fn same_future_state(left: &MeasuredTargetOrder, right: &MeasuredTargetOrder) ->
     left.owner_target_id == right.owner_target_id
         && left.output_target_id == right.output_target_id
         && left.order.iter().collect::<BTreeSet<_>>() == right.order.iter().collect::<BTreeSet<_>>()
+        && left.contract_ids == right.contract_ids
+        && left.strategy == right.strategy
 }
 
 fn dominates(left: &MeasuredTargetOrder, right: &MeasuredTargetOrder) -> bool {
@@ -206,6 +216,8 @@ mod tests {
                 .map(|(target, bytes)| ((*target).to_string(), *bytes))
                 .collect(),
             host_transient_bytes: 0,
+            contract_ids: vec!["contract".to_string()],
+            strategy: VulkanPlacementExecutionStrategy::TensorParallel,
         }
     }
 
@@ -247,6 +259,22 @@ mod tests {
         assert_eq!(
             non_dominated_target_orders(&[first.clone(), second.clone()]),
             vec![first.order, second.order],
+        );
+    }
+
+    #[test]
+    fn pruning_preserves_distinct_physical_strategies() {
+        let fast_tp = measured(&["a", "b", "c"], 10, &[("a", 5)], &[("a", 2)]);
+        let mut slower_expert = measured(&["a", "c", "b"], 20, &[("a", 5)], &[("a", 2)]);
+        slower_expert.strategy = VulkanPlacementExecutionStrategy::IntraExpertTensorParallel;
+        slower_expert.contract_ids = vec!["expert-contract".to_string()];
+
+        assert_eq!(
+            non_dominated_target_orders(&[fast_tp, slower_expert]),
+            vec![
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                vec!["a".to_string(), "c".to_string(), "b".to_string()],
+            ],
         );
     }
 }

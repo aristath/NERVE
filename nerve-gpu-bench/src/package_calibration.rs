@@ -7,8 +7,8 @@ use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, VulkanRuntimeDistributedPlacementCalibrationReport,
     VulkanRuntimePlacementCalibrationPolicy, VulkanRuntimePlacementCalibrationTarget,
     VulkanTargetedComponentExecutionPhase,
-    calibrate_vulkan_runtime_staged_placement_candidate_with_policy,
-    calibrate_vulkan_runtime_staged_prefill_placement_candidate_with_policy,
+    calibrate_vulkan_runtime_staged_contract_candidate_with_policy,
+    vulkan_runtime_distributed_contract_candidates,
     vulkan_runtime_placement_calibration_target_for_component,
 };
 
@@ -43,29 +43,37 @@ pub fn run_package_calibration(
         execution_phase,
     )?;
 
-    let Some(measurement) =
-        measure_package_candidate(&package, &target, phase, ordered_target_ids)?
-    else {
+    let measurement = measure_package_candidates(&package, &target, phase, ordered_target_ids)?;
+    if measurement.reports.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "the requested package placement candidate is unavailable",
         )
         .into());
-    };
+    }
     let payload = measurement.catalog.to_json_bytes()?;
     write_atomic(output, &payload)?;
     println!(
-        "calibrated package={} signature={} representative={} requested_component={} phase={} batch_width={} targets={:?} observations={} sampled={} measured_ns={} output={}",
+        "calibrated package={} signature={} representative={} requested_component={} phase={} batch_width={} targets={:?} observations={} contract_candidates={} sampled={} best_measured_ns={} output={}",
         package.source_path().display(),
         target.signature_id,
         target.component_id,
         component,
-        measurement.report.phase,
-        measurement.report.activation_batch_width,
-        measurement.report.physical_device_ids,
+        measurement.reports[0].phase,
+        measurement.reports[0].activation_batch_width,
+        measurement.reports[0].physical_device_ids,
         measurement.catalog.observation_count(),
-        measurement.report.sampled_workload,
-        measurement.report.measured_execution_ns,
+        measurement.reports.len(),
+        measurement
+            .reports
+            .iter()
+            .any(|report| report.sampled_workload),
+        measurement
+            .reports
+            .iter()
+            .map(|report| report.measured_execution_ns)
+            .min()
+            .unwrap_or(0),
         output.display(),
     );
     Ok(())
@@ -73,15 +81,15 @@ pub fn run_package_calibration(
 
 pub struct PackageCalibrationMeasurement {
     pub catalog: VulkanPlacementCalibrationCatalog,
-    pub report: VulkanRuntimeDistributedPlacementCalibrationReport,
+    pub reports: Vec<VulkanRuntimeDistributedPlacementCalibrationReport>,
 }
 
-pub fn measure_package_candidate(
+pub fn measure_package_candidates(
     package: &CalibrationPackage,
     target: &VulkanRuntimePlacementCalibrationTarget,
     phase: PackageCalibrationPhase,
     ordered_target_ids: &[String],
-) -> Result<Option<PackageCalibrationMeasurement>, Box<dyn Error>> {
+) -> Result<PackageCalibrationMeasurement, Box<dyn Error>> {
     let devices = open_calibration_devices(ordered_target_ids)?;
 
     let before = capture_device_snapshots(&devices)?;
@@ -119,36 +127,44 @@ pub fn measure_package_candidate(
         maximum_resident_parameter_bytes_by_physical_device,
         ..VulkanRuntimePlacementCalibrationPolicy::default()
     };
-    let mut catalog = VulkanPlacementCalibrationCatalog::default();
-    let calibration_result = match phase {
-        PackageCalibrationPhase::Decode => {
-            calibrate_vulkan_runtime_staged_placement_candidate_with_policy(
+    let execution_phase = match phase {
+        PackageCalibrationPhase::Decode => VulkanTargetedComponentExecutionPhase::Decode,
+        PackageCalibrationPhase::Prefill {
+            activation_batch_width,
+        } => VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width,
+        },
+    };
+    let candidates = vulkan_runtime_distributed_contract_candidates(
+        package.runtime_model(),
+        target,
+        execution_phase,
+    )?;
+    let calibration_result = (|| {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let mut reports = Vec::new();
+        for candidate in candidates {
+            let report = calibrate_vulkan_runtime_staged_contract_candidate_with_policy(
                 &devices,
                 package.manifest_dir(),
                 package.runtime_model(),
                 target,
+                execution_phase,
+                &candidate.contract_ids,
                 &mut catalog,
-                policy,
-            )
+                policy.clone(),
+            )?;
+            if let Some(report) = report {
+                reports.push(report);
+            }
         }
-        PackageCalibrationPhase::Prefill {
-            activation_batch_width,
-        } => calibrate_vulkan_runtime_staged_prefill_placement_candidate_with_policy(
-            &devices,
-            package.manifest_dir(),
-            package.runtime_model(),
-            target,
-            activation_batch_width,
-            &mut catalog,
-            policy,
-        ),
-    };
+        Ok::<_, nerve_runtime::VulkanResidentTokenModelPackageError>((catalog, reports))
+    })();
 
     let restoration_result = quiesce_and_verify_device_snapshots(&devices, &before);
 
-    let report = match (calibration_result, restoration_result) {
-        (Ok(Some(report)), Ok(())) => report,
-        (Ok(None), Ok(())) => return Ok(None),
+    let (catalog, reports) = match (calibration_result, restoration_result) {
+        (Ok(measured), Ok(())) => measured,
         (Err(error), Ok(())) => return Err(error.into()),
         (Ok(_), Err(restoration_error)) => {
             return Err(io::Error::other(restoration_error).into());
@@ -160,5 +176,5 @@ pub fn measure_package_candidate(
             .into());
         }
     };
-    Ok(Some(PackageCalibrationMeasurement { catalog, report }))
+    Ok(PackageCalibrationMeasurement { catalog, reports })
 }
