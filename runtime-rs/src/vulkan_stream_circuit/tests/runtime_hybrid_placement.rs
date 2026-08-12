@@ -31,6 +31,17 @@ fn hybrid_test_behavior(signature: &str) -> VulkanPlacementBehaviorIdentity {
     }
 }
 
+fn hybrid_test_behavior_for_phase(
+    signature: &str,
+    phase: nerve_execution_contracts::ExecutionPhase,
+    activation_batch_width: usize,
+) -> VulkanPlacementBehaviorIdentity {
+    let mut behavior = hybrid_test_behavior(signature);
+    behavior.phase = phase;
+    behavior.shape.activation_batch_width = activation_batch_width;
+    behavior
+}
+
 fn hybrid_test_device(id: &str) -> VulkanPlacementDeviceExecutionIdentity {
     VulkanPlacementDeviceExecutionIdentity {
         physical_device_id: id.to_string(),
@@ -44,6 +55,7 @@ fn hybrid_test_observation(
     device_id: &str,
     duration_ns: u64,
 ) -> VulkanPlacementCalibrationObservation {
+    let useful_activation_count = behavior.shape.activation_batch_width;
     let device = hybrid_test_device(device_id);
     VulkanPlacementCalibrationObservation {
         execution_case: VulkanPlacementExecutionCaseIdentity {
@@ -60,7 +72,7 @@ fn hybrid_test_observation(
         measured_call_count: 1,
         complete_transaction: true,
         duration_ns,
-        useful_activation_count: 1,
+        useful_activation_count,
         output_digest: "output".to_string(),
         output_artifact: None,
         output_equivalence: VulkanPlacementOutputEquivalenceEvidence::BitExact,
@@ -69,6 +81,69 @@ fn hybrid_test_observation(
         transient_peak_bytes_by_physical_device: BTreeMap::from([(device_id.to_string(), 2)]),
         host_resident_bytes: 0,
         host_transient_peak_bytes: 0,
+    }
+}
+
+fn record_hybrid_phase_candidates(
+    model: &VulkanResidentRuntimeModel,
+    catalog: &mut VulkanPlacementCalibrationCatalog,
+    phase: VulkanTargetedComponentExecutionPhase,
+    gpu0_duration_ns: u64,
+    gpu1_duration_ns: u64,
+) {
+    let execution_phase = match phase {
+        VulkanTargetedComponentExecutionPhase::Decode => {
+            nerve_execution_contracts::ExecutionPhase::Decode
+        }
+        VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+            nerve_execution_contracts::ExecutionPhase::Prefill
+        }
+    };
+    let mut signatures = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| {
+            vulkan_runtime_placement_calibration_target_for_component(
+                model,
+                &component.component_id,
+                phase,
+            )
+            .unwrap()
+            .signature_id
+        })
+        .collect::<Vec<_>>();
+    signatures.sort();
+    signatures.dedup();
+    for signature in signatures {
+        let behavior = hybrid_test_behavior_for_phase(
+            &signature,
+            execution_phase,
+            phase.activation_batch_width(),
+        );
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: behavior.clone(),
+                output_digest: "output".to_string(),
+                output_artifact: None,
+                state_digest: "state".to_string(),
+            })
+            .unwrap();
+        catalog
+            .record_observation(hybrid_test_observation(
+                behavior.clone(),
+                "gpu0",
+                gpu0_duration_ns,
+            ))
+            .unwrap();
+        catalog
+            .record_observation(hybrid_test_observation(
+                behavior,
+                "gpu1",
+                gpu1_duration_ns,
+            ))
+            .unwrap();
     }
 }
 
@@ -399,4 +474,86 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
         .0
         .contains("unbound physical device")
     );
+}
+
+#[test]
+fn runtime_hybrid_phase_set_keeps_decode_owners_while_optimizing_prefill() {
+    let mut model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    for execution in &mut model.component_executions {
+        let mut prefill_terminal = execution.kernels.last().unwrap().clone();
+        prefill_terminal.execution_index += 1;
+        prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
+        prefill_terminal.execution_domain =
+            VulkanResidentComponentKernelExecutionDomain::Prefill;
+        execution.kernels.push(prefill_terminal);
+    }
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    record_hybrid_phase_candidates(
+        &model,
+        &mut catalog,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        5,
+        10,
+    );
+    record_hybrid_phase_candidates(
+        &model,
+        &mut catalog,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 4,
+        },
+        20,
+        1,
+    );
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+
+    let phase_set = plan_vulkan_runtime_hybrid_phase_set(
+        &model,
+        &catalog,
+        &capacity,
+        Some(4),
+    )
+    .unwrap();
+    assert!(phase_set.decode.plan.steps.iter().all(|step| matches!(
+        step,
+        VulkanHybridScheduledStep::Region { execution_case, .. }
+            if execution_case.owner_physical_device_id == "gpu0"
+    )));
+    assert!(phase_set
+        .prefill
+        .as_ref()
+        .unwrap()
+        .plan
+        .steps
+        .iter()
+        .all(|step| matches!(
+            step,
+            VulkanHybridScheduledStep::Region { execution_case, .. }
+                if execution_case.owner_physical_device_id == "gpu0"
+        )));
+
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "logical0".to_string()),
+        ("gpu1".to_string(), "logical1".to_string()),
+    ]);
+    let (stable_model, physical_plan) =
+        lower_vulkan_runtime_hybrid_phase_set(&model, &phase_set, &bindings).unwrap();
+    assert!(stable_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .all(|component| stable_model
+            .placement
+            .device_for_component(&component.component_id)
+            == "logical0"));
+    assert_eq!(physical_plan.decode_execution_cases_by_component.len(), 3);
+    assert_eq!(physical_plan.prefill_execution_cases_by_component.len(), 3);
+    assert!(physical_plan.component_device_pools.decode.is_empty());
+    assert!(physical_plan.component_device_pools.prefill.is_empty());
 }

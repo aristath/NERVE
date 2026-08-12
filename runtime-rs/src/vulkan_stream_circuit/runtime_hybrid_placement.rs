@@ -6,6 +6,12 @@ pub struct VulkanRuntimeHybridOrderedPlacement {
     pub plan: VulkanHybridPlacementPlan,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanRuntimeHybridPhaseSetPlacement {
+    pub decode: VulkanRuntimeHybridOrderedPlacement,
+    pub prefill: Option<VulkanRuntimeHybridOrderedPlacement>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct VulkanRuntimeHybridLoweredPhasePlacement {
     /// Stable logical model with only the selected backbone/coordinator owner
@@ -39,6 +45,61 @@ pub fn plan_vulkan_runtime_hybrid_ordered_graph(
     capacity: &VulkanPlacementCapacityEnvelope,
     phase: VulkanTargetedComponentExecutionPhase,
 ) -> Result<VulkanRuntimeHybridOrderedPlacement, VulkanRuntimeHybridPlacementError> {
+    plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+        runtime_model,
+        catalog,
+        capacity,
+        phase,
+        None,
+    )
+}
+
+/// Chooses one persistent decode-owned backbone and then optimizes prefill
+/// against those same coordinators. Helpers and shard counts remain free to
+/// differ by phase, but phase switching never remounts or duplicates the
+/// logical component chain.
+pub fn plan_vulkan_runtime_hybrid_phase_set(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    prefill_activation_batch_width: Option<usize>,
+) -> Result<VulkanRuntimeHybridPhaseSetPlacement, VulkanRuntimeHybridPlacementError> {
+    if prefill_activation_batch_width.is_some_and(|width| width < 2) {
+        return runtime_hybrid_error(
+            "hybrid phase-set prefill requires a multi-lane activation batch width",
+        );
+    }
+    let decode = plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+        runtime_model,
+        catalog,
+        capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        None,
+    )?;
+    let decode_owner_by_component = runtime_hybrid_physical_owners(&decode)?;
+    let prefill = prefill_activation_batch_width
+        .map(|activation_batch_width| {
+            plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+                runtime_model,
+                catalog,
+                capacity,
+                VulkanTargetedComponentExecutionPhase::Prefill {
+                    activation_batch_width,
+                },
+                Some(&decode_owner_by_component),
+            )
+        })
+        .transpose()?;
+    Ok(VulkanRuntimeHybridPhaseSetPlacement { decode, prefill })
+}
+
+fn plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    phase: VulkanTargetedComponentExecutionPhase,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
+) -> Result<VulkanRuntimeHybridOrderedPlacement, VulkanRuntimeHybridPlacementError> {
     let execution_phase = runtime_hybrid_execution_phase(phase)?;
     let component_ids = runtime_model
         .circuit_graph
@@ -49,6 +110,14 @@ pub fn plan_vulkan_runtime_hybrid_ordered_graph(
         .collect::<Vec<_>>();
     if component_ids.is_empty() {
         return runtime_hybrid_error("hybrid placement found no signal-processor components");
+    }
+    if let Some(required_owners) = required_owner_by_component
+        && required_owners.keys().collect::<BTreeSet<_>>()
+            != component_ids.iter().collect::<BTreeSet<_>>()
+    {
+        return runtime_hybrid_error(
+            "hybrid owner constraints must cover every ordered component exactly once",
+        );
     }
 
     // Reuse the graph's exact boundary validator. Besides computing physical
@@ -91,6 +160,12 @@ pub fn plan_vulkan_runtime_hybrid_ordered_graph(
                         | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
                         | VulkanPlacementExecutionStrategy::Hybrid
                 )
+            })
+            .filter(|observation| {
+                required_owner_by_component.is_none_or(|required_owners| {
+                    observation.execution_case.owner_physical_device_id
+                        == required_owners[component_id]
+                })
             })
             .enumerate()
         {
@@ -151,6 +226,101 @@ pub fn plan_vulkan_runtime_hybrid_ordered_graph(
         activation_batch_width,
         plan,
     })
+}
+
+fn runtime_hybrid_physical_owners(
+    placement: &VulkanRuntimeHybridOrderedPlacement,
+) -> Result<BTreeMap<String, String>, VulkanRuntimeHybridPlacementError> {
+    let mut owners = BTreeMap::new();
+    for step in &placement.plan.steps {
+        let VulkanHybridScheduledStep::Region {
+            component_start,
+            component_end,
+            execution_case,
+            ..
+        } = step
+        else {
+            continue;
+        };
+        if *component_end != component_start + 1 {
+            return runtime_hybrid_error(
+                "runtime hybrid phase set requires one physical case per component",
+            );
+        }
+        let component_id = placement.component_ids.get(*component_start).ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(
+                "runtime hybrid phase set contains an out-of-range component".to_string(),
+            )
+        })?;
+        if owners
+            .insert(
+                component_id.clone(),
+                execution_case.owner_physical_device_id.clone(),
+            )
+            .is_some()
+        {
+            return runtime_hybrid_error(
+                "runtime hybrid phase set contains duplicate component ownership",
+            );
+        }
+    }
+    if owners.len() != placement.component_ids.len() {
+        return runtime_hybrid_error(
+            "runtime hybrid phase set does not assign every component owner",
+        );
+    }
+    Ok(owners)
+}
+
+pub fn lower_vulkan_runtime_hybrid_phase_set(
+    runtime_model: &VulkanResidentRuntimeModel,
+    placement: &VulkanRuntimeHybridPhaseSetPlacement,
+    logical_device_id_by_physical_device: &BTreeMap<String, String>,
+) -> Result<
+    (VulkanResidentRuntimeModel, VulkanRuntimePhysicalExecutionPlan),
+    VulkanRuntimeHybridPlacementError,
+> {
+    let decode = lower_vulkan_runtime_hybrid_phase_placement(
+        runtime_model,
+        &placement.decode,
+        logical_device_id_by_physical_device,
+    )?;
+    let prefill = placement
+        .prefill
+        .as_ref()
+        .map(|prefill| {
+            lower_vulkan_runtime_hybrid_phase_placement(
+                runtime_model,
+                prefill,
+                logical_device_id_by_physical_device,
+            )
+        })
+        .transpose()?;
+    if prefill
+        .as_ref()
+        .is_some_and(|prefill| prefill.runtime_model != decode.runtime_model)
+    {
+        return runtime_hybrid_error(
+            "hybrid phase set changed stable component ownership between decode and prefill",
+        );
+    }
+    let mut physical_execution_plan = VulkanRuntimePhysicalExecutionPlan {
+        component_device_pools: VulkanDistributedPhaseComponentDevicePools {
+            decode: decode.component_device_pools,
+            decode_batch: BTreeMap::new(),
+            prefill: BTreeMap::new(),
+        },
+        decode_execution_cases_by_component: decode.execution_cases_by_component,
+        ..VulkanRuntimePhysicalExecutionPlan::default()
+    };
+    if let Some(prefill) = prefill {
+        physical_execution_plan.component_device_pools.prefill =
+            prefill.component_device_pools;
+        physical_execution_plan.prefill_execution_cases_by_component =
+            prefill.execution_cases_by_component;
+    }
+    physical_execution_plan.validate(&decode.runtime_model)?;
+    Ok((decode.runtime_model, physical_execution_plan))
 }
 
 /// Lowers a solved phase into stable component owners plus phase-local exact
