@@ -301,7 +301,12 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
         VulkanTargetedComponentExecutionPhase::Decode,
     )
     .unwrap();
-    let lowered = lower_vulkan_runtime_hybrid_phase_placement(&model, &placement).unwrap();
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "logical-owner".to_string()),
+        ("gpu1".to_string(), "logical-helper".to_string()),
+    ]);
+    let lowered =
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &placement, &bindings).unwrap();
 
     assert_eq!(
         lowered.execution_phase,
@@ -313,7 +318,7 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
         lowered
             .component_device_pools
             .values()
-            .all(|devices| devices == &["gpu0", "gpu1"])
+            .all(|devices| devices == &["logical-owner", "logical-helper"])
     );
     assert!(
         lowered
@@ -334,7 +339,7 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
                     .runtime_model
                     .placement
                     .device_for_component(&component.component_id)
-                    == "gpu0"
+                    == "logical-owner"
             })
     );
 
@@ -344,7 +349,7 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
     };
     execution_case.behavior.compiled_execution_signature = "stale-signature".to_string();
     assert!(
-        lower_vulkan_runtime_hybrid_phase_placement(&model, &stale)
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &stale, &bindings)
             .unwrap_err()
             .0
             .contains("does not match compiled component")
@@ -358,7 +363,7 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
     };
     execution_case.shards[1].participant_ordinal = 0;
     assert!(
-        lower_vulkan_runtime_hybrid_phase_placement(&model, &conflicting_order)
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &conflicting_order, &bindings)
             .unwrap_err()
             .0
             .contains("conflicting calibrated participant order")
@@ -371,9 +376,27 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
     };
     execution_case.shards.clear();
     assert!(
-        lower_vulkan_runtime_hybrid_phase_placement(&model, &incomplete)
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &incomplete, &bindings)
             .unwrap_err()
             .0
             .contains("exact shard coverage")
+    );
+
+    let missing_binding = BTreeMap::from([("gpu0".to_string(), "logical-owner".to_string())]);
+    assert!(
+        lower_vulkan_runtime_hybrid_phase_placement(
+            &model,
+            &plan_vulkan_runtime_hybrid_ordered_graph(
+                &model,
+                &catalog,
+                &capacity,
+                VulkanTargetedComponentExecutionPhase::Decode,
+            )
+            .unwrap(),
+            &missing_binding,
+        )
+        .unwrap_err()
+        .0
+        .contains("unbound physical device")
     );
 }

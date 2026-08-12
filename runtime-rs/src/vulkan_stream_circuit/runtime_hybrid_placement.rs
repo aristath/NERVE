@@ -161,7 +161,9 @@ pub fn plan_vulkan_runtime_hybrid_ordered_graph(
 pub fn lower_vulkan_runtime_hybrid_phase_placement(
     runtime_model: &VulkanResidentRuntimeModel,
     placement: &VulkanRuntimeHybridOrderedPlacement,
+    logical_device_id_by_physical_device: &BTreeMap<String, String>,
 ) -> Result<VulkanRuntimeHybridLoweredPhasePlacement, VulkanRuntimeHybridPlacementError> {
+    validate_runtime_hybrid_device_bindings(logical_device_id_by_physical_device)?;
     let current_component_ids = runtime_model
         .circuit_graph
         .components
@@ -202,11 +204,25 @@ pub fn lower_vulkan_runtime_hybrid_phase_placement(
             placement.activation_batch_width,
             execution_case,
         )?;
-        let devices = runtime_hybrid_case_device_pool(execution_case)?;
-        owner_by_component.insert(
-            component_id.clone(),
-            execution_case.owner_physical_device_id.clone(),
-        );
+        let physical_devices = runtime_hybrid_case_device_pool(execution_case)?;
+        let devices = physical_devices
+            .iter()
+            .map(|physical_device_id| {
+                logical_device_id_by_physical_device
+                    .get(physical_device_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        VulkanRuntimeHybridPlacementError(format!(
+                            "hybrid physical case references unbound physical device {physical_device_id:?}",
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let owner_device_id = logical_device_id_by_physical_device
+            .get(&execution_case.owner_physical_device_id)
+            .expect("the owner is one of the resolved physical participants")
+            .clone();
+        owner_by_component.insert(component_id.clone(), owner_device_id);
         if devices.len() > 1 {
             component_device_pools.insert(component_id.clone(), devices);
         }
@@ -235,6 +251,26 @@ pub fn lower_vulkan_runtime_hybrid_phase_placement(
         component_device_pools,
         execution_cases_by_component,
     })
+}
+
+fn validate_runtime_hybrid_device_bindings(
+    logical_device_id_by_physical_device: &BTreeMap<String, String>,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    if logical_device_id_by_physical_device.is_empty()
+        || logical_device_id_by_physical_device
+            .iter()
+            .any(|(physical, logical)| physical.is_empty() || logical.is_empty())
+        || logical_device_id_by_physical_device
+            .values()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != logical_device_id_by_physical_device.len()
+    {
+        return runtime_hybrid_error(
+            "hybrid replay requires a nonempty one-to-one physical-to-logical device binding",
+        );
+    }
+    Ok(())
 }
 
 fn validate_runtime_hybrid_case_for_component(
