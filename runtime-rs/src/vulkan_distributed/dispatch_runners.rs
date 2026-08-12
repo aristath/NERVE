@@ -624,7 +624,14 @@ impl VulkanDistributedDispatchRunners {
                         .get(&planned_shard.device_id)
                         .is_some_and(|store| store.residency_policy().is_demand_loaded())
                         && !planned_dispatch.selected_resource_partitions.is_empty();
-                    let gates = if requires_demand_gates {
+                    // The island planner proves that every selected-resource
+                    // member uses the same selector-owned atomic groups and
+                    // exact shard ownership. One leading checkpoint therefore
+                    // validates every dynamic address needed by the complete
+                    // expert sequence; repeating the same gate before gate/up
+                    // and down would add warm-path dispatches without adding a
+                    // residency guarantee.
+                    let gates = if requires_demand_gates && dispatch_offset == 0 {
                         let store = resource_stores
                             .get(&planned_shard.device_id)
                             .cloned()
@@ -729,6 +736,7 @@ impl VulkanDistributedDispatchRunners {
                     })
                     .collect::<Vec<_>>();
                 let mut steps = Vec::new();
+                let residency_guard = selected_resource_gates.iter().flatten().next();
                 for ((base_step, gates), planned_dispatch) in base_steps
                     .into_iter()
                     .zip(&selected_resource_gates)
@@ -737,7 +745,7 @@ impl VulkanDistributedDispatchRunners {
                     for gate in gates {
                         steps.push(gate.gate_step()?);
                     }
-                    let step = match gates.first() {
+                    let step = match residency_guard {
                         Some(gate) => gate.guard_step(
                             base_step,
                             u32::try_from(planned_dispatch.dispatch_index).unwrap_or(u32::MAX),
@@ -1006,6 +1014,7 @@ impl VulkanDistributedDispatchRunners {
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut steps = Vec::new();
                 let mut byte_offsets = indirect.byte_offsets.iter().copied();
+                let residency_guard = shard.selected_resource_gates.iter().flatten().next();
                 for (((resident_dispatch, push_constants), gates), planned_dispatch) in shard
                     .resident_dispatches
                     .iter()
@@ -1033,7 +1042,7 @@ impl VulkanDistributedDispatchRunners {
                         byte_offset,
                     )
                     .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                    let step = match gates.first() {
+                    let step = match residency_guard {
                         Some(gate) => gate.guard_step(
                             base_step,
                             u32::try_from(planned_dispatch.dispatch_index).unwrap_or(u32::MAX),
