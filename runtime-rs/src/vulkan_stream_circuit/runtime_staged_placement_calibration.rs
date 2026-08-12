@@ -146,6 +146,9 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
         let Some(report) = report else {
             return Ok(None);
         };
+        if !vulkan_runtime_distributed_calibration_report_is_complete(&report) {
+            return Ok(None);
+        }
         if report.physical_device_ids != expected_ids
             || report.execution_case.owner_physical_device_id != expected_ids[0]
         {

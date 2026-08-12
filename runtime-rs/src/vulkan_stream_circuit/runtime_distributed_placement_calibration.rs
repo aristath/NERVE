@@ -55,7 +55,7 @@ pub fn record_vulkan_runtime_distributed_calibration_report(
     catalog: &mut VulkanPlacementCalibrationCatalog,
     report: &VulkanRuntimeDistributedPlacementCalibrationReport,
 ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
-    if report.sampled_workload || report.sample_fraction_millionths != 1_000_000 {
+    if !vulkan_runtime_distributed_calibration_report_is_complete(report) {
         return Err(VulkanPlacementCalibrationCatalogError(
             "distributed placement observation does not execute complete model work".to_string(),
         ));
@@ -76,6 +76,12 @@ pub fn record_vulkan_runtime_distributed_calibration_report(
         report.output_artifact.as_ref(),
     )?;
     catalog.record_observation(report.calibration_observation(output_equivalence))
+}
+
+fn vulkan_runtime_distributed_calibration_report_is_complete(
+    report: &VulkanRuntimeDistributedPlacementCalibrationReport,
+) -> bool {
+    !report.sampled_workload && report.sample_fraction_millionths == 1_000_000
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
