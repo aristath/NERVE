@@ -362,6 +362,108 @@ def test_independent_resources_preserve_compiler_source_integrity_partitions() -
     )
 
 
+def test_accepts_byte_preserving_matrix_reorders_as_atomic_selected_resources() -> None:
+    nodes, refs = _independent_component()
+    tensors = {
+        "tensors": {
+            "tensor.router": _tensor(4, [2]),
+            **{
+                f"tensor.unit_{unit}_{kind}": {
+                    **_tensor(8, [2, 2, 2]),
+                    SOURCE_INTEGRITY_PARTITION_COUNT_FIELD: 2,
+                    "derived": {
+                        "kind": "matrix_to_input_block_major",
+                        "source_tensor": f"source.unit_{unit}_{kind}",
+                        "source_file": "unused.safetensors",
+                        "source_header_bytes": 0,
+                        "data_offsets": [0, 8],
+                        "source_shape": [2, 4],
+                        "block_columns": 2,
+                    },
+                }
+                for unit in range(2)
+                for kind in ("scale", "weight")
+            },
+        }
+    }
+
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index=tensors,
+        require_direct_packaging=True,
+    )
+
+    assert analysis["dynamic_tensors"] == {
+        f"tensor.unit_{unit}_{kind}": {
+            "storage": "independent_resource",
+            SOURCE_INTEGRITY_PARTITION_COUNT_FIELD: 2,
+        }
+        for unit in range(2)
+        for kind in ("scale", "weight")
+    }
+    assert partition_counts_for_packaging(analysis) == {
+        f"tensor.unit_{unit}_{kind}": 2
+        for unit in range(2)
+        for kind in ("scale", "weight")
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_metadata",
+    [
+        {"derived": {"kind": "bf16_to_fp8_e4m3"}},
+        {"compile_only": True},
+        {
+            "derived": {
+                "kind": "matrix_to_input_block_major",
+                "source_tensor": "source",
+                "source_file": "unused.safetensors",
+                "source_header_bytes": 0,
+                "data_offsets": [0, 7],
+                "source_shape": [2, 4],
+                "block_columns": 2,
+            }
+        },
+        {
+            SOURCE_INTEGRITY_PARTITION_COUNT_FIELD: 3,
+            "derived": {
+                "kind": "matrix_to_input_block_major",
+                "source_tensor": "source",
+                "source_file": "unused.safetensors",
+                "source_header_bytes": 0,
+                "data_offsets": [0, 8],
+                "source_shape": [2, 4],
+                "block_columns": 2,
+            },
+        },
+    ],
+)
+def test_rejects_non_atomic_selected_resource_packaging_transforms(
+    invalid_metadata: dict[str, object],
+) -> None:
+    nodes, refs = _independent_component()
+    tensors = {
+        "tensors": {
+            "tensor.router": _tensor(4, [2]),
+            **{
+                f"tensor.unit_{unit}_{kind}": {
+                    **_tensor(8, [2, 2, 2]),
+                    **(invalid_metadata if unit == 0 and kind == "weight" else {}),
+                }
+                for unit in range(2)
+                for kind in ("scale", "weight")
+            },
+        }
+    }
+
+    with pytest.raises(ModelCompileError, match="non-atomic packaging transform"):
+        analyze_resource_residency_components(
+            components=[_component(nodes, refs)],
+            tensor_index=tensors,
+            require_direct_packaging=True,
+        )
+
+
 def test_independent_resource_contract_exposes_each_sealed_source_range(
     tmp_path: Path,
 ) -> None:
@@ -429,8 +531,7 @@ def test_independent_resource_contract_exposes_each_sealed_source_range(
     ]
     assert len(dynamic_resources) == 4
     assert all(
-        [byte_range["byte_count"] for byte_range in resource["ranges"]]
-        == [4, 4]
+        [byte_range["byte_count"] for byte_range in resource["ranges"]] == [4, 4]
         for resource in dynamic_resources
     )
     assert all(
@@ -621,7 +722,7 @@ def test_exact_early_selection_can_control_later_dynamic_parameters() -> None:
             "attrs": {},
         },
     )
-    nodes[2]["inputs"] = ["weighted"]
+    nodes[2]["inputs"] = ["weighted", "chosen"]
 
     analysis = analyze_resource_residency_components(
         components=[_component(nodes, refs)],
@@ -640,9 +741,10 @@ def test_exact_early_selection_can_control_later_dynamic_parameters() -> None:
     assert analysis["groups"][0]["selector_node_id"] == "choose"
     assert analysis["groups"][0]["selection_signal"] == "chosen"
     assert analysis["groups"][0]["resume_node_id"] == "selected_compute"
-    assert analysis["groups"][0]["predictable_dependency"] == nodes[0]["attrs"][
-        "predictable_dependency"
-    ]
+    assert (
+        analysis["groups"][0]["predictable_dependency"]
+        == nodes[0]["attrs"]["predictable_dependency"]
+    )
 
 
 def test_rejects_non_exact_or_unbound_predictable_selection_dependencies() -> None:
@@ -930,9 +1032,7 @@ def test_partition_bindings_preserve_physical_parameter_slot_order(
                 shape=shape,
                 payload=bytes([index]) * byte_count,
             )
-            for index, (name, (shape, byte_count)) in enumerate(
-                specs.items(), start=1
-            )
+            for index, (name, (shape, byte_count)) in enumerate(specs.items(), start=1)
         },
         "totals": {
             "tensor_count": len(specs),
@@ -1121,7 +1221,9 @@ def test_builds_concrete_group_table_for_independent_resources(
         )
         for binding in dynamic_bindings
     ) == [(0, 0), (0, 1), (1, 0), (1, 1)]
-    assert resource_builds == Counter({tensor_name: 1 for tensor_name in packaged["tensors"]})
+    assert resource_builds == Counter(
+        {tensor_name: 1 for tensor_name in packaged["tensors"]}
+    )
     assert len(source_header_catalogs) == 1
     assert len(artifact_size_catalogs) == 1
     validate_resource_residency_contract(package_dir, contract, manifest)
@@ -1262,7 +1364,9 @@ def test_rejects_overlapping_artifact_affinity_groups(tmp_path: Path) -> None:
     package_dir = tmp_path / "package"
     package_dir.mkdir()
 
-    with pytest.raises(ModelCompileError, match="appears in multiple artifact affinity"):
+    with pytest.raises(
+        ModelCompileError, match="appears in multiple artifact affinity"
+    ):
         copy_tensor_package(
             tensor_index,
             package_dir,

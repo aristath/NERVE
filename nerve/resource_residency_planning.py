@@ -282,8 +282,7 @@ def analyze_resource_residency_components(
                     or set(predictable_dependency) != _PREDICTABLE_DEPENDENCY_FIELDS
                     or predictable_dependency.get("schema")
                     != _PREDICTABLE_DEPENDENCY_SCHEMA
-                    or predictable_dependency.get("kind")
-                    != "parameter_table_lookup"
+                    or predictable_dependency.get("kind") != "parameter_table_lookup"
                     or predictable_dependency.get("selection_semantics") != "exact"
                 ):
                     raise ModelCompileError(
@@ -466,9 +465,7 @@ def analyze_resource_residency_components(
                         component_id=component_id,
                         node_id=node_id,
                     )
-                    for parameter_slot, parameter_id in enumerate(
-                        selected_parameters
-                    ):
+                    for parameter_slot, parameter_id in enumerate(selected_parameters):
                         node_parameter = (node_id, parameter_id)
                         if node_parameter in covered_node_parameters:
                             raise ModelCompileError(
@@ -640,7 +637,10 @@ def analyze_resource_residency_components(
                     f"{scope} component {component_id!r} selector "
                     f"{selector['node_id']!r} maps multiple selection signals"
                 )
-            if len(execution_signals) != 1 or len(execution_calibration_word_bases) != 1:
+            if (
+                len(execution_signals) != 1
+                or len(execution_calibration_word_bases) != 1
+            ):
                 raise ModelCompileError(
                     f"{scope} component {component_id!r} selector "
                     f"{selector['node_id']!r} maps incompatible execution records"
@@ -759,9 +759,9 @@ def analyze_resource_residency_components(
                         f"tensor {tensor_name!r} cannot be sealed into "
                         f"{source_partition_count} equal source ranges"
                     )
-                dynamic_tensors[tensor_name][
-                    SOURCE_INTEGRITY_PARTITION_COUNT_FIELD
-                ] = source_partition_count
+                dynamic_tensors[tensor_name][SOURCE_INTEGRITY_PARTITION_COUNT_FIELD] = (
+                    source_partition_count
+                )
         else:
             partitionings = {
                 (
@@ -880,9 +880,7 @@ def artifact_affinity_groups_for_packaging(analysis: Json) -> list[list[str]]:
                         access.get("parameter_id"),
                         "artifact affinity parameter id",
                     ),
-                    _non_empty_string(
-                        access.get("tensor"), "artifact affinity tensor"
-                    ),
+                    _non_empty_string(access.get("tensor"), "artifact affinity tensor"),
                 )
             )
         ordered_accesses.sort()
@@ -918,9 +916,7 @@ def artifact_affinity_groups_for_packaging(analysis: Json) -> list[list[str]]:
             if tensor_set.intersection(component["tensors"])
         ]
         if not overlapping:
-            components.append(
-                {"tensors": tensor_set, "orders": [(key, sequence)]}
-            )
+            components.append({"tensors": tensor_set, "orders": [(key, sequence)]})
             continue
         first = overlapping[0]
         merged_tensors = set(tensor_set)
@@ -1153,9 +1149,7 @@ def build_planned_resource_residency_contract(
             "resource_count": group["partition_count"],
             "selection_signal": group["selection_signal"],
             "execution_signal": group["execution_signal"],
-            "execution_calibration_word_base": group[
-                "execution_calibration_word_base"
-            ],
+            "execution_calibration_word_base": group["execution_calibration_word_base"],
             "encoding": deepcopy(group["encoding"]),
             "mapping": selector_mapping,
         }
@@ -1302,9 +1296,7 @@ def _validate_independent_tensor(
         raise ModelCompileError(
             f"selected tensor {tensor_name!r} has unsupported layout {layout!r}"
         )
-    if require_direct_packaging and (
-        metadata.get("derived") is not None or metadata.get("compile_only") is True
-    ):
+    if require_direct_packaging and not _has_atomic_selected_packaging(metadata):
         raise ModelCompileError(
             f"selected tensor {tensor_name!r} requires a non-atomic packaging transform"
         )
@@ -1353,12 +1345,87 @@ def _validate_partitioned_tensor(
         raise ModelCompileError(
             f"selected tensor {tensor_name!r} has unsupported layout {layout!r}"
         )
-    if require_direct_packaging and (
-        metadata.get("derived") is not None or metadata.get("compile_only") is True
-    ):
+    if require_direct_packaging and not _has_atomic_selected_packaging(metadata):
         raise ModelCompileError(
             f"selected tensor {tensor_name!r} requires a non-atomic packaging transform"
         )
+
+
+def _has_atomic_selected_packaging(metadata: Json) -> bool:
+    """Return whether packaging emits one sealed tensor without semantic coupling.
+
+    Selected resources may be compiler-reordered before publication as long as
+    the transform is byte-preserving, produces exactly one independently
+    sealable tensor, and does not depend on another derived output. Conversion
+    groups and compile-only dependencies remain ineligible because their
+    publication is not atomic at this resource boundary.
+    """
+
+    if metadata.get("compile_only") is True:
+        return False
+    derivation = metadata.get("derived")
+    if derivation is None:
+        return True
+    if not isinstance(derivation, dict):
+        return False
+    kind = derivation.get("kind")
+    if kind not in {"matrix_to_input_block_major", "transpose_2d"}:
+        return False
+    source_tensor = derivation.get("source_tensor")
+    source_file = derivation.get("source_file")
+    source_header_bytes = derivation.get("source_header_bytes")
+    source_shape = derivation.get("source_shape")
+    data_offsets = derivation.get("data_offsets")
+    output_shape = metadata.get("shape")
+    byte_count = metadata.get("byte_count")
+    source_partition_count = metadata.get(SOURCE_INTEGRITY_PARTITION_COUNT_FIELD)
+    if (
+        not isinstance(source_tensor, str)
+        or not source_tensor
+        or not isinstance(source_file, str)
+        or not source_file
+        or not isinstance(source_header_bytes, int)
+        or isinstance(source_header_bytes, bool)
+        or source_header_bytes < 0
+        or not isinstance(source_shape, list)
+        or len(source_shape) != 2
+        or any(
+            not isinstance(dimension, int)
+            or isinstance(dimension, bool)
+            or dimension <= 0
+            for dimension in source_shape
+        )
+        or not isinstance(data_offsets, list)
+        or len(data_offsets) != 2
+        or any(
+            not isinstance(offset, int) or isinstance(offset, bool) or offset < 0
+            for offset in data_offsets
+        )
+        or data_offsets[1] - data_offsets[0] != byte_count
+        or not isinstance(output_shape, list)
+        or (
+            source_partition_count is not None
+            and (
+                not isinstance(source_partition_count, int)
+                or isinstance(source_partition_count, bool)
+                or source_partition_count <= 0
+                or not output_shape
+                or output_shape[0] != source_partition_count
+            )
+        )
+    ):
+        return False
+    if kind == "transpose_2d":
+        return output_shape == [source_shape[1], source_shape[0]]
+    block_columns = derivation.get("block_columns")
+    return (
+        isinstance(block_columns, int)
+        and not isinstance(block_columns, bool)
+        and block_columns > 0
+        and source_shape[1] % block_columns == 0
+        and output_shape
+        == [source_shape[1] // block_columns, source_shape[0], block_columns]
+    )
 
 
 def _partition_member_template(
