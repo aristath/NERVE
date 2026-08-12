@@ -88,7 +88,7 @@ fn enumerate_distributed_contract_candidates<'a>(
     candidates: &mut BTreeSet<BTreeSet<String>>,
 ) -> Result<(), VulkanRuntimeResidencyPlanError> {
     if index == alternatives.len() {
-        if selected_contracts_have_complete_local_handoffs(selected)? {
+        if !selected.is_empty() && selected_contracts_have_complete_local_handoffs(selected)? {
             candidates.insert(
                 selected
                     .iter()
@@ -98,6 +98,16 @@ fn enumerate_distributed_contract_candidates<'a>(
         }
         return Ok(());
     }
+    // Leaving this kernel on its canonical implementation is a first-class
+    // hybrid choice. Without this branch candidate discovery can only measure
+    // the product of every distributable kernel in the component, which turns
+    // a local physical option into an accidental component-wide TP switch.
+    enumerate_distributed_contract_candidates(
+        alternatives,
+        index + 1,
+        selected,
+        candidates,
+    )?;
     for contract in &alternatives[index] {
         contract.validate().map_err(|error| {
             VulkanRuntimeResidencyPlanError(format!(
@@ -230,5 +240,46 @@ mod runtime_distributed_contract_candidate_tests {
         assert!(
             selected_contracts_have_complete_local_handoffs(&[&producer, &consumer]).unwrap()
         );
+    }
+
+    #[test]
+    fn enumerates_selective_and_combined_distributed_islands() {
+        let model = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let contracts = model
+            .component_executions
+            .iter()
+            .flat_map(|execution| &execution.kernels)
+            .flat_map(|kernel| &kernel.physical_execution_contracts)
+            .filter(|contract| contract.strategy.is_distributed())
+            .take(2)
+            .collect::<Vec<_>>();
+        let [first, second] = contracts.as_slice() else {
+            panic!("fixture must expose two independent distributed alternatives")
+        };
+        assert!(first.local_intermediates.is_empty());
+        assert!(second.local_intermediates.is_empty());
+
+        let alternatives = vec![vec![*first], vec![*second]];
+        let mut selected = Vec::new();
+        let mut candidates = BTreeSet::new();
+        enumerate_distributed_contract_candidates(
+            &alternatives,
+            0,
+            &mut selected,
+            &mut candidates,
+        )
+        .unwrap();
+
+        assert_eq!(
+            candidates,
+            BTreeSet::from([
+                BTreeSet::from([first.contract_id.clone()]),
+                BTreeSet::from([second.contract_id.clone()]),
+                BTreeSet::from([first.contract_id.clone(), second.contract_id.clone()]),
+            ]),
+        );
+        assert!(!candidates.contains(&BTreeSet::new()));
     }
 }
