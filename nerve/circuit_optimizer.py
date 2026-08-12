@@ -92,7 +92,11 @@ def optimize_circuit_for_vulkan(
         if fused is None:
             fused = _fuse_silu_multiply(current, following, consumer_counts)
         if fused is None:
-            fused = _fuse_linear_residual(current, following, consumer_counts)
+            fused = fuse_linear_residual_pair(
+                current,
+                following,
+                consumer_counts,
+            )
         if fused is None:
             fused = _fuse_linear_sigmoid_scalar_multiply(
                 current,
@@ -1664,11 +1668,19 @@ def _fuse_silu_multiply(
     }
 
 
-def _fuse_linear_residual(
+def fuse_linear_residual_pair(
     linear: Json,
     residual: Json | None,
     consumer_counts: Counter[str],
 ) -> Json | None:
+    """Return the canonical fused node when a linear/residual pair is legal.
+
+    Physical-representation discovery runs before the circuit optimizer. Keep
+    this predicate public so both stages agree on the exact region that will
+    exist after fusion; duplicating a looser pre-fusion recognizer can derive a
+    tensor-parallel artifact for a region that the executable graph never
+    creates.
+    """
     if residual is None or linear.get("op") != "linear" or residual.get("op") != "residual_add":
         return None
     if (

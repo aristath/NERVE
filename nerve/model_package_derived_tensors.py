@@ -1,3 +1,6 @@
+from collections import Counter
+
+from nerve.circuit_optimizer import fuse_linear_residual_pair
 from nerve.model_package_common import *
 from nerve.model_package_tensors import dtype_byte_count, tensor_dtype, tensor_shape
 from nerve.model_package_independent_experts import independent_sparse_moe_shader_file
@@ -89,12 +92,33 @@ def derive_tensor_parallel_linear_tensors(
     for circuit_ref in lowered_circuit_refs(lowered_index):
         circuit = read_json(lowered_dir / circuit_ref["circuit"])
         refs = circuit.get("parameters", {}).get("refs", {})
-        for node in circuit.get("nodes", []):
-            if (
-                node.get("op") != "linear_residual"
-                or len(node.get("inputs", [])) != 2
-                or len(node.get("outputs", [])) != 1
-            ):
+        nodes = circuit.get("nodes", [])
+        consumer_counts = Counter(
+            signal
+            for candidate in nodes
+            if isinstance(candidate, dict)
+            for signal in candidate.get("inputs", [])
+        )
+        for node_index, source_node in enumerate(nodes):
+            if not isinstance(source_node, dict):
+                continue
+            node = source_node
+            if node.get("op") != "linear_residual":
+                following = (
+                    nodes[node_index + 1]
+                    if node_index + 1 < len(nodes)
+                    and isinstance(nodes[node_index + 1], dict)
+                    else None
+                )
+                fused = fuse_linear_residual_pair(
+                    node,
+                    following,
+                    consumer_counts,
+                )
+                if fused is None:
+                    continue
+                node = fused
+            if len(node.get("inputs", [])) != 2 or len(node.get("outputs", [])) != 1:
                 continue
             params = node.get("params", [])
             if not params:

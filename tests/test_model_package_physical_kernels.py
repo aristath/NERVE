@@ -119,6 +119,83 @@ def test_compiler_derives_contiguous_input_block_major_weights(tmp_path: Path) -
     np.testing.assert_array_equal(reordered, expected)
 
 
+def test_compiler_derives_dense_down_weight_from_the_real_prefusion_region(
+    tmp_path: Path,
+) -> None:
+    _, circuit, tensor_index, _ = bf16_down_fixture(tmp_path)
+    linear = {
+        "id": "down",
+        "op": "linear",
+        "inputs": ["activated"],
+        "outputs": ["projected"],
+        "params": ["down"],
+    }
+    residual = {
+        "id": "residual",
+        "op": "residual_add",
+        "inputs": ["residual", "projected"],
+        "outputs": ["hidden"],
+    }
+    circuit["nodes"] = [linear, residual]
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
+
+    derive_tensor_parallel_linear_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered_dir,
+        tensor_index,
+        target=NativeTarget(),  # type: ignore[arg-type]
+    )
+
+    assert (
+        input_block_major_tensor_name("down.weight", TP_INPUT_BLOCK_COLUMNS)
+        in tensor_index["tensors"]
+    )
+
+
+def test_compiler_does_not_derive_dense_down_weight_for_an_unfusible_region(
+    tmp_path: Path,
+) -> None:
+    _, circuit, tensor_index, _ = bf16_down_fixture(tmp_path)
+    circuit["nodes"] = [
+        {
+            "id": "down",
+            "op": "linear",
+            "inputs": ["activated"],
+            "outputs": ["projected"],
+            "params": ["down"],
+        },
+        {
+            "id": "residual",
+            "op": "residual_add",
+            "inputs": ["residual", "projected"],
+            "outputs": ["hidden"],
+        },
+        {
+            "id": "observer",
+            "op": "identity",
+            "inputs": ["projected"],
+            "outputs": ["observed"],
+        },
+    ]
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
+
+    derive_tensor_parallel_linear_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered_dir,
+        tensor_index,
+        target=NativeTarget(),  # type: ignore[arg-type]
+    )
+
+    assert (
+        input_block_major_tensor_name("down.weight", TP_INPUT_BLOCK_COLUMNS)
+        not in tensor_index["tensors"]
+    )
+
+
 def test_contract_owns_the_input_column_shader_and_physical_weight(
     tmp_path: Path,
 ) -> None:
