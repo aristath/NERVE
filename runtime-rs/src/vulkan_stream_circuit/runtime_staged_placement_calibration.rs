@@ -203,10 +203,10 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
         {
             return Ok(None);
         }
-        if let Some((physical_device_id, device)) = canonical_participant {
+        if let Some((physical_device_id, device)) = &canonical_participant {
             try_record_vulkan_runtime_canonical_component(
-                &physical_device_id,
-                device,
+                physical_device_id,
+                Rc::clone(device),
                 manifest_dir,
                 runtime_model,
                 target,
@@ -218,9 +218,16 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
                 &mut canonical_attempts,
             )?;
         }
-        record_vulkan_runtime_distributed_calibration_report(catalog, &report)
-            .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
-        final_report = Some(report);
+        // A one-participant execution of a partition contract is useful only
+        // for fixing the exact workload sampled by wider stages. It is not a
+        // replayable single-device case: the ordinary single-device runtime
+        // does not mount distributed shard machinery. The canonical
+        // observation recorded above is the executable one-target candidate.
+        if canonical_participant.is_none() {
+            record_vulkan_runtime_distributed_calibration_report(catalog, &report)
+                .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+            final_report = Some(report);
+        }
     }
     Ok(final_report)
 }

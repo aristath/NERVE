@@ -44,7 +44,7 @@ pub fn run_package_calibration(
     )?;
 
     let measurement = measure_package_candidates(&package, &target, phase, ordered_target_ids)?;
-    if measurement.reports.is_empty() {
+    if measurement.catalog.observation_count() == 0 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "the requested package placement candidate is unavailable",
@@ -59,9 +59,12 @@ pub fn run_package_calibration(
         target.signature_id,
         target.component_id,
         component,
-        measurement.reports[0].phase,
-        measurement.reports[0].activation_batch_width,
-        measurement.reports[0].physical_device_ids,
+        match phase {
+            PackageCalibrationPhase::Decode => "decode",
+            PackageCalibrationPhase::Prefill { .. } => "prefill",
+        },
+        phase.activation_batch_width(),
+        ordered_target_ids,
         measurement.catalog.observation_count(),
         measurement.reports.len(),
         measurement
@@ -156,6 +159,9 @@ pub fn measure_package_candidates(
             )?;
             if let Some(report) = report {
                 reports.push(report);
+            }
+            if ordered_target_ids.len() == 1 && catalog.observation_count() > 0 {
+                break;
             }
         }
         Ok::<_, nerve_runtime::VulkanResidentTokenModelPackageError>((catalog, reports))

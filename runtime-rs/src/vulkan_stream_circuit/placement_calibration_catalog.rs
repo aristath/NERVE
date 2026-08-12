@@ -666,7 +666,13 @@ fn validate_observation(
         ));
     }
     let participant_count_valid = match case.strategy {
-        VulkanPlacementExecutionStrategy::SingleDevice => case.devices.len() == 1,
+        VulkanPlacementExecutionStrategy::SingleDevice => {
+            case.devices.len() == 1
+                && case.shards.is_empty()
+                && case.transports.is_empty()
+                && case.input_physical_device_id == case.owner_physical_device_id
+                && case.output_physical_device_id == case.owner_physical_device_id
+        }
         VulkanPlacementExecutionStrategy::Serialized
         | VulkanPlacementExecutionStrategy::TensorParallel
         | VulkanPlacementExecutionStrategy::WholeExpertParallel
@@ -1084,6 +1090,29 @@ mod placement_calibration_catalog_tests {
                 .unwrap_err()
                 .0
                 .contains("bounded complete transaction")
+        );
+    }
+
+    #[test]
+    fn single_device_evidence_cannot_contain_distributed_shards() {
+        let mut catalog = catalog_with_reference();
+        let mut invalid = observation(behavior(), "gpu0", "gpu0", 10, 16);
+        invalid.execution_case.strategy = VulkanPlacementExecutionStrategy::SingleDevice;
+        invalid.execution_case.devices.truncate(1);
+        invalid
+            .resident_bytes_by_physical_device
+            .retain(|device, _| device == "gpu0");
+        invalid
+            .transient_peak_bytes_by_physical_device
+            .retain(|device, _| device == "gpu0");
+        invalid.execution_case.transports.clear();
+
+        assert!(
+            catalog
+                .record_observation(invalid)
+                .unwrap_err()
+                .0
+                .contains("physical route or shard")
         );
     }
 

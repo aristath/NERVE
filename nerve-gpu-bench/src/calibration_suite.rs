@@ -51,12 +51,12 @@ pub fn run_calibration_suite(
         for order in &plan.initial_target_orders {
             let measurement =
                 measure_package_candidates(&package, &case.target, case.phase, order)?;
-            if measurement.reports.is_empty() {
+            if measurement.catalog.observation_count() == 0 {
                 unavailable_component_candidates += 1;
                 continue;
             }
             catalog.merge(&measurement.catalog)?;
-            measured_component_candidates += measurement.reports.len();
+            measured_component_candidates += measurement.catalog.observation_count();
             if order.len() == 2 {
                 current_width_measurements
                     .extend(measurement.reports.iter().map(measured_target_order));
@@ -71,12 +71,12 @@ pub fn run_calibration_suite(
             for order in expanded {
                 let measurement =
                     measure_package_candidates(&package, &case.target, case.phase, &order)?;
-                if measurement.reports.is_empty() {
+                if measurement.catalog.observation_count() == 0 {
                     unavailable_component_candidates += 1;
                     continue;
                 }
                 catalog.merge(&measurement.catalog)?;
-                measured_component_candidates += measurement.reports.len();
+                measured_component_candidates += measurement.catalog.observation_count();
                 next_width_measurements
                     .extend(measurement.reports.iter().map(measured_target_order));
             }
