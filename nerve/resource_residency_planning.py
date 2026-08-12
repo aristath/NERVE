@@ -26,6 +26,7 @@ from nerve.resource_residency import (
 
 RESIDENCY_ANALYSIS_SCHEMA = "nerve.compiler_resource_residency_analysis.v1"
 TENSOR_PARTITION_INTEGRITY_SCHEMA = "nerve.tensor_partition_integrity.v1"
+SOURCE_INTEGRITY_PARTITION_COUNT_FIELD = "source_integrity_partition_count"
 SELECTED_PARAMETER_ACCESSES_ATTRIBUTE = "selected_parameter_accesses"
 ROW_MAJOR_LAYOUT = "row_major"
 
@@ -632,6 +633,22 @@ def analyze_resource_residency_components(
             )
         if storage_kinds == {"independent_resources"}:
             dynamic_tensors[tensor_name] = {"storage": "independent_resource"}
+            source_partition_count = tensors[tensor_name].get(
+                SOURCE_INTEGRITY_PARTITION_COUNT_FIELD
+            )
+            if source_partition_count is not None:
+                source_partition_count = _positive_int(
+                    source_partition_count,
+                    f"tensor {tensor_name!r} source integrity partition count",
+                )
+                if int(tensors[tensor_name]["byte_count"]) % source_partition_count:
+                    raise ModelCompileError(
+                        f"tensor {tensor_name!r} cannot be sealed into "
+                        f"{source_partition_count} equal source ranges"
+                    )
+                dynamic_tensors[tensor_name][
+                    SOURCE_INTEGRITY_PARTITION_COUNT_FIELD
+                ] = source_partition_count
         else:
             partitionings = {
                 (
@@ -675,6 +692,14 @@ def partition_counts_for_packaging(analysis: Json) -> dict[str, int]:
                 "compiler residency analysis has an invalid dynamic tensor"
             )
         if metadata.get("storage") == "independent_resource":
+            source_partition_count = metadata.get(
+                SOURCE_INTEGRITY_PARTITION_COUNT_FIELD
+            )
+            if source_partition_count is not None:
+                counts[tensor_name] = _positive_int(
+                    source_partition_count,
+                    "independent source integrity partition count",
+                )
             continue
         counts[tensor_name] = _positive_int(
             metadata.get("partition_count"), "dynamic tensor partition count"

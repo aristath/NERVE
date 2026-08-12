@@ -677,21 +677,18 @@ def compiled_immutable_resource(
         raise ModelCompileError(
             f"compiled tensor {tensor_name!r} range exceeds {source_file!r}"
         )
+    ranges = _compiled_tensor_source_ranges(
+        package_dir=package_dir,
+        tensor_name=tensor_name,
+        metadata=metadata,
+        source_file=source_file,
+        absolute_offset=absolute_offset,
+        byte_count=byte_count,
+    )
     resource = {
         "id": "",
         "lifetime": lifetime,
-        "ranges": [
-            {
-                "artifact_path": source_file,
-                "byte_offset": absolute_offset,
-                "byte_count": byte_count,
-                "alignment_bytes": _largest_power_of_two_divisor(absolute_offset),
-                "integrity": {
-                    "algorithm": SHA256_INTEGRITY_ALGORITHM,
-                    "digest": digest,
-                },
-            }
-        ],
+        "ranges": ranges,
         "dependencies": [],
         "compatibility": {
             "device_api": "vulkan",
@@ -702,6 +699,116 @@ def compiled_immutable_resource(
     }
     resource["id"] = resource_identity(resource)
     return resource
+
+
+def _compiled_tensor_source_ranges(
+    *,
+    package_dir: Path,
+    tensor_name: str,
+    metadata: Json,
+    source_file: str,
+    absolute_offset: int,
+    byte_count: int,
+) -> list[Json]:
+    integrity = metadata.get("partition_integrity")
+    if integrity is None:
+        return [
+            {
+                "artifact_path": source_file,
+                "byte_offset": absolute_offset,
+                "byte_count": byte_count,
+                "alignment_bytes": _largest_power_of_two_divisor(absolute_offset),
+                "integrity": {
+                    "algorithm": SHA256_INTEGRITY_ALGORITHM,
+                    "digest": metadata["data_sha256"],
+                },
+            }
+        ]
+    fields = {
+        "schema",
+        "partition_axis",
+        "partition_count",
+        "partition_byte_count",
+        "digest_table_path",
+        "digest_table_byte_offset",
+        "digest_stride_bytes",
+        "table_sha256",
+    }
+    if not isinstance(integrity, dict) or set(integrity) != fields:
+        raise ModelCompileError(
+            f"compiled tensor {tensor_name!r} has malformed source-range integrity"
+        )
+    partition_count = _require_positive_int(
+        integrity.get("partition_count"),
+        f"tensor {tensor_name!r} source partition count",
+    )
+    partition_byte_count = _require_positive_int(
+        integrity.get("partition_byte_count"),
+        f"tensor {tensor_name!r} source partition byte count",
+    )
+    digest_table_path = _require_safe_relative_path(
+        integrity.get("digest_table_path"),
+        f"tensor {tensor_name!r} source partition digest table",
+    )
+    digest_table_byte_offset = _require_non_negative_int(
+        integrity.get("digest_table_byte_offset"),
+        f"tensor {tensor_name!r} source partition digest offset",
+    )
+    digest_stride_bytes = _require_positive_int(
+        integrity.get("digest_stride_bytes"),
+        f"tensor {tensor_name!r} source partition digest stride",
+    )
+    table_sha256 = integrity.get("table_sha256")
+    try:
+        digest_table_payload = (package_dir / digest_table_path).read_bytes()
+    except OSError as error:
+        raise ModelCompileError(
+            f"compiled tensor {tensor_name!r} partition digest table cannot be read: {error}"
+        ) from error
+    if (
+        integrity.get("schema") != "nerve.tensor_partition_integrity.v1"
+        or integrity.get("partition_axis") != 0
+        or partition_count * partition_byte_count != byte_count
+        or digest_stride_bytes != 32
+        or not _is_lower_hex_sha256(table_sha256)
+        or sha256(digest_table_payload).hexdigest() != table_sha256
+        or digest_table_byte_offset + partition_count * digest_stride_bytes
+        > len(digest_table_payload)
+    ):
+        raise ModelCompileError(
+            f"compiled tensor {tensor_name!r} source-range integrity is inconsistent"
+        )
+    alignment = min(
+        _largest_power_of_two_divisor(absolute_offset),
+        _largest_power_of_two_divisor(partition_byte_count),
+    )
+    ranges = []
+    for partition_index in range(partition_count):
+        resolved = resolve_partition_range(
+            package_dir,
+            artifact_path=source_file,
+            base_byte_offset=absolute_offset,
+            stride_bytes=partition_byte_count,
+            byte_count=partition_byte_count,
+            alignment_bytes=alignment,
+            digest_table_path=digest_table_path,
+            digest_table_byte_offset=digest_table_byte_offset,
+            digest_stride_bytes=digest_stride_bytes,
+            partition_index=partition_index,
+        )
+        ranges.append(
+            {
+                "artifact_path": resolved.artifact_path,
+                "byte_offset": resolved.byte_offset,
+                "byte_count": resolved.byte_count,
+                "alignment_bytes": resolved.alignment_bytes,
+                "integrity": {
+                    "algorithm": SHA256_INTEGRITY_ALGORITHM,
+                    "digest": resolved.sha256,
+                },
+            }
+        )
+    return ranges
 
 
 def compiled_resource_artifact_metadata(

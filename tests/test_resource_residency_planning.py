@@ -17,6 +17,7 @@ from nerve.resource_residency import (
 )
 from nerve.resource_residency_planning import (
     RESIDENCY_ANALYSIS_SCHEMA,
+    SOURCE_INTEGRITY_PARTITION_COUNT_FIELD,
     TENSOR_PARTITION_INTEGRITY_SCHEMA,
     analyze_resource_residency_components,
     artifact_affinity_groups_for_packaging,
@@ -312,6 +313,120 @@ def test_discovers_independently_stored_selected_resources() -> None:
         for unit in range(2)
         for kind in ("scale", "weight")
     }
+
+
+def test_independent_resources_preserve_compiler_source_integrity_partitions() -> None:
+    nodes, refs = _independent_component()
+    tensors = {
+        "tensors": {
+            "tensor.router": _tensor(4, [2]),
+            **{
+                f"tensor.unit_{unit}_{kind}": {
+                    **_tensor(8, [2, 4]),
+                    SOURCE_INTEGRITY_PARTITION_COUNT_FIELD: 2,
+                }
+                for unit in range(2)
+                for kind in ("scale", "weight")
+            },
+        }
+    }
+
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index=tensors,
+        require_direct_packaging=True,
+    )
+
+    assert partition_counts_for_packaging(analysis) == {
+        f"tensor.unit_{unit}_{kind}": 2
+        for unit in range(2)
+        for kind in ("scale", "weight")
+    }
+    assert all(
+        metadata[SOURCE_INTEGRITY_PARTITION_COUNT_FIELD] == 2
+        for metadata in analysis["dynamic_tensors"].values()
+    )
+
+
+def test_independent_resource_contract_exposes_each_sealed_source_range(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    nodes, refs = _independent_component()
+    tensor_index = {
+        "tensors": {
+            "tensor.router": _write_source_tensor(
+                source_dir,
+                tensor_name="tensor.router",
+                shape=[2],
+                payload=b"rt",
+            ),
+            **{
+                f"tensor.unit_{unit}_{kind}": {
+                    **_write_source_tensor(
+                        source_dir,
+                        tensor_name=f"tensor.unit_{unit}_{kind}",
+                        shape=[2, 4],
+                        payload=bytes([16 * unit + offset]) * 8,
+                    ),
+                    SOURCE_INTEGRITY_PARTITION_COUNT_FIELD: 2,
+                }
+                for unit in range(2)
+                for offset, kind in enumerate(("scale", "weight"), start=1)
+            },
+        }
+    }
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index=tensor_index,
+        require_direct_packaging=True,
+    )
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    packaged = copy_tensor_package(
+        tensor_index,
+        package_dir,
+        partition_counts=partition_counts_for_packaging(analysis),
+        artifact_affinity_groups=artifact_affinity_groups_for_packaging(analysis),
+    )
+    manifest = {
+        "circuit_graph": {
+            "components": [
+                {
+                    "component_id": "component",
+                    "circuit": {"nodes": nodes},
+                    "params": {"refs": refs},
+                }
+            ]
+        },
+        "speculative_decoders": [],
+    }
+    contract = build_planned_resource_residency_contract(
+        package_dir=package_dir,
+        tensor_index=packaged,
+        manifest=manifest,
+    )
+
+    dynamic_resources = [
+        resource
+        for resource in contract["resources"]
+        if resource["lifetime"] == "dynamic"
+    ]
+    assert len(dynamic_resources) == 4
+    assert all(
+        [byte_range["byte_count"] for byte_range in resource["ranges"]]
+        == [4, 4]
+        for resource in dynamic_resources
+    )
+    assert all(
+        all(
+            byte_range["integrity"]["algorithm"] == "sha256"
+            for byte_range in resource["ranges"]
+        )
+        for resource in dynamic_resources
+    )
+    validate_resource_residency_contract(package_dir, contract, manifest)
 
 
 def test_derives_artifact_affinity_from_selection_cohorts_not_model_identity() -> None:
