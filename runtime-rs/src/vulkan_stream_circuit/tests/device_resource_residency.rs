@@ -71,6 +71,136 @@ fn owner(value: &str) -> DeviceResourceResidencyOwnerId {
     DeviceResourceResidencyOwnerId::new(value).unwrap()
 }
 
+fn load_required<P: DeviceResidentResourcePayload>(
+    request: DeviceResourceResidencyRequest<P>,
+) -> DeviceResourceLoadPermit<P> {
+    match request {
+        DeviceResourceResidencyRequest::LoadRequired(permit) => permit,
+        _ => panic!("residency request did not reserve a physical load"),
+    }
+}
+
+#[test]
+fn distributed_residency_cohort_publishes_and_evicts_all_members_atomically() {
+    let gpu0 = DeviceResourceResidencyManager::<TestResidentPayload>::new("gpu0", 1024, 0)
+        .unwrap();
+    let gpu1 = DeviceResourceResidencyManager::<TestResidentPayload>::new("gpu1", 1024, 0)
+        .unwrap();
+    let fragment0 = residency_descriptor('1', '2', 96);
+    let fragment1 = residency_descriptor('1', '3', 112);
+    let cohort = DeviceResourceResidencyCohort::new(
+        "expert-0",
+        vec![
+            DeviceResourceResidencyCohortMember::new(
+                gpu0.clone(),
+                BTreeSet::from([fragment0.id.clone()]),
+            )
+            .unwrap(),
+            DeviceResourceResidencyCohortMember::new(
+                gpu1.clone(),
+                BTreeSet::from([fragment1.id.clone()]),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let drops = SyncArc::new(AtomicUsize::new(0));
+    let permit0 = load_required(gpu0.request(fragment0.clone(), owner("stream")).unwrap());
+    let permit1 = load_required(gpu1.request(fragment1.clone(), owner("stream")).unwrap());
+    assert_eq!(
+        cohort.state().unwrap(),
+        DeviceResourceResidencyCohortState::Transitioning,
+    );
+    cohort
+        .publish_loads(vec![
+            (
+                permit1,
+                resident_test_group(fragment1.clone(), SyncArc::clone(&drops)),
+            ),
+            (
+                permit0,
+                resident_test_group(fragment0.clone(), SyncArc::clone(&drops)),
+            ),
+        ])
+        .unwrap();
+    assert_eq!(
+        cohort.state().unwrap(),
+        DeviceResourceResidencyCohortState::Resident,
+    );
+
+    let active = match gpu1.request(fragment1, owner("active")).unwrap() {
+        DeviceResourceResidencyRequest::Resident(lease) => lease,
+        _ => panic!("published cohort member was not resident"),
+    };
+    let active_error = match cohort.evict_inactive() {
+        Ok(_) => panic!("an active cohort member must block the whole eviction"),
+        Err(error) => error,
+    };
+    assert_eq!(active_error.kind(), DeviceResourceResidencyErrorKind::InUse);
+    assert_eq!(
+        cohort.state().unwrap(),
+        DeviceResourceResidencyCohortState::Resident,
+        "an active member must prevent every member from being evicted",
+    );
+    drop(active);
+
+    let eviction = cohort.evict_inactive().unwrap();
+    assert_eq!(eviction.member_eviction_count(), 2);
+    assert_eq!(eviction.release().group_count, 2);
+    assert_eq!(eviction.release().byte_count, 208);
+    assert_eq!(
+        cohort.state().unwrap(),
+        DeviceResourceResidencyCohortState::Absent,
+    );
+    assert_eq!(gpu0.statistics().unwrap().resident_group_count, 0);
+    assert_eq!(gpu1.statistics().unwrap().resident_group_count, 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    drop(eviction);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn distributed_residency_cohort_rejects_incomplete_publication_without_partial_state() {
+    let gpu0 = DeviceResourceResidencyManager::<TestResidentPayload>::new("gpu0", 1024, 0)
+        .unwrap();
+    let gpu1 = DeviceResourceResidencyManager::<TestResidentPayload>::new("gpu1", 1024, 0)
+        .unwrap();
+    let fragment0 = residency_descriptor('4', '5', 64);
+    let fragment1 = residency_descriptor('4', '6', 80);
+    let cohort = DeviceResourceResidencyCohort::new(
+        "expert-1",
+        vec![
+            DeviceResourceResidencyCohortMember::new(
+                gpu0.clone(),
+                BTreeSet::from([fragment0.id.clone()]),
+            )
+            .unwrap(),
+            DeviceResourceResidencyCohortMember::new(
+                gpu1.clone(),
+                BTreeSet::from([fragment1.id.clone()]),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let drops = SyncArc::new(AtomicUsize::new(0));
+    let permit0 = load_required(gpu0.request(fragment0.clone(), owner("stream")).unwrap());
+    let _permit1 = load_required(gpu1.request(fragment1, owner("stream")).unwrap());
+    let error = cohort
+        .publish_loads(vec![(
+            permit0,
+            resident_test_group(fragment0, SyncArc::clone(&drops)),
+        )])
+        .unwrap_err();
+    assert_eq!(error.kind(), DeviceResourceResidencyErrorKind::InvalidPublication);
+    assert_eq!(gpu0.statistics().unwrap().resident_group_count, 0);
+    assert_eq!(gpu1.statistics().unwrap().resident_group_count, 0);
+    assert_ne!(
+        cohort.state().unwrap(),
+        DeviceResourceResidencyCohortState::Resident,
+    );
+}
+
 #[test]
 fn resolved_descriptor_keeps_source_default_and_sizes_explicit_derivation() {
     let required_features = vec![

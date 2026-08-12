@@ -230,6 +230,7 @@ include!("vulkan_stream_circuit/runtime_staged_placement_calibration.rs");
 include!("vulkan_stream_circuit/runtime_transfer_calibration.rs");
 include!("vulkan_stream_circuit/resource_backing_store.rs");
 include!("vulkan_stream_circuit/device_resource_residency.rs");
+include!("vulkan_stream_circuit/device_resource_residency_cohort.rs");
 include!("vulkan_stream_circuit/compiled_resource_device_upload.rs");
 include!("vulkan_stream_circuit/compiled_resource_residency_report.rs");
 include!("vulkan_stream_circuit/compiled_resource_memory_plan.rs");
