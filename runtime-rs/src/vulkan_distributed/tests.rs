@@ -2199,6 +2199,38 @@ mod tests {
         assert!(classes[..4].iter().all(|class_id| class_id == &classes[0]));
         assert!(classes[4..].iter().all(|class_id| class_id == &classes[4]));
         assert_ne!(classes[0], classes[4]);
+        let isolated = plan
+            .isolated_selected_resource_transaction(
+                "routed-experts",
+                6,
+                "calibration-device",
+                ExecutionPhase::Decode,
+            )
+            .unwrap();
+        assert_eq!(isolated.device_ids, vec!["calibration-device"]);
+        assert_eq!(isolated.dispatches.len(), 1);
+        assert_eq!(isolated.execution_islands.len(), 1);
+        assert_eq!(isolated.dispatches[0].owner_device_id, "calibration-device");
+        assert_eq!(isolated.dispatches[0].shards.len(), 1);
+        assert_eq!(
+            isolated.dispatches[0].shards[0].selected_resource_indices,
+            BTreeMap::from([("routed-experts".to_string(), vec![6])]),
+        );
+        assert!(isolated.dispatches[0].shards[0]
+            .selected_resource_fragments
+            .is_empty());
+        assert_eq!(isolated.dispatches[0].shards[0].row_start, 0);
+        assert_eq!(isolated.dispatches[0].shards[0].row_count, 8);
+        assert!(plan
+            .isolated_selected_resource_transaction(
+                "routed-experts",
+                8,
+                "calibration-device",
+                ExecutionPhase::Decode,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds selector"));
         let mut two_operation_plan = plan.clone();
         let mut second_operation = two_operation_plan.dispatches[0].clone();
         second_operation.dispatch_index += 1;
@@ -2950,6 +2982,38 @@ mod tests {
                     .sum::<usize>(),
             );
         }
+
+        let isolated = plan
+            .isolated_selected_resource_transaction(
+                "routed-experts",
+                0,
+                "calibration-device",
+                ExecutionPhase::Decode,
+            )
+            .unwrap();
+        assert_eq!(isolated.device_ids, vec!["calibration-device"]);
+        assert_eq!(isolated.dispatches.len(), 2);
+        assert_eq!(isolated.execution_islands.len(), 1);
+        for dispatch in &isolated.dispatches {
+            assert_eq!(dispatch.owner_device_id, "calibration-device");
+            let [shard] = dispatch.shards.as_slice() else {
+                panic!("isolated expert operation must have exactly one shard")
+            };
+            assert_eq!(shard.device_id, "calibration-device");
+            assert!(shard.selected_resource_indices.is_empty());
+            let [fragment] = shard.selected_resource_fragments["routed-experts"].as_slice()
+            else {
+                panic!("isolated expert operation must retain one complete resource fragment")
+            };
+            assert_eq!(fragment.resource_index, 0);
+            assert_eq!(fragment.logical_start, 0);
+            assert_eq!(fragment.logical_count, dispatch.output_rows);
+        }
+        let isolated_ownership =
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&isolated).unwrap();
+        assert_eq!(isolated_ownership.device_count, 1);
+        assert_eq!(isolated_ownership.unique_atomic_group_count, 1);
+        assert_eq!(isolated_ownership.total_addressable_bytes, 288);
 
         let mut mismatched = plan.clone();
         mismatched.dispatches[1].selected_resource_partitions[0].atomic_group_byte_counts[0] += 1;

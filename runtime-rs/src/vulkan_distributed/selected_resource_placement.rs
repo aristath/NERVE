@@ -73,6 +73,142 @@ impl VulkanDistributedExecutionPlan {
             resource_execution_class_ids,
         })
     }
+
+    /// Projects the complete compiler-declared operation chain for exactly one
+    /// selector resource onto one physical participant. The selector domain
+    /// and width remain unchanged: only the resource address/parameter tables
+    /// are narrowed, so valid non-local routes can still be present while
+    /// exactly one route performs arithmetic locally.
+    pub fn isolated_selected_resource_transaction(
+        &self,
+        selector_id: &str,
+        resource_index: usize,
+        device_id: &str,
+        phase: nerve_execution_contracts::ExecutionPhase,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        if selector_id.trim().is_empty() || device_id.trim().is_empty() {
+            return Err(VulkanDistributedPlanError(
+                "isolated selected-resource execution requires a selector and target device"
+                    .to_string(),
+            ));
+        }
+        let classes = self.selected_resource_execution_classes(selector_id)?;
+        if resource_index >= classes.resource_execution_class_ids.len() {
+            return Err(VulkanDistributedPlanError(format!(
+                "isolated selected-resource index {resource_index} exceeds selector {selector_id:?} domain {}",
+                classes.resource_execution_class_ids.len(),
+            )));
+        }
+        let mut dispatches = Vec::new();
+        for dispatch in &self.dispatches {
+            if !dispatch
+                .selected_resource_partitions
+                .iter()
+                .any(|partition| partition.selector_id == selector_id)
+            {
+                continue;
+            }
+            if dispatch.selected_resource_partitions.len() != 1
+                || dispatch.selected_resource_partitions[0].selector_id != selector_id
+            {
+                return Err(VulkanDistributedPlanError(format!(
+                    "isolated selected-resource dispatch {}.{} couples selector {selector_id:?} to another selector",
+                    dispatch.component_id, dispatch.node_id,
+                )));
+            }
+            let partition = &dispatch.selected_resource_partitions[0];
+            if resource_index >= partition.resource_count
+                || partition.resource_operation_class_ids.len() != partition.resource_count
+            {
+                return Err(VulkanDistributedPlanError(format!(
+                    "isolated selected-resource dispatch {}.{} has an incomplete selector domain",
+                    dispatch.component_id, dispatch.node_id,
+                )));
+            }
+            let mut shard = merged_distributed_dispatch_shard(dispatch)?;
+            shard.device_id = device_id.to_string();
+            if partition.parameter_partitions.is_empty() {
+                shard.selected_resource_indices = BTreeMap::from([(
+                    selector_id.to_string(),
+                    vec![resource_index],
+                )]);
+                shard.selected_resource_fragments.clear();
+            } else {
+                shard.selected_resource_indices.clear();
+                let fragments = shard
+                    .selected_resource_fragments
+                    .get_mut(selector_id)
+                    .ok_or_else(|| {
+                        VulkanDistributedPlanError(format!(
+                            "isolated selected-resource dispatch {}.{} has no merged fragments for selector {selector_id:?}",
+                            dispatch.component_id, dispatch.node_id,
+                        ))
+                    })?;
+                fragments.retain(|fragment| fragment.resource_index == resource_index);
+                if fragments.len() != 1 {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "isolated selected-resource dispatch {}.{} does not reconstruct exactly one complete resource fragment",
+                        dispatch.component_id, dispatch.node_id,
+                    )));
+                }
+                shard
+                    .selected_resource_fragments
+                    .retain(|candidate, _| candidate == selector_id);
+            }
+            let mut isolated = dispatch.clone();
+            isolated.owner_device_id = device_id.to_string();
+            isolated.distributed_parameter_byte_count = shard
+                .parameters
+                .iter()
+                .try_fold(0usize, |total, fragment| {
+                    total.checked_add(fragment.byte_count).ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "isolated selected-resource parameter bytes overflowed".to_string(),
+                        )
+                    })
+                })?;
+            isolated.shards = vec![shard];
+            dispatches.push(isolated);
+        }
+        if dispatches.is_empty() {
+            return Err(VulkanDistributedPlanError(format!(
+                "isolated selected-resource selector {selector_id:?} has no executable dispatches",
+            )));
+        }
+        let distributed_parameter_byte_count = dispatches.iter().try_fold(
+            0usize,
+            |total, dispatch| {
+                total
+                    .checked_add(dispatch.distributed_parameter_byte_count)
+                    .ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "isolated selected-resource parameter total overflowed".to_string(),
+                        )
+                    })
+            },
+        )?;
+        let execution_islands = resolved_physical_execution_islands_for_phase(
+            &dispatches,
+            self.shared_activation_route,
+            phase,
+        )?;
+        Ok(Self {
+            device_ids: vec![device_id.to_string()],
+            storage_buffer_offset_alignment: self.storage_buffer_offset_alignment,
+            shared_input_byte_capacity: dispatches
+                .first()
+                .expect("isolated dispatches were checked nonempty")
+                .input_byte_capacity,
+            shared_output_byte_capacity: dispatches
+                .last()
+                .expect("isolated dispatches were checked nonempty")
+                .output_byte_capacity,
+            dispatches,
+            execution_islands,
+            shared_activation_route: self.shared_activation_route,
+            distributed_parameter_byte_count,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
