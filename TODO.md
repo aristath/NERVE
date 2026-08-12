@@ -123,6 +123,18 @@ the local placement calibration, and the mounted graph.
   physical-plan validation, duplicate/altered/overlapping application
   rejection, and incompatible-baseline coverage. Real-model TP execution is
   still awaiting the explicitly authorized live gate.
+- The currently installed DeepSeek package predates routed/shared expert
+  cohort separation and therefore declares 5,872 single-device contracts, 258
+  whole-expert contracts, and zero tensor-parallel contracts. Hardware-neutral
+  recompilation of a real DeepSeek layer now proves that its 256 routed MXFP4
+  experts form a homogeneous independently addressable bank with distinct
+  immediate-decode and multi-lane intra-expert TP implementations, while the
+  always-executed native-FP8 shared expert remains a separate dense branch.
+  All 41 shaders selected for that complete real MoE region compile, and the
+  exact optimizer behavioral proof passes. A fresh self-contained package
+  rebuild and catalog audit are required before this becomes mounted-package
+  evidence; token generation through the TP path remains part of the
+  explicitly authorized live gate.
 - The calibration suite now produces canonical serialized and predicted
   mixed-hybrid region evidence from bounded, complete mounted transactions.
   It measures compute, synchronization, transfers, collectives, output, state,
@@ -203,22 +215,28 @@ For every numbered item below:
   graph progress are not replayed. The remaining bullets cover the complete
   mounted transaction, atomic cross-device sharded residency, measured
   intra-expert selection, and online ownership/cache adaptation.
-- Compiler-declared MXFP4 intra-expert TP now has distinct immediate and
-  multi-lane physical artifacts for the complete output-row gate/up to local
-  input-column down island. Multi-lane execution uses the physical artifacts
-  directly, keeps each participant's route-major intermediate at its compact
-  local shard stride, writes participant-major F32 partials, and retains the
-  existing whole-expert path for non-TP contracts. Shader compilation,
-  contract phase/shape selection, fragmented-resource planning, uneven local
-  buffer sizing, and invalid participant geometry are covered
-  hardware-neutrally. Live equivalence and the measured selection decision
-  remain part of the authorized mounted proof below.
+- The structure-driven compiler now separates heterogeneous sparse-expert
+  execution cohorts before physical implementation discovery: the routed
+  MXFP4 bank receives distinct immediate and multi-lane intra-expert TP
+  artifacts for its complete output-row gate/up to local input-column down
+  island, while the always-executed native-FP8 shared expert remains an exact
+  dense branch and combines with the routed reduction exactly once. This is
+  driven by tensor roles and representation contracts, not a model identity.
+  Multi-lane execution uses the physical artifacts directly, keeps each
+  participant's route-major intermediate at its compact local shard stride,
+  writes participant-major F32 partials, and retains the existing whole-expert
+  path for non-TP contracts. Shader compilation, contract phase/shape
+  selection, fragmented-resource planning, uneven local buffer sizing, zero
+  always-selected routed resources, and invalid participant geometry are
+  covered hardware-neutrally. A fresh complete package audit, live equivalence,
+  and the measured selection decision remain part of the authorized mounted
+  proof below.
 - Hardware-neutral execution acceptance now validates the complete sparse
   chain at normal package startup: exactly one structural router feeds each
-  gate/up, the matching gate/up and down form one distributed island, the
-  always-selected shared expert occupies the same independently addressable
-  selection domain, and exactly one coordinator-local reduction consumes the
-  island output. The scheduler keeps router stages before the island and the
+  routed gate/up, the matching routed gate/up and down form one distributed
+  island, the always-selected shared expert is a separate execution cohort,
+  and exactly one coordinator-local reduction/add sequence combines their
+  outputs. The scheduler keeps router stages before the island and the
   reduction after it, while distributed submission launches every owner shard
   before waiting or running its coordinator. The remaining acceptance is the
   explicitly authorized mounted proof below.
