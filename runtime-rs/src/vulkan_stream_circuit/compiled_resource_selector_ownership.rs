@@ -405,11 +405,14 @@ mod compiled_resource_selector_ownership_tests {
                 domain_id: "experts".to_string(),
                 resource_count: 8,
                 selection_signal: "routes".to_string(),
+                execution_signal: "routes".to_string(),
+                execution_calibration_word_base: 0,
                 encoding: CompiledResourceSelectionEncoding {
                     element_type: CompiledResourceSelectionElementType::U32,
                     selection_count_per_activation: 2,
                     index_shift: 0,
                     index_mask: 7,
+                    calibration_word_base: 0,
                 },
                 mapping: CompiledResourceSelectorMapping::GroupTable {
                     atomic_group_ids: (0..8).map(|index| format!("group-{index}")).collect(),
@@ -470,11 +473,14 @@ mod compiled_resource_selector_ownership_tests {
                 domain_id: "experts".to_string(),
                 resource_count: 1,
                 selection_signal: "routes".to_string(),
+                execution_signal: "routes".to_string(),
+                execution_calibration_word_base: 0,
                 encoding: CompiledResourceSelectionEncoding {
                     element_type: CompiledResourceSelectionElementType::U32,
                     selection_count_per_activation: 1,
                     index_shift: 0,
                     index_mask: 0,
+                    calibration_word_base: 0,
                 },
                 mapping: CompiledResourceSelectorMapping::GroupTable {
                     atomic_group_ids: vec![group_id],

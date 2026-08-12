@@ -192,11 +192,14 @@ fn runtime_resource_contract_instantiates_duplicates_without_copying_resources()
         domain_id: "test_domain".to_string(),
         resource_count: 1,
         selection_signal: "operator_norm_out".to_string(),
+        execution_signal: "operator_norm_out".to_string(),
+        execution_calibration_word_base: 0,
         encoding: CompiledResourceSelectionEncoding {
             element_type: CompiledResourceSelectionElementType::U32,
             selection_count_per_activation: 1,
             index_shift: 0,
             index_mask: 1,
+            calibration_word_base: 0,
         },
         mapping: CompiledResourceSelectorMapping::GroupTable {
             atomic_group_ids: vec![dynamic_group_id],

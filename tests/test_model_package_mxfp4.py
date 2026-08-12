@@ -186,7 +186,12 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
             **common_attrs,
             "swiglu_limit": 10.0,
             "selected_parameter_accesses": [
-                {"selection_signal": "routes", "mapping": gate_mapping}
+                {
+                    "selection_signal": "routes",
+                    "execution_signal": "routes",
+                    "execution_calibration_word_base": 0x3F800000,
+                    "mapping": gate_mapping,
+                }
             ],
         },
     }
@@ -201,7 +206,12 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
         "attrs": {
             **common_attrs,
             "selected_parameter_accesses": [
-                {"selection_signal": "routes", "mapping": down_mapping}
+                {
+                    "selection_signal": "routes",
+                    "execution_signal": "routes",
+                    "execution_calibration_word_base": 0x3F800000,
+                    "mapping": down_mapping,
+                }
             ],
         },
     }
@@ -555,7 +565,12 @@ def test_renders_one_selected_bank_with_compact_and_native_fp8_experts(
             **common_attrs,
             "swiglu_limit": 10.0,
             "selected_parameter_accesses": [
-                {"selection_signal": "routes", "mapping": gate_mapping}
+                {
+                    "selection_signal": "routes",
+                    "execution_signal": "routes",
+                    "execution_calibration_word_base": 0x3F800000,
+                    "mapping": gate_mapping,
+                }
             ],
         },
     }
@@ -570,7 +585,12 @@ def test_renders_one_selected_bank_with_compact_and_native_fp8_experts(
         "attrs": {
             **common_attrs,
             "selected_parameter_accesses": [
-                {"selection_signal": "routes", "mapping": down_mapping}
+                {
+                    "selection_signal": "routes",
+                    "execution_signal": "routes",
+                    "execution_calibration_word_base": 0x3F800000,
+                    "mapping": down_mapping,
+                }
             ],
         },
     }

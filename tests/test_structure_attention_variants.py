@@ -307,6 +307,7 @@ def test_discovers_sparse_moe_and_model_specific_numerics_by_structure(
                 "selection_count_per_activation": 8,
                 "index_shift": 0,
                 "index_mask": 0xffff,
+                "calibration_word_base": 0x3F800000,
             },
         },
     }

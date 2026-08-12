@@ -741,7 +741,12 @@ def independent_mxfp4_expert_pair_fixture(
             **common_attrs,
             "swiglu_limit": 0.0,
             "selected_parameter_accesses": [
-                {"selection_signal": "routes", "mapping": gate_mapping}
+                {
+                    "selection_signal": "routes",
+                    "execution_signal": "routes",
+                    "execution_calibration_word_base": 0x3F800000,
+                    "mapping": gate_mapping,
+                }
             ],
         },
     }
@@ -754,7 +759,12 @@ def independent_mxfp4_expert_pair_fixture(
         "attrs": {
             **common_attrs,
             "selected_parameter_accesses": [
-                {"selection_signal": "routes", "mapping": down_mapping}
+                {
+                    "selection_signal": "routes",
+                    "execution_signal": "routes",
+                    "execution_calibration_word_base": 0x3F800000,
+                    "mapping": down_mapping,
+                }
             ],
         },
     }
@@ -1067,7 +1077,12 @@ def test_independent_experts_compile_selector_partition_contracts(
             "intermediate_size": 128,
             "experts_per_token": 2,
             "selected_parameter_accesses": [
-                {"selection_signal": "routes", "mapping": mapping}
+                {
+                    "selection_signal": "routes",
+                    "execution_signal": "routes",
+                    "execution_calibration_word_base": 0x3F800000,
+                    "mapping": mapping,
+                }
             ],
         },
     }
@@ -1222,7 +1237,12 @@ def test_physical_expert_implementation_preserves_selected_parameter_partitions(
         "params": [parameter for entry in mapping for parameter in entry["parameter_ids"]],
         "attrs": {
             "selected_parameter_accesses": [
-                {"selection_signal": "routes", "mapping": mapping}
+                {
+                    "selection_signal": "routes",
+                    "execution_signal": "routes",
+                    "execution_calibration_word_base": 0x3F800000,
+                    "mapping": mapping,
+                }
             ]
         },
     }

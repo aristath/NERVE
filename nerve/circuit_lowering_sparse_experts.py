@@ -64,6 +64,7 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
             "selection_count_per_activation": selected_resource_count,
             "index_shift": 0,
             "index_mask": (1 << (resource_count - 1).bit_length()) - 1,
+            "calibration_word_base": 0,
         },
     }
     resource_selection_signal = selection_domain["selection_signal"]
@@ -141,6 +142,8 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
                 "selected_parameter_accesses": [
                     {
                         "selection_signal": resource_selection_signal,
+                        "execution_signal": "moe_routes",
+                        "execution_calibration_word_base": 0x3F800000,
                         "mapping": selected_gate_up,
                     }
                 ],
@@ -163,6 +166,8 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
                 "selected_parameter_accesses": [
                     {
                         "selection_signal": resource_selection_signal,
+                        "execution_signal": "moe_routes",
+                        "execution_calibration_word_base": 0x3F800000,
                         "mapping": selected_down,
                     }
                 ],

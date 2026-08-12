@@ -530,6 +530,7 @@ pub struct PlannedSelectionEncoding {
     pub selection_count_per_activation: usize,
     pub index_shift: u32,
     pub index_mask: u32,
+    pub calibration_word_base: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -688,12 +689,13 @@ fn planned_node_selection_domain(
                 node.id
             ))
         })?;
-    if encoding.len() != 4
+    if encoding.len() != 5
         || ![
             "element_type",
             "selection_count_per_activation",
             "index_shift",
             "index_mask",
+            "calibration_word_base",
         ]
         .iter()
         .all(|field| encoding.contains_key(*field))
@@ -719,10 +721,10 @@ fn planned_node_selection_domain(
         .get("selection_count_per_activation")
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value > 0)
+        .filter(|value| *value > 0 && *value <= resource_count)
         .ok_or_else(|| {
             CircuitPlanError(format!(
-                "{component_id} node {} selection_domain.encoding.selection_count_per_activation must be a positive integer",
+                "{component_id} node {} selection_domain.encoding.selection_count_per_activation must be positive and cannot exceed resource_count",
                 node.id
             ))
         })?;
@@ -754,6 +756,17 @@ fn planned_node_selection_domain(
         .ok_or_else(|| {
             CircuitPlanError(format!(
                 "{component_id} node {} selection_domain.encoding.index_mask cannot represent its domain",
+                node.id
+            ))
+        })?;
+    let calibration_word_base = encoding
+        .get("calibration_word_base")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value & (index_mask << index_shift) == 0)
+        .ok_or_else(|| {
+            CircuitPlanError(format!(
+                "{component_id} node {} selection_domain.encoding.calibration_word_base overlaps its index field",
                 node.id
             ))
         })?;
@@ -828,6 +841,7 @@ fn planned_node_selection_domain(
             selection_count_per_activation,
             index_shift,
             index_mask,
+            calibration_word_base,
         },
         predictable_dependency,
     }))
@@ -1105,7 +1119,8 @@ mod selection_domain_tests {
                 "element_type": "u32",
                 "selection_count_per_activation": 8,
                 "index_shift": 0,
-                "index_mask": 0xffff
+                "index_mask": 0xffff,
+                "calibration_word_base": 0
             }
         })
     }
@@ -1140,6 +1155,7 @@ mod selection_domain_tests {
                     selection_count_per_activation: 8,
                     index_shift: 0,
                     index_mask: 0xffff,
+                    calibration_word_base: 0,
                 },
                 predictable_dependency: None,
             })
@@ -1404,6 +1420,9 @@ mod selection_domain_tests {
         let mut zero_selections = valid_selection_domain();
         zero_selections["encoding"]["selection_count_per_activation"] =
             serde_json::json!(0);
+        let mut excessive_selections = valid_selection_domain();
+        excessive_selections["encoding"]["selection_count_per_activation"] =
+            serde_json::json!(257);
         let mut excessive_shift = valid_selection_domain();
         excessive_shift["encoding"]["index_shift"] = serde_json::json!(32);
         let mut inadequate_mask = valid_selection_domain();
@@ -1422,7 +1441,11 @@ mod selection_domain_tests {
             (wrong_element, "element_type is unsupported"),
             (
                 zero_selections,
-                "selection_count_per_activation must be a positive integer",
+                "selection_count_per_activation must be positive",
+            ),
+            (
+                excessive_selections,
+                "selection_count_per_activation must be positive and cannot exceed resource_count",
             ),
             (excessive_shift, "index_shift must be below 32"),
             (inadequate_mask, "index_mask cannot represent its domain"),

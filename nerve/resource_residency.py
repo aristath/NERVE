@@ -19,7 +19,7 @@ from nerve.resource_range_integrity import (
 from nerve.resident_representations import validate_resident_derivation
 
 
-RESOURCE_RESIDENCY_SCHEMA = "nerve.compiled_resource_residency.v4"
+RESOURCE_RESIDENCY_SCHEMA = "nerve.compiled_resource_residency.v5"
 RESOURCE_IDENTITY_ALGORITHM = "nerve.resource_identity_sha256.v1"
 RESOURCE_STATE_MACHINE_SCHEMA = "nerve.resource_residency_state_machine.v1"
 SUPPORTED_RESIDENCY_POLICIES = ("demand_retained", "eager")
@@ -127,6 +127,8 @@ _SELECTOR_FIELDS = frozenset(
         "domain_id",
         "resource_count",
         "selection_signal",
+        "execution_signal",
+        "execution_calibration_word_base",
         "encoding",
         "mapping",
     )
@@ -137,6 +139,7 @@ _SELECTION_ENCODING_FIELDS = frozenset(
         "selection_count_per_activation",
         "index_shift",
         "index_mask",
+        "calibration_word_base",
     )
 )
 _CHECKPOINT_FIELDS = frozenset(
@@ -270,6 +273,8 @@ def selector_identity(selector: Json) -> str:
                 "domain_id",
                 "resource_count",
                 "selection_signal",
+                "execution_signal",
+                "execution_calibration_word_base",
                 "encoding",
                 "mapping",
             )
@@ -900,6 +905,7 @@ def validate_resource_residency_contract(
         template_by_id,
         selectors,
         parameter_semantics,
+        component_nodes,
     )
     selector_by_id = _validate_selectors(
         selectors,
@@ -1291,6 +1297,7 @@ def _validate_bindings(
     template_by_id: dict[str, Json],
     selectors: list[Json],
     parameter_semantics: set[tuple[str, str, str, str]],
+    component_nodes: dict[tuple[str, str], dict[str, Json]],
 ) -> None:
     resource_ids_by_group = {
         group_id: set(group["resource_ids"])
@@ -1477,6 +1484,16 @@ def _validate_bindings(
                 f"selected resource bindings for {scope} {component_id}.{node_id} "
                 "do not map exactly one group-table selector"
             )
+        consumer = component_nodes.get((scope, component_id), {}).get(node_id)
+        if (
+            not isinstance(consumer, dict)
+            or candidates[0].get("execution_signal")
+            not in consumer.get("inputs", [])
+        ):
+            raise ModelCompileError(
+                f"selected resource bindings for {scope} {component_id}.{node_id} "
+                "do not consume the selector execution signal"
+            )
         resource_count = candidates[0].get("resource_count")
         slots_by_selector: dict[int, set[int]] = defaultdict(set)
         for _group_id, selector_index, parameter_slot in slots:
@@ -1524,6 +1541,16 @@ def _validate_bindings(
                 f"partition resource bindings for {scope} {component_id}.{node_id} "
                 "do not map exactly one partition-template selector"
             )
+        consumer = component_nodes.get((scope, component_id), {}).get(node_id)
+        if (
+            not isinstance(consumer, dict)
+            or matching_selectors[0].get("execution_signal")
+            not in consumer.get("inputs", [])
+        ):
+            raise ModelCompileError(
+                f"partition resource bindings for {scope} {component_id}.{node_id} "
+                "do not consume the selector execution signal"
+            )
         if sorted(slots) != list(range(len(slots))):
             raise ModelCompileError(
                 f"partition resource bindings for {scope} {component_id}.{node_id} "
@@ -1548,6 +1575,7 @@ def _validate_selectors(
             "node_id",
             "domain_id",
             "selection_signal",
+            "execution_signal",
         ):
             _require_non_empty_string(selector[field], f"selector {field}")
         nodes = component_nodes.get(
@@ -1591,7 +1619,7 @@ def _validate_selectors(
             raise ModelCompileError(
                 f"selector {selector_id!r} has unsupported selection element type"
             )
-        _require_positive_int(
+        selection_count_per_activation = _require_positive_int(
             encoding["selection_count_per_activation"],
             "selector selection count per activation",
         )
@@ -1601,12 +1629,25 @@ def _validate_selectors(
         index_mask = _require_positive_int(
             encoding["index_mask"], "selector selection index mask"
         )
+        selection_calibration_word_base = _require_non_negative_int(
+            encoding["calibration_word_base"],
+            "selector selection calibration word base",
+        )
+        execution_calibration_word_base = _require_non_negative_int(
+            selector["execution_calibration_word_base"],
+            "selector execution calibration word base",
+        )
         if (
             index_shift >= 32
             or index_mask > 0xFFFFFFFF
             or index_mask > 0xFFFFFFFF >> index_shift
             or index_mask & (index_mask + 1) != 0
             or (resource_count - 1) & index_mask != resource_count - 1
+            or selection_count_per_activation > resource_count
+            or selection_calibration_word_base > 0xFFFFFFFF
+            or selection_calibration_word_base & (index_mask << index_shift) != 0
+            or execution_calibration_word_base > 0xFFFFFFFF
+            or execution_calibration_word_base & (index_mask << index_shift) != 0
         ):
             raise ModelCompileError(
                 f"selector {selector_id!r} has invalid selection index encoding"

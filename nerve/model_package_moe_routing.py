@@ -234,6 +234,7 @@ def _validate_selection_domain(
             "selection_count_per_activation": total_selection_count,
             "index_shift": 0,
             "index_mask": (1 << (total_resource_count - 1).bit_length()) - 1,
+            "calibration_word_base": 0,
         },
     }
     if node.get("attrs", {}).get("selection_domain") != expected:

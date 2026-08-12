@@ -963,11 +963,14 @@ fn compiled_resource_device_store_loads_reuses_and_retires_stable_resources() {
             domain_id: "resources".to_string(),
             resource_count: 2,
             selection_signal: "selected".to_string(),
+            execution_signal: "selected".to_string(),
+            execution_calibration_word_base: 0,
             encoding: CompiledResourceSelectionEncoding {
                 element_type: CompiledResourceSelectionElementType::U32,
                 selection_count_per_activation: 2,
                 index_shift: 0,
                 index_mask: 0xffff,
+                calibration_word_base: 0,
             },
             mapping: CompiledResourceSelectorMapping::PartitionTemplate {
                 partition_template_id: template_id,
@@ -2137,11 +2140,14 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
             domain_id: "output_heads".to_string(),
             resource_count: 2,
             selection_signal: "selected_head".to_string(),
+            execution_signal: "selected_head".to_string(),
+            execution_calibration_word_base: 0,
             encoding: CompiledResourceSelectionEncoding {
                 element_type: CompiledResourceSelectionElementType::U32,
                 selection_count_per_activation: 1,
                 index_shift: 0,
                 index_mask: 0xffff,
+                calibration_word_base: 0,
             },
             mapping: CompiledResourceSelectorMapping::GroupTable {
                 atomic_group_ids: group_ids,
@@ -2381,11 +2387,14 @@ fn adaptive_representation_cache_promotes_restores_and_tears_down_atomically() {
             domain_id: "experts".to_string(),
             resource_count: 1,
             selection_signal: "selected_expert".to_string(),
+            execution_signal: "selected_expert".to_string(),
+            execution_calibration_word_base: 0,
             encoding: CompiledResourceSelectionEncoding {
                 element_type: CompiledResourceSelectionElementType::U32,
                 selection_count_per_activation: 1,
                 index_shift: 0,
                 index_mask: 0xffff,
+                calibration_word_base: 0,
             },
             mapping: CompiledResourceSelectorMapping::GroupTable {
                 atomic_group_ids: vec![group_id.clone()],

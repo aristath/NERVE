@@ -10,11 +10,14 @@ fn physical_checkpoint_fixture() -> (
         domain_id: "units".to_string(),
         resource_count: 3,
         selection_signal: "selected".to_string(),
+        execution_signal: "selected".to_string(),
+        execution_calibration_word_base: 0,
         encoding: CompiledResourceSelectionEncoding {
             element_type: CompiledResourceSelectionElementType::U32,
             selection_count_per_activation: 1,
             index_shift: 0,
             index_mask: 0xffff,
+            calibration_word_base: 0,
         },
         mapping: CompiledResourceSelectorMapping::GroupTable {
             atomic_group_ids: vec![

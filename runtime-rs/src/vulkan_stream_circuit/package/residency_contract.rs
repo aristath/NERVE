@@ -1,5 +1,5 @@
 pub const COMPILED_RESOURCE_RESIDENCY_SCHEMA: &str =
-    "nerve.compiled_resource_residency.v4";
+    "nerve.compiled_resource_residency.v5";
 pub const RESIDENT_DERIVATION_SCHEMA: &str =
     "nerve.resident_derivation.v1";
 pub const RESOURCE_IDENTITY_ALGORITHM: &str =
@@ -318,6 +318,12 @@ pub struct CompiledResourceSelector {
     pub domain_id: String,
     pub resource_count: usize,
     pub selection_signal: String,
+    /// Signal consumed by selected-resource arithmetic. Predictable residency
+    /// preselection may use a different, unweighted signal.
+    pub execution_signal: String,
+    /// Valid non-index bits for a compiler-generated calibration record.
+    /// Runtime inserts the resource index using `encoding`.
+    pub execution_calibration_word_base: u32,
     pub encoding: CompiledResourceSelectionEncoding,
     pub mapping: CompiledResourceSelectorMapping,
 }
@@ -329,6 +335,7 @@ pub struct CompiledResourceSelectionEncoding {
     pub selection_count_per_activation: usize,
     pub index_shift: u32,
     pub index_mask: u32,
+    pub calibration_word_base: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1517,7 +1524,15 @@ fn validate_bindings_against_package(
                 "compiled selected resource bindings for {scope} {component_id}.{node_id} do not map exactly one group-table selector"
             ));
         }
-        let resource_count = matching_selectors[0].resource_count;
+        let selector = matching_selectors[0];
+        validate_selector_execution_consumer(
+            manifest,
+            &scope,
+            &component_id,
+            &node_id,
+            &selector.execution_signal,
+        )?;
+        let resource_count = selector.resource_count;
         let mut slots_by_selector: BTreeMap<usize, BTreeSet<usize>> =
             BTreeMap::new();
         for (_, selector_index, parameter_slot) in slots {
@@ -1559,7 +1574,7 @@ fn validate_bindings_against_package(
     for ((scope, component_id, node_id, template_id, selection_signal), slots) in
         partition_slots
     {
-        let matching_selector_count = manifest
+        let matching_selectors = manifest
             .resource_residency
             .selectors
             .iter()
@@ -1574,9 +1589,9 @@ fn validate_bindings_against_package(
                         } if *partition_template_id == template_id
                     )
             })
-            .count();
+            .collect::<Vec<_>>();
         let unique_slots = slots.iter().copied().collect::<BTreeSet<_>>();
-        if matching_selector_count != 1
+        if matching_selectors.len() != 1
             || unique_slots.len() != slots.len()
             || unique_slots.iter().copied().ne(0..slots.len())
         {
@@ -1584,6 +1599,39 @@ fn validate_bindings_against_package(
                 "compiled partition resource bindings for {scope} {component_id}.{node_id} do not define one selector and contiguous parameter-slot layout"
             ));
         }
+        validate_selector_execution_consumer(
+            manifest,
+            &scope,
+            &component_id,
+            &node_id,
+            &matching_selectors[0].execution_signal,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_selector_execution_consumer(
+    manifest: &VulkanResidentModelPackageManifest,
+    execution_scope: &str,
+    component_id: &str,
+    node_id: &str,
+    execution_signal: &str,
+) -> io::Result<()> {
+    let (_, consumer) = scoped_component_node(
+        manifest,
+        execution_scope,
+        component_id,
+        node_id,
+    )
+    .ok_or_else(|| {
+        invalid_residency_error(
+            "compiled selected resource binding does not name a packaged consumer node",
+        )
+    })?;
+    if !consumer.inputs.iter().any(|input| input == execution_signal) {
+        return invalid_residency(format!(
+            "compiled selected resource consumer {execution_scope} {component_id}.{node_id} does not read selector execution signal {execution_signal}"
+        ));
     }
     Ok(())
 }
@@ -1712,6 +1760,8 @@ fn validate_selectors_and_checkpoints(
             .iter()
             .any(|output| output == &selector.selection_signal)
             || selector.encoding.selection_count_per_activation == 0
+            || selector.encoding.selection_count_per_activation
+                > selector.resource_count
             || selector.encoding.index_shift >= u32::BITS
             || selector.encoding.index_mask == 0
             || selector.encoding.index_mask
@@ -1726,6 +1776,13 @@ fn validate_selectors_and_checkpoints(
                     maximum_index & selector.encoding.index_mask
                         != maximum_index
                 })
+            || selector.execution_signal.trim().is_empty()
+            || selector.encoding.calibration_word_base
+                & (selector.encoding.index_mask << selector.encoding.index_shift)
+                != 0
+            || selector.execution_calibration_word_base
+                & (selector.encoding.index_mask << selector.encoding.index_shift)
+                != 0
         {
             return invalid_residency(
                 "compiled selector has an invalid physical selection encoding",
@@ -2043,7 +2100,8 @@ mod shared_template_tests {
                         "element_type": "u32",
                         "selection_count_per_activation": 1,
                         "index_shift": 0,
-                        "index_mask": 0xffff
+                        "index_mask": 0xffff,
+                        "calibration_word_base": 0
                     }
                 }
             });
@@ -2057,11 +2115,14 @@ mod shared_template_tests {
                 domain_id: "shared_partitions".to_string(),
                 resource_count: 3,
                 selection_signal: selection_signal.clone(),
+                execution_signal: selection_signal.clone(),
+                execution_calibration_word_base: 0,
                 encoding: CompiledResourceSelectionEncoding {
                     element_type: CompiledResourceSelectionElementType::U32,
                     selection_count_per_activation: 1,
                     index_shift: 0,
                     index_mask: 0xffff,
+                    calibration_word_base: 0,
                 },
                 mapping: CompiledResourceSelectorMapping::PartitionTemplate {
                     partition_template_id: template_id.clone(),
@@ -2089,5 +2150,33 @@ mod shared_template_tests {
         let contract_index =
             CompiledResourceContractIndex::new(&manifest.resource_residency).unwrap();
         validate_selectors_and_checkpoints(&manifest, &contract_index, &template_ids).unwrap();
+    }
+
+    #[test]
+    fn selector_execution_consumer_must_read_declared_execution_signal() {
+        let manifest = VulkanResidentModelPackageManifest::from_json_file(
+            &tiny_model_package_manifest_path(),
+        )
+        .unwrap();
+
+        validate_selector_execution_consumer(
+            &manifest,
+            "target",
+            "layer_00",
+            "ffn_down_projection__ffn_residual",
+            "ffn_hidden",
+        )
+        .unwrap();
+        let error = validate_selector_execution_consumer(
+            &manifest,
+            "target",
+            "layer_00",
+            "ffn_down_projection__ffn_residual",
+            "unconsumed_expert_records",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not read selector execution signal"));
     }
 }

@@ -61,6 +61,7 @@ def _fixture(
                             "selection_count_per_activation": 1,
                             "index_shift": 0,
                             "index_mask": 0xffff,
+                            "calibration_word_base": 0,
                         },
                     }
                 },
@@ -228,11 +229,14 @@ def _add_dynamic_selector_contract(
             else resource_count
         ),
         "selection_signal": "selection",
+        "execution_signal": "selection",
+        "execution_calibration_word_base": 0,
         "encoding": {
             "element_type": "u32",
             "selection_count_per_activation": 1,
             "index_shift": 0,
             "index_mask": 0xffff,
+            "calibration_word_base": 0,
         },
         "mapping": {
             "kind": "partition_template",
@@ -397,6 +401,43 @@ def test_validates_compact_partition_selector_and_checkpoint_contract(
     assert derived_partition_identity(template["group_identity_seed"], 0) != (
         derived_partition_identity(template["group_identity_seed"], 1)
     )
+
+
+def test_rejects_selector_execution_signal_not_consumed_by_selected_node(
+    tmp_path: Path,
+) -> None:
+    contract, manifest = _contract(tmp_path, selector=True)
+    template = _dynamic_template(tmp_path)
+    _replace_eager_resource_with_dynamic_template(contract, template)
+    _add_dynamic_selector_contract(contract, template)
+    selector = contract["selectors"][0]
+    selector["execution_signal"] = "unconsumed_expert_records"
+    selector["id"] = selector_identity(selector)
+    checkpoint = contract["checkpoints"][0]
+    checkpoint["selector_ids"] = [selector["id"]]
+    checkpoint["id"] = checkpoint_identity(checkpoint)
+
+    with pytest.raises(ModelCompileError, match="do not consume"):
+        validate_resource_residency_contract(tmp_path, contract, manifest)
+
+
+def test_rejects_selector_width_larger_than_resource_domain(tmp_path: Path) -> None:
+    contract, manifest = _contract(tmp_path, selector=True)
+    template = _dynamic_template(tmp_path)
+    _replace_eager_resource_with_dynamic_template(contract, template)
+    _add_dynamic_selector_contract(contract, template)
+    selector = contract["selectors"][0]
+    selector["encoding"]["selection_count_per_activation"] = 3
+    manifest["circuit_graph"]["components"][0]["circuit"]["nodes"][0]["attrs"][
+        "selection_domain"
+    ]["encoding"]["selection_count_per_activation"] = 3
+    selector["id"] = selector_identity(selector)
+    checkpoint = contract["checkpoints"][0]
+    checkpoint["selector_ids"] = [selector["id"]]
+    checkpoint["id"] = checkpoint_identity(checkpoint)
+
+    with pytest.raises(ModelCompileError, match="invalid selection index encoding"):
+        validate_resource_residency_contract(tmp_path, contract, manifest)
 
 
 def test_resolves_and_independently_verifies_one_partition(
@@ -696,11 +737,14 @@ def test_validates_concrete_dynamic_group_selector_and_checkpoint(
         "domain_id": "addressable_resources",
         "resource_count": 1,
         "selection_signal": "selection",
+        "execution_signal": "selection",
+        "execution_calibration_word_base": 0,
         "encoding": {
             "element_type": "u32",
             "selection_count_per_activation": 1,
             "index_shift": 0,
             "index_mask": 0xffff,
+            "calibration_word_base": 0,
         },
         "mapping": {
             "kind": "group_table",
@@ -762,11 +806,14 @@ def test_rejects_selector_count_and_checkpoint_boundary_drift(
         "domain_id": "addressable_resources",
         "resource_count": 1,
         "selection_signal": "selection",
+        "execution_signal": "selection",
+        "execution_calibration_word_base": 0,
         "encoding": {
             "element_type": "u32",
             "selection_count_per_activation": 1,
             "index_shift": 0,
             "index_mask": 0xffff,
+            "calibration_word_base": 0,
         },
         "mapping": {
             "kind": "partition_template",

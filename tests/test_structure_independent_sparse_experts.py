@@ -145,10 +145,13 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
             "selection_count_per_activation": 3,
             "index_shift": 0,
             "index_mask": 3,
+            "calibration_word_base": 0,
         },
     }
     selected = nodes["sparse_moe_gate_up"]["attrs"]["selected_parameter_accesses"][0]
     assert selected["selection_signal"] == "moe_resource_routes"
+    assert selected["execution_signal"] == "moe_routes"
+    assert selected["execution_calibration_word_base"] == 0x3F800000
     assert "moe_resource_routes" not in nodes["sparse_moe_gate_up"]["inputs"]
     assert selected["mapping"][1] == {
         "selector": 1,

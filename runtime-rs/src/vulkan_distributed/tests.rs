@@ -2105,7 +2105,7 @@ mod tests {
             });
         }
         let residency = CompiledResourceResidencyContract {
-            schema: "nerve.compiled_resource_residency.v4".to_string(),
+            schema: crate::COMPILED_RESOURCE_RESIDENCY_SCHEMA.to_string(),
             identity_algorithm: "nerve.resource_identity_sha256.v1".to_string(),
             state_machine_schema: "nerve.resource_residency_state_machine.v1".to_string(),
             supported_policies: vec![ResourceResidencyPolicy::DemandRetained],
@@ -2121,11 +2121,14 @@ mod tests {
                 domain_id: "experts".to_string(),
                 resource_count: 8,
                 selection_signal: "routes".to_string(),
+                execution_signal: "routes".to_string(),
+                execution_calibration_word_base: 0,
                 encoding: CompiledResourceSelectionEncoding {
                     element_type: CompiledResourceSelectionElementType::U32,
                     selection_count_per_activation: 2,
                     index_shift: 0,
                     index_mask: 7,
+                    calibration_word_base: 0,
                 },
                 mapping: CompiledResourceSelectorMapping::GroupTable { atomic_group_ids },
             }],

@@ -637,6 +637,7 @@ def _ffn_tail(
                             ),
                             "index_shift": 0,
                             "index_mask": 0xFFFF,
+                            "calibration_word_base": 0x3F800000,
                         },
                     },
                 },
@@ -663,6 +664,8 @@ def _ffn_tail(
                     "selected_parameter_accesses": [
                         {
                             "selection_signal": "moe_routes",
+                            "execution_signal": "moe_routes",
+                            "execution_calibration_word_base": 0x3F800000,
                             "partition_axis": 0,
                             "parameter_ids": [
                                 "moe_input",
@@ -707,6 +710,8 @@ def _ffn_tail(
                     "selected_parameter_accesses": [
                         {
                             "selection_signal": "moe_routes",
+                            "execution_signal": "moe_routes",
+                            "execution_calibration_word_base": 0x3F800000,
                             "partition_axis": 0,
                             "parameter_ids": [
                                 "moe_output",

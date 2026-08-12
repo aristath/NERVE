@@ -992,12 +992,15 @@ mod compiled_resource_address_layout_tests {
                 domain_id: "experts".to_string(),
                 resource_count: 2,
                 selection_signal: "selected_experts".to_string(),
+                execution_signal: "selected_experts".to_string(),
+                execution_calibration_word_base: 0,
                 encoding: CompiledResourceSelectionEncoding {
                     element_type:
                         CompiledResourceSelectionElementType::U32,
                     selection_count_per_activation: 1,
                     index_shift: 0,
                     index_mask: 0xffff,
+                    calibration_word_base: 0,
                 },
                 mapping: CompiledResourceSelectorMapping::GroupTable {
                     atomic_group_ids: groups
@@ -1134,12 +1137,15 @@ mod compiled_resource_address_layout_tests {
                 domain_id: "resources".to_string(),
                 resource_count: 3,
                 selection_signal: "selected".to_string(),
+                execution_signal: "selected".to_string(),
+                execution_calibration_word_base: 0,
                 encoding: CompiledResourceSelectionEncoding {
                     element_type:
                         CompiledResourceSelectionElementType::U32,
                     selection_count_per_activation: 1,
                     index_shift: 0,
                     index_mask: 0xffff,
+                    calibration_word_base: 0,
                 },
                 mapping:
                     CompiledResourceSelectorMapping::PartitionTemplate {
@@ -1283,12 +1289,15 @@ mod compiled_resource_address_layout_tests {
                 domain_id: "optional_features".to_string(),
                 resource_count: PARTITION_COUNT,
                 selection_signal: "selected_feature".to_string(),
+                execution_signal: "selected_feature".to_string(),
+                execution_calibration_word_base: 0,
                 encoding: CompiledResourceSelectionEncoding {
                     element_type:
                         CompiledResourceSelectionElementType::U32,
                     selection_count_per_activation: 1,
                     index_shift: 0,
                     index_mask: u32::MAX,
+                    calibration_word_base: 0,
                 },
                 mapping:
                     CompiledResourceSelectorMapping::PartitionTemplate {

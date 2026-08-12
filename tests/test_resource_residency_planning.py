@@ -55,6 +55,7 @@ def _routed_component() -> tuple[list[dict[str, object]], dict[str, object]]:
                         "selection_count_per_activation": 2,
                         "index_shift": 0,
                         "index_mask": 0xFFFF,
+                        "calibration_word_base": 0,
                     },
                 }
             },
@@ -69,6 +70,8 @@ def _routed_component() -> tuple[list[dict[str, object]], dict[str, object]]:
                 "selected_parameter_accesses": [
                     {
                         "selection_signal": "chosen",
+                        "execution_signal": "chosen",
+                        "execution_calibration_word_base": 0,
                         "partition_axis": 0,
                         "parameter_ids": ["bank_a", "scale_a"],
                     }
@@ -85,6 +88,8 @@ def _routed_component() -> tuple[list[dict[str, object]], dict[str, object]]:
                 "selected_parameter_accesses": [
                     {
                         "selection_signal": "chosen",
+                        "execution_signal": "chosen",
+                        "execution_calibration_word_base": 0,
                         "partition_axis": 0,
                         "parameter_ids": ["bank_b", "scale_b"],
                     }
@@ -117,6 +122,7 @@ def _optional_component() -> tuple[list[dict[str, object]], dict[str, object]]:
                         "selection_count_per_activation": 1,
                         "index_shift": 0,
                         "index_mask": 0xFFFF,
+                        "calibration_word_base": 0,
                     },
                 }
             },
@@ -131,6 +137,8 @@ def _optional_component() -> tuple[list[dict[str, object]], dict[str, object]]:
                 "selected_parameter_accesses": [
                     {
                         "selection_signal": "feature_index",
+                        "execution_signal": "feature_index",
+                        "execution_calibration_word_base": 0,
                         "partition_axis": 0,
                         "parameter_ids": ["projection_bank"],
                     }
@@ -162,6 +170,7 @@ def _independent_component() -> tuple[list[dict[str, object]], dict[str, object]
                         "selection_count_per_activation": 1,
                         "index_shift": 0,
                         "index_mask": 0xFFFF,
+                        "calibration_word_base": 0,
                     },
                 }
             },
@@ -181,6 +190,8 @@ def _independent_component() -> tuple[list[dict[str, object]], dict[str, object]
                 "selected_parameter_accesses": [
                     {
                         "selection_signal": "chosen",
+                        "execution_signal": "chosen",
+                        "execution_calibration_word_base": 0,
                         "mapping": [
                             {
                                 "selector": 0,
@@ -308,6 +319,9 @@ def test_discovers_independently_stored_selected_resources() -> None:
     group = analysis["groups"][0]
     assert group["storage"] == "independent_resources"
     assert group["partition_count"] == 2
+    assert group["selection_signal"] == "chosen"
+    assert group["execution_signal"] == "chosen"
+    assert group["execution_calibration_word_base"] == 0
     assert {(access["selector"], access["tensor"]) for access in group["accesses"]} == {
         (unit, f"tensor.unit_{unit}_{kind}")
         for unit in range(2)
@@ -565,6 +579,9 @@ def test_reuses_compatible_partitions_across_independent_selectors() -> None:
     second_nodes[1]["attrs"]["selected_parameter_accesses"][0]["selection_signal"] = (
         "second_index"
     )
+    second_nodes[1]["attrs"]["selected_parameter_accesses"][0]["execution_signal"] = (
+        "second_index"
+    )
 
     analysis = analyze_resource_residency_components(
         components=[
@@ -703,6 +720,18 @@ def test_rejects_predictable_dependency_without_selection_domain() -> None:
                 {"index_mask": 1}
             ),
             "invalid selection index encoding",
+        ),
+        (
+            lambda nodes: nodes[1]["attrs"]["selected_parameter_accesses"][0].update(
+                {"execution_signal": "not_a_consumer_input"}
+            ),
+            "does not consume selected execution signal",
+        ),
+        (
+            lambda nodes: nodes[1]["attrs"]["selected_parameter_accesses"][0].update(
+                {"execution_calibration_word_base": 1}
+            ),
+            "invalid selected calibration word base",
         ),
     ),
 )

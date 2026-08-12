@@ -1157,11 +1157,14 @@ fn fixture_model_runtime_model_with_one_dynamic_group() -> VulkanResidentRuntime
         domain_id: "fixture_dynamic_group".to_string(),
         resource_count: 1,
         selection_signal: "ffn_hidden".to_string(),
+        execution_signal: "ffn_hidden".to_string(),
+        execution_calibration_word_base: 0,
         encoding: CompiledResourceSelectionEncoding {
             element_type: CompiledResourceSelectionElementType::U32,
             selection_count_per_activation: 1,
             index_shift: 0,
             index_mask: 0,
+            calibration_word_base: 0,
         },
         mapping: CompiledResourceSelectorMapping::GroupTable {
             atomic_group_ids: vec![dynamic_group_id],
@@ -1264,11 +1267,14 @@ fn fixture_model_runtime_model_with_dynamic_partition(
         domain_id: "fixture_partitions".to_string(),
         resource_count: partition_count,
         selection_signal: "selection".to_string(),
+        execution_signal: "selection".to_string(),
+        execution_calibration_word_base: 0,
         encoding: CompiledResourceSelectionEncoding {
             element_type: CompiledResourceSelectionElementType::U32,
             selection_count_per_activation: 1,
             index_shift: 0,
             index_mask: u32::MAX,
+            calibration_word_base: 0,
         },
         mapping: CompiledResourceSelectorMapping::PartitionTemplate {
             partition_template_id: template_id,
