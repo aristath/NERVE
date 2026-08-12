@@ -141,12 +141,16 @@ pub fn validate_vulkan_placement_output_equivalence(
     equivalence.validate()?;
     match equivalence.output {
         VulkanPlacementEquivalenceKind::BitExact => {
-            if reference_artifact.is_some()
-                || candidate_artifact.is_some()
-                || reference_digest != candidate_digest
-            {
+            if candidate_artifact.is_some() || reference_digest != candidate_digest {
                 return Err(VulkanPlacementCalibrationCatalogError(
                     "bit-exact placement output differs from its canonical reference".to_string(),
+                ));
+            }
+            if let Some(reference) = reference_artifact
+                && vulkan_placement_output_artifact_digest(reference)? != reference_digest
+            {
+                return Err(VulkanPlacementCalibrationCatalogError(
+                    "bit-exact canonical output artifact disagrees with its digest".to_string(),
                 ));
             }
             Ok(VulkanPlacementOutputEquivalenceEvidence::BitExact)

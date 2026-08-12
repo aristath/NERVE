@@ -60,9 +60,30 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
                     "directed transfer transient byte accounting overflowed".to_string(),
                 )
             })?;
+        let implementation_digest = runtime_transfer_calibration_digest(
+            b"nerve.directed_transfer.implementation.v1",
+            &[crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.as_bytes()],
+        );
+        let artifact_digest = runtime_transfer_calibration_digest(
+            b"nerve.directed_transfer.artifact.v1",
+            &[
+                crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.as_bytes(),
+                VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.as_bytes(),
+            ],
+        );
+        let execution_graph_digest = self.execution_graph_digest();
         Ok(VulkanPlacementCalibrationObservation {
             execution_case: VulkanPlacementExecutionCaseIdentity {
                 behavior: self.behavior_identity(),
+                contract_ids: vec![VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.to_string()],
+                implementation_digests: vec![implementation_digest],
+                artifact_digest,
+                execution_graph_digest,
+                operations: vec![VulkanPlacementOperationGeometry::DirectedTransfer {
+                    contract_id: VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.to_string(),
+                    byte_count: self.byte_count,
+                }],
+                equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
                 strategy: VulkanPlacementExecutionStrategy::DirectedBoundary,
                 devices,
                 shards: Vec::new(),
@@ -102,30 +123,8 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
     }
 
     fn behavior_identity(&self) -> VulkanPlacementBehaviorIdentity {
-        let implementation_digest = runtime_transfer_calibration_digest(
-            b"nerve.directed_transfer.implementation.v1",
-            &[crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.as_bytes()],
-        );
-        let artifact_digest = runtime_transfer_calibration_digest(
-            b"nerve.directed_transfer.artifact.v1",
-            &[
-                crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.as_bytes(),
-                VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.as_bytes(),
-            ],
-        );
-        let execution_graph_digest = runtime_transfer_calibration_digest(
-            b"nerve.directed_transfer.graph.v1",
-            &[
-                VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.as_bytes(),
-                &self.byte_count.to_le_bytes(),
-            ],
-        );
         VulkanPlacementBehaviorIdentity {
-            compiled_execution_signature: execution_graph_digest.clone(),
-            contract_ids: vec![VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.to_string()],
-            implementation_digests: vec![implementation_digest],
-            artifact_digest,
-            execution_graph_digest,
+            compiled_execution_signature: self.execution_graph_digest(),
             runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
                 .to_string(),
             phase: self.phase,
@@ -133,14 +132,19 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
                 activation_batch_width: self.activation_batch_width,
                 input_byte_capacity: self.byte_count,
                 output_byte_capacity: self.byte_count,
-                operations: vec![VulkanPlacementOperationGeometry::DirectedTransfer {
-                    contract_id: VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.to_string(),
-                    byte_count: self.byte_count,
-                }],
             },
             input_fixture_digest: self.fixture_digest.clone(),
-            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
         }
+    }
+
+    fn execution_graph_digest(&self) -> String {
+        runtime_transfer_calibration_digest(
+            b"nerve.directed_transfer.graph.v1",
+            &[
+                VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.as_bytes(),
+                &self.byte_count.to_le_bytes(),
+            ],
+        )
     }
 
     fn validate_geometry(&self) -> Result<(), VulkanPlacementCalibrationCatalogError> {
@@ -469,8 +473,6 @@ mod runtime_transfer_calibration_validation_tests {
         assert!(matches!(
             observation
                 .execution_case
-                .behavior
-                .shape
                 .operations
                 .as_slice(),
             [VulkanPlacementOperationGeometry::DirectedTransfer {
@@ -520,7 +522,7 @@ mod runtime_transfer_calibration_validation_tests {
             257 * 64,
         );
         assert!(matches!(
-            observation.execution_case.behavior.shape.operations.as_slice(),
+            observation.execution_case.operations.as_slice(),
             [VulkanPlacementOperationGeometry::DirectedTransfer { byte_count, .. }]
                 if *byte_count == 257 * 64
         ));

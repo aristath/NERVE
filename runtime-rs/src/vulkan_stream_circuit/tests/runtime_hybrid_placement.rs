@@ -5,29 +5,14 @@ fn hybrid_test_digest(byte: char) -> String {
 fn hybrid_test_behavior(signature: &str) -> VulkanPlacementBehaviorIdentity {
     VulkanPlacementBehaviorIdentity {
         compiled_execution_signature: signature.to_string(),
-        contract_ids: vec!["contract".to_string()],
-        implementation_digests: vec![hybrid_test_digest('a')],
-        artifact_digest: hybrid_test_digest('b'),
-        execution_graph_digest: hybrid_test_digest('c'),
         runtime_implementation_fingerprint: "runtime".to_string(),
         phase: nerve_execution_contracts::ExecutionPhase::Decode,
         shape: VulkanPlacementShapeClass {
             activation_batch_width: 1,
             input_byte_capacity: 16,
             output_byte_capacity: 16,
-            operations: vec![VulkanPlacementOperationGeometry::Dispatch {
-                geometry: VulkanPlacementDispatchGeometry {
-                    contract_id: "contract".to_string(),
-                    logical_extent: 8,
-                    sampled_extent: 8,
-                    input_width: 8,
-                    workgroup_count_x: 1,
-                    local_size_x: 64,
-                },
-            }],
         },
         input_fixture_digest: hybrid_test_digest('d'),
-        equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
     }
 }
 
@@ -60,6 +45,21 @@ fn hybrid_test_observation(
     VulkanPlacementCalibrationObservation {
         execution_case: VulkanPlacementExecutionCaseIdentity {
             behavior,
+            contract_ids: vec!["contract".to_string()],
+            implementation_digests: vec![hybrid_test_digest('a')],
+            artifact_digest: hybrid_test_digest('b'),
+            execution_graph_digest: hybrid_test_digest('c'),
+            operations: vec![VulkanPlacementOperationGeometry::Dispatch {
+                geometry: VulkanPlacementDispatchGeometry {
+                    contract_id: "contract".to_string(),
+                    logical_extent: 8,
+                    sampled_extent: 8,
+                    input_width: 8,
+                    workgroup_count_x: 1,
+                    local_size_x: 64,
+                },
+            }],
+            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
             strategy: VulkanPlacementExecutionStrategy::SingleDevice,
             devices: vec![device],
             shards: Vec::new(),
@@ -150,6 +150,21 @@ fn hybrid_test_distributed_observation(
     VulkanPlacementCalibrationObservation {
         execution_case: VulkanPlacementExecutionCaseIdentity {
             behavior,
+            contract_ids: vec!["contract".to_string()],
+            implementation_digests: vec![hybrid_test_digest('a')],
+            artifact_digest: hybrid_test_digest('b'),
+            execution_graph_digest: hybrid_test_digest('c'),
+            operations: vec![VulkanPlacementOperationGeometry::Dispatch {
+                geometry: VulkanPlacementDispatchGeometry {
+                    contract_id: "contract".to_string(),
+                    logical_extent: 8,
+                    sampled_extent: 8,
+                    input_width: 8,
+                    workgroup_count_x: 2,
+                    local_size_x: 64,
+                },
+            }],
+            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
             strategy: VulkanPlacementExecutionStrategy::TensorParallel,
             devices: vec![hybrid_test_device("gpu0"), hybrid_test_device("gpu1")],
             shards: vec![
@@ -296,12 +311,6 @@ fn runtime_hybrid_planner_rejects_missing_or_ambiguous_behavior_evidence() {
     )
     .unwrap();
     let mut second_behavior = hybrid_test_behavior(&target.signature_id);
-    let VulkanPlacementOperationGeometry::Dispatch { geometry } =
-        &mut second_behavior.shape.operations[0]
-    else {
-        panic!("hybrid fixture operation must be a dispatch");
-    };
-    geometry.sampled_extent = 4;
     second_behavior.input_fixture_digest = hybrid_test_digest('e');
     catalog
         .record_reference(VulkanPlacementCanonicalReference {

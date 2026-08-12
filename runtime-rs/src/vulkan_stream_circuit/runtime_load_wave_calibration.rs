@@ -35,7 +35,7 @@ impl VulkanRuntimeLoadWaveCalibrationReport {
     fn validate(&self) -> Result<(), VulkanPlacementCalibrationCatalogError> {
         let shape = &self.execution_case.behavior.shape;
         let operation_matches = matches!(
-            shape.operations.as_slice(),
+            self.execution_case.operations.as_slice(),
             [VulkanPlacementOperationGeometry::LazyLoadWave {
                 contract_id,
                 resource_count,
@@ -76,7 +76,7 @@ impl VulkanRuntimeLoadWaveCalibrationReport {
             || shape.activation_batch_width != self.activation_batch_width
             || shape.input_byte_capacity != self.loaded_byte_count
             || shape.output_byte_capacity != self.loaded_byte_count
-            || self.execution_case.behavior.contract_ids != [self.selector_id.clone()]
+            || self.execution_case.contract_ids != [self.selector_id.clone()]
             || !operation_matches
             || !device_matches
             || self.execution_case.input_physical_device_id != self.physical_device_id
@@ -257,7 +257,7 @@ pub fn calibrate_vulkan_runtime_load_wave(
     )
     .unwrap_or(usize::MAX)
     .saturating_add(measured.after.transfer_staging_host_bytes);
-    let behavior = load_wave_behavior_identity(
+    let identity = load_wave_execution_identity(
         runtime_model,
         selector,
         &target.resource_indices,
@@ -276,7 +276,13 @@ pub fn calibrate_vulkan_runtime_load_wave(
         ],
     );
     let execution_case = VulkanPlacementExecutionCaseIdentity {
-        behavior,
+        behavior: identity.behavior,
+        contract_ids: identity.contract_ids,
+        implementation_digests: identity.implementation_digests,
+        artifact_digest: identity.artifact_digest,
+        execution_graph_digest: identity.execution_graph_digest,
+        operations: identity.operations,
+        equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
         strategy: VulkanPlacementExecutionStrategy::LazyLoadWave,
         devices: vec![VulkanPlacementDeviceExecutionIdentity {
             physical_device_id: physical_device_id.to_string(),
@@ -424,14 +430,23 @@ fn run_vulkan_runtime_load_wave_once(
     }
 }
 
-fn load_wave_behavior_identity(
+struct VulkanLoadWaveExecutionIdentity {
+    behavior: VulkanPlacementBehaviorIdentity,
+    contract_ids: Vec<String>,
+    implementation_digests: Vec<String>,
+    artifact_digest: String,
+    execution_graph_digest: String,
+    operations: Vec<VulkanPlacementOperationGeometry>,
+}
+
+fn load_wave_execution_identity(
     runtime_model: &VulkanResidentRuntimeModel,
     selector: &CompiledResourceSelector,
     resource_indices: &[usize],
     validation: &VulkanCompiledResourceReadbackValidation,
     phase: nerve_execution_contracts::ExecutionPhase,
     activation_batch_width: usize,
-) -> Result<VulkanPlacementBehaviorIdentity, VulkanResidentTokenModelPackageError> {
+) -> Result<VulkanLoadWaveExecutionIdentity, VulkanResidentTokenModelPackageError> {
     let selector_bytes = serde_json::to_vec(selector)
         .map_err(|error| load_wave_calibration_error_value(error.to_string()))?;
     let artifact_bytes = serde_json::to_vec(&runtime_model.package.artifact_integrity)
@@ -450,8 +465,22 @@ fn load_wave_behavior_identity(
         b"nerve.lazy_load_wave.compiled_execution.v1",
         &[&selector_bytes, &graph_bytes],
     );
-    Ok(VulkanPlacementBehaviorIdentity {
-        compiled_execution_signature,
+    Ok(VulkanLoadWaveExecutionIdentity {
+        behavior: VulkanPlacementBehaviorIdentity {
+            compiled_execution_signature,
+            runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
+                .to_string(),
+            phase,
+            shape: VulkanPlacementShapeClass {
+                activation_batch_width,
+                input_byte_capacity: validation.byte_count,
+                output_byte_capacity: validation.byte_count,
+            },
+            input_fixture_digest: load_wave_digest(
+                b"nerve.lazy_load_wave.request.v1",
+                &[selector.id.as_bytes(), &indices_bytes],
+            ),
+        },
         contract_ids: vec![selector.id.clone()],
         implementation_digests: vec![load_wave_digest(
             b"nerve.lazy_load_wave.implementation.v1",
@@ -464,24 +493,15 @@ fn load_wave_behavior_identity(
             b"nerve.lazy_load_wave.artifact.v1",
             &[&artifact_bytes, &selector_bytes],
         ),
-        execution_graph_digest: load_wave_digest(b"nerve.lazy_load_wave.graph.v1", &[&graph_bytes]),
-        runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.to_string(),
-        phase,
-        shape: VulkanPlacementShapeClass {
-            activation_batch_width,
-            input_byte_capacity: validation.byte_count,
-            output_byte_capacity: validation.byte_count,
-            operations: vec![VulkanPlacementOperationGeometry::LazyLoadWave {
-                contract_id: selector.id.clone(),
-                resource_count: validation.group_ids.len(),
-                byte_count: validation.byte_count,
-            }],
-        },
-        input_fixture_digest: load_wave_digest(
-            b"nerve.lazy_load_wave.request.v1",
-            &[selector.id.as_bytes(), &indices_bytes],
+        execution_graph_digest: load_wave_digest(
+            b"nerve.lazy_load_wave.graph.v1",
+            &[&graph_bytes],
         ),
-        equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
+        operations: vec![VulkanPlacementOperationGeometry::LazyLoadWave {
+            contract_id: selector.id.clone(),
+            resource_count: validation.group_ids.len(),
+            byte_count: validation.byte_count,
+        }],
     })
 }
 
@@ -519,24 +539,14 @@ mod runtime_load_wave_calibration_validation_tests {
     fn report() -> VulkanRuntimeLoadWaveCalibrationReport {
         let behavior = VulkanPlacementBehaviorIdentity {
             compiled_execution_signature: digest(6),
-            contract_ids: vec![digest(1)],
-            implementation_digests: vec![digest(2)],
-            artifact_digest: digest(3),
-            execution_graph_digest: digest(4),
             runtime_implementation_fingerprint: "runtime".to_string(),
             phase: nerve_execution_contracts::ExecutionPhase::Decode,
             shape: VulkanPlacementShapeClass {
                 activation_batch_width: 1,
                 input_byte_capacity: 4096,
                 output_byte_capacity: 4096,
-                operations: vec![VulkanPlacementOperationGeometry::LazyLoadWave {
-                    contract_id: digest(1),
-                    resource_count: 1,
-                    byte_count: 4096,
-                }],
             },
             input_fixture_digest: digest(5),
-            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
         };
         let physical_device_id = "vulkan-uuid:00112233445566778899aabbccddeeff".to_string();
         VulkanRuntimeLoadWaveCalibrationReport {
@@ -561,6 +571,16 @@ mod runtime_load_wave_calibration_validation_tests {
             transient_host_bytes: 4096,
             execution_case: VulkanPlacementExecutionCaseIdentity {
                 behavior,
+                contract_ids: vec![digest(1)],
+                implementation_digests: vec![digest(2)],
+                artifact_digest: digest(3),
+                execution_graph_digest: digest(4),
+                operations: vec![VulkanPlacementOperationGeometry::LazyLoadWave {
+                    contract_id: digest(1),
+                    resource_count: 1,
+                    byte_count: 4096,
+                }],
+                equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
                 strategy: VulkanPlacementExecutionStrategy::LazyLoadWave,
                 devices: vec![VulkanPlacementDeviceExecutionIdentity {
                     physical_device_id: physical_device_id.clone(),
@@ -602,7 +622,7 @@ mod runtime_load_wave_calibration_validation_tests {
     #[test]
     fn load_wave_catalog_recording_is_transactional() {
         let mut report = report();
-        report.execution_case.behavior.shape.operations.clear();
+        report.execution_case.operations.clear();
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
         let before = catalog.clone();
         assert!(record_vulkan_runtime_load_wave_calibration_report(&mut catalog, &report).is_err());
@@ -613,7 +633,7 @@ mod runtime_load_wave_calibration_validation_tests {
     fn load_wave_report_rejects_tensor_count_as_group_geometry() {
         let mut report = report();
         let VulkanPlacementOperationGeometry::LazyLoadWave { resource_count, .. } =
-            &mut report.execution_case.behavior.shape.operations[0]
+            &mut report.execution_case.operations[0]
         else {
             unreachable!()
         };

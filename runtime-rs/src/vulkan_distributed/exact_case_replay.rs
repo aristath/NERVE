@@ -146,8 +146,8 @@ fn replay_exact_distributed_component_case(
         .values()
         .map(|digest| (*digest).to_string())
         .collect::<Vec<_>>();
-    if runtime_contract_ids != case.behavior.contract_ids
-        || runtime_implementation_digests != case.behavior.implementation_digests
+    if runtime_contract_ids != case.contract_ids
+        || runtime_implementation_digests != case.implementation_digests
     {
         return exact_case_error(format!(
             "exact case for component {component_id:?} was measured with different physical execution contracts",
@@ -650,30 +650,30 @@ mod exact_case_replay_tests {
         VulkanPlacementExecutionCaseIdentity {
             behavior: VulkanPlacementBehaviorIdentity {
                 compiled_execution_signature: "signature".to_string(),
-                contract_ids: vec!["contract".to_string()],
-                implementation_digests: vec!["implementation".to_string()],
-                artifact_digest: "artifact".to_string(),
-                execution_graph_digest: "graph".to_string(),
                 runtime_implementation_fingerprint: "runtime".to_string(),
                 phase: ExecutionPhase::Decode,
                 shape: VulkanPlacementShapeClass {
                     activation_batch_width: 1,
                     input_byte_capacity: 16,
                     output_byte_capacity: 16,
-                    operations: vec![VulkanPlacementOperationGeometry::Dispatch {
-                        geometry: VulkanPlacementDispatchGeometry {
-                            contract_id: "contract".to_string(),
-                            logical_extent: 4,
-                            sampled_extent: 4,
-                            input_width: 4,
-                            workgroup_count_x: 1,
-                            local_size_x: 64,
-                        },
-                    }],
                 },
                 input_fixture_digest: "fixture".to_string(),
-                equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
             },
+            contract_ids: vec!["contract".to_string()],
+            implementation_digests: vec!["implementation".to_string()],
+            artifact_digest: "artifact".to_string(),
+            execution_graph_digest: "graph".to_string(),
+            operations: vec![VulkanPlacementOperationGeometry::Dispatch {
+                geometry: VulkanPlacementDispatchGeometry {
+                    contract_id: "contract".to_string(),
+                    logical_extent: 4,
+                    sampled_extent: 4,
+                    input_width: 4,
+                    workgroup_count_x: 1,
+                    local_size_x: 64,
+                },
+            }],
+            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
             strategy: VulkanPlacementExecutionStrategy::WholeExpertParallel,
             devices: vec![device("physical-owner"), device("physical-helper")],
             shards: vec![
@@ -834,7 +834,7 @@ mod exact_case_replay_tests {
             distributed_parameter_byte_count: 0,
         };
         let mut stale = exact_case(&[0, 1], &[2, 3]);
-        stale.behavior.implementation_digests = vec!["stale".to_string()];
+        stale.implementation_digests = vec!["stale".to_string()];
 
         let error = replay_exact_distributed_component_case(
             &mut plan,

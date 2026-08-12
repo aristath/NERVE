@@ -344,7 +344,7 @@ fn is_exact_directed_boundary_observation(
     expected_byte_count: usize,
 ) -> bool {
     matches!(
-        observation.execution_case.behavior.shape.operations.as_slice(),
+        observation.execution_case.operations.as_slice(),
         [VulkanPlacementOperationGeometry::DirectedTransfer { byte_count, .. }]
             if *byte_count == expected_byte_count
     )
@@ -585,40 +585,20 @@ mod hybrid_placement_optimizer_tests {
 
     fn region_behavior(contract: &str) -> VulkanPlacementBehaviorIdentity {
         VulkanPlacementBehaviorIdentity {
-            compiled_execution_signature: digest('e'),
-            contract_ids: vec![contract.to_string()],
-            implementation_digests: vec![digest('a')],
-            artifact_digest: digest('b'),
-            execution_graph_digest: digest('c'),
+            compiled_execution_signature: format!("signature:{contract}"),
             runtime_implementation_fingerprint: "runtime".to_string(),
             phase: nerve_execution_contracts::ExecutionPhase::Decode,
             shape: VulkanPlacementShapeClass {
                 activation_batch_width: 1,
                 input_byte_capacity: 16,
                 output_byte_capacity: 16,
-                operations: vec![VulkanPlacementOperationGeometry::Dispatch {
-                    geometry: VulkanPlacementDispatchGeometry {
-                        contract_id: contract.to_string(),
-                        logical_extent: 8,
-                        sampled_extent: 8,
-                        input_width: 8,
-                        workgroup_count_x: 1,
-                        local_size_x: 64,
-                    },
-                }],
             },
             input_fixture_digest: digest('d'),
-            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
         }
     }
 
-    fn boundary_behavior(contract: &str, byte_count: usize) -> VulkanPlacementBehaviorIdentity {
-        let mut behavior = region_behavior(contract);
-        behavior.shape.operations = vec![VulkanPlacementOperationGeometry::DirectedTransfer {
-            contract_id: contract.to_string(),
-            byte_count,
-        }];
-        behavior
+    fn boundary_behavior(contract: &str, _byte_count: usize) -> VulkanPlacementBehaviorIdentity {
+        region_behavior(contract)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -632,6 +612,7 @@ mod hybrid_placement_optimizer_tests {
         duration_ns: u64,
         useful_activation_count: usize,
     ) -> VulkanPlacementCalibrationObservation {
+        let contract_id = behavior.compiled_execution_signature.clone();
         let device_identities = devices
             .iter()
             .map(|(id, _)| device(id, 2))
@@ -654,6 +635,21 @@ mod hybrid_placement_optimizer_tests {
         VulkanPlacementCalibrationObservation {
             execution_case: VulkanPlacementExecutionCaseIdentity {
                 behavior,
+                contract_ids: vec![contract_id.clone()],
+                implementation_digests: vec![digest('a')],
+                artifact_digest: digest('b'),
+                execution_graph_digest: digest('c'),
+                operations: vec![VulkanPlacementOperationGeometry::Dispatch {
+                    geometry: VulkanPlacementDispatchGeometry {
+                        contract_id,
+                        logical_extent: 8,
+                        sampled_extent: 8,
+                        input_width: 8,
+                        workgroup_count_x: 1,
+                        local_size_x: 64,
+                    },
+                }],
+                equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
                 strategy,
                 devices: device_identities,
                 shards,
@@ -695,6 +691,15 @@ mod hybrid_placement_optimizer_tests {
         VulkanPlacementCalibrationObservation {
             execution_case: VulkanPlacementExecutionCaseIdentity {
                 behavior,
+                contract_ids: vec!["boundary".to_string()],
+                implementation_digests: vec![digest('a')],
+                artifact_digest: digest('b'),
+                execution_graph_digest: digest('c'),
+                operations: vec![VulkanPlacementOperationGeometry::DirectedTransfer {
+                    contract_id: "boundary".to_string(),
+                    byte_count: 16,
+                }],
+                equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
                 strategy: VulkanPlacementExecutionStrategy::DirectedBoundary,
                 devices,
                 shards: Vec::new(),

@@ -1,5 +1,5 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v7";
+    "nerve.vulkan_placement_calibration_catalog.v8";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,7 +105,6 @@ pub struct VulkanPlacementShapeClass {
     pub activation_batch_width: usize,
     pub input_byte_capacity: usize,
     pub output_byte_capacity: usize,
-    pub operations: Vec<VulkanPlacementOperationGeometry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -155,26 +154,20 @@ pub struct VulkanPlacementTransportIdentity {
     pub route: String,
 }
 
-/// Exact semantic and executable identity shared by canonically equivalent
-/// placement candidates. Physical placement is intentionally absent so one
-/// validated reference can authorize comparison across legal placements.
+/// Exact logical transaction shared by canonically equivalent physical
+/// candidates. Executable contracts and operation geometry intentionally live
+/// on the execution case so one canonical component result can validate every
+/// legal implementation and placement of this behavior.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VulkanPlacementBehaviorIdentity {
-    /// Stable producer-emitted identity of the executable transaction. This
-    /// is the model-independent join key that binds measurements back to the
-    /// same compiled contract. Producers for repeated graph components must
-    /// exclude semantic component names so equivalent instances can share
-    /// evidence.
+    /// Stable producer-emitted identity of the complete logical transaction.
+    /// Producers for repeated graph components exclude semantic instance names
+    /// while retaining every compiler fact that changes logical behavior.
     pub compiled_execution_signature: String,
-    pub contract_ids: Vec<String>,
-    pub implementation_digests: Vec<String>,
-    pub artifact_digest: String,
-    pub execution_graph_digest: String,
     pub runtime_implementation_fingerprint: String,
     pub phase: nerve_execution_contracts::ExecutionPhase,
     pub shape: VulkanPlacementShapeClass,
     pub input_fixture_digest: String,
-    pub equivalence: VulkanPlacementEquivalenceIdentity,
 }
 
 /// Exact measured execution case. Changing a driver, shard, endpoint, owner,
@@ -182,6 +175,12 @@ pub struct VulkanPlacementBehaviorIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VulkanPlacementExecutionCaseIdentity {
     pub behavior: VulkanPlacementBehaviorIdentity,
+    pub contract_ids: Vec<String>,
+    pub implementation_digests: Vec<String>,
+    pub artifact_digest: String,
+    pub execution_graph_digest: String,
+    pub operations: Vec<VulkanPlacementOperationGeometry>,
+    pub equivalence: VulkanPlacementEquivalenceIdentity,
     pub strategy: VulkanPlacementExecutionStrategy,
     pub devices: Vec<VulkanPlacementDeviceExecutionIdentity>,
     pub shards: Vec<VulkanPlacementShardIdentity>,
@@ -352,13 +351,13 @@ impl VulkanPlacementCalibrationCatalog {
                 "placement reference requires output and state digests".to_string(),
             ));
         }
-        validate_vulkan_placement_output_equivalence(
-            &reference.behavior.equivalence,
-            &reference.output_digest,
-            reference.output_artifact.as_ref(),
-            &reference.output_digest,
-            reference.output_artifact.as_ref(),
-        )?;
+        if let Some(artifact) = &reference.output_artifact
+            && vulkan_placement_output_artifact_digest(artifact)? != reference.output_digest
+        {
+            return Err(VulkanPlacementCalibrationCatalogError(
+                "placement reference output artifact disagrees with its digest".to_string(),
+            ));
+        }
         match self
             .references
             .binary_search_by(|existing| existing.behavior.cmp(&reference.behavior))
@@ -397,7 +396,7 @@ impl VulkanPlacementCalibrationCatalog {
             ));
         }
         let output_equivalence = validate_vulkan_placement_output_equivalence(
-            &reference.behavior.equivalence,
+            &observation.execution_case.equivalence,
             &reference.output_digest,
             reference.output_artifact.as_ref(),
             &observation.output_digest,
@@ -512,7 +511,7 @@ impl VulkanPlacementCalibrationCatalog {
                         .activation_batch_width
                         == activation_batch_width
                     && matches!(
-                        observation.execution_case.behavior.shape.operations.as_slice(),
+                        observation.execution_case.operations.as_slice(),
                         [VulkanPlacementOperationGeometry::DirectedTransfer {
                             byte_count: measured,
                             ..
@@ -593,51 +592,15 @@ fn compatible_remeasurement(
 fn validate_behavior_identity(
     behavior: &VulkanPlacementBehaviorIdentity,
 ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
-    if behavior.contract_ids.is_empty()
-        || behavior.compiled_execution_signature.is_empty()
-        || behavior.contract_ids.iter().any(String::is_empty)
-        || behavior.implementation_digests.len() != behavior.contract_ids.len()
-        || behavior.implementation_digests.iter().any(String::is_empty)
-        || behavior.artifact_digest.is_empty()
-        || behavior.execution_graph_digest.is_empty()
+    if behavior.compiled_execution_signature.is_empty()
         || behavior.runtime_implementation_fingerprint.is_empty()
         || behavior.shape.activation_batch_width == 0
         || behavior.shape.input_byte_capacity == 0
         || behavior.shape.output_byte_capacity == 0
-        || behavior.shape.operations.is_empty()
         || !valid_sha256_digest(&behavior.input_fixture_digest)
     {
         return Err(VulkanPlacementCalibrationCatalogError(
             "placement behavior identity is incomplete".to_string(),
-        ));
-    }
-    behavior.equivalence.validate()?;
-    if !is_strictly_sorted(&behavior.contract_ids)
-        || !valid_sha256_digest(&behavior.artifact_digest)
-        || !valid_sha256_digest(&behavior.execution_graph_digest)
-        || behavior
-            .implementation_digests
-            .iter()
-            .any(|digest| !valid_sha256_digest(digest))
-        || behavior.shape.operations.iter().any(|operation| {
-            !behavior
-                .contract_ids
-                .iter()
-                .any(|id| id == operation.contract_id())
-        })
-    {
-        return Err(VulkanPlacementCalibrationCatalogError(
-            "placement behavior identity is not canonical or digest-complete".to_string(),
-        ));
-    }
-    if behavior
-        .shape
-        .operations
-        .iter()
-        .any(|operation| !operation.is_valid())
-    {
-        return Err(VulkanPlacementCalibrationCatalogError(
-            "placement shape contains an invalid dispatch geometry".to_string(),
         ));
     }
     Ok(())
@@ -648,7 +611,27 @@ fn validate_observation(
 ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
     validate_behavior_identity(&observation.execution_case.behavior)?;
     let case = &observation.execution_case;
-    if case.devices.is_empty()
+    if case.contract_ids.is_empty()
+        || case.contract_ids.iter().any(String::is_empty)
+        || case.implementation_digests.len() != case.contract_ids.len()
+        || case.implementation_digests.iter().any(String::is_empty)
+        || !is_strictly_sorted(&case.contract_ids)
+        || !valid_sha256_digest(&case.artifact_digest)
+        || !valid_sha256_digest(&case.execution_graph_digest)
+        || case
+            .implementation_digests
+            .iter()
+            .any(|digest| !valid_sha256_digest(digest))
+        || case.operations.is_empty()
+        || case.operations.iter().any(|operation| {
+            !operation.is_valid()
+                || !case
+                    .contract_ids
+                    .iter()
+                    .any(|id| id == operation.contract_id())
+        })
+        || case.equivalence.validate().is_err()
+        || case.devices.is_empty()
         || case
             .devices
             .iter()
@@ -813,29 +796,14 @@ mod placement_calibration_catalog_tests {
     fn behavior() -> VulkanPlacementBehaviorIdentity {
         VulkanPlacementBehaviorIdentity {
             compiled_execution_signature: format!("sha256:{}", "f".repeat(64)),
-            contract_ids: vec!["contract".to_string()],
-            implementation_digests: vec![format!("sha256:{}", "a".repeat(64))],
-            artifact_digest: format!("sha256:{}", "b".repeat(64)),
-            execution_graph_digest: format!("sha256:{}", "d".repeat(64)),
             runtime_implementation_fingerprint: "runtime".to_string(),
             phase: nerve_execution_contracts::ExecutionPhase::Decode,
             shape: VulkanPlacementShapeClass {
                 activation_batch_width: 1,
                 input_byte_capacity: 16,
                 output_byte_capacity: 16,
-                operations: vec![VulkanPlacementOperationGeometry::Dispatch {
-                    geometry: VulkanPlacementDispatchGeometry {
-                        contract_id: "contract".to_string(),
-                        logical_extent: 8,
-                        sampled_extent: 8,
-                        input_width: 8,
-                        workgroup_count_x: 1,
-                        local_size_x: 64,
-                    },
-                }],
             },
             input_fixture_digest: format!("sha256:{}", "c".repeat(64)),
-            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
         }
     }
 
@@ -859,6 +827,21 @@ mod placement_calibration_catalog_tests {
         VulkanPlacementCalibrationObservation {
             execution_case: VulkanPlacementExecutionCaseIdentity {
                 behavior,
+                contract_ids: vec!["contract".to_string()],
+                implementation_digests: vec![format!("sha256:{}", "a".repeat(64))],
+                artifact_digest: format!("sha256:{}", "b".repeat(64)),
+                execution_graph_digest: format!("sha256:{}", "d".repeat(64)),
+                operations: vec![VulkanPlacementOperationGeometry::Dispatch {
+                    geometry: VulkanPlacementDispatchGeometry {
+                        contract_id: "contract".to_string(),
+                        logical_extent: 8,
+                        sampled_extent: 8,
+                        input_width: 8,
+                        workgroup_count_x: 1,
+                        local_size_x: 64,
+                    },
+                }],
+                equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
                 strategy: VulkanPlacementExecutionStrategy::TensorParallel,
                 devices,
                 shards: vec![VulkanPlacementShardIdentity {
@@ -1114,8 +1097,8 @@ mod placement_calibration_catalog_tests {
                 bytes: (((value.to_bits() >> 16) as u16).to_le_bytes()).to_vec(),
             }],
         };
-        let mut behavior = behavior();
-        behavior.equivalence = VulkanPlacementEquivalenceIdentity {
+        let behavior = behavior();
+        let equivalence = VulkanPlacementEquivalenceIdentity {
             output: VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance,
             state: VulkanPlacementEquivalenceKind::BitExact,
             absolute_tolerance_bits: Some(0.01f64.to_bits()),
@@ -1129,7 +1112,7 @@ mod placement_calibration_catalog_tests {
         let candidate_digest =
             vulkan_placement_output_artifact_digest(&candidate_artifact).unwrap();
         let evidence = validate_vulkan_placement_output_equivalence(
-            &behavior.equivalence,
+            &equivalence,
             &reference_digest,
             Some(&reference_artifact),
             &candidate_digest,
@@ -1146,6 +1129,7 @@ mod placement_calibration_catalog_tests {
             })
             .unwrap();
         let mut accepted = observation(behavior.clone(), "gpu0", "gpu0", 10, 16);
+        accepted.execution_case.equivalence = equivalence.clone();
         accepted.output_digest = candidate_digest;
         accepted.output_artifact = Some(candidate_artifact);
         accepted.output_equivalence = evidence;
@@ -1154,6 +1138,7 @@ mod placement_calibration_catalog_tests {
             .unwrap();
 
         let mut rejected = observation(behavior, "gpu1", "gpu1", 10, 16);
+        rejected.execution_case.equivalence = equivalence;
         let rejected_artifact = artifact(1.03125);
         rejected.output_digest =
             vulkan_placement_output_artifact_digest(&rejected_artifact).unwrap();
@@ -1431,6 +1416,38 @@ mod placement_calibration_catalog_tests {
     }
 
     #[test]
+    fn one_logical_behavior_accepts_distinct_validated_physical_contracts() {
+        let behavior = behavior();
+        let mut catalog = catalog_with_reference();
+        let first = observation(behavior.clone(), "gpu0", "gpu0", 10, 16);
+        let mut second = observation(behavior.clone(), "gpu0", "gpu0", 8, 16);
+        second.execution_case.contract_ids = vec!["other-contract".to_string()];
+        second.execution_case.implementation_digests =
+            vec![format!("sha256:{}", "e".repeat(64))];
+        second.execution_case.artifact_digest = format!("sha256:{}", "f".repeat(64));
+        second.execution_case.execution_graph_digest =
+            format!("sha256:{}", "1".repeat(64));
+        let VulkanPlacementOperationGeometry::Dispatch { geometry } =
+            &mut second.execution_case.operations[0]
+        else {
+            unreachable!()
+        };
+        geometry.contract_id = "other-contract".to_string();
+
+        catalog.record_observation(first).unwrap();
+        catalog.record_observation(second).unwrap();
+
+        assert_eq!(
+            catalog.candidate_behaviors_for_compiled_execution(
+                &behavior.compiled_execution_signature,
+                behavior.phase,
+            ),
+            vec![&behavior],
+        );
+        assert_eq!(catalog.candidates_for_behavior(&behavior).len(), 2);
+    }
+
+    #[test]
     fn typed_non_dispatch_transactions_validate_without_fake_shader_geometry() {
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
         for (suffix, operation) in [
@@ -1460,7 +1477,7 @@ mod placement_calibration_catalog_tests {
             ),
         ] {
             let mut behavior = behavior();
-            behavior.execution_graph_digest = format!(
+            behavior.input_fixture_digest = format!(
                 "sha256:{}",
                 match suffix {
                     "transfer" => "1",
@@ -1469,7 +1486,17 @@ mod placement_calibration_catalog_tests {
                 }
                 .repeat(64),
             );
-            behavior.shape.operations = vec![operation];
+            let mut candidate = observation(behavior.clone(), "gpu0", "gpu0", 10, 16);
+            candidate.execution_case.execution_graph_digest = format!(
+                "sha256:{}",
+                match suffix {
+                    "transfer" => "1",
+                    "reduction" => "2",
+                    _ => "3",
+                }
+                .repeat(64),
+            );
+            candidate.execution_case.operations = vec![operation];
             catalog
                 .record_reference(VulkanPlacementCanonicalReference {
                     behavior,
@@ -1478,27 +1505,30 @@ mod placement_calibration_catalog_tests {
                     state_digest: format!("state-{suffix}"),
                 })
                 .unwrap();
+            candidate.output_digest = format!("output-{suffix}");
+            candidate.state_digest = format!("state-{suffix}");
+            catalog.record_observation(candidate).unwrap();
         }
         catalog.validate().unwrap();
     }
 
     #[test]
     fn typed_transactions_reject_invalid_reduction_and_unknown_contract() {
-        let mut invalid_reduction = behavior();
-        invalid_reduction.shape.operations = vec![VulkanPlacementOperationGeometry::Reduction {
+        let mut invalid_reduction = observation(behavior(), "gpu0", "gpu0", 10, 16);
+        invalid_reduction.execution_case.operations = vec![VulkanPlacementOperationGeometry::Reduction {
             contract_id: "contract".to_string(),
             element_count: 128,
             element_byte_count: 4,
             participant_count: 1,
         }];
-        assert!(validate_behavior_identity(&invalid_reduction).is_err());
+        assert!(validate_observation(&invalid_reduction).is_err());
 
-        let mut unknown_contract = behavior();
-        unknown_contract.shape.operations =
+        let mut unknown_contract = observation(behavior(), "gpu0", "gpu0", 10, 16);
+        unknown_contract.execution_case.operations =
             vec![VulkanPlacementOperationGeometry::DirectedTransfer {
                 contract_id: "other-contract".to_string(),
                 byte_count: 16,
             }];
-        assert!(validate_behavior_identity(&unknown_contract).is_err());
+        assert!(validate_observation(&unknown_contract).is_err());
     }
 }

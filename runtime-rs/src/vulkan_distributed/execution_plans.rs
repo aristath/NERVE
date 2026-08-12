@@ -575,7 +575,7 @@ impl VulkanDistributedExecutionPlanSet {
         >| {
             cases
                 .values()
-                .flat_map(|case| case.behavior.contract_ids.iter().cloned())
+                .flat_map(|case| case.contract_ids.iter().cloned())
                 .collect::<BTreeSet<_>>()
         };
         let decode_contracts = selected_contracts(decode_cases);

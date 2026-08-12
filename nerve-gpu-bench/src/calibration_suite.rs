@@ -139,7 +139,7 @@ fn measured_target_order(
         resident_bytes: report.resident_parameter_bytes_by_device.clone(),
         transient_bytes: report.resident_transient_bytes_by_device.clone(),
         host_transient_bytes: report.resident_host_transient_bytes,
-        contract_ids: report.execution_case.behavior.contract_ids.clone(),
+        contract_ids: report.execution_case.contract_ids.clone(),
         strategy: report.execution_case.strategy,
     }
 }

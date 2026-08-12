@@ -88,7 +88,7 @@ pub fn record_vulkan_runtime_distributed_calibration_report(
             )
         })?;
     let output_equivalence = validate_vulkan_placement_output_equivalence(
-        &report.execution_case.behavior.equivalence,
+        &report.execution_case.equivalence,
         &reference.output_digest,
         reference.output_artifact.as_ref(),
         &report.output_digest,
@@ -600,7 +600,6 @@ fn distributed_calibration_execution_case(
         activation_batch_width: phase.activation_batch_width(),
         input_byte_capacity: first_island.leader().input_byte_capacity,
         output_byte_capacity: last_island.tail().output_byte_capacity,
-        operations,
     };
     let execution_phase = match phase {
         VulkanTargetedComponentExecutionPhase::Decode => {
@@ -616,17 +615,18 @@ fn distributed_calibration_execution_case(
     Ok(VulkanPlacementExecutionCaseIdentity {
         behavior: VulkanPlacementBehaviorIdentity {
             compiled_execution_signature,
-            contract_ids,
-            implementation_digests,
-            artifact_digest,
-            execution_graph_digest,
             runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
                 .to_string(),
             phase: execution_phase,
             shape,
             input_fixture_digest,
-            equivalence,
         },
+        contract_ids,
+        implementation_digests,
+        artifact_digest,
+        execution_graph_digest,
+        operations,
+        equivalence,
         strategy: vulkan_distributed_placement_strategy(
             devices.len(),
             execution_plan
@@ -1870,14 +1870,13 @@ impl VulkanRuntimeDistributedPlacementSession {
             &self.placed_slice.mounted,
             &self.terminal_dispatch,
             self.execution_case
-                .behavior
                 .equivalence
                 .output_scalar_format
                 .unwrap_or(VulkanPlacementScalarFormat::Bf16),
         )?;
         let output_digest = vulkan_placement_output_artifact_digest(&captured_output)
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let output_artifact = (self.execution_case.behavior.equivalence.output
+        let output_artifact = (self.execution_case.equivalence.output
             == VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance)
             .then_some(captured_output);
         let state_digest = distributed_calibration_state_digest(&self.placed_slice.mounted)?;
@@ -1987,14 +1986,13 @@ impl VulkanRuntimeDistributedPlacementSession {
             &self.terminal_dispatch,
             activation_batch_width,
             self.execution_case
-                .behavior
                 .equivalence
                 .output_scalar_format
                 .unwrap_or(VulkanPlacementScalarFormat::Bf16),
         )?;
         let output_digest = vulkan_placement_output_artifact_digest(&captured_output)
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let output_artifact = (self.execution_case.behavior.equivalence.output
+        let output_artifact = (self.execution_case.equivalence.output
             == VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance)
             .then_some(captured_output);
         let state_digest = distributed_calibration_state_digest(&self.placed_slice.mounted)?;
