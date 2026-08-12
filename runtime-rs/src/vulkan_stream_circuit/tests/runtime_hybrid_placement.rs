@@ -586,6 +586,76 @@ fn runtime_hybrid_planner_maps_compiler_signatures_to_every_component_instance()
 }
 
 #[test]
+fn runtime_serialized_reference_planner_excludes_faster_tp_candidates() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let mut catalog = hybrid_test_catalog(&model);
+    let behaviors = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| {
+            vulkan_runtime_placement_calibration_target_for_component(
+                &model,
+                &component.component_id,
+                VulkanTargetedComponentExecutionPhase::Decode,
+            )
+            .unwrap()
+            .signature_id
+        })
+        .collect::<BTreeSet<_>>();
+    for signature in behaviors {
+        let behavior = catalog
+            .candidate_behaviors_for_compiled_execution(
+                &signature,
+                crate::RUNTIME_IMPLEMENTATION_FINGERPRINT,
+                nerve_execution_contracts::ExecutionPhase::Decode,
+            )[0]
+            .clone();
+        catalog
+            .record_observation(hybrid_test_distributed_observation(behavior, 1))
+            .unwrap();
+    }
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+
+    let hybrid = plan_vulkan_runtime_hybrid_ordered_graph(
+        &model,
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+    let serialized = plan_vulkan_runtime_serialized_ordered_graph(
+        &model,
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+
+    assert!(hybrid.plan.steps.iter().all(|step| matches!(
+        step,
+        VulkanHybridScheduledStep::Region { execution_case, .. }
+            if execution_case.strategy == VulkanPlacementExecutionStrategy::TensorParallel
+    )));
+    assert!(serialized.plan.steps.iter().all(|step| matches!(
+        step,
+        VulkanHybridScheduledStep::Region { execution_case, .. }
+            if execution_case.strategy == VulkanPlacementExecutionStrategy::SingleDevice
+    )));
+    assert!(
+        hybrid.plan.predicted_duration_ns_per_activation
+            < serialized.plan.predicted_duration_ns_per_activation
+    );
+}
+
+#[test]
 fn runtime_hybrid_planner_ignores_unreplayable_serialized_regions() {
     let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let mut catalog = hybrid_test_catalog(&model);

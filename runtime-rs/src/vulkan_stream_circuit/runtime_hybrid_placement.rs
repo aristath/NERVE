@@ -52,6 +52,12 @@ struct VulkanRuntimeHybridCandidateGraph {
     >,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanRuntimeHybridComponentStrategyFilter {
+    AnyMeasured,
+    SingleDeviceOnly,
+}
+
 impl Display for VulkanRuntimeHybridPlacementError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
@@ -71,12 +77,11 @@ pub fn plan_vulkan_runtime_hybrid_ordered_graph(
     capacity: &VulkanPlacementCapacityEnvelope,
     phase: VulkanTargetedComponentExecutionPhase,
 ) -> Result<VulkanRuntimeHybridOrderedPlacement, VulkanRuntimeHybridPlacementError> {
-    try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+    try_plan_vulkan_runtime_hybrid_ordered_graph(
         runtime_model,
         catalog,
         capacity,
         phase,
-        None,
     )?
     .ok_or_else(|| {
         VulkanRuntimeHybridPlacementError(
@@ -84,6 +89,60 @@ pub fn plan_vulkan_runtime_hybrid_ordered_graph(
                 .to_string(),
         )
     })
+}
+
+pub fn try_plan_vulkan_runtime_hybrid_ordered_graph(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<Option<VulkanRuntimeHybridOrderedPlacement>, VulkanRuntimeHybridPlacementError> {
+    try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+        runtime_model,
+        catalog,
+        capacity,
+        phase,
+        None,
+    )
+}
+
+/// Selects the best complete measured layer-serial route. This is the
+/// canonical outer-region reference path: every component executes on one
+/// device, while exact measured boundaries may connect different owners.
+pub fn plan_vulkan_runtime_serialized_ordered_graph(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<VulkanRuntimeHybridOrderedPlacement, VulkanRuntimeHybridPlacementError> {
+    try_plan_vulkan_runtime_serialized_ordered_graph(
+        runtime_model,
+        catalog,
+        capacity,
+        phase,
+    )?
+    .ok_or_else(|| {
+        VulkanRuntimeHybridPlacementError(
+            "no exact measured serialized placement is available for the current devices and capacity"
+                .to_string(),
+        )
+    })
+}
+
+pub fn try_plan_vulkan_runtime_serialized_ordered_graph(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<Option<VulkanRuntimeHybridOrderedPlacement>, VulkanRuntimeHybridPlacementError> {
+    try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners_and_filter(
+        runtime_model,
+        catalog,
+        capacity,
+        phase,
+        None,
+        VulkanRuntimeHybridComponentStrategyFilter::SingleDeviceOnly,
+    )
 }
 
 /// Chooses one persistent decode-owned backbone and then optimizes prefill
@@ -225,11 +284,30 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
     phase: VulkanTargetedComponentExecutionPhase,
     required_owner_by_component: Option<&BTreeMap<String, String>>,
 ) -> Result<Option<VulkanRuntimeHybridOrderedPlacement>, VulkanRuntimeHybridPlacementError> {
+    try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners_and_filter(
+        runtime_model,
+        catalog,
+        capacity,
+        phase,
+        required_owner_by_component,
+        VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+    )
+}
+
+fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners_and_filter(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    phase: VulkanTargetedComponentExecutionPhase,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
+    component_strategy_filter: VulkanRuntimeHybridComponentStrategyFilter,
+) -> Result<Option<VulkanRuntimeHybridOrderedPlacement>, VulkanRuntimeHybridPlacementError> {
     let candidates = runtime_hybrid_candidate_graph(
         runtime_model,
         catalog,
         phase,
         required_owner_by_component,
+        component_strategy_filter,
     )?;
     let plan = try_plan_vulkan_hybrid_ordered_graph(
         catalog,
@@ -268,6 +346,7 @@ fn runtime_hybrid_candidate_graph(
     catalog: &VulkanPlacementCalibrationCatalog,
     phase: VulkanTargetedComponentExecutionPhase,
     required_owner_by_component: Option<&BTreeMap<String, String>>,
+    component_strategy_filter: VulkanRuntimeHybridComponentStrategyFilter,
 ) -> Result<VulkanRuntimeHybridCandidateGraph, VulkanRuntimeHybridPlacementError> {
     let execution_phase = runtime_hybrid_execution_phase(phase)?;
     let component_ids = runtime_model
@@ -339,14 +418,20 @@ fn runtime_hybrid_candidate_graph(
             .candidates_for_behavior(behavior)
             .into_iter()
             .filter(|observation| {
-                matches!(
-                    observation.execution_case.strategy,
-                    VulkanPlacementExecutionStrategy::SingleDevice
-                        | VulkanPlacementExecutionStrategy::TensorParallel
-                        | VulkanPlacementExecutionStrategy::WholeExpertParallel
-                        | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
-                        | VulkanPlacementExecutionStrategy::Hybrid
-                )
+                match component_strategy_filter {
+                    VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured => matches!(
+                        observation.execution_case.strategy,
+                        VulkanPlacementExecutionStrategy::SingleDevice
+                            | VulkanPlacementExecutionStrategy::TensorParallel
+                            | VulkanPlacementExecutionStrategy::WholeExpertParallel
+                            | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
+                            | VulkanPlacementExecutionStrategy::Hybrid
+                    ),
+                    VulkanRuntimeHybridComponentStrategyFilter::SingleDeviceOnly => {
+                        observation.execution_case.strategy
+                            == VulkanPlacementExecutionStrategy::SingleDevice
+                    }
+                }
             })
             .filter(|observation| {
                 required_owner_by_component.is_none_or(|required_owners| {
@@ -388,6 +473,11 @@ fn runtime_hybrid_candidate_graph(
         .collect::<Result<Vec<_>, _>>()?;
     let mut region_executions_by_case = BTreeMap::new();
     for (region_index, calibration) in catalog.region_executions().iter().enumerate() {
+        if component_strategy_filter
+            == VulkanRuntimeHybridComponentStrategyFilter::SingleDeviceOnly
+        {
+            continue;
+        }
         let outer = &calibration.execution_case;
         if outer.behavior.runtime_implementation_fingerprint
             != crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
@@ -502,7 +592,13 @@ pub fn vulkan_runtime_hybrid_phase_is_calibrated(
     catalog: &VulkanPlacementCalibrationCatalog,
     phase: VulkanTargetedComponentExecutionPhase,
 ) -> Result<bool, VulkanRuntimeHybridPlacementError> {
-    let candidates = runtime_hybrid_candidate_graph(runtime_model, catalog, phase, None)?;
+    let candidates = runtime_hybrid_candidate_graph(
+        runtime_model,
+        catalog,
+        phase,
+        None,
+        VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+    )?;
     Ok(runtime_hybrid_candidate_graph_has_complete_route(
         &candidates,
     ))

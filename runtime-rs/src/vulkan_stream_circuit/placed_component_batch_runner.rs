@@ -199,6 +199,52 @@ impl VulkanResidentPlacedComponentBatchRunner {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn new_for_components(
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        placed_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
+        runtime_execution_identity: &str,
+        quantum_calibrators: &BTreeMap<
+            String,
+            Rc<RefCell<RuntimeExecutionQuantumCalibrator>>,
+        >,
+        lane_capacity: usize,
+        execution_mode: VulkanComponentBatchExecutionMode,
+        retained_signal_keys_by_device:
+            &BTreeMap<String, BTreeSet<VulkanComponentBatchSignalKey>>,
+        capture_causal_state_snapshots: bool,
+        distributed_execution_plan: &VulkanDistributedExecutionPlan,
+        distributed_parameter_buffers: &VulkanDistributedParameterBuffers,
+        distributed_dynamic_resource_buffers:
+            &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
+        distributed_resource_stores:
+            &BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
+        component_ids: BTreeSet<String>,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        let lane_mounteds_by_slice = placed_slices
+            .iter()
+            .map(|slice| vec![&slice.mounted; lane_capacity])
+            .collect::<Vec<_>>();
+        let execution_scope = VulkanComponentBatchExecutionScope::components(component_ids)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        Self::new_with_lane_mounteds(
+            devices,
+            placed_slices,
+            runtime_execution_identity,
+            &lane_mounteds_by_slice,
+            quantum_calibrators,
+            lane_capacity,
+            execution_mode,
+            retained_signal_keys_by_device,
+            capture_causal_state_snapshots,
+            distributed_execution_plan,
+            distributed_parameter_buffers,
+            distributed_dynamic_resource_buffers,
+            distributed_resource_stores,
+            &execution_scope,
+        )
+    }
+
     fn new_for_independent_streams(
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         processors: &[&VulkanResidentInProcessPlacedStreamProcessor],

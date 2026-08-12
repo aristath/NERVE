@@ -779,8 +779,8 @@ fn validate_observation(
                 && case.input_physical_device_id == case.owner_physical_device_id
                 && case.output_physical_device_id == case.owner_physical_device_id
         }
+        VulkanPlacementExecutionStrategy::SerializedRegion => case.shards.is_empty(),
         VulkanPlacementExecutionStrategy::Serialized
-        | VulkanPlacementExecutionStrategy::SerializedRegion
         | VulkanPlacementExecutionStrategy::TensorParallel
         | VulkanPlacementExecutionStrategy::WholeExpertParallel
         | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
