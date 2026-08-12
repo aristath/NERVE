@@ -37,6 +37,12 @@ impl VulkanPlacementCalibrationCatalog {
             .filter(|calibration| &calibration.execution_case.behavior == behavior)
             .collect()
     }
+
+    pub(crate) fn region_executions(
+        &self,
+    ) -> &[VulkanPlacementRegionExecutionCalibration] {
+        &self.region_executions
+    }
 }
 
 pub fn vulkan_placement_region_compiled_execution_signature(
@@ -141,6 +147,19 @@ fn validate_region_execution_calibration(
             != outer_case.output_physical_device_id
         || calibration.component_cases[0].owner_physical_device_id
             != outer_case.owner_physical_device_id
+        || calibration.component_cases[0]
+            .behavior
+            .shape
+            .input_byte_capacity
+            != outer_case.behavior.shape.input_byte_capacity
+        || calibration
+            .component_cases
+            .last()
+            .unwrap()
+            .behavior
+            .shape
+            .output_byte_capacity
+            != outer_case.behavior.shape.output_byte_capacity
     {
         return Err(VulkanPlacementCalibrationCatalogError(
             "region transaction endpoints or coordinator disagree with its component sequence"
@@ -269,6 +288,22 @@ fn validate_region_boundary_execution_case(
     boundary: &VulkanPlacementExecutionCaseIdentity,
 ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
     validate_region_nested_execution_case(boundary)?;
+    let [transport] = boundary.transports.as_slice() else {
+        return Err(VulkanPlacementCalibrationCatalogError(
+            "region physical boundary requires one resident transport".to_string(),
+        ));
+    };
+    let boundary_devices = boundary
+        .devices
+        .iter()
+        .map(|device| device.physical_device_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_devices = [
+        source.output_physical_device_id.as_str(),
+        destination.input_physical_device_id.as_str(),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
     if boundary.strategy != VulkanPlacementExecutionStrategy::DirectedBoundary
         || boundary.behavior.runtime_implementation_fingerprint
             != outer.behavior.runtime_implementation_fingerprint
@@ -277,6 +312,17 @@ fn validate_region_boundary_execution_case(
             != outer.behavior.shape.activation_batch_width
         || boundary.input_physical_device_id != source.output_physical_device_id
         || boundary.output_physical_device_id != destination.input_physical_device_id
+        || boundary.owner_physical_device_id != boundary.input_physical_device_id
+        || boundary.behavior.shape.input_byte_capacity != byte_count
+        || boundary.behavior.shape.output_byte_capacity != byte_count
+        || boundary_devices != expected_devices
+        || transport.source_physical_device_id != boundary.input_physical_device_id
+        || transport.destination_physical_device_id != boundary.output_physical_device_id
+        || transport.byte_capacity != byte_count
+        || !matches!(
+            transport.route.as_str(),
+            "external_device_local" | "device_local_staging"
+        )
         || !matches!(
             boundary.operations.as_slice(),
             [VulkanPlacementOperationGeometry::DirectedTransfer {
@@ -398,7 +444,7 @@ mod region_placement_calibration_catalog_tests {
                 source_physical_device_id: "gpu0".to_string(),
                 destination_physical_device_id: "gpu1".to_string(),
                 byte_capacity: 16,
-                route: "shared_host".to_string(),
+                route: "device_local_staging".to_string(),
             }],
         }
     }
@@ -529,5 +575,17 @@ mod region_placement_calibration_catalog_tests {
             .unwrap_err()
             .to_string()
             .contains("contracts, operations, or transports"));
+
+        let (mut catalog, mut unmountable_route) = region_fixture();
+        unmountable_route.boundary_cases[0].execution_case.transports[0].route =
+            "shared_host".to_string();
+        unmountable_route.execution_case.transports[0].route = "shared_host".to_string();
+        catalog.observations[0].execution_case = unmountable_route.execution_case.clone();
+        assert!(
+            validate_region_execution_calibration(&catalog, &unmountable_route)
+                .unwrap_err()
+                .to_string()
+                .contains("exact measured directed transition")
+        );
     }
 }

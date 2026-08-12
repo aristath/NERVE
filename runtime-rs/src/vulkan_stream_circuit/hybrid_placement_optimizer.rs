@@ -142,10 +142,12 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
             observation.execution_case.strategy,
             VulkanPlacementExecutionStrategy::SingleDevice
                 | VulkanPlacementExecutionStrategy::Serialized
+                | VulkanPlacementExecutionStrategy::SerializedRegion
                 | VulkanPlacementExecutionStrategy::TensorParallel
                 | VulkanPlacementExecutionStrategy::WholeExpertParallel
                 | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
                 | VulkanPlacementExecutionStrategy::Hybrid
+                | VulkanPlacementExecutionStrategy::HybridRegion
         ) {
             return Err(VulkanHybridPlacementError(format!(
                 "hybrid region candidate {:?} has non-region strategy {:?}",

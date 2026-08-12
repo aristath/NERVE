@@ -4,6 +4,10 @@ pub struct VulkanRuntimeHybridOrderedPlacement {
     pub execution_phase: nerve_execution_contracts::ExecutionPhase,
     pub activation_batch_width: usize,
     pub plan: VulkanHybridPlacementPlan,
+    pub region_executions_by_case: BTreeMap<
+        VulkanPlacementExecutionCaseIdentity,
+        VulkanPlacementRegionExecutionCalibration,
+    >,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +39,18 @@ pub struct VulkanRuntimeHybridLoweredPhasePlacement {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanRuntimeHybridPlacementError(pub String);
+
+struct VulkanRuntimeHybridCandidateGraph {
+    component_ids: Vec<String>,
+    execution_phase: nerve_execution_contracts::ExecutionPhase,
+    activation_batch_width: usize,
+    region_candidates: Vec<VulkanHybridRegionCandidate>,
+    boundary_candidates: Vec<VulkanHybridBoundaryCandidate>,
+    region_executions_by_case: BTreeMap<
+        VulkanPlacementExecutionCaseIdentity,
+        VulkanPlacementRegionExecutionCalibration,
+    >,
+}
 
 impl Display for VulkanRuntimeHybridPlacementError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
@@ -115,13 +131,6 @@ pub fn resolve_vulkan_runtime_hybrid_physical_execution(
     logical_device_id_by_physical_device: &BTreeMap<String, String>,
 ) -> Result<Option<VulkanRuntimeHybridPhysicalExecutionResolution>, VulkanRuntimeHybridPlacementError>
 {
-    if !vulkan_runtime_hybrid_phase_is_calibrated(
-        runtime_model,
-        catalog,
-        VulkanTargetedComponentExecutionPhase::Decode,
-    )? {
-        return Ok(None);
-    }
     let prefill_activation_batch_width = vulkan_runtime_hybrid_calibrated_prefill_widths(
         runtime_model,
         catalog,
@@ -216,6 +225,50 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
     phase: VulkanTargetedComponentExecutionPhase,
     required_owner_by_component: Option<&BTreeMap<String, String>>,
 ) -> Result<Option<VulkanRuntimeHybridOrderedPlacement>, VulkanRuntimeHybridPlacementError> {
+    let candidates = runtime_hybrid_candidate_graph(
+        runtime_model,
+        catalog,
+        phase,
+        required_owner_by_component,
+    )?;
+    let plan = try_plan_vulkan_hybrid_ordered_graph(
+        catalog,
+        candidates.component_ids.len(),
+        &candidates.region_candidates,
+        &candidates.boundary_candidates,
+        capacity,
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    Ok(plan.map(|plan| {
+        let selected_region_executions = plan
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                VulkanHybridScheduledStep::Region {
+                    execution_case, ..
+                } => candidates
+                    .region_executions_by_case
+                    .get(execution_case)
+                    .map(|calibration| (execution_case.clone(), calibration.clone())),
+                VulkanHybridScheduledStep::Boundary { .. } => None,
+            })
+            .collect();
+        VulkanRuntimeHybridOrderedPlacement {
+            component_ids: candidates.component_ids,
+            execution_phase: candidates.execution_phase,
+            activation_batch_width: candidates.activation_batch_width,
+            plan,
+            region_executions_by_case: selected_region_executions,
+        }
+    }))
+}
+
+fn runtime_hybrid_candidate_graph(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    phase: VulkanTargetedComponentExecutionPhase,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
+) -> Result<VulkanRuntimeHybridCandidateGraph, VulkanRuntimeHybridPlacementError> {
     let execution_phase = runtime_hybrid_execution_phase(phase)?;
     let component_ids = runtime_model
         .circuit_graph
@@ -247,14 +300,21 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
         );
     }
 
+    let component_targets = component_ids
+        .iter()
+        .map(|component_id| {
+            vulkan_runtime_placement_calibration_target_for_component(
+                runtime_model,
+                component_id,
+                phase,
+            )
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut region_candidates = Vec::new();
-    for (component_index, component_id) in component_ids.iter().enumerate() {
-        let target = vulkan_runtime_placement_calibration_target_for_component(
-            runtime_model,
-            component_id,
-            phase,
-        )
-        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    for (component_index, (component_id, target)) in
+        component_ids.iter().zip(&component_targets).enumerate()
+    {
         let behaviors = catalog
             .candidate_behaviors_for_compiled_execution(
                 &target.signature_id,
@@ -266,20 +326,19 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
                 behavior.shape.activation_batch_width == phase.activation_batch_width()
             })
             .collect::<Vec<_>>();
-        let [behavior] = behaviors.as_slice() else {
+        if behaviors.len() > 1 {
             return runtime_hybrid_error(format!(
                 "compiled component {component_id:?} has {} exact calibration behavior cohorts; expected one",
                 behaviors.len(),
             ));
+        }
+        let Some(behavior) = behaviors.first() else {
+            continue;
         };
         for (candidate_index, observation) in catalog
             .candidates_for_behavior(behavior)
             .into_iter()
             .filter(|observation| {
-                // Serialized evidence describes a multi-component region.
-                // This runtime adapter currently lowers one exact case per
-                // component, so admitting it here would let the optimizer
-                // select a case that exact replay must reject.
                 matches!(
                     observation.execution_case.strategy,
                     VulkanPlacementExecutionStrategy::SingleDevice
@@ -307,6 +366,86 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
     }
 
     let activation_batch_width = phase.activation_batch_width();
+    let boundary_byte_counts = boundaries
+        .iter()
+        .map(|boundary| {
+            let [transfer] = boundary.transfers.as_slice() else {
+                return Ok(None);
+            };
+            if !transfer.source_in_prefix {
+                return Ok(None);
+            }
+            transfer
+                .byte_count
+                .checked_mul(activation_batch_width)
+                .map(Some)
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(
+                        "hybrid boundary activation byte count overflowed".to_string(),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut region_executions_by_case = BTreeMap::new();
+    for (region_index, calibration) in catalog.region_executions().iter().enumerate() {
+        let outer = &calibration.execution_case;
+        if outer.behavior.runtime_implementation_fingerprint
+            != crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
+            || outer.behavior.phase != execution_phase
+            || outer.behavior.shape.activation_batch_width != activation_batch_width
+        {
+            continue;
+        }
+        let region_len = calibration.component_cases.len();
+        if region_len > component_ids.len() {
+            continue;
+        }
+        for component_start in 0..=component_ids.len() - region_len {
+            let component_end = component_start + region_len;
+            let expected_signatures = component_targets[component_start..component_end]
+                .iter()
+                .map(|target| target.signature_id.as_str())
+                .collect::<Vec<_>>();
+            if calibration
+                .component_cases
+                .iter()
+                .map(|case| case.behavior.compiled_execution_signature.as_str())
+                .ne(expected_signatures)
+            {
+                continue;
+            }
+            let Some(expected_boundary_bytes) = boundary_byte_counts
+                [component_start..component_end.saturating_sub(1)]
+                .iter()
+                .copied()
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            if calibration.boundary_byte_counts != expected_boundary_bytes
+                || required_owner_by_component.is_some_and(|required_owners| {
+                    calibration.component_cases.iter().enumerate().any(
+                        |(offset, case)| {
+                            case.owner_physical_device_id
+                                != required_owners[&component_ids[component_start + offset]]
+                        },
+                    )
+                })
+            {
+                continue;
+            }
+            region_candidates.push(VulkanHybridRegionCandidate {
+                candidate_id: format!(
+                    "region:{component_start}:{component_end}:case:{region_index}"
+                ),
+                component_start,
+                component_end,
+                execution_case: outer.clone(),
+            });
+            region_executions_by_case.insert(outer.clone(), calibration.clone());
+        }
+    }
+
     let mut boundary_candidates = Vec::new();
     for (boundary_index, boundary) in boundaries.iter().enumerate() {
         // Multiple or reverse-direction edge transfers require one measured
@@ -332,7 +471,14 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
             execution_phase,
             activation_batch_width,
             byte_count,
-        ) {
+        ).into_iter().filter(|observation| {
+            runtime_hybrid_boundary_execution_case_is_compatible(
+                execution_phase,
+                Some(activation_batch_width),
+                byte_count,
+                &observation.execution_case,
+            )
+        }) {
             boundary_candidates.push(VulkanHybridBoundaryCandidate {
                 boundary_index,
                 byte_count,
@@ -341,20 +487,14 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
         }
     }
 
-    let plan = try_plan_vulkan_hybrid_ordered_graph(
-        catalog,
-        component_ids.len(),
-        &region_candidates,
-        &boundary_candidates,
-        capacity,
-    )
-    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    Ok(plan.map(|plan| VulkanRuntimeHybridOrderedPlacement {
+    Ok(VulkanRuntimeHybridCandidateGraph {
         component_ids,
         execution_phase,
         activation_batch_width,
-        plan,
-    }))
+        region_candidates,
+        boundary_candidates,
+        region_executions_by_case,
+    })
 }
 
 pub fn vulkan_runtime_hybrid_phase_is_calibrated(
@@ -362,50 +502,50 @@ pub fn vulkan_runtime_hybrid_phase_is_calibrated(
     catalog: &VulkanPlacementCalibrationCatalog,
     phase: VulkanTargetedComponentExecutionPhase,
 ) -> Result<bool, VulkanRuntimeHybridPlacementError> {
-    let execution_phase = runtime_hybrid_execution_phase(phase)?;
-    for component in runtime_model
-        .circuit_graph
-        .components
-        .iter()
-        .filter(|component| component.runtime_role.is_signal_processor())
-    {
-        let target = vulkan_runtime_placement_calibration_target_for_component(
-            runtime_model,
-            &component.component_id,
-            phase,
-        )
-        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-        let behavior_count = catalog
-            .candidate_behaviors_for_compiled_execution(
-                &target.signature_id,
-                crate::RUNTIME_IMPLEMENTATION_FINGERPRINT,
-                execution_phase,
-            )
-            .into_iter()
-            .filter(|behavior| {
-                behavior.shape.activation_batch_width == phase.activation_batch_width()
-            })
-            .count();
-        match behavior_count {
-            0 => return Ok(false),
-            1 => {}
-            count => {
-                return runtime_hybrid_error(format!(
-                    "compiled component {:?} has {count} exact calibration behavior cohorts for activation width {}",
-                    component.component_id,
-                    phase.activation_batch_width(),
-                ));
+    let candidates = runtime_hybrid_candidate_graph(runtime_model, catalog, phase, None)?;
+    Ok(runtime_hybrid_candidate_graph_has_complete_route(
+        &candidates,
+    ))
+}
+
+fn runtime_hybrid_candidate_graph_has_complete_route(
+    candidates: &VulkanRuntimeHybridCandidateGraph,
+) -> bool {
+    let component_count = candidates.component_ids.len();
+    let mut outputs_by_cursor = vec![BTreeSet::<String>::new(); component_count + 1];
+    for cursor in 0..component_count {
+        for region in candidates
+            .region_candidates
+            .iter()
+            .filter(|region| region.component_start == cursor)
+        {
+            let input = region.execution_case.input_physical_device_id.as_str();
+            let input_is_reachable = if cursor == 0 {
+                true
+            } else {
+                outputs_by_cursor[cursor].iter().any(|output| {
+                    output == input
+                        || candidates.boundary_candidates.iter().any(|boundary| {
+                            boundary.boundary_index == cursor - 1
+                                && boundary.execution_case.input_physical_device_id == *output
+                                && boundary.execution_case.output_physical_device_id == input
+                        })
+                })
+            };
+            if input_is_reachable {
+                outputs_by_cursor[region.component_end]
+                    .insert(region.execution_case.output_physical_device_id.clone());
             }
         }
     }
-    Ok(true)
+    !outputs_by_cursor[component_count].is_empty()
 }
 
 pub fn vulkan_runtime_hybrid_calibrated_prefill_widths(
     runtime_model: &VulkanResidentRuntimeModel,
     catalog: &VulkanPlacementCalibrationCatalog,
 ) -> Result<Vec<usize>, VulkanRuntimeHybridPlacementError> {
-    let mut common_widths = None::<BTreeSet<usize>>;
+    let mut candidate_widths = BTreeSet::new();
     for component in runtime_model
         .circuit_graph
         .components
@@ -437,35 +577,42 @@ pub fn vulkan_runtime_hybrid_calibrated_prefill_widths(
             },
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-        let mut behavior_count_by_width = BTreeMap::<usize, usize>::new();
         for behavior in catalog.candidate_behaviors_for_compiled_execution(
             &target.signature_id,
             crate::RUNTIME_IMPLEMENTATION_FINGERPRINT,
             nerve_execution_contracts::ExecutionPhase::Prefill,
         ) {
-            *behavior_count_by_width
-                .entry(behavior.shape.activation_batch_width)
-                .or_default() += 1;
+            if behavior.shape.activation_batch_width >= 2 {
+                candidate_widths.insert(behavior.shape.activation_batch_width);
+            }
         }
-        if let Some((width, count)) = behavior_count_by_width
-            .iter()
-            .find(|(_, count)| **count != 1)
-        {
-            return runtime_hybrid_error(format!(
-                "compiled component {:?} has {count} exact prefill behavior cohorts for activation width {width}",
-                component.component_id,
-            ));
-        }
-        let widths = behavior_count_by_width
-            .into_keys()
-            .filter(|width| *width >= 2)
-            .collect::<BTreeSet<_>>();
-        common_widths = Some(match common_widths {
-            None => widths,
-            Some(common) => common.intersection(&widths).copied().collect(),
-        });
     }
-    Ok(common_widths.unwrap_or_default().into_iter().collect())
+    candidate_widths.extend(
+        catalog
+            .region_executions()
+            .iter()
+            .map(|region| &region.execution_case.behavior)
+            .filter(|behavior| {
+                behavior.runtime_implementation_fingerprint
+                    == crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
+                    && behavior.phase == nerve_execution_contracts::ExecutionPhase::Prefill
+                    && behavior.shape.activation_batch_width >= 2
+            })
+            .map(|behavior| behavior.shape.activation_batch_width),
+    );
+    let mut complete_widths = Vec::new();
+    for activation_batch_width in candidate_widths {
+        if vulkan_runtime_hybrid_phase_is_calibrated(
+            runtime_model,
+            catalog,
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width,
+            },
+        )? {
+            complete_widths.push(activation_batch_width);
+        }
+    }
+    Ok(complete_widths)
 }
 
 fn runtime_hybrid_physical_owners(
@@ -482,29 +629,34 @@ fn runtime_hybrid_physical_owners(
         else {
             continue;
         };
-        if *component_end != component_start + 1 {
-            return runtime_hybrid_error(
-                "runtime hybrid phase set requires one physical case per component",
-            );
-        }
-        let component_id = placement
-            .component_ids
-            .get(*component_start)
-            .ok_or_else(|| {
-                VulkanRuntimeHybridPlacementError(
-                    "runtime hybrid phase set contains an out-of-range component".to_string(),
-                )
-            })?;
-        if owners
-            .insert(
-                component_id.clone(),
-                execution_case.owner_physical_device_id.clone(),
-            )
-            .is_some()
+        for (offset, component_case) in runtime_hybrid_step_component_cases(
+            placement,
+            *component_start,
+            *component_end,
+            execution_case,
+        )?
+        .into_iter()
+        .enumerate()
         {
-            return runtime_hybrid_error(
-                "runtime hybrid phase set contains duplicate component ownership",
-            );
+            let component_id = placement
+                .component_ids
+                .get(*component_start + offset)
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(
+                        "runtime hybrid phase set contains an out-of-range component".to_string(),
+                    )
+                })?;
+            if owners
+                .insert(
+                    component_id.clone(),
+                    component_case.owner_physical_device_id.clone(),
+                )
+                .is_some()
+            {
+                return runtime_hybrid_error(
+                    "runtime hybrid phase set contains duplicate component ownership",
+                );
+            }
         }
     }
     if owners.len() != placement.component_ids.len() {
@@ -513,6 +665,46 @@ fn runtime_hybrid_physical_owners(
         );
     }
     Ok(owners)
+}
+
+fn runtime_hybrid_step_component_cases<'a>(
+    placement: &'a VulkanRuntimeHybridOrderedPlacement,
+    component_start: usize,
+    component_end: usize,
+    execution_case: &'a VulkanPlacementExecutionCaseIdentity,
+) -> Result<Vec<&'a VulkanPlacementExecutionCaseIdentity>, VulkanRuntimeHybridPlacementError> {
+    if component_start >= component_end || component_end > placement.component_ids.len() {
+        return runtime_hybrid_error("runtime hybrid region has an invalid component range");
+    }
+    if component_end == component_start + 1 {
+        if matches!(
+            execution_case.strategy,
+            VulkanPlacementExecutionStrategy::SerializedRegion
+                | VulkanPlacementExecutionStrategy::HybridRegion
+        ) {
+            return runtime_hybrid_error(
+                "runtime hybrid region strategy cannot replay as one component",
+            );
+        }
+        return Ok(vec![execution_case]);
+    }
+    let calibration = placement
+        .region_executions_by_case
+        .get(execution_case)
+        .ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(
+                "runtime hybrid multi-component region has no exact replay calibration"
+                    .to_string(),
+            )
+        })?;
+    if calibration.execution_case != *execution_case
+        || calibration.component_cases.len() != component_end - component_start
+    {
+        return runtime_hybrid_error(
+            "runtime hybrid region replay does not match its scheduled component range",
+        );
+    }
+    Ok(calibration.component_cases.iter().collect())
 }
 
 pub fn lower_vulkan_runtime_hybrid_phase_set(
@@ -608,43 +800,52 @@ pub fn lower_vulkan_runtime_hybrid_phase_placement(
         else {
             continue;
         };
-        if *component_start != next_component || *component_end != component_start + 1 {
+        if *component_start != next_component {
             return runtime_hybrid_error(
-                "runtime hybrid replay currently requires one exact physical case per ordered component",
+                "runtime hybrid replay does not cover ordered components contiguously",
             );
         }
-        let component_id = &placement.component_ids[*component_start];
-        validate_runtime_hybrid_case_for_component(
-            runtime_model,
-            component_id,
-            placement.execution_phase,
-            placement.activation_batch_width,
+        let component_cases = runtime_hybrid_step_component_cases(
+            placement,
+            *component_start,
+            *component_end,
             execution_case,
         )?;
-        let physical_devices = runtime_hybrid_case_device_pool(execution_case)?;
-        let devices = physical_devices
-            .iter()
-            .map(|physical_device_id| {
-                logical_device_id_by_physical_device
-                    .get(physical_device_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        VulkanRuntimeHybridPlacementError(format!(
-                            "hybrid physical case references unbound physical device {physical_device_id:?}",
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let owner_device_id = logical_device_id_by_physical_device
-            .get(&execution_case.owner_physical_device_id)
-            .expect("the owner is one of the resolved physical participants")
-            .clone();
-        owner_by_component.insert(component_id.clone(), owner_device_id);
-        if devices.len() > 1 {
-            component_device_pools.insert(component_id.clone(), devices);
+        for (offset, component_case) in component_cases.into_iter().enumerate() {
+            let component_index = *component_start + offset;
+            let component_id = &placement.component_ids[component_index];
+            validate_runtime_hybrid_case_for_component(
+                runtime_model,
+                component_id,
+                placement.execution_phase,
+                placement.activation_batch_width,
+                component_case,
+            )?;
+            let physical_devices = runtime_hybrid_case_device_pool(component_case)?;
+            let devices = physical_devices
+                .iter()
+                .map(|physical_device_id| {
+                    logical_device_id_by_physical_device
+                        .get(physical_device_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            VulkanRuntimeHybridPlacementError(format!(
+                                "hybrid physical case references unbound physical device {physical_device_id:?}",
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let owner_device_id = logical_device_id_by_physical_device
+                .get(&component_case.owner_physical_device_id)
+                .expect("the owner is one of the resolved physical participants")
+                .clone();
+            owner_by_component.insert(component_id.clone(), owner_device_id);
+            if devices.len() > 1 {
+                component_device_pools.insert(component_id.clone(), devices);
+            }
+            execution_cases_by_component.insert(component_id.clone(), component_case.clone());
         }
-        execution_cases_by_component.insert(component_id.clone(), execution_case.clone());
-        next_component += 1;
+        next_component = *component_end;
     }
     if next_component != placement.component_ids.len() {
         return runtime_hybrid_error(
@@ -664,15 +865,51 @@ pub fn lower_vulkan_runtime_hybrid_phase_placement(
     let graph_boundaries = vulkan_runtime_placement_boundaries(&runtime_model)
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     let mut boundary_executions = BTreeMap::new();
+    let mut scheduled_boundaries = Vec::<(
+        usize,
+        &VulkanPlacementExecutionCaseIdentity,
+    )>::new();
     for step in &placement.plan.steps {
-        let VulkanHybridScheduledStep::Boundary {
-            boundary_index,
-            execution_case,
-        } = step
-        else {
-            continue;
-        };
-        let graph_boundary = graph_boundaries.get(*boundary_index).ok_or_else(|| {
+        match step {
+            VulkanHybridScheduledStep::Boundary {
+                boundary_index,
+                execution_case,
+            } => scheduled_boundaries.push((*boundary_index, execution_case)),
+            VulkanHybridScheduledStep::Region {
+                component_start,
+                component_end,
+                execution_case,
+                ..
+            } if *component_end > *component_start + 1 => {
+                let calibration = placement
+                    .region_executions_by_case
+                    .get(execution_case)
+                    .ok_or_else(|| {
+                        VulkanRuntimeHybridPlacementError(
+                            "runtime hybrid region has no internal boundary replay".to_string(),
+                        )
+                    })?;
+                scheduled_boundaries.extend(calibration.boundary_cases.iter().map(|boundary| {
+                    (
+                        *component_start + boundary.boundary_ordinal,
+                        &boundary.execution_case,
+                    )
+                }));
+            }
+            VulkanHybridScheduledStep::Region { .. } => {}
+        }
+    }
+    scheduled_boundaries.sort_by_key(|(boundary_index, _)| *boundary_index);
+    if scheduled_boundaries
+        .windows(2)
+        .any(|pair| pair[0].0 == pair[1].0)
+    {
+        return runtime_hybrid_error(
+            "runtime hybrid placement repeats one physical boundary execution",
+        );
+    }
+    for (boundary_index, execution_case) in scheduled_boundaries {
+        let graph_boundary = graph_boundaries.get(boundary_index).ok_or_else(|| {
             VulkanRuntimeHybridPlacementError(format!(
                 "hybrid physical boundary {boundary_index} is outside the mounted graph",
             ))
@@ -689,7 +926,7 @@ pub fn lower_vulkan_runtime_hybrid_phase_placement(
         }
         let source_component_id = placement
             .component_ids
-            .get(*boundary_index)
+            .get(boundary_index)
             .cloned()
             .ok_or_else(|| {
                 VulkanRuntimeHybridPlacementError(format!(
@@ -739,7 +976,7 @@ pub fn lower_vulkan_runtime_hybrid_phase_placement(
                 ))
             })?;
         let boundary = VulkanRuntimePhysicalBoundaryExecution {
-            boundary_index: *boundary_index,
+            boundary_index,
             edge_index: *edge_index,
             source_component_id,
             source_port_id: graph_edge.source.port_id.clone(),
@@ -757,7 +994,7 @@ pub fn lower_vulkan_runtime_hybrid_phase_placement(
             &boundary,
         )?;
         if boundary_executions
-            .insert(*boundary_index, boundary)
+            .insert(boundary_index, boundary)
             .is_some()
         {
             return runtime_hybrid_error(format!(

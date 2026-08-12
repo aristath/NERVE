@@ -234,14 +234,37 @@ fn hybrid_test_boundary_case(
     byte_count: usize,
     route: &str,
 ) -> VulkanPlacementExecutionCaseIdentity {
+    hybrid_test_boundary_case_for_phase(
+        source_device_id,
+        destination_device_id,
+        byte_count,
+        route,
+        nerve_execution_contracts::ExecutionPhase::Decode,
+        1,
+    )
+}
+
+fn hybrid_test_boundary_case_for_phase(
+    source_device_id: &str,
+    destination_device_id: &str,
+    byte_count: usize,
+    route: &str,
+    phase: nerve_execution_contracts::ExecutionPhase,
+    activation_batch_width: usize,
+) -> VulkanPlacementExecutionCaseIdentity {
+    let mut devices = vec![
+        hybrid_test_device(source_device_id),
+        hybrid_test_device(destination_device_id),
+    ];
+    devices.sort();
     VulkanPlacementExecutionCaseIdentity {
         behavior: VulkanPlacementBehaviorIdentity {
             compiled_execution_signature: hybrid_test_digest('f'),
             runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
                 .to_string(),
-            phase: nerve_execution_contracts::ExecutionPhase::Decode,
+            phase,
             shape: VulkanPlacementShapeClass {
-                activation_batch_width: 1,
+                activation_batch_width,
                 input_byte_capacity: byte_count,
                 output_byte_capacity: byte_count,
             },
@@ -257,10 +280,7 @@ fn hybrid_test_boundary_case(
         }],
         equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
         strategy: VulkanPlacementExecutionStrategy::DirectedBoundary,
-        devices: vec![
-            hybrid_test_device(source_device_id),
-            hybrid_test_device(destination_device_id),
-        ],
+        devices,
         shards: Vec::new(),
         input_physical_device_id: source_device_id.to_string(),
         output_physical_device_id: destination_device_id.to_string(),
@@ -272,6 +292,190 @@ fn hybrid_test_boundary_case(
             route: route.to_string(),
         }],
     }
+}
+
+fn record_hybrid_test_serialized_region(
+    model: &VulkanResidentRuntimeModel,
+    catalog: &mut VulkanPlacementCalibrationCatalog,
+    phase: VulkanTargetedComponentExecutionPhase,
+    duration_ns: u64,
+) -> VulkanPlacementExecutionCaseIdentity {
+    let execution_phase = runtime_hybrid_execution_phase(phase).unwrap();
+    let activation_batch_width = phase.activation_batch_width();
+    let component_ids = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| component.component_id.clone())
+        .collect::<Vec<_>>();
+    let physical_devices = ["gpu0", "gpu1", "gpu0"];
+    assert_eq!(component_ids.len(), physical_devices.len());
+    let component_cases = component_ids
+        .iter()
+        .zip(physical_devices)
+        .map(|(component_id, physical_device_id)| {
+            let target = vulkan_runtime_placement_calibration_target_for_component(
+                model,
+                component_id,
+                phase,
+            )
+            .unwrap();
+            hybrid_test_observation(
+                hybrid_test_behavior_for_phase(
+                    &target.signature_id,
+                    execution_phase,
+                    activation_batch_width,
+                ),
+                physical_device_id,
+                10,
+            )
+            .execution_case
+        })
+        .collect::<Vec<_>>();
+    let graph_boundaries = vulkan_runtime_placement_boundaries(model).unwrap();
+    let boundary_byte_counts = graph_boundaries
+        .iter()
+        .map(|boundary| {
+            let [transfer] = boundary.transfers.as_slice() else {
+                panic!("fixture boundary must contain one transfer");
+            };
+            assert!(transfer.source_in_prefix);
+            transfer.byte_count * activation_batch_width
+        })
+        .collect::<Vec<_>>();
+    let boundary_cases = vec![
+        VulkanPlacementRegionBoundaryExecutionCase {
+            boundary_ordinal: 0,
+            execution_case: hybrid_test_boundary_case_for_phase(
+                "gpu0",
+                "gpu1",
+                boundary_byte_counts[0],
+                "device_local_staging",
+                execution_phase,
+                activation_batch_width,
+            ),
+        },
+        VulkanPlacementRegionBoundaryExecutionCase {
+            boundary_ordinal: 1,
+            execution_case: hybrid_test_boundary_case_for_phase(
+                "gpu1",
+                "gpu0",
+                boundary_byte_counts[1],
+                "device_local_staging",
+                execution_phase,
+                activation_batch_width,
+            ),
+        },
+    ];
+    let signature = vulkan_placement_region_compiled_execution_signature(
+        &component_cases
+            .iter()
+            .map(|case| case.behavior.compiled_execution_signature.clone())
+            .collect::<Vec<_>>(),
+        &boundary_byte_counts,
+    )
+    .unwrap();
+    let behavior = hybrid_test_behavior_for_phase(
+        &signature,
+        execution_phase,
+        activation_batch_width,
+    );
+    let mut contract_implementations = BTreeMap::new();
+    let mut operations = Vec::new();
+    let mut transports = Vec::new();
+    for ordinal in 0..component_cases.len() {
+        let component = &component_cases[ordinal];
+        for (contract, implementation) in component
+            .contract_ids
+            .iter()
+            .cloned()
+            .zip(component.implementation_digests.iter().cloned())
+        {
+            contract_implementations.insert(contract, implementation);
+        }
+        operations.extend(component.operations.iter().cloned());
+        if let Some(boundary) = boundary_cases
+            .iter()
+            .find(|boundary| boundary.boundary_ordinal == ordinal)
+        {
+            for (contract, implementation) in boundary
+                .execution_case
+                .contract_ids
+                .iter()
+                .cloned()
+                .zip(
+                    boundary
+                        .execution_case
+                        .implementation_digests
+                        .iter()
+                        .cloned(),
+                )
+            {
+                contract_implementations.insert(contract, implementation);
+            }
+            operations.extend(boundary.execution_case.operations.iter().cloned());
+            transports.extend(boundary.execution_case.transports.iter().cloned());
+        }
+    }
+    transports.sort();
+    let execution_case = VulkanPlacementExecutionCaseIdentity {
+        behavior: behavior.clone(),
+        contract_ids: contract_implementations.keys().cloned().collect(),
+        implementation_digests: contract_implementations.values().cloned().collect(),
+        artifact_digest: hybrid_test_digest('8'),
+        execution_graph_digest: hybrid_test_digest('9'),
+        operations,
+        equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
+        strategy: VulkanPlacementExecutionStrategy::SerializedRegion,
+        devices: vec![hybrid_test_device("gpu0"), hybrid_test_device("gpu1")],
+        shards: Vec::new(),
+        input_physical_device_id: "gpu0".to_string(),
+        output_physical_device_id: "gpu0".to_string(),
+        owner_physical_device_id: "gpu0".to_string(),
+        transports,
+    };
+    catalog
+        .record_reference(VulkanPlacementCanonicalReference {
+            behavior: behavior.clone(),
+            output_digest: "output".to_string(),
+            output_artifact: None,
+            state_digest: "state".to_string(),
+        })
+        .unwrap();
+    catalog
+        .record_observation(VulkanPlacementCalibrationObservation {
+            execution_case: execution_case.clone(),
+            warmup_call_count: 1,
+            measured_call_count: 1,
+            complete_transaction: true,
+            duration_ns,
+            useful_activation_count: activation_batch_width,
+            output_digest: "output".to_string(),
+            output_artifact: None,
+            output_equivalence: VulkanPlacementOutputEquivalenceEvidence::BitExact,
+            state_digest: "state".to_string(),
+            resident_bytes_by_physical_device: BTreeMap::from([
+                ("gpu0".to_string(), 10),
+                ("gpu1".to_string(), 10),
+            ]),
+            transient_peak_bytes_by_physical_device: BTreeMap::from([
+                ("gpu0".to_string(), 2),
+                ("gpu1".to_string(), 2),
+            ]),
+            host_resident_bytes: 0,
+            host_transient_peak_bytes: 0,
+        })
+        .unwrap();
+    catalog
+        .record_region_execution(VulkanPlacementRegionExecutionCalibration {
+            execution_case: execution_case.clone(),
+            boundary_byte_counts,
+            component_cases,
+            boundary_cases,
+        })
+        .unwrap();
+    execution_case
 }
 
 fn hybrid_test_catalog(model: &VulkanResidentRuntimeModel) -> VulkanPlacementCalibrationCatalog {
@@ -429,12 +633,123 @@ fn runtime_hybrid_planner_ignores_unreplayable_serialized_regions() {
 }
 
 #[test]
+fn runtime_hybrid_planner_selects_one_complete_exact_serialized_region() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    let region_case = record_hybrid_test_serialized_region(
+        &model,
+        &mut catalog,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        1,
+    );
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+
+    assert!(
+        vulkan_runtime_hybrid_phase_is_calibrated(
+            &model,
+            &catalog,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap()
+    );
+
+    let placement = plan_vulkan_runtime_hybrid_ordered_graph(
+        &model,
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+
+    assert_eq!(placement.plan.predicted_duration_ns_per_activation, 1);
+    assert_eq!(placement.plan.steps.len(), 1);
+    assert!(matches!(
+        &placement.plan.steps[0],
+        VulkanHybridScheduledStep::Region {
+            component_start: 0,
+            component_end: 3,
+            execution_case,
+            ..
+        } if execution_case == &region_case
+    ));
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "logical0".to_string()),
+        ("gpu1".to_string(), "logical1".to_string()),
+    ]);
+    let lowered =
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &placement, &bindings).unwrap();
+    assert_eq!(lowered.execution_cases_by_component.len(), 3);
+    assert_eq!(lowered.boundary_executions.len(), 2);
+    assert_eq!(
+        lowered
+            .runtime_model
+            .placement
+            .device_for_component(&placement.component_ids[1]),
+        "logical1",
+    );
+}
+
+#[test]
+fn runtime_hybrid_prefill_discovers_and_lowers_region_only_evidence() {
+    let mut model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    for execution in &mut model.component_executions {
+        let mut prefill_terminal = execution.kernels.last().unwrap().clone();
+        prefill_terminal.execution_index += 1;
+        prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
+        prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
+        execution.kernels.push(prefill_terminal);
+    }
+    let phase = VulkanTargetedComponentExecutionPhase::Prefill {
+        activation_batch_width: 4,
+    };
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    record_hybrid_test_serialized_region(&model, &mut catalog, phase, 4);
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+
+    assert_eq!(
+        vulkan_runtime_hybrid_calibrated_prefill_widths(&model, &catalog).unwrap(),
+        [4]
+    );
+    let placement =
+        plan_vulkan_runtime_hybrid_ordered_graph(&model, &catalog, &capacity, phase).unwrap();
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "logical0".to_string()),
+        ("gpu1".to_string(), "logical1".to_string()),
+    ]);
+    let lowered =
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &placement, &bindings).unwrap();
+    assert_eq!(lowered.activation_batch_width, 4);
+    assert_eq!(lowered.execution_cases_by_component.len(), 3);
+    assert_eq!(lowered.boundary_executions.len(), 2);
+}
+
+#[test]
 fn runtime_hybrid_planner_rejects_missing_or_ambiguous_behavior_evidence() {
     let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let capacity = VulkanPlacementCapacityEnvelope {
         available_bytes_by_device: BTreeMap::from([(hybrid_test_device("gpu0"), 100)]),
         host_available_bytes: 100,
     };
+    assert!(
+        !vulkan_runtime_hybrid_phase_is_calibrated(
+            &model,
+            &VulkanPlacementCalibrationCatalog::default(),
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap()
+    );
     let missing = plan_vulkan_runtime_hybrid_ordered_graph(
         &model,
         &VulkanPlacementCalibrationCatalog::default(),
@@ -442,7 +757,7 @@ fn runtime_hybrid_planner_rejects_missing_or_ambiguous_behavior_evidence() {
         VulkanTargetedComponentExecutionPhase::Decode,
     )
     .unwrap_err();
-    assert!(missing.0.contains("0 exact calibration behavior cohorts"));
+    assert!(missing.0.contains("no exact measured runtime hybrid placement"));
 
     let mut catalog = hybrid_test_catalog(&model);
     let target = vulkan_runtime_placement_calibration_target_for_component(

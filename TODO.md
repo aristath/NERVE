@@ -146,11 +146,12 @@ For every numbered item below:
 
 ### 3. Make placement calibration safe for runtime consumption
 
-- Add complete serialized multi-component-region and mixed hybrid transaction
-  calibration. The current exact runtime adapter deliberately rejects a
-  serialized observation because it can lower only one exact case per logical
-  component; do not approximate a region by summing independent component and
-  boundary measurements.
+- Produce complete serialized multi-component-region and mixed-hybrid
+  calibration directly from one bounded mounted transaction. The catalog,
+  graph gate, optimizer, phase selection, and physical lowering now preserve
+  and replay exact region evidence, including internal boundaries; the missing
+  producer must measure that outer transaction rather than synthesize it by
+  summing independent component and boundary measurements.
 - Prove the resulting catalog against a concretely mounted runtime model before
   chat: every automatically selectable TP case must match that model's exact
   runtime fingerprint, implementation signatures, artifacts, shapes, device

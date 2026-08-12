@@ -480,37 +480,49 @@ fn validate_runtime_hybrid_boundary_case(
                 "exact physical boundary byte geometry overflowed".to_string(),
             )
         })?;
-    let [transport] = case.transports.as_slice() else {
-        return runtime_hybrid_error("exact physical boundary requires one transport identity");
-    };
-    if transport.source_physical_device_id != case.input_physical_device_id
-        || transport.destination_physical_device_id != case.output_physical_device_id
-        || case.owner_physical_device_id != case.input_physical_device_id
-        || transport.byte_capacity != byte_count
-        || case.behavior.shape.input_byte_capacity != byte_count
-        || case.behavior.shape.output_byte_capacity != byte_count
-        || !matches!(
-            transport.route.as_str(),
-            "external_device_local" | "device_local_staging"
-        )
-    {
+    if !runtime_hybrid_boundary_execution_case_is_compatible(
+        execution_phase,
+        exact_batch_width,
+        byte_count,
+        case,
+    ) {
         return runtime_hybrid_error(
             "exact physical boundary has incompatible endpoints, bytes, or mounted route",
         );
     }
-    let [VulkanPlacementOperationGeometry::DirectedTransfer {
-        byte_count: operation_bytes,
-        ..
-    }] = case.operations.as_slice()
-    else {
-        return runtime_hybrid_error("exact physical boundary requires one directed transfer");
-    };
-    if *operation_bytes != byte_count {
-        return runtime_hybrid_error(
-            "exact physical boundary operation disagrees with its transport bytes",
-        );
-    }
     Ok(())
+}
+
+fn runtime_hybrid_boundary_execution_case_is_compatible(
+    execution_phase: nerve_execution_contracts::ExecutionPhase,
+    exact_batch_width: Option<usize>,
+    byte_count: usize,
+    case: &VulkanPlacementExecutionCaseIdentity,
+) -> bool {
+    let batch_width = case.behavior.shape.activation_batch_width;
+    let [transport] = case.transports.as_slice() else {
+        return false;
+    };
+    matches!(
+        case.operations.as_slice(),
+        [VulkanPlacementOperationGeometry::DirectedTransfer {
+            byte_count: operation_bytes,
+            ..
+        }] if *operation_bytes == byte_count
+    ) && case.strategy == VulkanPlacementExecutionStrategy::DirectedBoundary
+        && case.behavior.phase == execution_phase
+        && exact_batch_width.is_none_or(|expected| batch_width == expected)
+        && (exact_batch_width.is_some() || batch_width >= 2)
+        && transport.source_physical_device_id == case.input_physical_device_id
+        && transport.destination_physical_device_id == case.output_physical_device_id
+        && case.owner_physical_device_id == case.input_physical_device_id
+        && transport.byte_capacity == byte_count
+        && case.behavior.shape.input_byte_capacity == byte_count
+        && case.behavior.shape.output_byte_capacity == byte_count
+        && matches!(
+            transport.route.as_str(),
+            "external_device_local" | "device_local_staging"
+        )
 }
 
 #[cfg(test)]
