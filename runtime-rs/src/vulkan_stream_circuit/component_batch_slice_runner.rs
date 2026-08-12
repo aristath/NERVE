@@ -645,7 +645,8 @@ impl VulkanResidentComponentBatchSliceRunner {
                 retained_signal_keys,
             )?;
         let private_distributed_activations =
-            distributed_component_batch_private_activation_specs(distributed_execution_plan);
+            distributed_component_batch_private_activation_specs(distributed_execution_plan)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut shared_device_ids_by_buffer = BTreeMap::<usize, BTreeSet<String>>::new();
         for dispatch in distributed_execution_plan
             .dispatches

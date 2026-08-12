@@ -165,6 +165,7 @@ include!("vulkan_stream_circuit/component_batch_kernel_selection.rs");
 include!("vulkan_stream_circuit/component_batch_slice_runner.rs");
 include!("vulkan_stream_circuit/component_batch_distributed.rs");
 include!("vulkan_stream_circuit/component_batch_input_columns.rs");
+include!("vulkan_stream_circuit/component_batch_output_rows.rs");
 include!("vulkan_stream_circuit/component_batch_temporal.rs");
 include!("vulkan_stream_circuit/placed_component_batch_runner.rs");
 include!("vulkan_stream_circuit/stream_processor.rs");

@@ -4787,7 +4787,6 @@ if (
             or intermediate_size % 128
             or not 0 < experts_per_token <= num_experts
             or (stage == "gate_up") != (swiglu_limit is not None)
-            or (tensor_parallel is not None and batch_mode is not None)
             or (
                 native_fp8_start is not None
                 and (tensor_parallel is not None or input_block_major is not None)

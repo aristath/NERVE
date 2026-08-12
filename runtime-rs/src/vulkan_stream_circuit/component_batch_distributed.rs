@@ -17,6 +17,14 @@ struct VulkanDistributedComponentBatchRunners {
     >,
 }
 
+fn distributed_component_batch_uses_physical_output_row_artifact(
+    planned: &VulkanDistributedDispatchPlan,
+) -> bool {
+    planned.distribution == VulkanDistributedDispatchDistribution::OutputRows
+        && planned.execution_strategy
+            == nerve_execution_contracts::ExecutionStrategy::TensorParallelExpert
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct VulkanDistributedComponentBatchPrivateActivationKey {
     owner_device_id: String,
@@ -34,8 +42,7 @@ struct VulkanDistributedComponentBatchPrivateActivationBufferKey {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanDistributedComponentBatchPrivateActivationSpec {
-    signal_byte_capacity: usize,
-    device_ids: BTreeSet<String>,
+    frame_byte_capacities: BTreeMap<String, usize>,
 }
 
 fn distributed_component_batch_activation_key(
@@ -93,10 +100,10 @@ fn distributed_component_batch_signal_key(
 
 fn distributed_component_batch_private_activation_specs(
     execution_plan: &VulkanDistributedExecutionPlan,
-) -> BTreeMap<
+) -> Result<BTreeMap<
     VulkanDistributedComponentBatchPrivateActivationKey,
     VulkanDistributedComponentBatchPrivateActivationSpec,
-> {
+>, VulkanError> {
     let mut specs = BTreeMap::new();
     for group in &execution_plan.execution_islands {
         for pair in group.dispatches.windows(2) {
@@ -114,29 +121,59 @@ fn distributed_component_batch_private_activation_specs(
                 &group.owner_device_id,
                 &producer.output_activation,
             );
-            let device_ids = producer
+            if producer.shards.len() != consumer.shards.len() {
+                return Err(VulkanError(format!(
+                    "distributed component batch private intermediate {} -> {} changes participant count",
+                    producer.node_id, consumer.node_id,
+                )));
+            }
+            let frame_byte_capacities = producer
                 .shards
                 .iter()
-                .map(|shard| shard.device_id.clone())
-                .collect::<BTreeSet<_>>();
-            specs
-                .entry(key)
-                .and_modify(
-                    |existing: &mut VulkanDistributedComponentBatchPrivateActivationSpec| {
-                        debug_assert_eq!(
-                            existing.signal_byte_capacity,
-                            producer.output_activation.signal_byte_capacity
-                        );
-                        existing.device_ids.extend(device_ids.iter().cloned());
-                    },
-                )
-                .or_insert(VulkanDistributedComponentBatchPrivateActivationSpec {
-                    signal_byte_capacity: producer.output_activation.signal_byte_capacity,
-                    device_ids,
-                });
+                .zip(&consumer.shards)
+                .map(|(producer_shard, consumer_shard)| {
+                    if producer_shard.device_id != consumer_shard.device_id
+                        || producer_shard.output_byte_count
+                            != consumer_shard.input_range.byte_count
+                        || producer_shard.output_byte_count == 0
+                    {
+                        return Err(VulkanError(format!(
+                            "distributed component batch private intermediate {} -> {} has incompatible storage on {:?}",
+                            producer.node_id,
+                            consumer.node_id,
+                            producer_shard.device_id,
+                        )));
+                    }
+                    Ok((
+                        producer_shard.device_id.clone(),
+                        producer_shard.output_byte_count,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            if frame_byte_capacities.len() != producer.shards.len() {
+                return Err(VulkanError(format!(
+                    "distributed component batch private intermediate {} -> {} repeats a participant device",
+                    producer.node_id, consumer.node_id,
+                )));
+            }
+            match specs.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(VulkanDistributedComponentBatchPrivateActivationSpec {
+                        frame_byte_capacities,
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    if entry.get().frame_byte_capacities != frame_byte_capacities {
+                        return Err(VulkanError(format!(
+                            "distributed component batch private intermediate {} -> {} has conflicting participant geometry",
+                            producer.node_id, consumer.node_id,
+                        )));
+                    }
+                }
+            }
         }
     }
-    specs
+    Ok(specs)
 }
 
 struct VulkanDistributedComponentBatchDispatchRunner {
@@ -269,18 +306,18 @@ impl VulkanDistributedComponentBatchRunners {
         execution_mode: VulkanComponentBatchExecutionMode,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         let private_activation_specs =
-            distributed_component_batch_private_activation_specs(execution_plan);
+            distributed_component_batch_private_activation_specs(execution_plan)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut private_activation_buffers = BTreeMap::new();
         for (activation, spec) in &private_activation_specs {
-            let byte_capacity = spec
-                .signal_byte_capacity
-                .checked_mul(lane_capacity)
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                        "distributed private activation capacity overflowed".to_string(),
-                    ))
-                })?;
-            for device_id in &spec.device_ids {
+            for (device_id, frame_byte_capacity) in &spec.frame_byte_capacities {
+                let byte_capacity = frame_byte_capacity
+                    .checked_mul(lane_capacity)
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "distributed private activation capacity overflowed".to_string(),
+                        ))
+                    })?;
                 let device = devices.get(device_id).ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
                         device_id: device_id.clone(),
@@ -369,6 +406,22 @@ impl VulkanDistributedComponentBatchRunners {
                     lane_capacity,
                     execution_plan.shared_activation_route,
                 )?);
+                continue;
+            }
+            if distributed_component_batch_uses_physical_output_row_artifact(planned) {
+                dispatches.push(
+                    create_distributed_output_row_physical_component_batch_dispatch(
+                        devices,
+                        placed_slices,
+                        batch_slices,
+                        planned,
+                        parameter_buffers,
+                        dynamic_resource_buffers,
+                        &private_activation_buffers,
+                        lane_capacity,
+                        execution_plan.shared_activation_route,
+                    )?,
+                );
                 continue;
             }
             let owner_index = placed_slices
@@ -509,21 +562,26 @@ impl VulkanDistributedComponentBatchRunners {
                         ),
                         device_id: shard.device_id.clone(),
                     };
-                let input = if let Some(buffer) =
-                    private_activation_buffers.get(&input_private_key)
-                {
+                let private_input = private_activation_buffers.get(&input_private_key);
+                let input = if let Some(buffer) = private_input {
                     buffer
                 } else {
                     batch_slice.distributed_signal_buffer(&input_key, &shard.device_id)?
                 };
-                let output = if let Some(buffer) =
-                    private_activation_buffers.get(&output_private_key)
-                {
+                let private_output = private_activation_buffers.get(&output_private_key);
+                let output = if let Some(buffer) = private_output {
                     buffer
                 } else {
                     batch_slice.distributed_signal_buffer(&output_key, &shard.device_id)?
                 };
-                let (output_byte_offset, output_byte_capacity) = match planned.distribution {
+                let (output_byte_offset, output_byte_capacity) = if private_output.is_some() {
+                    local_distributed_component_batch_binding_range(
+                        shard.output_byte_count,
+                        lane_capacity,
+                        "output",
+                    )?
+                } else {
+                    match planned.distribution {
                     VulkanDistributedDispatchDistribution::OutputRows => {
                         distributed_batch_shard_output_binding_range(
                             planned.output_byte_capacity,
@@ -546,18 +604,26 @@ impl VulkanDistributedComponentBatchRunners {
                     VulkanDistributedDispatchDistribution::InputColumns => {
                         unreachable!("input-column component batches were rejected before allocation")
                     }
+                    }
                 };
                 let mut bindings = Vec::with_capacity(
                     2 + planned.auxiliary_input_activations.len()
                         + shard.parameters.len()
                         + 2 * planned.selected_resource_partitions.len(),
                 );
-                let (input_byte_offset, input_byte_capacity) =
+                let (input_byte_offset, input_byte_capacity) = if private_input.is_some() {
+                    local_distributed_component_batch_binding_range(
+                        shard.input_range.byte_count,
+                        lane_capacity,
+                        "input",
+                    )?
+                } else {
                     distributed_batch_shard_binding_range(
                         planned.input_byte_capacity,
                         lane_capacity,
                         &shard.input_range,
-                    )?;
+                    )?
+                };
                 bindings.push(
                     VulkanResidentKernelBufferBinding::new(
                         u32::try_from(planned.input_activation.binding).map_err(|_| {

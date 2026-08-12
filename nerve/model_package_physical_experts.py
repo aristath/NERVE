@@ -173,8 +173,6 @@ def independent_expert_physical_implementations(
         intermediate["format"] = "bf16:route_major_local_rows"
     common: Json = {
         "local_size_x": 512,
-        "phases": ["decode"],
-        "execution_shape": "single_lane",
         "formats": {
             "storage": "mxfp4_e2m1+f8_e8m0",
             "compute": "fp8_e4m3",
@@ -205,73 +203,29 @@ def independent_expert_physical_implementations(
     }
     if stage == "gate_up":
         prequantized = len(node["inputs"]) == 3
-        shader_file = (
-            "independent_sparse_moe_gate_up_tensor_parallel"
+        shader_suffix = (
             f"{'_prequant' if prequantized else ''}_mxfp4_e2m1_g32_"
             f"h{hidden_size}_i{intermediate_size}_e{resource_count}_"
             f"k{experts_per_token}_limit"
             f"{shader_float_token(float(attrs.get('swiglu_limit', 0.0)))}.comp"
         )
-        return [
-            {
-                **common,
-                "shader_path": f"shaders/{shader_file}",
-                "workgroup_count_x": (
-                    intermediate_size // INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS
-                ),
-                "execution_form": "replicated_input_partitioned_output",
-                "partition_launch": {
-                    "workgroup_x": "proportional",
-                    "origin": "local_zero",
-                },
-                "inputs": [
-                    *[
-                        {"binding": binding, "distribution": "replicated"}
-                        for binding in range(input_count - 1)
-                    ],
-                    {
-                        "binding": input_count - 1,
-                        "distribution": "routed",
-                        "dimension": 0,
-                        "alignment_elements": 1,
-                    },
-                ],
-                "outputs": [
-                    {
-                        "binding": output_binding,
-                        "collection": "concatenated",
-                        "dimension": 0,
-                        "alignment_elements": INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS,
-                    }
-                ],
-            }
-        ]
-    shader_file = (
-        "independent_sparse_moe_down_tensor_parallel_input_block_major_b128_"
-        f"mxfp4_e2m1_g32_h{hidden_size}_i{intermediate_size}_"
-        f"e{resource_count}_k{experts_per_token}.comp"
-    )
-    return [
-        {
+        implementation = {
             **common,
-            "shader_path": f"shaders/{shader_file}",
-            "workgroup_count_x": hidden_size // INDEPENDENT_MXFP4_DOWN_TILE_ROWS,
-            "execution_form": "partitioned_input_partial_output",
+            "workgroup_count_x": (
+                intermediate_size // INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS
+            ),
+            "execution_form": "replicated_input_partitioned_output",
             "partition_launch": {
-                "workgroup_x": "repeated",
-                "origin": "push_constant_u32",
-                "origin_push_constant": "input_start",
-                "count_push_constant": "input_count",
+                "workgroup_x": "proportional",
+                "origin": "local_zero",
             },
             "inputs": [
+                *[
+                    {"binding": binding, "distribution": "replicated"}
+                    for binding in range(input_count - 1)
+                ],
                 {
-                    "binding": 0,
-                    "distribution": "sharded",
-                    "dimension": 0,
-                    "alignment_elements": INDEPENDENT_MXFP4_TP_COLUMNS,
-                },
-                {
-                    "binding": 1,
+                    "binding": input_count - 1,
                     "distribution": "routed",
                     "dimension": 0,
                     "alignment_elements": 1,
@@ -280,15 +234,91 @@ def independent_expert_physical_implementations(
             "outputs": [
                 {
                     "binding": output_binding,
-                    "collection": "reduced",
-                    "reduction": {
-                        "operation": "sum_f32",
-                        "dimension_name": "expert_output_elements",
-                        "finalization": {"kind": "store_f32_to_bf16"},
-                    },
+                    "collection": "concatenated",
+                    "dimension": 0,
+                    "alignment_elements": INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS,
                 }
             ],
         }
+        return [
+            {
+                **implementation,
+                "shader_path": (
+                    "shaders/independent_sparse_moe_gate_up_tensor_parallel"
+                    f"{shader_suffix}"
+                ),
+                "phases": ["decode"],
+                "execution_shape": "single_lane",
+            },
+            {
+                **implementation,
+                "shader_path": (
+                    "shaders/independent_sparse_moe_gate_up_batch1_tensor_parallel"
+                    f"{shader_suffix}"
+                ),
+                "phases": ["decode", "prefill"],
+                "execution_shape": "multi_lane",
+            },
+        ]
+    shader_suffix = (
+        "_input_block_major_b128_"
+        f"mxfp4_e2m1_g32_h{hidden_size}_i{intermediate_size}_"
+        f"e{resource_count}_k{experts_per_token}.comp"
+    )
+    implementation = {
+        **common,
+        "workgroup_count_x": hidden_size // INDEPENDENT_MXFP4_DOWN_TILE_ROWS,
+        "execution_form": "partitioned_input_partial_output",
+        "partition_launch": {
+            "workgroup_x": "repeated",
+            "origin": "push_constant_u32",
+            "origin_push_constant": "input_start",
+            "count_push_constant": "input_count",
+        },
+        "inputs": [
+            {
+                "binding": 0,
+                "distribution": "sharded",
+                "dimension": 0,
+                "alignment_elements": INDEPENDENT_MXFP4_TP_COLUMNS,
+            },
+            {
+                "binding": 1,
+                "distribution": "routed",
+                "dimension": 0,
+                "alignment_elements": 1,
+            },
+        ],
+        "outputs": [
+            {
+                "binding": output_binding,
+                "collection": "reduced",
+                "reduction": {
+                    "operation": "sum_f32",
+                    "dimension_name": "expert_output_elements",
+                    "finalization": {"kind": "store_f32_to_bf16"},
+                },
+            }
+        ],
+    }
+    return [
+        {
+            **implementation,
+            "shader_path": (
+                f"shaders/independent_sparse_moe_down_tensor_parallel{shader_suffix}"
+            ),
+            "phases": ["decode"],
+            "execution_shape": "single_lane",
+        },
+        {
+            **implementation,
+            "shader_path": (
+                "shaders/independent_sparse_moe_down_batch1_tensor_parallel"
+                f"{shader_suffix}"
+            ),
+            "phases": ["decode", "prefill"],
+            "execution_shape": "multi_lane",
+        },
     ]
 
 

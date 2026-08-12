@@ -188,6 +188,16 @@ For every numbered item below:
   graph progress are not replayed. The remaining bullets cover the complete
   mounted transaction, atomic cross-device sharded residency, measured
   intra-expert selection, and online ownership/cache adaptation.
+- Compiler-declared MXFP4 intra-expert TP now has distinct immediate and
+  multi-lane physical artifacts for the complete output-row gate/up to local
+  input-column down island. Multi-lane execution uses the physical artifacts
+  directly, keeps each participant's route-major intermediate at its compact
+  local shard stride, writes participant-major F32 partials, and retains the
+  existing whole-expert path for non-TP contracts. Shader compilation,
+  contract phase/shape selection, fragmented-resource planning, uneven local
+  buffer sizing, and invalid participant geometry are covered
+  hardware-neutrally. Live equivalence and the measured selection decision
+  remain part of the authorized mounted proof below.
 - Execute the router once on the layer coordinator and keep routing metadata on
   the device.
 - Dispatch the six selected routed experts concurrently to their owners. Run

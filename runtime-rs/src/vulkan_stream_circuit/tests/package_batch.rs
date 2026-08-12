@@ -10,6 +10,7 @@ use crate::stream_plan::{StreamCircuitExecutionPlan, StreamCircuitResourcePlan};
 use crate::test_support::{
     tiny_model_dir, tiny_model_package_manifest_path, tiny_model_tensor_index_path,
 };
+use crate::VulkanDistributedDispatchShard;
 
 const FIXTURE_MODEL_GREEDY_SAMPLER_COMPONENT_ID: &str = "greedy_sampler";
 const FIXTURE_MODEL_EMBED_TOKENS_TENSOR: &str = "model.embed_tokens.weight";
@@ -2135,7 +2136,11 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
         shared_output_byte_capacity: 8_224,
         distributed_parameter_byte_count: 0,
     };
-    assert!(distributed_component_batch_private_activation_specs(&undeclared_plan).is_empty());
+    assert!(
+        distributed_component_batch_private_activation_specs(&undeclared_plan)
+            .unwrap()
+            .is_empty()
+    );
 
     let local_intermediate = nerve_execution_contracts::LocalIntermediateContract {
         signal: "expert_intermediates".to_string(),
@@ -2162,7 +2167,7 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
         distributed_parameter_byte_count: 0,
     };
 
-    let specs = distributed_component_batch_private_activation_specs(&plan);
+    let specs = distributed_component_batch_private_activation_specs(&plan).unwrap();
 
     assert_eq!(specs.len(), 1);
     let (key, spec) = specs.first_key_value().unwrap();
@@ -2170,10 +2175,195 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
     assert_eq!(key.component_id, "layer");
     assert_eq!(key.signal_id, "expert_intermediates");
     assert_eq!(key.slot, 1);
-    assert_eq!(spec.signal_byte_capacity, 8_224);
     assert_eq!(
-        spec.device_ids,
-        BTreeSet::from(["gpu0".to_string(), "gpu1".to_string()])
+        spec.frame_byte_capacities,
+        BTreeMap::from([
+            ("gpu0".to_string(), 8_224),
+            ("gpu1".to_string(), 8_224),
+        ])
+    );
+}
+
+#[test]
+fn distributed_batch_private_intermediate_uses_each_local_shard_stride() {
+    let activation = |binding, signal: &str, slot| VulkanDistributedActivationSlot {
+        binding,
+        component_id: "layer".to_string(),
+        signal_id: signal.to_string(),
+        slot,
+        byte_capacity: 24_576,
+        signal_byte_capacity: 24_576,
+        storage: VulkanDistributedActivationStorage::ActivationSlot,
+    };
+    let shards = vec![
+        VulkanDistributedDispatchShard {
+            device_id: "gpu0".to_string(),
+            selected_resource_indices: BTreeMap::new(),
+            selected_resource_fragments: BTreeMap::new(),
+            row_start: 0,
+            row_count: 128,
+            workgroup_count_x: 4,
+            base_workgroup_z: 0,
+            input_range: VulkanDistributedActivationRange {
+                byte_offset: 0,
+                byte_count: 24_576,
+            },
+            auxiliary_input_ranges: Vec::new(),
+            output_byte_offset: 0,
+            output_byte_count: 8_192,
+            parameters: Vec::new(),
+        },
+        VulkanDistributedDispatchShard {
+            device_id: "gpu1".to_string(),
+            selected_resource_indices: BTreeMap::new(),
+            selected_resource_fragments: BTreeMap::new(),
+            row_start: 128,
+            row_count: 256,
+            workgroup_count_x: 8,
+            base_workgroup_z: 128,
+            input_range: VulkanDistributedActivationRange {
+                byte_offset: 0,
+                byte_count: 24_576,
+            },
+            auxiliary_input_ranges: Vec::new(),
+            output_byte_offset: 8_192,
+            output_byte_count: 16_384,
+            parameters: Vec::new(),
+        },
+    ];
+    let dispatch = |dispatch_index,
+                    node_id: &str,
+                    input_activation,
+                    output_activation,
+                    shards: Vec<VulkanDistributedDispatchShard>| {
+        VulkanDistributedDispatchPlan {
+            owner_device_id: "gpu0".to_string(),
+            dispatch_index,
+            component_id: "layer".to_string(),
+            node_id: node_id.to_string(),
+            physical_artifact_id: node_id.to_string(),
+            physical_execution_contract_id: format!("sha256:{}", "a".repeat(64)),
+            implementation_digest: format!("sha256:{}", "b".repeat(64)),
+            execution_strategy:
+                nerve_execution_contracts::ExecutionStrategy::TensorParallelExpert,
+            equivalence: crate::VulkanDistributedEquivalencePlan {
+                output: crate::VulkanDistributedEquivalenceKind::BitExact,
+                state: crate::VulkanDistributedEquivalenceKind::BitExact,
+                absolute_tolerance_bits: None,
+                relative_tolerance_bits: None,
+            },
+            contract_member_node_ids: vec![node_id.to_string()],
+            local_intermediates: Vec::new(),
+            has_lazy_resource_requirements: false,
+            selected_resource_partitions: Vec::new(),
+            owner_residency_requirements: Vec::new(),
+            input_byte_capacity: 24_576,
+            output_byte_capacity: 24_576,
+            output_rows: 384,
+            input_width: 2_048,
+            row_alignment: 1,
+            input_activation,
+            input_distribution: nerve_execution_contracts::InputDistribution::Replicated,
+            auxiliary_input_activations: Vec::new(),
+            auxiliary_input_distributions: Vec::new(),
+            output_activation,
+            output_collection: nerve_execution_contracts::OutputCollection::Concatenated,
+            reduction: None,
+            distribution: VulkanDistributedDispatchDistribution::OutputRows,
+            distributed_parameter_byte_count: 0,
+            shards,
+        }
+    };
+    let intermediate = activation(2, "expert_intermediates", 1);
+    let mut gate = dispatch(
+        4,
+        "expert_gate_up",
+        activation(0, "hidden", 0),
+        intermediate.clone(),
+        shards.clone(),
+    );
+    let mut down_shards = shards;
+    for shard in &mut down_shards {
+        shard.input_range.byte_offset = shard.output_byte_offset;
+        shard.input_range.byte_count = shard.output_byte_count;
+    }
+    let mut down = dispatch(
+        5,
+        "expert_down",
+        intermediate,
+        activation(2, "expert_outputs", 2),
+        down_shards,
+    );
+    down.distribution = VulkanDistributedDispatchDistribution::InputColumns;
+    down.input_activation.binding = 0;
+    down.input_distribution = nerve_execution_contracts::InputDistribution::Sharded;
+    down.output_collection = nerve_execution_contracts::OutputCollection::Reduced;
+    down.reduction = Some(VulkanDistributedReductionPlan {
+        operation: nerve_execution_contracts::ReductionOperation::SumF32,
+        element_count: 6_144,
+        partial_byte_capacity: 24_576,
+        finalization: VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16,
+    });
+    let local_intermediate = nerve_execution_contracts::LocalIntermediateContract {
+        signal: "expert_intermediates".to_string(),
+        producer_binding: 2,
+        consumer_binding: 0,
+        format: "bf16:route_major_local_rows".to_string(),
+    };
+    gate.local_intermediates = vec![local_intermediate.clone()];
+    down.local_intermediates = vec![local_intermediate];
+    let execution_islands = resolved_physical_execution_islands(
+        &[gate.clone(), down.clone()],
+        VulkanSharedResidentBufferRoute::SharedHost,
+    )
+    .unwrap();
+    assert!(distributed_component_batch_uses_physical_output_row_artifact(
+        &gate
+    ));
+    assert!(!distributed_component_batch_uses_physical_output_row_artifact(
+        &down
+    ));
+    let mut whole_expert = gate.clone();
+    whole_expert.execution_strategy =
+        nerve_execution_contracts::ExecutionStrategy::ExpertParallel;
+    assert!(!distributed_component_batch_uses_physical_output_row_artifact(
+        &whole_expert
+    ));
+    let plan = VulkanDistributedExecutionPlan {
+        device_ids: vec!["gpu0".to_string(), "gpu1".to_string()],
+        storage_buffer_offset_alignment: 256,
+        dispatches: vec![gate, down],
+        execution_islands,
+        shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+        shared_input_byte_capacity: 24_576,
+        shared_output_byte_capacity: 24_576,
+        distributed_parameter_byte_count: 0,
+    };
+
+    let specs = distributed_component_batch_private_activation_specs(&plan).unwrap();
+    let spec = specs.first_key_value().unwrap().1;
+    assert_eq!(
+        spec.frame_byte_capacities,
+        BTreeMap::from([
+            ("gpu0".to_string(), 8_192),
+            ("gpu1".to_string(), 16_384),
+        ])
+    );
+    assert_eq!(
+        local_distributed_component_batch_binding_range(8_192, 3, "output").unwrap(),
+        (0, 24_576),
+    );
+
+    let mut inconsistent = plan;
+    let duplicate = inconsistent.execution_islands[0].dispatches[1].shards[0].clone();
+    inconsistent.execution_islands[0].dispatches[1]
+        .shards
+        .push(duplicate);
+    let error = distributed_component_batch_private_activation_specs(&inconsistent).unwrap_err();
+    assert!(error.to_string().contains("changes participant count"));
+    assert!(local_distributed_component_batch_binding_range(0, 3, "input").is_err());
+    assert!(
+        local_distributed_component_batch_binding_range(usize::MAX, 2, "input").is_err()
     );
 }
 

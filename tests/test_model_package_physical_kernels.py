@@ -157,9 +157,7 @@ def test_compiler_derives_contiguous_input_block_major_weights(tmp_path: Path) -
         target=NativeTarget(),  # type: ignore[arg-type]
     )
 
-    name = input_block_major_tensor_name(
-        "down.weight", TP_INPUT_BLOCK_COLUMNS
-    )
+    name = input_block_major_tensor_name("down.weight", TP_INPUT_BLOCK_COLUMNS)
     info = tensor_index["tensors"][name]
     assert info["shape"] == [2, 4, 128]
     assert info["logical_shape"] == [4, 256]
@@ -361,9 +359,9 @@ def test_compiler_declares_only_an_executable_local_shard_handoff(
             "format": "bf16",
         }
     ]
-    assert physical_kernel_implementations_for_node(
-        circuit, down, tensor_index
-    )[0]["local_intermediates"] == [
+    assert physical_kernel_implementations_for_node(circuit, down, tensor_index)[0][
+        "local_intermediates"
+    ] == [
         {
             "signal": "activated",
             "producer_binding": 1,
@@ -382,18 +380,13 @@ def test_compiler_declares_only_an_executable_local_shard_handoff(
         }
     )
     assert (
-        local_shard_intermediates_for_node(
-            circuit, compiled_gate_up, tensor_index
-        )
+        local_shard_intermediates_for_node(circuit, compiled_gate_up, tensor_index)
         == []
     )
     circuit["nodes"].pop()
 
     down["inputs"][0] = "another-signal"
-    assert (
-        local_shard_intermediates_for_node(circuit, gate_up, tensor_index)
-        == []
-    )
+    assert local_shard_intermediates_for_node(circuit, gate_up, tensor_index) == []
 
 
 def test_dense_ffn_pair_emits_one_compatible_local_tensor_parallel_island(
@@ -442,9 +435,9 @@ def test_dense_ffn_pair_emits_one_compatible_local_tensor_parallel_island(
     down_implementation = physical_kernel_implementations_for_node(
         circuit, down, tensor_index
     )[0]
-    down_implementation["shader_path"] = down_implementation[
-        "shader_path"
-    ].replace(".comp", ".spv")
+    down_implementation["shader_path"] = down_implementation["shader_path"].replace(
+        ".comp", ".spv"
+    )
     physical_down_shader = tmp_path / down_implementation["shader_path"]
     physical_down_shader.write_bytes(b"input-column-down")
 
@@ -497,9 +490,7 @@ def test_dense_ffn_pair_emits_one_compatible_local_tensor_parallel_island(
             "format": "bf16",
         }
     ]
-    assert gate_distributed["execution_form"] == (
-        "replicated_input_partitioned_output"
-    )
+    assert gate_distributed["execution_form"] == ("replicated_input_partitioned_output")
     assert gate_distributed["local_intermediates"] == expected_handoff
     assert down_distributed["local_intermediates"] == expected_handoff
     assert gate_distributed["outputs"][0]["collection"] == "concatenated"
@@ -578,9 +569,7 @@ def test_compiler_derives_fp8_weight_and_scale_physical_resources(
         target=NativeTarget(),  # type: ignore[arg-type]
     )
 
-    weight = input_block_major_tensor_name(
-        "down.weight", TP_INPUT_BLOCK_COLUMNS
-    )
+    weight = input_block_major_tensor_name("down.weight", TP_INPUT_BLOCK_COLUMNS)
     scale = transposed_tensor_name("down.weight_scale_inv")
     assert tensor_index["tensors"][weight]["shape"] == [2, 4, 128]
     assert tensor_index["tensors"][scale]["shape"] == [2, 2]
@@ -1016,7 +1005,9 @@ def _write_mxfp4_fixture_tensor_pair(
             "dtype": dtype,
             "shape": shape,
             **({"logical_shape": [rows, columns]} if dtype == "I8" else {}),
-            "parameter_count": rows * columns if dtype == "I8" else rows * columns // 32,
+            "parameter_count": rows * columns
+            if dtype == "I8"
+            else rows * columns // 32,
             "byte_count": len(payload),
             "layout": "row_major",
             "source_file": str(source),
@@ -1060,9 +1051,7 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
     weight = input_block_major_tensor_name(weight_name, 64)
     scale = input_block_major_tensor_name(scale_name, 4)
     rewritten = json.loads(circuit_path.read_text())
-    assert rewritten["parameters"]["refs"]["expert_0_down_weight"] == {
-        "tensor": weight
-    }
+    assert rewritten["parameters"]["refs"]["expert_0_down_weight"] == {"tensor": weight}
     assert rewritten["parameters"]["refs"]["expert_0_down_scale"] == {"tensor": scale}
     assert tensor_index["tensors"][weight]["shape"] == [2, 128, 64]
     assert tensor_index["tensors"][weight]["logical_shape"] == [128, 256]
@@ -1073,9 +1062,10 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
     assert "physical_execution_only" not in tensor_index["tensors"][weight]
     for parameter_id in gate_up["params"]:
         tensor_name = circuit["parameters"]["refs"][parameter_id]["tensor"]
-        assert tensor_index["tensors"][tensor_name][
-            "source_integrity_partition_count"
-        ] == 2
+        assert (
+            tensor_index["tensors"][tensor_name]["source_integrity_partition_count"]
+            == 2
+        )
 
     shader_file = independent_sparse_moe_shader_file(
         rewritten,
@@ -1088,12 +1078,34 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
         rewritten["nodes"][0],
         tensor_index,
     )
-    gate_implementation = physical_kernel_implementations_for_node(
+    gate_implementations = physical_kernel_implementations_for_node(
         rewritten, rewritten["nodes"][0], tensor_index
-    )[0]
-    down_implementation = physical_kernel_implementations_for_node(
+    )
+    down_implementations = physical_kernel_implementations_for_node(
         rewritten, rewritten["nodes"][1], tensor_index
-    )[0]
+    )
+    assert [
+        implementation["execution_shape"] for implementation in gate_implementations
+    ] == [
+        "single_lane",
+        "multi_lane",
+    ]
+    assert [
+        implementation["execution_shape"] for implementation in down_implementations
+    ] == [
+        "single_lane",
+        "multi_lane",
+    ]
+    assert [implementation["phases"] for implementation in gate_implementations] == [
+        ["decode"],
+        ["decode", "prefill"],
+    ]
+    assert [implementation["phases"] for implementation in down_implementations] == [
+        ["decode"],
+        ["decode", "prefill"],
+    ]
+    gate_implementation = gate_implementations[0]
+    down_implementation = down_implementations[0]
     assert gate_implementation["strategy"] == "tensor_parallel_expert"
     assert gate_implementation["execution_form"] == (
         "replicated_input_partitioned_output"
@@ -1122,8 +1134,8 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
     batch_shader_file = frame_parallel_batch_shader_file(shader_file)
     assert batch_shader_file is not None
     physical_shader_files = {
-        Path(gate_implementation["shader_path"]).name,
-        Path(down_implementation["shader_path"]).name,
+        Path(implementation["shader_path"]).name
+        for implementation in (*gate_implementations, *down_implementations)
     }
     rendered_dir = tmp_path / "shaders"
     copy_shader_templates(
@@ -1144,15 +1156,23 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
             assert "block * HIDDEN_SIZE + row" in source
         if rendered_shader.name in physical_shader_files:
             assert "#define TENSOR_PARALLEL 1" in source
+            if "_batch1_" in rendered_shader.name:
+                assert "gl_WorkGroupID.y" in source
+                assert "batch_index" in source
+                if "_gate_up_" in rendered_shader.name:
+                    assert "local_frame_words" in source
+                else:
+                    assert "InputRange" in source
     compile_shader_artifacts(rendered_dir)
 
-    for node, canonical_shader, implementation in (
-        (rewritten["nodes"][0], gate_shader_file, gate_implementation),
-        (rewritten["nodes"][1], shader_file, down_implementation),
+    for node, canonical_shader, implementations in (
+        (rewritten["nodes"][0], gate_shader_file, gate_implementations),
+        (rewritten["nodes"][1], shader_file, down_implementations),
     ):
-        implementation["shader_path"] = implementation["shader_path"].replace(
-            ".comp", ".spv"
-        )
+        for implementation in implementations:
+            implementation["shader_path"] = implementation["shader_path"].replace(
+                ".comp", ".spv"
+            )
         kernel = {
             "source_node_ids": [node["id"]],
             "semantic_module_ids": [f"layer.feed_forward.{node['id']}"],
@@ -1160,7 +1180,7 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
             "local_size_x": 512,
             "workgroup_count_x": 1,
             "batch_implementations": [],
-            "physical_implementations": [implementation],
+            "physical_implementations": implementations,
         }
         contracts = build_kernel_physical_execution_contracts(
             node=node,
@@ -1174,8 +1194,17 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
             for contract in contracts
             if contract["strategy"] == "tensor_parallel_expert"
         ]
-        assert len(distributed) == 1
-        assert distributed[0]["artifacts"][0]["path"] == implementation["shader_path"]
+        assert len(distributed) == 2
+        assert {
+            (contract["execution_shape"], tuple(contract["phases"]))
+            for contract in distributed
+        } == {
+            ("single_lane", ("decode",)),
+            ("multi_lane", ("decode", "prefill")),
+        }
+        assert {contract["artifacts"][0]["path"] for contract in distributed} == {
+            implementation["shader_path"] for implementation in implementations
+        }
 
     packaged = copy_tensor_package(
         tensor_index,
@@ -1205,18 +1234,17 @@ def test_compiler_skips_a_linear_without_legal_physical_geometry(
         target=NativeTarget(),  # type: ignore[arg-type]
     )
 
-    assert input_block_major_tensor_name(
-        "down.weight", TP_INPUT_BLOCK_COLUMNS
-    ) not in tensor_index["tensors"]
+    assert (
+        input_block_major_tensor_name("down.weight", TP_INPUT_BLOCK_COLUMNS)
+        not in tensor_index["tensors"]
+    )
 
 
 def test_compiler_rejects_a_collision_with_its_reserved_tensor_name(
     tmp_path: Path,
 ) -> None:
     _, circuit, tensor_index, _ = bf16_down_fixture(tmp_path)
-    reserved = input_block_major_tensor_name(
-        "down.weight", TP_INPUT_BLOCK_COLUMNS
-    )
+    reserved = input_block_major_tensor_name("down.weight", TP_INPUT_BLOCK_COLUMNS)
     tensor_index["tensors"][reserved] = {"dtype": "BF16", "shape": [1]}
     lowered_dir = tmp_path / "lowered"
     lowered_dir.mkdir()
@@ -1283,9 +1311,7 @@ def test_independent_experts_compile_selector_partition_contracts(
         "inputs": ["expert_intermediates", "routes"],
         "outputs": ["expert_outputs"],
         "params": [
-            parameter
-            for entry in mapping
-            for parameter in entry["parameter_ids"]
+            parameter for entry in mapping for parameter in entry["parameter_ids"]
         ],
         "attrs": {
             "hidden_size": 128,
@@ -1302,8 +1328,7 @@ def test_independent_experts_compile_selector_partition_contracts(
         },
     }
     refs = {
-        parameter: {"tensor": f"tensor.{parameter}"}
-        for parameter in node["params"]
+        parameter: {"tensor": f"tensor.{parameter}"} for parameter in node["params"]
     }
     tensor_index = {
         "tensors": {
@@ -1356,9 +1381,7 @@ def test_independent_experts_compile_selector_partition_contracts(
     )
 
     distributed = next(
-        contract
-        for contract in contracts
-        if contract["strategy"] == "expert_parallel"
+        contract for contract in contracts if contract["strategy"] == "expert_parallel"
     )
     assert distributed["execution_form"] == "whole_expert_ownership"
     assert distributed["partition_extent"] == {
@@ -1449,7 +1472,9 @@ def test_physical_expert_implementation_preserves_selected_parameter_partitions(
         "op": "independent_sparse_moe_down",
         "inputs": ["expert_intermediates", "routes"],
         "outputs": ["expert_outputs"],
-        "params": [parameter for entry in mapping for parameter in entry["parameter_ids"]],
+        "params": [
+            parameter for entry in mapping for parameter in entry["parameter_ids"]
+        ],
         "attrs": {
             "selected_parameter_accesses": [
                 {
@@ -1462,8 +1487,7 @@ def test_physical_expert_implementation_preserves_selected_parameter_partitions(
         },
     }
     refs = {
-        parameter: {"tensor": f"tensor.{parameter}"}
-        for parameter in node["params"]
+        parameter: {"tensor": f"tensor.{parameter}"} for parameter in node["params"]
     }
     tensor_index = {
         "tensors": {
@@ -1585,9 +1609,8 @@ def test_physical_expert_implementation_preserves_selected_parameter_partitions(
         for contract in contracts
         if contract["strategy"] == "tensor_parallel_expert"
     )
-    assert physical["selected_resource_partitions"] == [
-        selected_resource_partition
-    ]
+    assert physical["selected_resource_partitions"] == [selected_resource_partition]
+
 
 def test_input_column_physical_shaders_render_and_compile(tmp_path: Path) -> None:
     source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
