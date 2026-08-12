@@ -446,46 +446,23 @@ fn distributed_calibration_execution_case(
     let contract_ids = contract_digests.keys().cloned().collect::<Vec<_>>();
     let implementation_digests = contract_digests.values().cloned().collect::<Vec<_>>();
 
-    let mut operations = Vec::with_capacity(execution_plan.dispatches.len());
+    let dispatch_indices = (0..execution_plan.dispatches.len()).collect::<Vec<_>>();
+    let row_extents = dispatch_work
+        .iter()
+        .map(|work| (work.full_rows, work.sampled_rows))
+        .collect::<Vec<_>>();
+    let operations = vulkan_distributed_execution_operations(
+        loaded_manifest,
+        execution_plan,
+        &dispatch_indices,
+        &row_extents,
+    )?;
     let mut shards = Vec::new();
-    for (dispatch_ordinal, (dispatch, work)) in execution_plan
+    for (dispatch_ordinal, dispatch) in execution_plan
         .dispatches
         .iter()
-        .zip(dispatch_work)
         .enumerate()
     {
-        let artifact = loaded_manifest
-            .physical_artifact(&dispatch.physical_artifact_id)
-            .ok_or_else(|| {
-                distributed_calibration_error_value(format!(
-                    "distributed calibration case is missing loaded artifact {:?}",
-                    dispatch.physical_artifact_id,
-                ))
-            })?;
-        let workgroup_count_x = dispatch.shards.iter().try_fold(0u32, |total, shard| {
-            total.checked_add(shard.workgroup_count_x).ok_or_else(|| {
-                distributed_calibration_error_value(
-                    "distributed calibration workgroup geometry overflowed",
-                )
-            })
-        })?;
-        operations.push(VulkanPlacementOperationGeometry::Dispatch {
-            geometry: VulkanPlacementDispatchGeometry {
-                contract_id: dispatch.physical_execution_contract_id.clone(),
-                logical_extent: work.full_rows,
-                sampled_extent: work.sampled_rows,
-                input_width: dispatch.input_width,
-                workgroup_count_x,
-                local_size_x: artifact.artifact.local_size_x,
-            },
-        });
-        if let Some(reduction) = distributed_calibration_reduction_geometry(
-            &dispatch.physical_execution_contract_id,
-            dispatch.reduction.as_ref(),
-            dispatch.shards.len(),
-        )? {
-            operations.push(reduction);
-        }
         for shard in &dispatch.shards {
             let participant_ordinal = participant_ordinal_by_logical
                 .get(shard.device_id.as_str())
@@ -600,7 +577,8 @@ fn distributed_calibration_execution_case(
     };
     let input_fixture_digest =
         distributed_calibration_fixture_identity(execution_phase, &shape, 0)?;
-    let equivalence = distributed_calibration_equivalence(execution_plan)?;
+    let equivalence =
+        vulkan_distributed_execution_equivalence(execution_plan, &dispatch_indices)?;
     Ok(VulkanPlacementExecutionCaseIdentity {
         behavior: VulkanPlacementBehaviorIdentity {
             compiled_execution_signature,
@@ -712,121 +690,6 @@ fn distributed_calibration_normalized_selected_resource_fragments<'a>(
         .collect()
 }
 
-fn distributed_calibration_equivalence(
-    execution_plan: &VulkanDistributedExecutionPlan,
-) -> Result<VulkanPlacementEquivalenceIdentity, VulkanResidentTokenModelPackageError> {
-    let dispatches = execution_plan
-        .execution_islands
-        .iter()
-        .flat_map(|island| &island.dispatches)
-        .collect::<Vec<_>>();
-    distributed_calibration_equivalence_from_dispatches(&dispatches)
-}
-
-fn distributed_calibration_equivalence_from_dispatches(
-    dispatches: &[&VulkanDistributedDispatchPlan],
-) -> Result<VulkanPlacementEquivalenceIdentity, VulkanResidentTokenModelPackageError> {
-    let contracts = dispatches
-        .iter()
-        .map(|dispatch| {
-            (
-                dispatch.equivalence.clone(),
-                dispatch
-                    .reduction
-                    .as_ref()
-                    .map(|reduction| reduction.finalization.clone()),
-            )
-        })
-        .collect::<Vec<_>>();
-    distributed_calibration_equivalence_from_contracts(&contracts)
-}
-
-fn distributed_calibration_equivalence_from_contracts(
-    contracts: &[(
-        crate::VulkanDistributedEquivalencePlan,
-        Option<VulkanDistributedReductionFinalizationPlan>,
-    )],
-) -> Result<VulkanPlacementEquivalenceIdentity, VulkanResidentTokenModelPackageError> {
-    let Some((tail, tail_finalization)) = contracts.last() else {
-        return distributed_calibration_error(
-            "distributed calibration equivalence requires an executable dispatch",
-        );
-    };
-    if contracts[..contracts.len() - 1]
-        .iter()
-        .any(|(equivalence, _)| equivalence.output != VulkanDistributedEquivalenceKind::BitExact)
-    {
-        return distributed_calibration_error(
-            "distributed calibration cannot compose a tolerant intermediate without a compiler-declared region equivalence",
-        );
-    }
-    if contracts
-        .iter()
-        .any(|(equivalence, _)| equivalence.state != VulkanDistributedEquivalenceKind::BitExact)
-    {
-        return distributed_calibration_error(
-            "distributed calibration cannot validate tolerant state without a typed compiled state layout",
-        );
-    }
-    let output = match tail.output {
-        VulkanDistributedEquivalenceKind::BitExact => VulkanPlacementEquivalenceKind::BitExact,
-        VulkanDistributedEquivalenceKind::AbsoluteRelativeTolerance => {
-            VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance
-        }
-    };
-    let output_scalar_format = match output {
-        VulkanPlacementEquivalenceKind::BitExact => None,
-        VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance => match tail_finalization {
-            Some(VulkanDistributedReductionFinalizationPlan::StoreF32) => {
-                Some(VulkanPlacementScalarFormat::F32)
-            }
-            Some(
-                VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16
-                | VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. }
-            ) => {
-                Some(VulkanPlacementScalarFormat::Bf16)
-            }
-            None => {
-                return distributed_calibration_error(
-                    "tolerant distributed output has no typed reduction finalization",
-                );
-            }
-        },
-    };
-    let equivalence = VulkanPlacementEquivalenceIdentity {
-        output,
-        state: VulkanPlacementEquivalenceKind::BitExact,
-        absolute_tolerance_bits: tail.absolute_tolerance_bits,
-        relative_tolerance_bits: tail.relative_tolerance_bits,
-        output_scalar_format,
-    };
-    equivalence
-        .validate()
-        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-    Ok(equivalence)
-}
-
-fn distributed_calibration_reduction_geometry(
-    contract_id: &str,
-    reduction: Option<&VulkanDistributedReductionPlan>,
-    participant_count: usize,
-) -> Result<Option<VulkanPlacementOperationGeometry>, VulkanResidentTokenModelPackageError> {
-    let Some(reduction) = reduction else {
-        return Ok(None);
-    };
-    if contract_id.is_empty() || reduction.element_count == 0 || participant_count < 2 {
-        return distributed_calibration_error(
-            "distributed calibration reduction geometry is incomplete",
-        );
-    }
-    Ok(Some(VulkanPlacementOperationGeometry::Reduction {
-        contract_id: contract_id.to_string(),
-        element_count: reduction.element_count,
-        element_byte_count: size_of::<f32>(),
-        participant_count,
-    }))
-}
-
 fn distributed_calibration_distribution_name(
     distribution: VulkanDistributedDispatchDistribution,
 ) -> &'static str {
@@ -895,127 +758,6 @@ fn distributed_calibration_fixture_identity(
         ))
     })?;
     Ok(format!("sha256:{:x}", Sha256::digest(payload)))
-}
-
-fn distributed_calibration_artifact_digest(
-    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
-    execution_plan: &VulkanDistributedExecutionPlan,
-) -> Result<String, VulkanResidentTokenModelPackageError> {
-    let mut digest = Sha256::new();
-    digest.update(b"nerve.distributed_calibration_artifacts.v2\0");
-    if execution_plan.dispatches.is_empty() {
-        return distributed_calibration_error("distributed calibration artifact identity is empty");
-    }
-    for dispatch in &execution_plan.dispatches {
-        let artifact = loaded_manifest
-            .physical_artifact(&dispatch.physical_artifact_id)
-            .ok_or_else(|| {
-                distributed_calibration_error_value(format!(
-                    "distributed calibration artifact identity is missing physical artifact {:?}",
-                    dispatch.physical_artifact_id,
-                ))
-            })?;
-        distributed_calibration_update_artifact_digest(&mut digest, artifact)?;
-    }
-    Ok(format!("sha256:{:x}", digest.finalize()))
-}
-
-fn distributed_calibration_update_artifact_digest(
-    digest: &mut Sha256,
-    artifact: &VulkanLoadedPhysicalKernelArtifact,
-) -> Result<(), VulkanResidentTokenModelPackageError> {
-    // IDs, operation labels, and source paths are not executable identity.
-    // Hash only the interface and SPIR-V that the selected physical dispatch
-    // will execute, in dispatch order.
-    let interface = serde_json::to_vec(&(
-        artifact.artifact.entry_point.as_str(),
-        artifact.artifact.local_size_x,
-        artifact.artifact.workgroup_count_x,
-        &artifact.artifact.descriptor_signature,
-        &artifact.artifact.push_constants,
-        artifact.artifact.stream_control_binding,
-    ))
-    .map_err(|error| {
-        distributed_calibration_error_value(format!(
-            "failed to encode distributed calibration artifact interface: {error}",
-        ))
-    })?;
-    digest.update((interface.len() as u64).to_le_bytes());
-    digest.update(interface);
-    digest.update((artifact.words.len() as u64).to_le_bytes());
-    for word in &artifact.words {
-        digest.update(word.to_le_bytes());
-    }
-    Ok(())
-}
-
-fn distributed_calibration_execution_graph_digest(
-    target: &VulkanRuntimePlacementCalibrationTarget,
-    tick_plan: &VulkanMountedPlacedStreamTickPlan,
-) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"nerve.distributed_calibration_execution_graph.v2\0");
-    // The target signature already identifies the complete compiler-emitted
-    // physical transaction while deliberately excluding semantic labels. Keep
-    // that property here: equivalent repeated components must share placement
-    // evidence, while a different stage/IO topology must not.
-    digest.update(target.signature_id.as_bytes());
-    digest.update([0]);
-    digest.update(tick_plan.stage_count.to_le_bytes());
-    digest.update(tick_plan.receive_stage_count.to_le_bytes());
-    digest.update(tick_plan.dispatch_stage_count.to_le_bytes());
-    digest.update(tick_plan.publish_stage_count.to_le_bytes());
-    for stage in &tick_plan.stages {
-        match stage {
-            VulkanMountedPlacedStreamTickStage::ReceiveEdge { byte_capacity, .. } => {
-                digest.update([0]);
-                digest.update(byte_capacity.to_le_bytes());
-            }
-            VulkanMountedPlacedStreamTickStage::Dispatch { dispatch, .. } => {
-                digest.update([1]);
-                digest.update(dispatch.descriptor_count.to_le_bytes());
-                digest.update(dispatch.resident_descriptor_count.to_le_bytes());
-                digest.update(dispatch.reads.len().to_le_bytes());
-                for read in &dispatch.reads {
-                    distributed_calibration_update_io_topology_digest(&mut digest, read);
-                }
-                digest.update(dispatch.writes.len().to_le_bytes());
-                for write in &dispatch.writes {
-                    distributed_calibration_update_io_topology_digest(&mut digest, write);
-                }
-            }
-            VulkanMountedPlacedStreamTickStage::PublishEdge { byte_capacity, .. } => {
-                digest.update([2]);
-                digest.update(byte_capacity.to_le_bytes());
-            }
-        }
-    }
-    format!("sha256:{:x}", digest.finalize())
-}
-
-fn distributed_calibration_update_io_topology_digest(
-    digest: &mut Sha256,
-    io: &VulkanMountedPlacedStreamTickIo,
-) {
-    match io {
-        VulkanMountedPlacedStreamTickIo::ActivationSlot { slot, .. } => {
-            digest.update([0]);
-            digest.update(slot.to_le_bytes());
-        }
-        VulkanMountedPlacedStreamTickIo::ModelSignal { .. } => digest.update([1]),
-        VulkanMountedPlacedStreamTickIo::LocalEdgeBuffer { byte_capacity, .. } => {
-            digest.update([2]);
-            digest.update(byte_capacity.to_le_bytes());
-        }
-        VulkanMountedPlacedStreamTickIo::IncomingEdgeBuffer { byte_capacity, .. } => {
-            digest.update([3]);
-            digest.update(byte_capacity.to_le_bytes());
-        }
-        VulkanMountedPlacedStreamTickIo::OutgoingEdgeBuffer { byte_capacity, .. } => {
-            digest.update([4]);
-            digest.update(byte_capacity.to_le_bytes());
-        }
-    }
 }
 
 struct VulkanRuntimeDistributedPlacementExecution {
@@ -1527,10 +1269,18 @@ impl VulkanRuntimeDistributedPlacementSession {
                 ))
             })?;
         let tick_plan = distributed_calibration_dispatch_tick_plan(&mounted_bound);
-        let artifact_digest =
-            distributed_calibration_artifact_digest(&loaded_manifest, &distributed_execution_plan)?;
-        let execution_graph_digest =
-            distributed_calibration_execution_graph_digest(target, &tick_plan);
+        let distributed_dispatch_indices =
+            (0..distributed_execution_plan.dispatches.len()).collect::<Vec<_>>();
+        let artifact_digest = vulkan_distributed_execution_artifact_digest(
+            &loaded_manifest,
+            &distributed_execution_plan,
+            &distributed_dispatch_indices,
+        )?;
+        let execution_graph_digest = vulkan_distributed_execution_graph_digest(
+            &target.signature_id,
+            &distributed_execution_plan,
+            &distributed_dispatch_indices,
+        )?;
         let execution_plan =
             VulkanMountedPlacedResidentStreamTickExecutionPlan::
                 from_tick_plan_with_physical_execution_islands_and_demand(
@@ -2466,6 +2216,17 @@ fn distributed_calibration_error_value(
 mod runtime_distributed_placement_calibration_strategy_tests {
     use super::*;
 
+    fn digest_target(component_id: &str, node_id: &str) -> VulkanRuntimePlacementCalibrationTarget {
+        VulkanRuntimePlacementCalibrationTarget {
+            signature_id: "same-physical-signature".to_string(),
+            component_id: component_id.to_string(),
+            component_ids: vec![component_id.to_string()],
+            terminal_node_id: node_id.to_string(),
+            implementation: "physical-implementation".to_string(),
+            planned_resident_parameter_bytes: 0,
+        }
+    }
+
     fn recording_report() -> VulkanRuntimeDistributedPlacementCalibrationReport {
         let digest = |byte: char| format!("sha256:{}", byte.to_string().repeat(64));
         let physical_device_id = "gpu0".to_string();
@@ -2588,83 +2349,6 @@ mod runtime_distributed_placement_calibration_strategy_tests {
         assert_eq!(catalog.observation_count(), 0);
     }
 
-    fn digest_target(component_id: &str, node_id: &str) -> VulkanRuntimePlacementCalibrationTarget {
-        VulkanRuntimePlacementCalibrationTarget {
-            signature_id: "same-physical-signature".to_string(),
-            component_id: component_id.to_string(),
-            component_ids: vec![component_id.to_string()],
-            terminal_node_id: node_id.to_string(),
-            implementation: "physical-implementation".to_string(),
-            planned_resident_parameter_bytes: 0,
-        }
-    }
-
-    fn digest_plan(
-        component_id: &str,
-        node_id: &str,
-        edge_bytes: usize,
-    ) -> VulkanMountedPlacedStreamTickPlan {
-        VulkanMountedPlacedStreamTickPlan {
-            backend_id: "vulkan".to_string(),
-            device_id: "semantic-device-label".to_string(),
-            stages: vec![VulkanMountedPlacedStreamTickStage::Dispatch {
-                stage_index: 17,
-                dispatch: VulkanMountedPlacedStreamTickDispatch {
-                    dispatch_index: 91,
-                    kernel_id: format!("kernel-for-{component_id}"),
-                    component_id: component_id.to_string(),
-                    node_id: node_id.to_string(),
-                    op: "semantic-op-label".to_string(),
-                    descriptor_count: 3,
-                    resident_descriptor_count: 1,
-                    reads: vec![
-                        VulkanMountedPlacedStreamTickIo::ModelSignal {
-                            signal_id: format!("input-for-{component_id}"),
-                        },
-                        VulkanMountedPlacedStreamTickIo::LocalEdgeBuffer {
-                            edge_index: 41,
-                            buffer_index: 7,
-                            byte_capacity: edge_bytes,
-                        },
-                    ],
-                    writes: vec![VulkanMountedPlacedStreamTickIo::ModelSignal {
-                        signal_id: format!("output-for-{component_id}"),
-                    }],
-                },
-            }],
-            stage_count: 1,
-            receive_stage_count: 0,
-            dispatch_stage_count: 1,
-            publish_stage_count: 0,
-            local_edge_read_count: 1,
-            local_edge_write_count: 0,
-            incoming_edge_read_count: 0,
-            outgoing_edge_write_count: 0,
-            model_input_read_count: 1,
-            model_output_write_count: 1,
-            can_execute: true,
-        }
-    }
-
-    #[test]
-    fn execution_graph_identity_reuses_equivalent_components_without_hiding_topology() {
-        let first = distributed_calibration_execution_graph_digest(
-            &digest_target("block.0", "down.0"),
-            &digest_plan("block.0", "down.0", 8_192),
-        );
-        let relabeled = distributed_calibration_execution_graph_digest(
-            &digest_target("block.19", "down.19"),
-            &digest_plan("block.19", "down.19", 8_192),
-        );
-        let different_topology = distributed_calibration_execution_graph_digest(
-            &digest_target("block.19", "down.19"),
-            &digest_plan("block.19", "down.19", 16_384),
-        );
-
-        assert_eq!(first, relabeled);
-        assert_ne!(first, different_topology);
-    }
-
     #[test]
     fn selected_resource_identity_uses_partition_ordinals_not_runtime_selector_ids() {
         let first = distributed_calibration_normalized_selected_resource_indices(
@@ -2702,7 +2386,7 @@ mod runtime_distributed_placement_calibration_strategy_tests {
 
     fn artifact_digest(artifact: &VulkanLoadedPhysicalKernelArtifact) -> String {
         let mut digest = Sha256::new();
-        distributed_calibration_update_artifact_digest(&mut digest, artifact).unwrap();
+        vulkan_distributed_execution_update_artifact_digest(&mut digest, artifact).unwrap();
         format!("sha256:{:x}", digest.finalize())
     }
 
@@ -2839,7 +2523,8 @@ mod runtime_distributed_placement_calibration_strategy_tests {
             finalization: VulkanDistributedReductionFinalizationPlan::StoreF32,
         };
         assert_eq!(
-            distributed_calibration_reduction_geometry("contract", Some(&reduction), 3).unwrap(),
+            vulkan_distributed_execution_reduction_geometry("contract", Some(&reduction), 3)
+                .unwrap(),
             Some(VulkanPlacementOperationGeometry::Reduction {
                 contract_id: "contract".to_string(),
                 element_count: 4096,
@@ -2848,10 +2533,11 @@ mod runtime_distributed_placement_calibration_strategy_tests {
             })
         );
         assert!(
-            distributed_calibration_reduction_geometry("contract", Some(&reduction), 1).is_err()
+            vulkan_distributed_execution_reduction_geometry("contract", Some(&reduction), 1)
+                .is_err()
         );
         assert_eq!(
-            distributed_calibration_reduction_geometry("contract", None, 1).unwrap(),
+            vulkan_distributed_execution_reduction_geometry("contract", None, 1).unwrap(),
             None
         );
     }
@@ -2870,7 +2556,7 @@ mod runtime_distributed_placement_calibration_strategy_tests {
             absolute_tolerance_bits: Some(0.01f64.to_bits()),
             relative_tolerance_bits: Some(0.02f64.to_bits()),
         };
-        let accepted = distributed_calibration_equivalence_from_contracts(&[
+        let accepted = vulkan_distributed_execution_equivalence_from_contracts(&[
             (exact.clone(), None),
             (
                 tolerant.clone(),
@@ -2894,7 +2580,7 @@ mod runtime_distributed_placement_calibration_strategy_tests {
         assert_eq!(accepted.relative_tolerance(), Some(0.02));
 
         assert!(
-            distributed_calibration_equivalence_from_contracts(&[
+            vulkan_distributed_execution_equivalence_from_contracts(&[
                 (tolerant.clone(), None),
                 (exact, None),
             ])
@@ -2903,7 +2589,7 @@ mod runtime_distributed_placement_calibration_strategy_tests {
             .contains("tolerant intermediate")
         );
         assert!(
-            distributed_calibration_equivalence_from_contracts(&[(tolerant, None)])
+            vulkan_distributed_execution_equivalence_from_contracts(&[(tolerant, None)])
                 .unwrap_err()
                 .to_string()
                 .contains("typed reduction")

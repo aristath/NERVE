@@ -1,6 +1,9 @@
 use crate::vulkan_stream_circuit::{
     VulkanPlacementDeviceExecutionIdentity, VulkanPlacementExecutionCaseIdentity,
     VulkanPlacementExecutionStrategy,
+    vulkan_distributed_execution_artifact_digest,
+    vulkan_distributed_execution_equivalence, vulkan_distributed_execution_graph_digest,
+    vulkan_distributed_execution_operations,
 };
 
 impl VulkanDistributedExecutionPlanSet {
@@ -13,24 +16,28 @@ impl VulkanDistributedExecutionPlanSet {
             String,
             VulkanPlacementDeviceExecutionIdentity,
         >,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
     ) -> Result<(), VulkanDistributedPlanError> {
         replay_exact_execution_cases_to_phase(
             &mut self.decode,
             decode_cases,
             ExecutionPhase::Decode,
             device_execution_identity_by_logical_device,
+            loaded_manifest,
         )?;
         replay_exact_execution_cases_to_phase(
             &mut self.decode_batch,
             decode_batch_cases,
             ExecutionPhase::Decode,
             device_execution_identity_by_logical_device,
+            loaded_manifest,
         )?;
         replay_exact_execution_cases_to_phase(
             &mut self.prefill,
             prefill_cases,
             ExecutionPhase::Prefill,
             device_execution_identity_by_logical_device,
+            loaded_manifest,
         )?;
         VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(self)?;
         Ok(())
@@ -45,10 +52,16 @@ fn replay_exact_execution_cases_to_phase(
         String,
         VulkanPlacementDeviceExecutionIdentity,
     >,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
 ) -> Result<(), VulkanDistributedPlanError> {
     if cases.is_empty() {
         return Ok(());
     }
+    execution_plan.execution_islands = resolved_physical_execution_islands_for_phase(
+        &execution_plan.dispatches,
+        execution_plan.shared_activation_route,
+        phase,
+    )?;
     let dispatch_indices_by_component = execution_plan
         .dispatches
         .iter()
@@ -98,6 +111,7 @@ fn replay_exact_execution_cases_to_phase(
                 dispatch_indices,
                 case,
                 device_execution_identity_by_logical_device,
+                loaded_manifest,
             )?,
         }
     }
@@ -127,11 +141,19 @@ fn replay_exact_distributed_component_case(
         String,
         VulkanPlacementDeviceExecutionIdentity,
     >,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
 ) -> Result<(), VulkanDistributedPlanError> {
     if dispatch_indices.is_empty() || case.devices.len() < 2 || case.shards.is_empty() {
         return exact_case_error(format!(
             "distributed exact case for component {component_id:?} has no matching runtime dispatches or participants",
         ));
+    }
+    if execution_plan.execution_islands.is_empty() {
+        execution_plan.execution_islands = resolved_physical_execution_islands_for_phase(
+            &execution_plan.dispatches,
+            execution_plan.shared_activation_route,
+            case.behavior.phase,
+        )?;
     }
     let mut runtime_contracts = BTreeMap::<&str, &str>::new();
     for dispatch_index in dispatch_indices {
@@ -171,6 +193,13 @@ fn replay_exact_distributed_component_case(
             "exact case for component {component_id:?} was measured with a different physical execution strategy",
         ));
     }
+    validate_exact_case_executable_identity(
+        execution_plan,
+        component_id,
+        dispatch_indices,
+        case,
+        loaded_manifest,
+    )?;
     let runtime_participants = dispatch_indices
         .iter()
         .flat_map(|dispatch_index| {
@@ -198,8 +227,37 @@ fn replay_exact_distributed_component_case(
             "exact case for component {component_id:?} was measured on different physical devices or drivers",
         ));
     }
+    let dispatch_ids = dispatch_indices
+        .iter()
+        .map(|index| execution_plan.dispatches[*index].dispatch_index)
+        .collect::<BTreeSet<_>>();
+    let component_islands = execution_plan
+        .execution_islands
+        .iter()
+        .filter(|island| {
+            island.component_id == component_id
+                && island
+                .dispatches
+                .iter()
+                .any(|dispatch| dispatch_ids.contains(&dispatch.dispatch_index))
+        })
+        .collect::<Vec<_>>();
+    let first_island = component_islands.first().ok_or_else(|| {
+        VulkanDistributedPlanError(format!(
+            "exact case for component {component_id:?} has no concrete physical execution island",
+        ))
+    })?;
+    let last_island = component_islands.last().expect("checked nonempty above");
+    if component_islands
+        .iter()
+        .any(|island| island.owner_device_id != first_island.owner_device_id)
+    {
+        return exact_case_error(format!(
+            "exact case for component {component_id:?} spans runtime islands with different owners",
+        ));
+    }
     let owner_identity = device_execution_identity_by_logical_device
-        .get(&execution_plan.dispatches[dispatch_indices[0]].owner_device_id)
+        .get(&first_island.owner_device_id)
         .ok_or_else(|| {
             VulkanDistributedPlanError(format!(
                 "exact case for component {component_id:?} has an unbound logical owner",
@@ -208,6 +266,31 @@ fn replay_exact_distributed_component_case(
     if owner_identity.physical_device_id != case.owner_physical_device_id {
         return exact_case_error(format!(
             "exact case for component {component_id:?} was measured with a different physical owner",
+        ));
+    }
+    let input_identity = device_execution_identity_by_logical_device
+        .get(&first_island.entry_device_id)
+        .ok_or_else(|| {
+            VulkanDistributedPlanError(format!(
+                "exact case for component {component_id:?} has an unbound physical input endpoint",
+            ))
+        })?;
+    let output_identity = device_execution_identity_by_logical_device
+        .get(&last_island.exit_device_id)
+        .ok_or_else(|| {
+            VulkanDistributedPlanError(format!(
+                "exact case for component {component_id:?} has an unbound physical output endpoint",
+            ))
+        })?;
+    let runtime_input_byte_capacity = first_island.leader().input_byte_capacity;
+    let runtime_output_byte_capacity = last_island.tail().output_byte_capacity;
+    if input_identity.physical_device_id != case.input_physical_device_id
+        || output_identity.physical_device_id != case.output_physical_device_id
+        || runtime_input_byte_capacity != case.behavior.shape.input_byte_capacity
+        || runtime_output_byte_capacity != case.behavior.shape.output_byte_capacity
+    {
+        return exact_case_error(format!(
+            "exact case for component {component_id:?} was measured with different physical endpoints or activation shape",
         ));
     }
     validate_exact_case_transport(
@@ -309,6 +392,66 @@ fn replay_exact_distributed_component_case(
     {
         return exact_case_error(format!(
             "exact case for component {component_id:?} contains shards outside its runtime dispatch sequence",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exact_case_executable_identity(
+    execution_plan: &VulkanDistributedExecutionPlan,
+    component_id: &str,
+    dispatch_indices: &[usize],
+    case: &VulkanPlacementExecutionCaseIdentity,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
+) -> Result<(), VulkanDistributedPlanError> {
+    let artifact_digest = vulkan_distributed_execution_artifact_digest(
+        loaded_manifest,
+        execution_plan,
+        dispatch_indices,
+    )
+    .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+    if artifact_digest != case.artifact_digest {
+        return exact_case_error(format!(
+            "exact case for component {component_id:?} was measured with different executable artifacts",
+        ));
+    }
+
+    let row_extents = dispatch_indices
+        .iter()
+        .map(|dispatch_index| {
+            let rows = execution_plan.dispatches[*dispatch_index].output_rows;
+            (rows, rows)
+        })
+        .collect::<Vec<_>>();
+    let operations = vulkan_distributed_execution_operations(
+        loaded_manifest,
+        execution_plan,
+        dispatch_indices,
+        &row_extents,
+    )
+    .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+    if operations != case.operations {
+        return exact_case_error(format!(
+            "exact case for component {component_id:?} was measured with different operation geometry",
+        ));
+    }
+
+    let graph_digest = vulkan_distributed_execution_graph_digest(
+        &case.behavior.compiled_execution_signature,
+        execution_plan,
+        dispatch_indices,
+    )
+    .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+    if graph_digest != case.execution_graph_digest {
+        return exact_case_error(format!(
+            "exact case for component {component_id:?} was measured with a different distributed execution graph",
+        ));
+    }
+    let equivalence = vulkan_distributed_execution_equivalence(execution_plan, dispatch_indices)
+        .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+    if equivalence != case.equivalence {
+        return exact_case_error(format!(
+            "exact case for component {component_id:?} was measured with different output or state equivalence",
         ));
     }
     Ok(())
@@ -472,7 +615,8 @@ fn validate_exact_case_transport(
         .execution_islands
         .iter()
         .filter(|island| {
-            island
+            island.component_id == component_id
+                && island
                 .dispatches
                 .iter()
                 .any(|dispatch| dispatch_index_set.contains(&dispatch.dispatch_index))
@@ -536,10 +680,14 @@ fn exact_case_error<T>(message: impl Into<String>) -> Result<T, VulkanDistribute
 #[cfg(test)]
 mod exact_case_replay_tests {
     use super::*;
+    use std::path::PathBuf;
     use crate::vulkan_stream_circuit::{
         VulkanPlacementBehaviorIdentity, VulkanPlacementDeviceExecutionIdentity,
         VulkanPlacementDispatchGeometry, VulkanPlacementEquivalenceIdentity,
-        VulkanPlacementOperationGeometry, VulkanPlacementShapeClass, VulkanPlacementShardIdentity,
+        VulkanPlacementEquivalenceKind,
+        VulkanPhysicalKernelArtifact, VulkanPlacementOperationGeometry,
+        VulkanPlacementScalarFormat, VulkanPlacementShapeClass, VulkanPlacementShardIdentity,
+        VulkanPlacementTransportIdentity,
     };
 
     fn activation(binding: usize, signal_id: &str) -> VulkanDistributedActivationSlot {
@@ -552,6 +700,103 @@ mod exact_case_replay_tests {
             signal_byte_capacity: 16,
             storage: VulkanDistributedActivationStorage::ActivationSlot,
         }
+    }
+
+    fn loaded_manifest() -> VulkanLoadedKernelArtifactCatalog {
+        VulkanLoadedKernelArtifactCatalog {
+            reusable_artifacts: Vec::new(),
+            physical_artifacts: vec![VulkanLoadedPhysicalKernelArtifact {
+                artifact: VulkanPhysicalKernelArtifact {
+                    artifact_id: "artifact".to_string(),
+                    op: "test".to_string(),
+                    path: "test.spv".to_string(),
+                    entry_point: "main".to_string(),
+                    local_size_x: 64,
+                    workgroup_count_x: 1,
+                    descriptor_signature: Vec::new(),
+                    push_constants: Vec::new(),
+                    stream_control_binding: None,
+                },
+                resolved_path: PathBuf::from("test.spv"),
+                words: vec![0x0723_0203, 1, 2, 3],
+            }],
+            reusable_word_count: 0,
+            physical_word_count: 4,
+        }
+    }
+
+    fn plan_with_dispatch(dispatch: VulkanDistributedDispatchPlan) -> VulkanDistributedExecutionPlan {
+        let mut plan = VulkanDistributedExecutionPlan {
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            storage_buffer_offset_alignment: 4,
+            dispatches: vec![dispatch],
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 16,
+            shared_output_byte_capacity: 16,
+            distributed_parameter_byte_count: 0,
+        };
+        plan.execution_islands = resolved_physical_execution_islands_for_phase(
+            &plan.dispatches,
+            plan.shared_activation_route,
+            ExecutionPhase::Decode,
+        )
+        .unwrap();
+        plan
+    }
+
+    fn synchronize_executable_identity(
+        mut execution_case: VulkanPlacementExecutionCaseIdentity,
+        plan: &VulkanDistributedExecutionPlan,
+    ) -> VulkanPlacementExecutionCaseIdentity {
+        let dispatch_indices = [0];
+        execution_case.artifact_digest = vulkan_distributed_execution_artifact_digest(
+            &loaded_manifest(),
+            plan,
+            &dispatch_indices,
+        )
+        .unwrap();
+        execution_case.operations = vulkan_distributed_execution_operations(
+            &loaded_manifest(),
+            plan,
+            &dispatch_indices,
+            &[(4, 4)],
+        )
+        .unwrap();
+        execution_case.execution_graph_digest = vulkan_distributed_execution_graph_digest(
+            &execution_case.behavior.compiled_execution_signature,
+            plan,
+            &dispatch_indices,
+        )
+        .unwrap();
+        execution_case.equivalence =
+            vulkan_distributed_execution_equivalence(plan, &dispatch_indices).unwrap();
+        let physical_id = |logical_id: &str| match logical_id {
+            "owner" => "physical-owner",
+            "helper" => "physical-helper",
+            other => panic!("unexpected test logical device {other:?}"),
+        };
+        execution_case.transports = plan
+            .execution_islands
+            .iter()
+            .flat_map(|island| &island.transport_routes)
+            .map(|route| VulkanPlacementTransportIdentity {
+                source_physical_device_id: physical_id(&route.source_device_id).to_string(),
+                destination_physical_device_id: physical_id(&route.destination_device_id)
+                    .to_string(),
+                byte_capacity: route.byte_capacity,
+                route: match route.kind {
+                    VulkanPhysicalExecutionTransportKind::ExternalDeviceLocal => {
+                        "external_device_local"
+                    }
+                    VulkanPhysicalExecutionTransportKind::SharedHost => "shared_host",
+                }
+                .to_string(),
+            })
+            .collect();
+        execution_case.transports.sort();
+        execution_case.transports.dedup();
+        execution_case
     }
 
     fn shard(device_id: &str, row_start: usize, resources: &[usize]) -> VulkanDistributedDispatchShard {
@@ -658,7 +903,7 @@ mod exact_case_replay_tests {
             selected_resource_fragments_by_partition: BTreeMap::new(),
             parameter_bytes: 0,
         };
-        VulkanPlacementExecutionCaseIdentity {
+        let execution_case = VulkanPlacementExecutionCaseIdentity {
             behavior: VulkanPlacementBehaviorIdentity {
                 compiled_execution_signature: "signature".to_string(),
                 runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
@@ -696,7 +941,8 @@ mod exact_case_replay_tests {
             output_physical_device_id: "physical-owner".to_string(),
             owner_physical_device_id: "physical-owner".to_string(),
             transports: Vec::new(),
-        }
+        };
+        synchronize_executable_identity(execution_case, &plan_with_dispatch(dispatch()))
     }
 
     fn tensor_parallel_dispatch() -> VulkanDistributedDispatchPlan {
@@ -720,7 +966,10 @@ mod exact_case_replay_tests {
             shard.distribution = "output_rows".to_string();
             shard.selected_resource_indices_by_partition.clear();
         }
-        execution_case
+        synchronize_executable_identity(
+            execution_case,
+            &plan_with_dispatch(tensor_parallel_dispatch()),
+        )
     }
 
     fn device_execution_identities() -> BTreeMap<String, VulkanPlacementDeviceExecutionIdentity> {
@@ -742,6 +991,88 @@ mod exact_case_replay_tests {
                 },
             ),
         ])
+    }
+
+    fn replay_tensor_parallel_case(
+        execution_case: VulkanPlacementExecutionCaseIdentity,
+        loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
+    ) -> Result<VulkanDistributedExecutionPlanSet, VulkanDistributedPlanError> {
+        let empty = || VulkanDistributedExecutionPlan {
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            storage_buffer_offset_alignment: 4,
+            dispatches: Vec::new(),
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 16,
+            shared_output_byte_capacity: 16,
+            distributed_parameter_byte_count: 0,
+        };
+        let mut plans = VulkanDistributedExecutionPlanSet {
+            decode: VulkanDistributedExecutionPlan {
+                dispatches: vec![tensor_parallel_dispatch()],
+                ..empty()
+            },
+            decode_batch: empty(),
+            prefill: empty(),
+        };
+        plans.apply_exact_execution_cases(
+            &BTreeMap::from([("moe".to_string(), execution_case)]),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &device_execution_identities(),
+            loaded_manifest,
+        )?;
+        Ok(plans)
+    }
+
+    #[test]
+    fn distributed_execution_graph_identity_reuses_semantic_relabels_but_not_topology() {
+        let plan = plan_with_dispatch(tensor_parallel_dispatch());
+        let first = vulkan_distributed_execution_graph_digest("signature", &plan, &[0]).unwrap();
+
+        let mut relabeled = plan.clone();
+        relabeled.dispatches[0].component_id = "another-layer".to_string();
+        relabeled.dispatches[0].node_id = "another-node".to_string();
+        relabeled.dispatches[0].physical_artifact_id = "another-artifact-label".to_string();
+        relabeled.execution_islands = resolved_physical_execution_islands_for_phase(
+            &relabeled.dispatches,
+            relabeled.shared_activation_route,
+            ExecutionPhase::Decode,
+        )
+        .unwrap();
+        let relabeled_digest =
+            vulkan_distributed_execution_graph_digest("signature", &relabeled, &[0]).unwrap();
+
+        let mut different_topology = plan;
+        different_topology.dispatches[0].input_byte_capacity += 2;
+        let different_digest = vulkan_distributed_execution_graph_digest(
+            "signature",
+            &different_topology,
+            &[0],
+        )
+        .unwrap();
+
+        assert_eq!(first, relabeled_digest);
+        assert_ne!(first, different_digest);
+    }
+
+    #[test]
+    fn distributed_execution_identity_is_scoped_to_the_selected_component() {
+        let mut plan = plan_with_dispatch(tensor_parallel_dispatch());
+        let mut unrelated = tensor_parallel_dispatch();
+        unrelated.dispatch_index = 8;
+        unrelated.component_id = "unrelated".to_string();
+        unrelated.node_id = "unrelated-down".to_string();
+        unrelated.equivalence.output =
+            VulkanDistributedEquivalenceKind::AbsoluteRelativeTolerance;
+        unrelated.equivalence.absolute_tolerance_bits = Some(0.01f64.to_bits());
+        unrelated.equivalence.relative_tolerance_bits = Some(0.01f64.to_bits());
+        plan.dispatches.push(unrelated);
+
+        assert_eq!(
+            vulkan_distributed_execution_equivalence(&plan, &[0]).unwrap(),
+            VulkanPlacementEquivalenceIdentity::bit_exact(),
+        );
     }
 
     #[test]
@@ -771,6 +1102,7 @@ mod exact_case_replay_tests {
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &device_execution_identities(),
+                &loaded_manifest(),
             )
             .unwrap();
 
@@ -815,10 +1147,102 @@ mod exact_case_replay_tests {
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &device_execution_identities(),
+                &loaded_manifest(),
             )
             .unwrap_err();
 
         assert!(error.0.contains("different runtime implementation"));
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rejects_stale_executable_binary() {
+        let mut stale_manifest = loaded_manifest();
+        stale_manifest.physical_artifacts[0].words[3] ^= 1;
+
+        let error = replay_tensor_parallel_case(
+            tensor_parallel_exact_case(),
+            &stale_manifest,
+        )
+        .unwrap_err();
+
+        assert!(error.0.contains("different executable artifacts"));
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rejects_stale_operation_geometry() {
+        let mut stale = tensor_parallel_exact_case();
+        let VulkanPlacementOperationGeometry::Dispatch { geometry } = &mut stale.operations[0]
+        else {
+            panic!("test fixture must begin with a distributed dispatch");
+        };
+        geometry.input_width += 1;
+
+        let error = replay_tensor_parallel_case(stale, &loaded_manifest()).unwrap_err();
+
+        assert!(error.0.contains("different operation geometry"));
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rejects_stale_execution_graph() {
+        let mut stale = tensor_parallel_exact_case();
+        stale.execution_graph_digest = format!("sha256:{}", "f".repeat(64));
+
+        let error = replay_tensor_parallel_case(stale, &loaded_manifest()).unwrap_err();
+
+        assert!(error.0.contains("different distributed execution graph"));
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rejects_stale_activation_shape() {
+        let mut stale = tensor_parallel_exact_case();
+        stale.behavior.shape.output_byte_capacity += 2;
+
+        let error = replay_tensor_parallel_case(stale, &loaded_manifest()).unwrap_err();
+
+        assert!(error.0.contains("different physical endpoints or activation shape"));
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rejects_stale_owner_and_endpoint() {
+        let mut stale_owner = tensor_parallel_exact_case();
+        stale_owner.owner_physical_device_id = "physical-helper".to_string();
+        let owner_error =
+            replay_tensor_parallel_case(stale_owner, &loaded_manifest()).unwrap_err();
+        assert!(owner_error.0.contains("different physical owner"));
+
+        let mut stale_endpoint = tensor_parallel_exact_case();
+        stale_endpoint.output_physical_device_id = "physical-helper".to_string();
+        let endpoint_error =
+            replay_tensor_parallel_case(stale_endpoint, &loaded_manifest()).unwrap_err();
+        assert!(
+            endpoint_error
+                .0
+                .contains("different physical endpoints or activation shape")
+        );
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rejects_stale_transport_route() {
+        let mut stale = tensor_parallel_exact_case();
+        assert!(!stale.transports.is_empty());
+        stale.transports[0].route = "external_device_local".to_string();
+
+        let error = replay_tensor_parallel_case(stale, &loaded_manifest()).unwrap_err();
+
+        assert!(error.0.contains("different physical transport routes"));
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rejects_stale_equivalence_contract() {
+        let mut stale = tensor_parallel_exact_case();
+        stale.equivalence.output = VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance;
+        stale.equivalence.absolute_tolerance_bits = Some(0.01f64.to_bits());
+        stale.equivalence.relative_tolerance_bits = Some(0.01f64.to_bits());
+        stale.equivalence.output_scalar_format = Some(VulkanPlacementScalarFormat::Bf16);
+
+        let error = replay_tensor_parallel_case(stale, &loaded_manifest()).unwrap_err();
+
+        assert!(error.0.contains("different output or state equivalence"));
     }
 
     #[test]
@@ -857,6 +1281,7 @@ mod exact_case_replay_tests {
                     },
                 ),
             ]),
+            &loaded_manifest(),
         )
         .unwrap();
 
@@ -907,6 +1332,7 @@ mod exact_case_replay_tests {
                         },
                     ),
                 ]),
+                &loaded_manifest(),
             )
             .unwrap_err()
             .to_string()
@@ -950,6 +1376,7 @@ mod exact_case_replay_tests {
                     },
                 ),
             ]),
+            &loaded_manifest(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("different physical devices or drivers"));
@@ -993,6 +1420,7 @@ mod exact_case_replay_tests {
                     },
                 ),
             ]),
+            &loaded_manifest(),
         )
         .unwrap_err();
 
@@ -1037,6 +1465,7 @@ mod exact_case_replay_tests {
                     },
                 ),
             ]),
+            &loaded_manifest(),
         )
         .unwrap_err();
 

@@ -587,9 +587,10 @@ pub(crate) fn selected_resource_execution_requirement(
             input_byte_capacity: first_island.leader().input_byte_capacity,
             output_byte_capacity: last_island.tail().output_byte_capacity,
         },
-        artifact_digest: distributed_calibration_artifact_digest(
+        artifact_digest: vulkan_distributed_execution_artifact_digest(
             loaded_manifest,
             isolated_execution_plan,
+            &(0..isolated_execution_plan.dispatches.len()).collect::<Vec<_>>(),
         )?,
         execution_graph_digest: selected_resource_execution_graph_digest(
             component_signature,

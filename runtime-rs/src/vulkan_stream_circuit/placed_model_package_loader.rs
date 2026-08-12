@@ -298,6 +298,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 &physical_execution_plan.decode_batch_execution_cases_by_component,
                 &physical_execution_plan.prefill_execution_cases_by_component,
                 &device_execution_identity_by_logical_device,
+                &distributed_loaded_manifest,
             )
             .map_err(|error| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(

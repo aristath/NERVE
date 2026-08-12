@@ -220,6 +220,7 @@ include!("vulkan_stream_circuit/runtime_distributed_selected_resource_planning.r
 include!("vulkan_stream_circuit/runtime_selected_resource_mount_planning.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_calibration.rs");
 include!("vulkan_stream_circuit/runtime_distributed_contract_candidates.rs");
+include!("vulkan_stream_circuit/runtime_distributed_execution_identity.rs");
 include!("vulkan_stream_circuit/runtime_distributed_placement_calibration.rs");
 include!("vulkan_stream_circuit/runtime_canonical_placement_calibration.rs");
 include!("vulkan_stream_circuit/runtime_staged_placement_calibration.rs");

@@ -100,10 +100,14 @@ the local placement calibration, and the mounted graph.
   calibration, and rebuilds activation, parameter, ownership, and physical
   residency plans as one coherent fixed point. Missing, ambiguous,
   phase-incompatible, or capacity-infeasible evidence preserves the compiled
-  baseline. Normal chat reports the mounted physical-execution summary, and the
-  conversation gate can require a nonzero TP-island proof. This path is covered
-  hardware-neutrally; its first real-model proof remains blocked by the live
-  inference quarantine above.
+  baseline. Before allocating or entering chat, exact distributed replay now
+  reconstructs the selected component transaction from the concretely loaded
+  SPIR-V, graph topology, operation and reduction geometry, equivalence,
+  activation shape, devices and drivers, endpoints, owner, shards, selected
+  resources, and transport routes. Normal chat reports the mounted
+  physical-execution summary, and the conversation gate can require a nonzero
+  TP-island proof. This path is covered hardware-neutrally; its first real-model
+  proof remains blocked by the live inference quarantine above.
 - All tests and model gates run sequentially. Every Rust test command uses
   `-- --test-threads=1`; Vulkan tests are selected and executed individually.
 
@@ -152,10 +156,6 @@ For every numbered item below:
   and replay exact region evidence, including internal boundaries; the missing
   producer must measure that outer transaction rather than synthesize it by
   summing independent component and boundary measurements.
-- Prove the resulting catalog against a concretely mounted runtime model before
-  chat: every automatically selectable TP case must match that model's exact
-  runtime fingerprint, implementation signatures, artifacts, shapes, device
-  identities, owner profiles, and transport routes.
 
 ### 4. Prove dense FFN tensor parallelism on mounted execution
 
