@@ -850,7 +850,7 @@ mod tests {
                     },
                 ],
                 selection_count_per_activation: 1,
-                resource_execution_class_ids: vec![format!(
+                resource_operation_class_ids: vec![format!(
                     "sha256:{}",
                     "a".repeat(64)
                 )],
@@ -2172,7 +2172,22 @@ mod tests {
             dispatch.selected_resource_partitions[0].atomic_group_byte_counts,
             vec![8; 8]
         );
-        let classes = &dispatch.selected_resource_partitions[0]
+        let operation_classes = &dispatch.selected_resource_partitions[0]
+            .resource_operation_class_ids;
+        assert_eq!(operation_classes.len(), 8);
+        assert!(operation_classes.iter().all(|class_id| {
+            valid_selected_resource_execution_class_id(class_id)
+        }));
+        assert!(operation_classes[..4]
+            .iter()
+            .all(|class_id| class_id == &operation_classes[0]));
+        assert!(operation_classes[4..]
+            .iter()
+            .all(|class_id| class_id == &operation_classes[4]));
+        assert_ne!(operation_classes[0], operation_classes[4]);
+        let classes = plan
+            .selected_resource_execution_classes("routed-experts")
+            .unwrap()
             .resource_execution_class_ids;
         assert_eq!(classes.len(), 8);
         assert!(classes.iter().all(|class_id| {
@@ -2181,6 +2196,31 @@ mod tests {
         assert!(classes[..4].iter().all(|class_id| class_id == &classes[0]));
         assert!(classes[4..].iter().all(|class_id| class_id == &classes[4]));
         assert_ne!(classes[0], classes[4]);
+        let mut two_operation_plan = plan.clone();
+        let mut second_operation = two_operation_plan.dispatches[0].clone();
+        second_operation.dispatch_index += 1;
+        second_operation.node_id = "independent-gate-up".to_string();
+        second_operation.selected_resource_partitions[0].resource_operation_class_ids = (0..8)
+            .map(|resource_index| {
+                format!(
+                    "sha256:{}",
+                    if resource_index < 4 { "c" } else { "d" }.repeat(64)
+                )
+            })
+            .collect();
+        two_operation_plan.dispatches.push(second_operation);
+        let two_operation_classes = two_operation_plan
+            .selected_resource_execution_classes("routed-experts")
+            .unwrap()
+            .resource_execution_class_ids;
+        assert!(two_operation_classes[..4]
+            .iter()
+            .all(|class_id| class_id == &two_operation_classes[0]));
+        assert!(two_operation_classes[4..]
+            .iter()
+            .all(|class_id| class_id == &two_operation_classes[4]));
+        assert_ne!(two_operation_classes[0], two_operation_classes[4]);
+        assert_ne!(two_operation_classes, classes);
         assert_eq!(dispatch.shards.len(), 2);
         assert!(
             dispatch
@@ -2275,7 +2315,7 @@ mod tests {
 
         let mut malformed_class = plans.clone();
         malformed_class.decode.dispatches[0].selected_resource_partitions[0]
-            .resource_execution_class_ids
+            .resource_operation_class_ids
             .pop();
         assert!(
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(
@@ -2369,7 +2409,7 @@ mod tests {
                 },
             ],
             selection_count_per_activation: 1,
-            resource_execution_class_ids: vec![
+            resource_operation_class_ids: vec![
                 format!("sha256:{}", "a".repeat(64));
                 2
             ],
@@ -2578,7 +2618,7 @@ mod tests {
                 parameters_per_resource: 2,
                 parameter_partitions: Vec::new(),
                 selection_count_per_activation: 2,
-                resource_execution_class_ids: vec![
+                resource_operation_class_ids: vec![
                     format!("sha256:{}", "a".repeat(64));
                     4
                 ],
@@ -2757,7 +2797,7 @@ mod tests {
                     },
                 ],
                 selection_count_per_activation: 1,
-                resource_execution_class_ids: vec![format!(
+                resource_operation_class_ids: vec![format!(
                     "sha256:{}",
                     "a".repeat(64)
                 )],

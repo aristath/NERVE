@@ -2140,10 +2140,10 @@ pub struct VulkanDistributedSelectedResourcePartitionPlan {
     pub parameters_per_resource: usize,
     pub parameter_partitions: Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
     pub selection_count_per_activation: usize,
-    /// Stable structural execution class for each selector index. Content and
-    /// model identities are intentionally excluded so equivalent experts can
-    /// share one exact calibration observation.
-    pub resource_execution_class_ids: Vec<String>,
+    /// Stable structural operation class for each selector index in this one
+    /// dispatch. Placement combines the ordered operation classes of an
+    /// expert path into one independently placeable transaction class.
+    pub resource_operation_class_ids: Vec<String>,
     pub atomic_group_ids: Vec<String>,
     pub atomic_group_byte_counts: Vec<usize>,
     pub atomic_group_resource_ids: Vec<Vec<String>>,

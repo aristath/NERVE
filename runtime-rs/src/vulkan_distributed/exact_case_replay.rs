@@ -601,7 +601,7 @@ mod exact_case_replay_tests {
                 parameters_per_resource: 2,
                 parameter_partitions: Vec::new(),
                 selection_count_per_activation: 2,
-                resource_execution_class_ids: vec![
+                resource_operation_class_ids: vec![
                     format!("sha256:{}", "a".repeat(64));
                     4
                 ],

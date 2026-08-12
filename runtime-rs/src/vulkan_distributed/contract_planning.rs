@@ -869,7 +869,7 @@ fn resolve_selected_resource_partitions(
                 ));
             }
             let mut atomic_group_byte_counts = Vec::with_capacity(atomic_group_ids.len());
-            let mut resource_execution_class_ids =
+            let mut resource_operation_class_ids =
                 Vec::with_capacity(atomic_group_ids.len());
             let mut atomic_group_resource_ids = Vec::with_capacity(atomic_group_ids.len());
             let mut parameter_resource_ids = Vec::with_capacity(atomic_group_ids.len());
@@ -939,7 +939,7 @@ fn resolve_selected_resource_partitions(
                     })
                 })?;
                 atomic_group_byte_counts.push(group_bytes);
-                resource_execution_class_ids.push(selected_resource_execution_class_id(
+                resource_operation_class_ids.push(selected_resource_operation_class_id(
                     dispatch,
                     artifact,
                     contract,
@@ -969,7 +969,7 @@ fn resolve_selected_resource_partitions(
                 selection_count_per_activation: selector
                     .encoding
                     .selection_count_per_activation,
-                resource_execution_class_ids,
+                resource_operation_class_ids,
                 atomic_group_ids: atomic_group_ids.clone(),
                 atomic_group_byte_counts,
                 atomic_group_resource_ids,
@@ -981,7 +981,7 @@ fn resolve_selected_resource_partitions(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn selected_resource_execution_class_id(
+fn selected_resource_operation_class_id(
     dispatch: &VulkanPreparedDispatch,
     artifact: &crate::vulkan_stream_circuit::VulkanPhysicalKernelArtifact,
     contract: &PhysicalExecutionContract,
@@ -1032,7 +1032,7 @@ fn selected_resource_execution_class_id(
         .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
     atomic_resources.sort_by_key(Value::to_string);
     let payload = serde_json::to_vec(&serde_json::json!({
-        "schema": "nerve.selected_resource_execution_class.v1",
+        "schema": "nerve.selected_resource_operation_class.v1",
         "implementation_digest": &contract.implementation_digest,
         "operation_family": &contract.operation_family,
         "artifact": {
