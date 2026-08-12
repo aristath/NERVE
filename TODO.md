@@ -201,6 +201,17 @@ For every numbered item below:
 - Use marginal expert frequency and joint co-selection telemetry to place and
   replicate hot experts. Optimize concurrent per-device expert makespan, not
   the sum of six independent expected costs.
+- Calibrate exact execution and lazy-load-wave costs for every compiler-declared
+  expert resource class on each eligible target. Bind that evidence to the
+  artifact, representation, phase, geometry, device, and driver; a missing
+  class measurement makes that placement unavailable. Never substitute an
+  average component duration or derive a resource cost from advertised compute.
+- Apply the telemetry-aware whole-expert placement plan in the production mount
+  and execution-plan path. A planner exercised only by unit tests is not an
+  implemented runtime feature.
+- Replan expert ownership, replicas, and cache quotas from warm telemetry
+  without replacing the stable layer coordinators or dense/attention execution
+  islands. Hybrid physical execution must not disable working-set adaptation.
 - Allow a compiler-declared predictable router dependency to trigger safe
   prefetch or preselection without a DeepSeek-specific runtime branch.
 
