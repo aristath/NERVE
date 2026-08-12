@@ -30,8 +30,7 @@ def attention_tile_token_width(head_width: int) -> int:
         reduction_width = 1 << (tile_tokens - 1).bit_length()
         shared_floats = (
             2 * head_width
-            + tile_tokens
-            * (head_width + subgroup_partials_per_token + 4)
+            + tile_tokens * (head_width + subgroup_partials_per_token + 4)
             + reduction_width
             + 6
         )
@@ -40,6 +39,7 @@ def attention_tile_token_width(head_width: int) -> int:
         token_batches = candidate
     token_batches = max(1, token_batches)
     return physical_tile_tokens * token_batches
+
 
 def write_compiled_tensor(
     *,
@@ -51,14 +51,11 @@ def write_compiled_tensor(
     partition_count: int | None = None,
 ) -> tuple[int, str, list[bytes]]:
     byte_count = int(info["byte_count"])
-    if (
-        partition_count is not None
-        and (
-            not isinstance(partition_count, int)
-            or isinstance(partition_count, bool)
-            or partition_count <= 0
-            or byte_count % partition_count
-        )
+    if partition_count is not None and (
+        not isinstance(partition_count, int)
+        or isinstance(partition_count, bool)
+        or partition_count <= 0
+        or byte_count % partition_count
     ):
         raise ModelCompileError(
             f"tensor {tensor_name!r} has an invalid partition count"
@@ -127,14 +124,11 @@ def write_compiled_composite_tensor(
             f"composite tensor {tensor_name!r} requires unsupported layout {layout!r}"
         )
     byte_count = int(info["byte_count"])
-    if (
-        partition_count is not None
-        and (
-            not isinstance(partition_count, int)
-            or isinstance(partition_count, bool)
-            or partition_count <= 0
-            or byte_count % partition_count
-        )
+    if partition_count is not None and (
+        not isinstance(partition_count, int)
+        or isinstance(partition_count, bool)
+        or partition_count <= 0
+        or byte_count % partition_count
     ):
         raise ModelCompileError(
             f"composite tensor {tensor_name!r} has an invalid partition count"
@@ -152,9 +146,7 @@ def write_compiled_composite_tensor(
     written = 0
     data_digest = sha256()
     partition_digests: list[bytes] = []
-    partition_bytes = (
-        None if partition_count is None else byte_count // partition_count
-    )
+    partition_bytes = None if partition_count is None else byte_count // partition_count
     partition_remaining = partition_bytes
     partition_digest = sha256() if partition_bytes is not None else None
     with destination.open("wb") as destination_handle:
@@ -207,10 +199,7 @@ def write_compiled_composite_tensor(
         raise ModelCompileError(
             f"composite tensor {tensor_name!r} wrote {written} bytes; expected {byte_count}"
         )
-    if (
-        partition_count is not None
-        and len(partition_digests) != partition_count
-    ):
+    if partition_count is not None and len(partition_digests) != partition_count:
         raise ModelCompileError(
             f"composite tensor {tensor_name!r} did not end on a partition boundary"
         )
@@ -227,6 +216,42 @@ def write_compiled_derived_matrix_reorder(
 ) -> tuple[int, str, list[bytes]]:
     if layout != ROW_MAJOR_LAYOUT:
         raise ModelCompileError("derived matrix reorders require row-major storage")
+    dtype = str(info["dtype"])
+    byte_count = int(info["byte_count"])
+    output_shape = [int(value) for value in info["shape"]]
+    header_payload = compiled_safetensors_header(
+        tensor_name,
+        dtype=dtype,
+        shape=output_shape,
+        byte_count=byte_count,
+        layout=layout,
+    )
+    data_start = 8 + len(header_payload)
+    with destination.open("wb") as destination_handle:
+        destination_handle.write(struct.pack("<Q", len(header_payload)))
+        destination_handle.write(header_payload)
+        destination_handle.truncate(data_start + byte_count)
+
+    data_digest, partition_digests = write_derived_matrix_reorder_payload(
+        tensor_name=tensor_name,
+        info=info,
+        destination=destination,
+        destination_data_offset=data_start,
+        partition_count=partition_count,
+    )
+    return len(header_payload), data_digest, partition_digests
+
+
+def write_derived_matrix_reorder_payload(
+    *,
+    tensor_name: str,
+    info: Json,
+    destination: Path,
+    destination_data_offset: int,
+    partition_count: int | None = None,
+) -> tuple[str, list[bytes]]:
+    """Write one byte-preserving matrix reorder into an existing artifact."""
+
     derivation = info.get("derived")
     if not isinstance(derivation, dict) or derivation.get("kind") not in {
         "matrix_to_input_block_major",
@@ -258,9 +283,14 @@ def write_compiled_derived_matrix_reorder(
     if (
         data_offsets[1] - data_offsets[0] != byte_count
         or math.prod(source_shape) * numpy_dtype.itemsize != byte_count
+        or not isinstance(destination_data_offset, int)
+        or isinstance(destination_data_offset, bool)
+        or destination_data_offset < 0
+        or not destination.is_file()
+        or destination.stat().st_size < destination_data_offset + byte_count
     ):
         raise ModelCompileError(
-            f"derived matrix reorder {tensor_name!r} has inconsistent source storage"
+            f"derived matrix reorder {tensor_name!r} has inconsistent storage"
         )
     output_shape = [int(value) for value in info["shape"]]
     if partition_count is not None and (
@@ -274,18 +304,6 @@ def write_compiled_derived_matrix_reorder(
         raise ModelCompileError(
             f"derived matrix reorder {tensor_name!r} has an invalid partition count"
         )
-    header_payload = compiled_safetensors_header(
-        tensor_name,
-        dtype=dtype,
-        shape=output_shape,
-        byte_count=byte_count,
-        layout=layout,
-    )
-    data_start = 8 + len(header_payload)
-    with destination.open("wb") as destination_handle:
-        destination_handle.write(struct.pack("<Q", len(header_payload)))
-        destination_handle.write(header_payload)
-        destination_handle.truncate(data_start + byte_count)
 
     source_matrix = np.memmap(
         source,
@@ -299,7 +317,7 @@ def write_compiled_derived_matrix_reorder(
         destination,
         dtype=numpy_dtype,
         mode="r+",
-        offset=data_start,
+        offset=destination_data_offset,
         shape=tuple(output_shape),
         order="C",
     )
@@ -341,7 +359,7 @@ def write_compiled_derived_matrix_reorder(
     digest = sha256()
     partition_digests: list[bytes] = []
     with destination.open("rb") as destination_handle:
-        destination_handle.seek(data_start)
+        destination_handle.seek(destination_data_offset)
         ranges = 1 if partition_count is None else partition_count
         range_bytes = byte_count // ranges
         for _ in range(ranges):
@@ -359,7 +377,7 @@ def write_compiled_derived_matrix_reorder(
                 remaining -= len(payload)
             if range_digest is not None:
                 partition_digests.append(range_digest.digest())
-    return len(header_payload), digest.hexdigest(), partition_digests
+    return digest.hexdigest(), partition_digests
 
 
 def write_compiled_derived_fp8_e4m3_output_projection(
@@ -392,7 +410,9 @@ def write_compiled_derived_fp8_e4m3_output_projection(
 
     source = Path(derivation["source_file"])
     if not source.is_file():
-        raise ModelCompileError(f"derived FP8 source tensor file does not exist: {source}")
+        raise ModelCompileError(
+            f"derived FP8 source tensor file does not exist: {source}"
+        )
     source_shape = [int(value) for value in derivation["source_shape"]]
     if len(source_shape) != 2:
         raise ModelCompileError(
@@ -467,7 +487,9 @@ def write_compiled_derived_fp8_e4m3_output_projection(
                 column_start = block_column * block_columns
                 column_end = min(column_start + block_columns, input_columns)
                 source_block = block[:, column_start:column_end]
-                block_max = float(np.max(np.abs(source_block))) if source_block.size else 0.0
+                block_max = (
+                    float(np.max(np.abs(source_block))) if source_block.size else 0.0
+                )
                 scale = block_max / 448.0 if block_max > 0.0 else 1.0
                 scales[block_column] = scale
                 quantized[:, column_start:column_end] = f32_to_e4m3fn(
@@ -619,10 +641,7 @@ def write_compiled_derived_bf16_from_fp8_e4m3(
     if layout != ROW_MAJOR_LAYOUT:
         raise ModelCompileError("derived BF16 tensors require row-major layout")
     derivation = info.get("derived")
-    if (
-        not isinstance(derivation, dict)
-        or derivation.get("kind") != "fp8_e4m3_to_bf16"
-    ):
+    if not isinstance(derivation, dict) or derivation.get("kind") != "fp8_e4m3_to_bf16":
         raise ModelCompileError(
             f"tensor {tensor_name!r} is not a derived FP8-to-BF16 tensor"
         )
@@ -679,9 +698,7 @@ def write_compiled_derived_bf16_from_fp8_e4m3(
         layout=layout,
     )
     source_start = (
-        8
-        + int(derivation["source_header_bytes"])
-        + int(derivation["data_offsets"][0])
+        8 + int(derivation["source_header_bytes"]) + int(derivation["data_offsets"][0])
     )
     data_digest = sha256()
     with (
@@ -851,9 +868,8 @@ def e4m3fn_to_f32(values: np.ndarray) -> np.ndarray:
     normal = exponent != 0
     decoded = np.zeros(raw.shape, dtype=np.float32)
     if np.any(normal):
-        decoded[normal] = (
-            (1.0 + mantissa[normal] / 8.0)
-            * np.exp2(exponent[normal].astype(np.float32) - 7.0)
+        decoded[normal] = (1.0 + mantissa[normal] / 8.0) * np.exp2(
+            exponent[normal].astype(np.float32) - 7.0
         )
     if np.any(~normal):
         decoded[~normal] = mantissa[~normal] / 512.0
@@ -893,9 +909,7 @@ def f32_to_e4m3fn(values: np.ndarray) -> np.ndarray:
         exponent[overflow] += 1
         mantissa[overflow] = 0
         exponent_field = exponent + 7
-        saturated = (exponent_field > 15) | (
-            (exponent_field == 15) & (mantissa > 6)
-        )
+        saturated = (exponent_field > 15) | ((exponent_field == 15) & (mantissa > 6))
         exponent_field = np.where(saturated, 15, exponent_field)
         mantissa = np.where(saturated, 6, mantissa)
         encoded[normal] = ((exponent_field << 3) | mantissa).astype(np.uint8)
@@ -1023,11 +1037,8 @@ def can_fuse_mixed_precision_parallel_linears(
     if (
         fp8_projection.get("op") != "parallel_linear_2way"
         or bf16_projection.get("op") != "parallel_linear_2way"
-        or fp8_projection.get("attrs", {}).get("branch_parameter_counts")
-        != [2, 2]
-        or bf16_projection.get("attrs", {}).get(
-            "branch_parameter_counts", [1, 1]
-        )
+        or fp8_projection.get("attrs", {}).get("branch_parameter_counts") != [2, 2]
+        or bf16_projection.get("attrs", {}).get("branch_parameter_counts", [1, 1])
         != [1, 1]
         or len(fp8_projection.get("params", [])) != 4
         or len(bf16_projection.get("params", [])) != 2
@@ -1092,8 +1103,7 @@ def can_fuse_mixed_precision_parallel_linears(
     ):
         return False
     fp8_output_tiles = max(
-        (int(shape[0]) + FP8_PREQUANT_TILE_ROWS - 1)
-        // FP8_PREQUANT_TILE_ROWS
+        (int(shape[0]) + FP8_PREQUANT_TILE_ROWS - 1) // FP8_PREQUANT_TILE_ROWS
         for shape in fp8_shapes
     )
     bf16_output_words = sum((int(shape[0]) + 1) // 2 for shape in bf16_shapes)
@@ -1174,10 +1184,13 @@ def physical_input_prequantization_spec(
 ) -> Json | None:
     fp8_spec = _fp8_prequantization_spec(circuit, node, tensor_index)
     if fp8_spec is not None:
-        contract = str(fp8_spec.get("contract") or _fp8_activation_contract(
-            activation_quantization,
-            block_columns=int(fp8_spec["block_columns"]),
-        ))
+        contract = str(
+            fp8_spec.get("contract")
+            or _fp8_activation_contract(
+                activation_quantization,
+                block_columns=int(fp8_spec["block_columns"]),
+            )
+        )
         return prequantization_spec(
             contract,
             input_size=int(fp8_spec["input_size"]),
@@ -1261,17 +1274,14 @@ def _fp8_activation_contract(
             )
     elif quantization_format != "dynamic_token_fp8_e4m3":
         raise ModelCompileError(
-            "unsupported FP8 activation quantization format "
-            f"{quantization_format!r}"
+            f"unsupported FP8 activation quantization format {quantization_format!r}"
         )
     scale_format = activation_quantization.get("scale_format")
     if scale_format == "f32_exact":
         return FP8_PREQUANTIZATION_CONTRACT
     if scale_format == "e8m0_power_of_two":
         return FP8_E8M0_PREQUANTIZATION_CONTRACT
-    raise ModelCompileError(
-        f"unsupported FP8 activation scale format {scale_format!r}"
-    )
+    raise ModelCompileError(f"unsupported FP8 activation scale format {scale_format!r}")
 
 
 def _fp8_prequantization_spec(
@@ -1303,9 +1313,7 @@ def _fp8_prequantization_spec(
     if node.get("op") == "sparse_moe_gate_up":
         try:
             if (
-                parameter_dtype_for_id(
-                    circuit, node["params"][0], tensor_index
-                )
+                parameter_dtype_for_id(circuit, node["params"][0], tensor_index)
                 != "F8_E4M3"
             ):
                 return None
@@ -1328,9 +1336,7 @@ def _fp8_prequantization_spec(
     if node.get("op") == "sparse_moe_down":
         try:
             if (
-                parameter_dtype_for_id(
-                    circuit, node["params"][0], tensor_index
-                )
+                parameter_dtype_for_id(circuit, node["params"][0], tensor_index)
                 != "F8_E4M3"
             ):
                 return None
@@ -1381,11 +1387,7 @@ def _fp8_prequantization_spec(
         )
     except (KeyError, ModelCompileError):
         return None
-    if (
-        len(shape) != 2
-        or int(shape[1]) <= 0
-        or int(shape[1]) % block_columns
-    ):
+    if len(shape) != 2 or int(shape[1]) <= 0 or int(shape[1]) % block_columns:
         return None
     return {
         "input_size": int(shape[1]),
@@ -1616,8 +1618,7 @@ def can_fuse_parallel_mixed_head_norm_rope(
         and query_rope_attrs.get("activation_quantization") is None
         and isinstance(quantization, dict)
         and quantization.get("format") == "fp8_e4m3"
-        and quantization.get("scale_format")
-        in {"f32_exact", "e8m0_power_of_two"}
+        and quantization.get("scale_format") in {"f32_exact", "e8m0_power_of_two"}
         and quantization.get("scope") == "non_rotary_dimensions"
         and quantization.get("mode") == "quantize_dequantize"
         and block_columns > 0
@@ -1633,8 +1634,7 @@ def can_fuse_parallel_mixed_head_norm_rope(
         and norm_layout == ROW_MAJOR_LAYOUT
         and bool(devices)
         and all(
-            {"shader_float8", "shader_int8"}
-            <= set(device.get("shader_features", []))
+            {"shader_float8", "shader_int8"} <= set(device.get("shader_features", []))
             and "arithmetic" in set(device.get("subgroup_operations", []))
             and bool(device.get("subgroup_compute_supported"))
             and int(device.get("max_compute_work_group_invocations", 0)) >= 64
@@ -1881,9 +1881,7 @@ def q8_0_linear_shape_for_node(
         Q8_0_BLOCK_WORDS,
     ]
     expected_bytes = (
-        out_features
-        * (in_features // Q8_0_GROUP_SIZE)
-        * Q8_0_BLOCK_BYTE_COUNT
+        out_features * (in_features // Q8_0_GROUP_SIZE) * Q8_0_BLOCK_BYTE_COUNT
     )
     if (
         out_features <= 0

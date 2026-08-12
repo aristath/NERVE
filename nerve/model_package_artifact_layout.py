@@ -10,26 +10,28 @@ from typing import Callable
 
 from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.model_package_common import ROW_MAJOR_LAYOUT, package_artifact_path
-from nerve.model_package_tensors import copy_exact_bytes
+from nerve.model_package_tensors import (
+    copy_exact_bytes,
+    write_derived_matrix_reorder_payload,
+)
 from nerve.model_transpiler import read_safetensors_header
 
 
 def validate_artifact_affinity_groups(
     tensors: dict[str, Json], raw_groups: list[list[str]] | None
 ) -> list[list[str]]:
-    return _validated_affinity_groups(
-        tensors, [] if raw_groups is None else raw_groups
-    )
+    return _validated_affinity_groups(tensors, [] if raw_groups is None else raw_groups)
 
 
-def write_direct_tensor_affinity_bank(
+def write_atomic_tensor_affinity_bank(
     *,
     package_dir: Path,
     tensor_names: list[str],
     tensors: dict[str, Json],
+    partition_counts: dict[str, int],
     cancel_requested: Callable[[], bool] | None = None,
-) -> tuple[Json, dict[str, Json]]:
-    """Stream untransformed source tensors directly into one compiled bank."""
+) -> tuple[Json, dict[str, Json], dict[str, list[bytes]]]:
+    """Write direct and byte-preserving reordered tensors into one sealed bank."""
 
     relative_destination = _affinity_bank_path(tensor_names)
     destination = package_artifact_path(
@@ -37,15 +39,41 @@ def write_direct_tensor_affinity_bank(
     )
     header_payload, offsets = _affinity_bank_header(tensor_names, tensors)
     results: dict[str, Json] = {}
+    partition_digests: dict[str, list[bytes]] = {}
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     try:
-        with ExitStack() as source_stack, temporary.open("wb") as destination_handle:
-            source_handles = {}
+        total_bytes = sum(int(tensors[name]["byte_count"]) for name in tensor_names)
+        with temporary.open("wb") as destination_handle:
             destination_handle.write(struct.pack("<Q", len(header_payload)))
             destination_handle.write(header_payload)
+            destination_handle.truncate(8 + len(header_payload) + total_bytes)
+        with ExitStack() as source_stack, temporary.open("r+b") as destination_handle:
+            source_handles = {}
             for tensor_name in tensor_names:
                 check_compile_cancelled(cancel_requested)
                 info = tensors[tensor_name]
+                partition_count = partition_counts.get(tensor_name)
+                derivation = info.get("derived")
+                if isinstance(derivation, dict):
+                    digest, tensor_partition_digests = (
+                        write_derived_matrix_reorder_payload(
+                            tensor_name=tensor_name,
+                            info=info,
+                            destination=temporary,
+                            destination_data_offset=(
+                                8 + len(header_payload) + offsets[tensor_name][0]
+                            ),
+                            partition_count=partition_count,
+                        )
+                    )
+                    results[tensor_name] = {
+                        "source_file": relative_destination,
+                        "data_offsets": offsets[tensor_name],
+                        "data_sha256": digest,
+                        "safetensors_header_bytes": len(header_payload),
+                    }
+                    partition_digests[tensor_name] = tensor_partition_digests
+                    continue
                 source = Path(str(info.get("source_file", "")))
                 if not source.is_file():
                     raise ModelCompileError(
@@ -83,10 +111,14 @@ def write_direct_tensor_affinity_bank(
                     source_handle = source_stack.enter_context(source.open("rb"))
                     source_handles[source] = source_handle
                 source_handle.seek(8 + source_header_bytes + int(source_offsets[0]))
-                copy_exact_bytes(
-                    source_handle,
-                    destination_handle,
-                    byte_count,
+                destination_handle.seek(
+                    8 + len(header_payload) + offsets[tensor_name][0]
+                )
+                tensor_partition_digests = _copy_with_partition_digests(
+                    source_handle=source_handle,
+                    destination_handle=destination_handle,
+                    byte_count=byte_count,
+                    partition_count=partition_count,
                     digest=digest,
                 )
                 results[tensor_name] = {
@@ -95,6 +127,7 @@ def write_direct_tensor_affinity_bank(
                     "data_sha256": digest.hexdigest(),
                     "safetensors_header_bytes": len(header_payload),
                 }
+                partition_digests[tensor_name] = tensor_partition_digests
             destination_handle.flush()
             os.fsync(destination_handle.fileno())
         temporary.replace(destination)
@@ -112,7 +145,48 @@ def write_direct_tensor_affinity_bank(
             },
         },
         results,
+        partition_digests,
     )
+
+
+def _copy_with_partition_digests(
+    *,
+    source_handle,
+    destination_handle,
+    byte_count: int,
+    partition_count: int | None,
+    digest,
+) -> list[bytes]:
+    if partition_count is None:
+        copy_exact_bytes(
+            source_handle,
+            destination_handle,
+            byte_count,
+            digest=digest,
+        )
+        return []
+    if (
+        not isinstance(partition_count, int)
+        or isinstance(partition_count, bool)
+        or partition_count <= 0
+        or byte_count % partition_count
+    ):
+        raise ModelCompileError("affinity-packed tensor has invalid partitions")
+    partition_bytes = byte_count // partition_count
+    partition_digests = []
+    for _ in range(partition_count):
+        partition_digest = sha256()
+        remaining = partition_bytes
+        while remaining:
+            payload = source_handle.read(min(remaining, 8 * 1024 * 1024))
+            if not payload:
+                raise ModelCompileError("affinity-packed tensor ended unexpectedly")
+            destination_handle.write(payload)
+            digest.update(payload)
+            partition_digest.update(payload)
+            remaining -= len(payload)
+        partition_digests.append(partition_digest.digest())
+    return partition_digests
 
 
 def pack_tensor_artifacts_by_affinity(

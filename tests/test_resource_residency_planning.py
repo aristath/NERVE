@@ -855,10 +855,11 @@ def _write_source_tensor(
     tensor_name: str,
     shape: list[int],
     payload: bytes,
+    dtype: str = "U8",
 ) -> dict[str, object]:
     header = {
         tensor_name: {
-            "dtype": "U8",
+            "dtype": dtype,
             "shape": shape,
             "data_offsets": [0, len(payload)],
         }
@@ -867,7 +868,7 @@ def _write_source_tensor(
     path = root / f"{tensor_name.replace('.', '_')}.safetensors"
     path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + payload)
     return {
-        "dtype": "U8",
+        "dtype": dtype,
         "shape": shape,
         "byte_count": len(payload),
         "parameter_count": len(payload),
@@ -875,6 +876,136 @@ def _write_source_tensor(
         "source_header_bytes": len(encoded),
         "data_offsets": [0, len(payload)],
     }
+
+
+def test_packages_mixed_direct_and_reordered_selected_resources_without_peak_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    router = _write_source_tensor(
+        source_dir,
+        tensor_name="tensor.router",
+        shape=[5],
+        payload=b"route",
+    )
+    tensors: dict[str, dict[str, object]] = {"tensor.router": router}
+    expected_payload = bytearray()
+    for unit in range(2):
+        scale_name = f"tensor.unit_{unit}_scale"
+        scale_payload = bytes(range(16 + unit * 8, 24 + unit * 8))
+        scale = _write_source_tensor(
+            source_dir,
+            tensor_name=scale_name,
+            shape=[2, 2, 2],
+            payload=scale_payload,
+            dtype="I8",
+        )
+        scale[SOURCE_INTEGRITY_PARTITION_COUNT_FIELD] = 2
+        tensors[scale_name] = scale
+        expected_payload.extend(scale_payload)
+
+        source_name = f"source.unit_{unit}_weight"
+        source_payload = bytes(range(unit * 8, unit * 8 + 8))
+        source = _write_source_tensor(
+            source_dir,
+            tensor_name=source_name,
+            shape=[2, 4],
+            payload=source_payload,
+            dtype="I8",
+        )
+        weight_name = f"tensor.unit_{unit}_weight"
+        tensors[weight_name] = {
+            **source,
+            "shape": [2, 2, 2],
+            SOURCE_INTEGRITY_PARTITION_COUNT_FIELD: 2,
+            "derived": {
+                "kind": "matrix_to_input_block_major",
+                "source_tensor": source_name,
+                "source_file": source["source_file"],
+                "source_header_bytes": source["source_header_bytes"],
+                "data_offsets": source["data_offsets"],
+                "source_shape": [2, 4],
+                "block_columns": 2,
+            },
+        }
+        expected_payload.extend(
+            source_payload[0:2]
+            + source_payload[4:6]
+            + source_payload[2:4]
+            + source_payload[6:8]
+        )
+
+    tensor_index = {
+        "tensors": tensors,
+        "totals": {
+            "tensor_count": len(tensors),
+            "parameter_count": sum(
+                int(info["parameter_count"]) for info in tensors.values()
+            ),
+            "byte_count": sum(int(info["byte_count"]) for info in tensors.values()),
+        },
+    }
+    nodes, refs = _independent_component()
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index=tensor_index,
+        require_direct_packaging=True,
+    )
+    standalone_reorders: list[str] = []
+    original_reorder = __import__(
+        "nerve.model_package_assets", fromlist=["write_compiled_derived_matrix_reorder"]
+    ).write_compiled_derived_matrix_reorder
+
+    def count_standalone_reorders(**kwargs: object):
+        standalone_reorders.append(str(kwargs["tensor_name"]))
+        return original_reorder(**kwargs)
+
+    monkeypatch.setattr(
+        "nerve.model_package_assets.write_compiled_derived_matrix_reorder",
+        count_standalone_reorders,
+    )
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+
+    packaged = copy_tensor_package(
+        tensor_index,
+        package_dir,
+        partition_counts=partition_counts_for_packaging(analysis),
+        artifact_affinity_groups=artifact_affinity_groups_for_packaging(analysis),
+    )
+
+    assert standalone_reorders == []
+    dynamic_names = artifact_affinity_groups_for_packaging(analysis)[0]
+    dynamic_infos = [packaged["tensors"][name] for name in dynamic_names]
+    assert len({info["source_file"] for info in dynamic_infos}) == 1
+    bank_path = package_dir / dynamic_infos[0]["source_file"]
+    header_bytes = int(dynamic_infos[0]["safetensors_header_bytes"])
+    assert bank_path.read_bytes()[8 + header_bytes :] == expected_payload
+    assert all(
+        info["partition_integrity"]["partition_count"] == 2 for info in dynamic_infos
+    )
+    digest_table = (
+        package_dir / dynamic_infos[0]["partition_integrity"]["digest_table_path"]
+    )
+    bank_payload = bank_path.read_bytes()
+    digest_payload = digest_table.read_bytes()
+    for name in dynamic_names:
+        info = packaged["tensors"][name]
+        integrity = info["partition_integrity"]
+        digest_offset = int(integrity["digest_table_byte_offset"])
+        partition_bytes = int(integrity["partition_byte_count"])
+        source_offsets = [int(value) for value in info["data_offsets"]]
+        actual = bank_payload[
+            8 + header_bytes + source_offsets[0] : 8 + header_bytes + source_offsets[1]
+        ]
+        expected_digests = b"".join(
+            sha256(actual[offset : offset + partition_bytes]).digest()
+            for offset in range(0, len(actual), partition_bytes)
+        )
+        assert digest_payload[digest_offset : digest_offset + 64] == expected_digests
+    assert len(packaged["source"]["weights_files"]) == 2
 
 
 def test_packages_partition_digests_and_builds_compact_dynamic_contract(

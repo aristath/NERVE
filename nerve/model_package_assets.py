@@ -4,7 +4,7 @@ from nerve.model_package_packed_tensors import *
 from nerve.model_package_artifact_layout import (
     pack_tensor_artifacts_by_affinity,
     validate_artifact_affinity_groups,
-    write_direct_tensor_affinity_bank,
+    write_atomic_tensor_affinity_bank,
 )
 from nerve.resource_residency_planning import (
     TENSOR_PARTITION_INTEGRITY_SCHEMA,
@@ -169,8 +169,14 @@ def all_lowered_circuit_refs(lowered_index: Json) -> list[Json]:
     return refs
 
 
-def _supports_direct_affinity_packaging(info: Json, *, partitioned: bool) -> bool:
-    if partitioned or info.get("derived") is not None or info.get("source_parts"):
+def _supports_atomic_affinity_packaging(info: Json) -> bool:
+    if info.get("source_parts"):
+        return False
+    derivation = info.get("derived")
+    if derivation is not None and (
+        not isinstance(derivation, dict)
+        or derivation.get("kind") not in {"matrix_to_input_block_major", "transpose_2d"}
+    ):
         return False
     quantization = info.get("quantization")
     return not (
@@ -214,49 +220,83 @@ def copy_tensor_package(
     affinity_groups = validate_artifact_affinity_groups(
         packaged["tensors"], artifact_affinity_groups
     )
-    direct_affinity_groups = [
+    atomic_affinity_groups = [
         group
         for group in affinity_groups
         if all(
-            _supports_direct_affinity_packaging(
-                packaged["tensors"][tensor_name],
-                partitioned=tensor_name in partition_counts,
-            )
+            _supports_atomic_affinity_packaging(packaged["tensors"][tensor_name])
             for tensor_name in group
         )
     ]
     deferred_affinity_groups = [
-        group for group in affinity_groups if group not in direct_affinity_groups
+        group for group in affinity_groups if group not in atomic_affinity_groups
     ]
-    direct_affinity_group_by_tensor = {
-        tensor_name: group
-        for group in direct_affinity_groups
-        for tensor_name in group
+    atomic_affinity_group_by_tensor = {
+        tensor_name: group for group in atomic_affinity_groups for tensor_name in group
     }
-    direct_affinity_groups_written: set[tuple[str, ...]] = set()
+    atomic_affinity_groups_written: set[tuple[str, ...]] = set()
     partition_digest_payload = bytearray()
     partition_integrity_records: list[tuple[Json, int, int, int]] = []
+
+    def record_partition_integrity(
+        tensor_name: str,
+        info: Json,
+        partition_count: int,
+        partition_digests: list[bytes],
+    ) -> None:
+        if len(partition_digests) != partition_count:
+            raise ModelCompileError(
+                f"selected tensor {tensor_name!r} emitted incomplete partition integrity"
+            )
+        digest_offset = len(partition_digest_payload)
+        for partition_digest in partition_digests:
+            if len(partition_digest) != 32:
+                raise ModelCompileError(
+                    f"selected tensor {tensor_name!r} emitted an invalid digest"
+                )
+            partition_digest_payload.extend(partition_digest)
+        partition_integrity_records.append(
+            (
+                info,
+                partition_count,
+                int(info["byte_count"]) // partition_count,
+                digest_offset,
+            )
+        )
+
     for index, (tensor_name, info) in enumerate(tensors, start=1):
         check_compile_cancelled(cancel_requested)
-        direct_group = direct_affinity_group_by_tensor.get(tensor_name)
-        if direct_group is not None:
-            group_key = tuple(direct_group)
-            if group_key not in direct_affinity_groups_written:
-                source_record, emitted = write_direct_tensor_affinity_bank(
-                    package_dir=package_dir,
-                    tensor_names=direct_group,
-                    tensors=packaged["tensors"],
-                    cancel_requested=cancel_requested,
+        atomic_group = atomic_affinity_group_by_tensor.get(tensor_name)
+        if atomic_group is not None:
+            group_key = tuple(atomic_group)
+            if group_key not in atomic_affinity_groups_written:
+                source_record, emitted, emitted_partition_digests = (
+                    write_atomic_tensor_affinity_bank(
+                        package_dir=package_dir,
+                        tensor_names=atomic_group,
+                        tensors=packaged["tensors"],
+                        partition_counts=partition_counts,
+                        cancel_requested=cancel_requested,
+                    )
                 )
                 compiled_sources.append(source_record)
                 for emitted_name, emitted_metadata in emitted.items():
                     emitted_info = packaged["tensors"][emitted_name]
                     emitted_info.update(emitted_metadata)
                     emitted_info["layout"] = ROW_MAJOR_LAYOUT
+                    emitted_info.pop("derived", None)
                     emitted_info.pop("source_parts", None)
                     emitted_info.pop("source_header_bytes", None)
                     emitted_info.pop("layout_hint", None)
-                direct_affinity_groups_written.add(group_key)
+                    emitted_partition_count = partition_counts.get(emitted_name)
+                    if emitted_partition_count is not None:
+                        record_partition_integrity(
+                            emitted_name,
+                            emitted_info,
+                            emitted_partition_count,
+                            emitted_partition_digests[emitted_name],
+                        )
+                atomic_affinity_groups_written.add(group_key)
             if progress is not None:
                 progress(index, total, tensor_name)
             continue
@@ -273,11 +313,10 @@ def copy_tensor_package(
         partition_count = partition_counts.get(tensor_name)
         quantization = info.get("quantization")
         partition_digests: list[bytes] = []
-        matrix_reorder = (
-            isinstance(derivation, dict)
-            and derivation.get("kind")
-            in {"matrix_to_input_block_major", "transpose_2d"}
-        )
+        matrix_reorder = isinstance(derivation, dict) and derivation.get("kind") in {
+            "matrix_to_input_block_major",
+            "transpose_2d",
+        }
         if partition_count is not None and (
             (isinstance(derivation, dict) and not matrix_reorder)
             or (
@@ -504,25 +543,8 @@ def copy_tensor_package(
                 partition_count=partition_count,
             )
         if partition_count is not None:
-            if len(partition_digests) != partition_count:
-                raise ModelCompileError(
-                    f"selected tensor {tensor_name!r} emitted incomplete "
-                    "partition integrity"
-                )
-            digest_offset = len(partition_digest_payload)
-            for partition_digest in partition_digests:
-                if len(partition_digest) != 32:
-                    raise ModelCompileError(
-                        f"selected tensor {tensor_name!r} emitted an invalid digest"
-                    )
-                partition_digest_payload.extend(partition_digest)
-            partition_integrity_records.append(
-                (
-                    info,
-                    partition_count,
-                    int(info["byte_count"]) // partition_count,
-                    digest_offset,
-                )
+            record_partition_integrity(
+                tensor_name, info, partition_count, partition_digests
             )
         if isinstance(quantization, dict):
             quantization.pop("execution_zero_point_encoding", None)
