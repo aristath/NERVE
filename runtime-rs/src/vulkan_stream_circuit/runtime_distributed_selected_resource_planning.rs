@@ -361,6 +361,7 @@ pub fn try_plan_vulkan_runtime_selected_resource_placements(
     }
 
     let mut placements = Vec::with_capacity(requirement_plans.len());
+    let mut remaining_capacities = capacities.to_vec();
     for requirement_plan in requirement_plans {
         let partitions = execution_plan
             .dispatches
@@ -400,7 +401,7 @@ pub fn try_plan_vulkan_runtime_selected_resource_placements(
         if participant_ids.len() < 2 {
             return Ok(None);
         }
-        let candidate_capacities = capacities
+        let candidate_capacities = remaining_capacities
             .iter()
             .filter(|capacity| participant_ids.contains(capacity.device_id.as_str()))
             .cloned()
@@ -475,9 +476,44 @@ pub fn try_plan_vulkan_runtime_selected_resource_placements(
         {
             return Ok(None);
         }
+        reserve_selected_resource_placement_capacity(
+            &mut remaining_capacities,
+            &placement,
+            residency_policy,
+        )?;
         placements.push(placement);
     }
     Ok(Some(placements))
+}
+
+fn reserve_selected_resource_placement_capacity(
+    capacities: &mut [VulkanPlacementSelectedResourceDeviceCapacity],
+    placement: &VulkanSelectedResourcePlacementPlan,
+    residency_policy: ResourceResidencyPolicy,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    if residency_policy == ResourceResidencyPolicy::DemandPaged {
+        return Ok(());
+    }
+    for load in &placement.device_loads {
+        let remaining = capacities
+            .iter_mut()
+            .find(|capacity| capacity.device_id == load.device_id)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "selected-resource placement references missing capacity {:?}",
+                    load.device_id,
+                ))
+            })?;
+        remaining.resident_payload_capacity_bytes = remaining
+            .resident_payload_capacity_bytes
+            .checked_sub(load.addressable_bytes)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(
+                    "selected-resource retained payload exceeded its cumulative capacity",
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn uniform_selected_resource_telemetry(
@@ -654,6 +690,38 @@ mod runtime_selected_resource_execution_planning_tests {
         }
     }
 
+    fn capacity(bytes: usize) -> VulkanPlacementSelectedResourceDeviceCapacity {
+        VulkanPlacementSelectedResourceDeviceCapacity {
+            device_id: "gpu0".to_string(),
+            identity: VulkanPlacementDeviceExecutionIdentity {
+                physical_device_id: "physical-gpu0".to_string(),
+                api_version: 1,
+                driver_version: 1,
+            },
+            resident_payload_capacity_bytes: bytes,
+        }
+    }
+
+    fn placement(bytes: usize) -> VulkanSelectedResourcePlacementPlan {
+        VulkanSelectedResourcePlacementPlan {
+            selector_id: "experts".to_string(),
+            assignments: vec![crate::vulkan_distributed::VulkanSelectedResourceAssignment {
+                resource_index: 0,
+                device_id: "gpu0".to_string(),
+            }],
+            device_loads: vec![crate::vulkan_distributed::VulkanSelectedResourceDeviceLoad {
+                device_id: "gpu0".to_string(),
+                addressable_bytes: bytes,
+                maximum_load_wave_bytes: bytes,
+                first_moment_ns: 1,
+                second_moment_ns2: 1,
+                owned_resource_indices: vec![0],
+            }],
+            maximum_first_moment_ns: 1,
+            maximum_second_moment_ns2: 1,
+        }
+    }
+
     #[test]
     fn representative_plan_keeps_one_exact_resource_per_execution_class() {
         let class_a = digest('1');
@@ -703,5 +771,39 @@ mod runtime_selected_resource_execution_planning_tests {
 
         let single = uniform_selected_resource_telemetry("block", &partition(1)).unwrap();
         assert!(single.co_selection_counts.is_empty());
+    }
+
+    #[test]
+    fn retained_selectors_consume_one_cumulative_payload_budget() {
+        let mut capacities = vec![capacity(100)];
+        reserve_selected_resource_placement_capacity(
+            &mut capacities,
+            &placement(60),
+            ResourceResidencyPolicy::DemandRetained,
+        )
+        .unwrap();
+        assert_eq!(capacities[0].resident_payload_capacity_bytes, 40);
+        assert!(
+            reserve_selected_resource_placement_capacity(
+                &mut capacities,
+                &placement(41),
+                ResourceResidencyPolicy::DemandRetained,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("cumulative capacity")
+        );
+    }
+
+    #[test]
+    fn paged_selectors_share_capacity_without_reserving_addressable_payload() {
+        let mut capacities = vec![capacity(100)];
+        reserve_selected_resource_placement_capacity(
+            &mut capacities,
+            &placement(80),
+            ResourceResidencyPolicy::DemandPaged,
+        )
+        .unwrap();
+        assert_eq!(capacities[0].resident_payload_capacity_bytes, 100);
     }
 }

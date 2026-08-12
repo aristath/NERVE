@@ -34,6 +34,7 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     distributed_parameter_exclusion_plan: VulkanDistributedParameterExclusionPlan,
     physical_execution_residency_plan: VulkanRuntimePhysicalExecutionResidencyPlan,
     mounted_boundary_routes: BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
+    selected_resource_placements: Vec<VulkanSelectedResourcePlacementPlan>,
     distributed_selected_resource_store_plan: VulkanDistributedSelectedResourceStorePlan,
     distributed_loaded_manifest: VulkanLoadedKernelArtifactCatalog,
     distributed_parameter_buffers: Arc<VulkanDistributedParameterBuffers>,
@@ -41,6 +42,15 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     compiled_resource_device_stores: BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
     compiled_resource_physical_placements: Vec<VulkanCompiledResourcePhysicalPlacement>,
     runtime_component_instances: Vec<VulkanRuntimeComponentInstance>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VulkanMountedPhysicalExecutionSummary {
+    pub tensor_parallel_island_count: usize,
+    pub whole_expert_parallel_island_count: usize,
+    pub intra_expert_tensor_parallel_island_count: usize,
+    pub hybrid_island_count: usize,
+    pub selected_resource_placement_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +103,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
         &self,
     ) -> &VulkanDistributedSelectedResourceStorePlan {
         &self.distributed_selected_resource_store_plan
+    }
+
+    pub fn selected_resource_placements(&self) -> &[VulkanSelectedResourcePlacementPlan] {
+        &self.selected_resource_placements
+    }
+
+    pub fn decode_physical_execution_summary(&self) -> VulkanMountedPhysicalExecutionSummary {
+        mounted_physical_execution_summary(
+            &self.distributed_execution_plans.decode.execution_islands,
+            self.selected_resource_placements.len(),
+        )
     }
 
     fn compiled_resource_load_required_count(
@@ -166,6 +187,38 @@ impl VulkanResidentInProcessPlacedModelPackage {
         }
         Ok(declarations.into_values().collect())
     }
+}
+
+pub(crate) fn mounted_physical_execution_summary(
+    islands: &[VulkanPhysicalExecutionIslandPlan],
+    selected_resource_placement_count: usize,
+) -> VulkanMountedPhysicalExecutionSummary {
+    let mut summary = VulkanMountedPhysicalExecutionSummary {
+        selected_resource_placement_count,
+        ..VulkanMountedPhysicalExecutionSummary::default()
+    };
+    for island in islands {
+        use nerve_execution_contracts::ExecutionStrategy;
+        let saw_tensor_parallel = island
+            .dispatches
+            .iter()
+            .any(|dispatch| dispatch.execution_strategy == ExecutionStrategy::TensorParallel);
+        let saw_whole_expert = island
+            .dispatches
+            .iter()
+            .any(|dispatch| dispatch.execution_strategy == ExecutionStrategy::ExpertParallel);
+        let saw_intra_expert = island.dispatches.iter().any(|dispatch| {
+            dispatch.execution_strategy == ExecutionStrategy::TensorParallelExpert
+        });
+        match (saw_tensor_parallel, saw_whole_expert, saw_intra_expert) {
+            (true, false, false) => summary.tensor_parallel_island_count += 1,
+            (false, true, false) => summary.whole_expert_parallel_island_count += 1,
+            (false, false, true) => summary.intra_expert_tensor_parallel_island_count += 1,
+            (false, false, false) => {}
+            _ => summary.hybrid_island_count += 1,
+        }
+    }
+    summary
 }
 
 fn transient_state_declaration_for_resident_state_buffer(

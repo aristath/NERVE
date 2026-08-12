@@ -624,6 +624,57 @@ impl VulkanDistributedExecutionPlanSet {
     }
 }
 
+pub(crate) fn selected_resource_placements_fit_phase_participants(
+    plans: &VulkanDistributedExecutionPlanSet,
+    placements: &[VulkanSelectedResourcePlacementPlan],
+) -> Result<bool, VulkanDistributedPlanError> {
+    let placement_by_selector = canonical_selected_resource_placements(placements)?;
+    for phase in plans.all() {
+        for dispatch in &phase.dispatches {
+            let matching_partitions = dispatch
+                .selected_resource_partitions
+                .iter()
+                .filter_map(|partition| {
+                    placement_by_selector
+                        .get(partition.selector_id.as_str())
+                        .map(|placement| (partition, *placement))
+                })
+                .collect::<Vec<_>>();
+            if matching_partitions.is_empty() {
+                continue;
+            }
+            let compiled_devices = dispatch
+                .shards
+                .iter()
+                .map(|shard| shard.device_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let assigned_devices = matching_partitions
+                .iter()
+                .flat_map(|(partition, placement)| {
+                    placement.assignments.iter().map(move |assignment| {
+                        (partition.resource_count, assignment)
+                    })
+                })
+                .map(|(resource_count, assignment)| {
+                    if assignment.resource_index >= resource_count {
+                        return Err(VulkanDistributedPlanError(format!(
+                            "selected-resource placement assigns resource {} outside 0..{resource_count}",
+                            assignment.resource_index,
+                        )));
+                    }
+                    Ok(assignment.device_id.as_str())
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            if assigned_devices.len() < 2
+                || !assigned_devices.is_subset(&compiled_devices)
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn canonical_selected_resource_placements<'a>(
     placements: &'a [VulkanSelectedResourcePlacementPlan],
 ) -> Result<BTreeMap<&'a str, &'a VulkanSelectedResourcePlacementPlan>, VulkanDistributedPlanError>
@@ -659,11 +710,17 @@ fn apply_selected_resource_placements_to_phase(
     placements: &BTreeMap<&str, &VulkanSelectedResourcePlacementPlan>,
     phase: nerve_execution_contracts::ExecutionPhase,
 ) -> Result<(), VulkanDistributedPlanError> {
-    if !execution_plan
+    let phase_selectors = execution_plan
         .dispatches
         .iter()
-        .any(|dispatch| !dispatch.selected_resource_partitions.is_empty())
-    {
+        .flat_map(|dispatch| {
+            dispatch
+                .selected_resource_partitions
+                .iter()
+                .map(|partition| partition.selector_id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    if phase_selectors.is_empty() {
         return Ok(());
     }
     let mut applied_selectors = BTreeSet::new();
@@ -780,7 +837,9 @@ fn apply_selected_resource_placements_to_phase(
     let missing = placements
         .keys()
         .copied()
-        .filter(|selector_id| !applied_selectors.contains(selector_id))
+        .filter(|selector_id| {
+            phase_selectors.contains(*selector_id) && !applied_selectors.contains(selector_id)
+        })
         .collect::<Vec<_>>();
     if !missing.is_empty() {
         return Err(VulkanDistributedPlanError(format!(

@@ -2284,24 +2284,43 @@ mod tests {
             ownership.device("helper").unwrap().selectors[0].owned_resource_indices,
             vec![4, 5, 6, 7]
         );
+        let placement = VulkanSelectedResourcePlacementPlan {
+            selector_id: "routed-experts".to_string(),
+            assignments: (0..8)
+                .map(|resource_index| VulkanSelectedResourceAssignment {
+                    resource_index,
+                    device_id: if resource_index % 2 == 0 {
+                        "owner".to_string()
+                    } else {
+                        "helper".to_string()
+                    },
+                })
+                .collect(),
+            device_loads: Vec::new(),
+            maximum_first_moment_ns: 0,
+            maximum_second_moment_ns2: 0,
+        };
+        assert!(
+            selected_resource_placements_fit_phase_participants(
+                &plans,
+                std::slice::from_ref(&placement),
+            )
+            .unwrap()
+        );
+        let mut incompatible_phase = plans.clone();
+        for shard in &mut incompatible_phase.prefill.dispatches[0].shards {
+            shard.device_id = "owner".to_string();
+        }
+        assert!(
+            !selected_resource_placements_fit_phase_participants(
+                &incompatible_phase,
+                std::slice::from_ref(&placement),
+            )
+            .unwrap()
+        );
         let mut rewired = plans.clone();
         rewired
-            .apply_selected_resource_placements(&[VulkanSelectedResourcePlacementPlan {
-                selector_id: "routed-experts".to_string(),
-                assignments: (0..8)
-                    .map(|resource_index| VulkanSelectedResourceAssignment {
-                        resource_index,
-                        device_id: if resource_index % 2 == 0 {
-                            "owner".to_string()
-                        } else {
-                            "helper".to_string()
-                        },
-                    })
-                    .collect(),
-                device_loads: Vec::new(),
-                maximum_first_moment_ns: 0,
-                maximum_second_moment_ns2: 0,
-            }])
+            .apply_selected_resource_placements(std::slice::from_ref(&placement))
             .unwrap();
         let mut decode_only = plans.clone();
         decode_only.decode_batch.dispatches.clear();
@@ -2309,22 +2328,7 @@ mod tests {
         decode_only.prefill.dispatches.clear();
         decode_only.prefill.execution_islands.clear();
         decode_only
-            .apply_selected_resource_placements(&[VulkanSelectedResourcePlacementPlan {
-                selector_id: "routed-experts".to_string(),
-                assignments: (0..8)
-                    .map(|resource_index| VulkanSelectedResourceAssignment {
-                        resource_index,
-                        device_id: if resource_index % 2 == 0 {
-                            "owner".to_string()
-                        } else {
-                            "helper".to_string()
-                        },
-                    })
-                    .collect(),
-                device_loads: Vec::new(),
-                maximum_first_moment_ns: 0,
-                maximum_second_moment_ns2: 0,
-            }])
+            .apply_selected_resource_placements(std::slice::from_ref(&placement))
             .expect("a package without distributed batch or prefill must retain decode expert placement");
         let rewired_ownership =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&rewired).unwrap();
@@ -3293,6 +3297,15 @@ mod tests {
                 .all(|route| route.byte_capacity == 48),
             "F32 shard partials, not the smaller BF16 final output, cross the collection boundary"
         );
+        let summary = crate::vulkan_stream_circuit::mounted_physical_execution_summary(
+            std::slice::from_ref(&island),
+            3,
+        );
+        assert_eq!(summary.tensor_parallel_island_count, 1);
+        assert_eq!(summary.whole_expert_parallel_island_count, 0);
+        assert_eq!(summary.intra_expert_tensor_parallel_island_count, 0);
+        assert_eq!(summary.hybrid_island_count, 0);
+        assert_eq!(summary.selected_resource_placement_count, 3);
     }
 
     #[test]

@@ -112,8 +112,8 @@ use crate::vulkan_distributed::{
     VulkanPhysicalExecutionTransportKind, VulkanSelectedResourcePlacementPlan,
     allocate_distributed_shared_buffer, create_distributed_reduction_runner_for_buffers,
     distributed_shard_push_constants, resolved_physical_execution_islands,
-    selected_resource_activation, try_plan_selected_resource_placement,
-    vulkan_distributed_placement_strategy,
+    selected_resource_activation, selected_resource_placements_fit_phase_participants,
+    try_plan_selected_resource_placement, vulkan_distributed_placement_strategy,
 };
 
 mod package;
@@ -215,6 +215,7 @@ include!("vulkan_stream_circuit/package_placement_catalog.rs");
 include!("vulkan_stream_circuit/hybrid_placement_optimizer.rs");
 include!("vulkan_stream_circuit/runtime_hybrid_placement.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_planning.rs");
+include!("vulkan_stream_circuit/runtime_selected_resource_mount_planning.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_calibration.rs");
 include!("vulkan_stream_circuit/runtime_distributed_contract_candidates.rs");
 include!("vulkan_stream_circuit/runtime_distributed_placement_calibration.rs");

@@ -360,10 +360,9 @@ fn validate_selected_resource_device_capacities(
             || !physical_ids.insert(capacity.identity.physical_device_id.as_str())
             || capacity.identity.api_version == 0
             || capacity.identity.driver_version == 0
-            || capacity.resident_payload_capacity_bytes == 0
     }) {
         return Err(VulkanPlacementCalibrationCatalogError(
-            "selected-resource placement capacities require unique exact devices and positive remaining capacity"
+            "selected-resource placement capacities require unique exact device identities"
                 .to_string(),
         ));
     }
@@ -406,6 +405,18 @@ mod selected_resource_calibration_catalog_tests {
             api_version: 14,
             driver_version: 27,
         }
+    }
+
+    #[test]
+    fn exact_device_capacity_may_be_exhausted_without_invalidating_its_identity() {
+        validate_selected_resource_device_capacities(&[
+            VulkanPlacementSelectedResourceDeviceCapacity {
+                device_id: "gpu0".to_string(),
+                identity: device("physical-gpu0"),
+                resident_payload_capacity_bytes: 0,
+            },
+        ])
+        .unwrap();
     }
 
     fn behavior(

@@ -83,6 +83,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             manifest_dir,
             runtime_model,
             None,
+            None,
             dynamic_state_capacity_activations,
             1,
             ResourceResidencyPolicy::Eager,
@@ -102,6 +103,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
+            None,
             None,
             dynamic_state_capacity_activations,
             speculative_draft_tokens,
@@ -132,6 +134,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
+            None,
             None,
             dynamic_state_capacity_activations,
             speculative_draft_tokens,
@@ -168,6 +171,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
+            None,
             None,
             dynamic_state_capacity_activations,
             speculative_draft_tokens,
@@ -207,6 +211,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             manifest_dir,
             runtime_model,
             None,
+            None,
             dynamic_state_capacity_activations,
             speculative_draft_tokens,
             resource_residency_policy,
@@ -231,6 +236,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         manifest_dir: impl AsRef<Path>,
         runtime_model: VulkanResidentRuntimeModel,
         physical_execution_plan: VulkanRuntimePhysicalExecutionPlan,
+        placement_calibration_catalog: Option<&VulkanPlacementCalibrationCatalog>,
         dynamic_state_capacity_activations: Option<usize>,
         speculative_draft_tokens: usize,
         resource_residency_policy: ResourceResidencyPolicy,
@@ -246,6 +252,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             manifest_dir,
             runtime_model,
             Some(physical_execution_plan),
+            placement_calibration_catalog,
             dynamic_state_capacity_activations,
             speculative_draft_tokens,
             resource_residency_policy,
@@ -268,6 +275,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         manifest_dir: impl AsRef<Path>,
         runtime_model: VulkanResidentRuntimeModel,
         physical_execution_plan: Option<VulkanRuntimePhysicalExecutionPlan>,
+        placement_calibration_catalog: Option<&VulkanPlacementCalibrationCatalog>,
         dynamic_state_capacity_activations: Option<usize>,
         speculative_draft_tokens: usize,
         resource_residency_policy: ResourceResidencyPolicy,
@@ -319,7 +327,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     VulkanResidentTokenModelPackageError::new(error.to_string()),
                 )
             })?;
-        let runtime_execution_identity = canonical_runtime_execution_identity(
+        let base_runtime_execution_identity = canonical_runtime_execution_identity(
             &runtime_model,
             &physical_execution_plan,
             capacity,
@@ -533,69 +541,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )),
                 )
             })?;
-        let distributed_activation_plan =
-            VulkanDistributedActivationBufferPlan::from_execution_plan_set(
-                &distributed_execution_plans,
-            )
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to plan distributed Vulkan phase activation edges: {error}"
-                    )),
-                )
-            })?;
-        let distributed_parameter_allocation_plan =
-            VulkanDistributedParameterAllocationPlan::from_execution_plan_set(
-                &distributed_execution_plans,
-                &tensor_index,
-            )
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to plan distributed Vulkan phase parameter shards: {error}"
-                    )),
-                )
-            })?;
-        let distributed_parameter_exclusion_plan =
-            VulkanDistributedParameterExclusionPlan::from_execution_plan_set(
-                &distributed_execution_plans,
-                &prepared_plans,
-                &tensor_index,
-            )
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to prove distributed Vulkan phase parameter replacement: {error}"
-                    )),
-                )
-            })?;
-        let distributed_selected_resource_store_plan =
-            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(
-                &distributed_execution_plans,
-            )
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to plan distributed selected-resource ownership: {error}"
-                    )),
-                )
-            })?;
-        let physical_execution_residency_plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
-            &residency_plan,
-            &device_ids,
-            &distributed_parameter_allocation_plan,
-            &distributed_parameter_exclusion_plan,
-            &distributed_activation_plan,
-        )
-        .map_err(|error| {
-            VulkanResidentInProcessPlacedRuntimeError::Package(
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to plan exact physical execution residency: {error}"
-                )),
-            )
-        })?;
         let mut physical_device_by_logical_device = BTreeMap::new();
         let mut safe_capacity_by_physical_device = BTreeMap::new();
+        let mut selected_resource_mount_devices = Vec::with_capacity(device_ids.len());
         for device_id in &device_ids {
             let device = device_for(device_id)?;
             let physical_device_id = device.physical_device_id().to_string();
@@ -607,7 +555,52 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .entry(physical_device_id)
                 .and_modify(|capacity: &mut usize| *capacity = (*capacity).min(safe_capacity))
                 .or_insert(safe_capacity);
+            let upload_alignment =
+                compiled_resource_upload_alignment(&compiled_resource_contract, device)
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(error.to_string()),
+                        )
+                    })?;
+            selected_resource_mount_devices.push(VulkanRuntimeSelectedResourceMountDevice {
+                logical_device_id: device_id.clone(),
+                physical_device_id: device.physical_device_id().to_string(),
+                execution_identity: device_execution_identity_by_logical_device[device_id].clone(),
+                live_safe_capacity_bytes: safe_capacity,
+                upload_alignment,
+            });
         }
+        let selected_resource_resolution = resolve_vulkan_runtime_selected_resource_mount(
+            &runtime_model,
+            &compiled_resource_contract,
+            &distributed_loaded_manifest,
+            distributed_execution_plans,
+            &residency_plan,
+            &device_ids,
+            &prepared_plans,
+            &tensor_index,
+            &selected_resource_mount_devices,
+            &input_device_id,
+            &output_device_id,
+            mount_speculative_decoders,
+            resource_residency_policy,
+            placement_calibration_catalog,
+            None,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+        let selected_resource_placements = selected_resource_resolution.placements;
+        let runtime_execution_identity = canonical_mounted_runtime_execution_identity(
+            &base_runtime_execution_identity,
+            &selected_resource_placements,
+        )?;
+        let VulkanRuntimeDistributedMountPlans {
+            execution_plans: distributed_execution_plans,
+            activation_plan: distributed_activation_plan,
+            parameter_allocation_plan: distributed_parameter_allocation_plan,
+            parameter_exclusion_plan: distributed_parameter_exclusion_plan,
+            selected_resource_store_plan: distributed_selected_resource_store_plan,
+            physical_execution_residency_plan,
+        } = selected_resource_resolution.plans;
         admit_vulkan_runtime_physical_execution_mount(
             &physical_execution_residency_plan,
             &physical_device_by_logical_device,
@@ -1406,6 +1399,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             distributed_parameter_exclusion_plan,
             physical_execution_residency_plan,
             mounted_boundary_routes,
+            selected_resource_placements,
             distributed_selected_resource_store_plan,
             distributed_loaded_manifest,
             distributed_parameter_buffers,

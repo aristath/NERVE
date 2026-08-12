@@ -39,6 +39,7 @@ include!("tests/runtime_residency_plan.rs");
 include!("tests/runtime_physical_execution_residency.rs");
 include!("tests/runtime_auto_placement.rs");
 include!("tests/runtime_hybrid_placement.rs");
+include!("tests/runtime_selected_resource_mount_planning.rs");
 include!("tests/compiled_resource_device_store.rs");
 include!("tests/device_resource_residency.rs");
 include!("tests/physical_residency_checkpoint.rs");

@@ -8,6 +8,7 @@ fn mount_placed_chat_stream(
     capacity: usize,
     speculative_draft_tokens: usize,
     physical_execution_plan: Option<VulkanRuntimePhysicalExecutionPlan>,
+    placement_calibration_catalog: Option<&VulkanPlacementCalibrationCatalog>,
     retained_stores: Option<&VulkanRetainedCompiledResourceStores>,
 ) -> Result<VulkanResidentInProcessPlacedPromptStream, Box<dyn Error>> {
     runtime_model.package.sampler.spec =
@@ -20,6 +21,7 @@ fn mount_placed_chat_stream(
             manifest_dir,
             runtime_model,
             physical_execution_plan,
+            placement_calibration_catalog,
             Some(capacity),
             speculative_draft_tokens,
             args.resource_residency_policy,
@@ -227,6 +229,9 @@ fn run_placed_chat(
         capacity,
         speculative_draft_tokens,
         physical_execution_plan.clone(),
+        auto_placement
+            .as_ref()
+            .map(|placement| &placement.calibration_catalog),
         None,
     )?;
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
@@ -256,13 +261,14 @@ fn run_placed_chat(
         .map(|placement| placement.calibration_catalog.observation_count())
         .unwrap_or(0);
     println!(
-        "nerve chat ready: placed_in_process, devices={:?}, bindings={:?}, context_size={}, speculative_draft_tokens={}, residency_policy={}, exact_calibration_observations={}, setup_ms={:.3}",
+        "nerve chat ready: placed_in_process, devices={:?}, bindings={:?}, context_size={}, speculative_draft_tokens={}, residency_policy={}, exact_calibration_observations={}, physical_execution={:?}, setup_ms={:.3}",
         stream_snapshot.device_ids,
         mounted_device_bindings,
         stream_snapshot.context_window_activations,
         speculative_draft_tokens,
         args.resource_residency_policy.as_runtime_name(),
         exact_calibration_observation_count,
+        stream_snapshot.physical_execution,
         nanos_to_millis(elapsed_nanos_u64(setup_start))
     );
 
@@ -637,6 +643,7 @@ fn run_placed_chat(
                             new_runtime_model.clone(),
                             capacity,
                             speculative_draft_tokens,
+                            None,
                             None,
                             Some(&release.retained_stores),
                         )?;

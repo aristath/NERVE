@@ -75,6 +75,53 @@ fn canonical_runtime_execution_identity(
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+fn canonical_mounted_runtime_execution_identity(
+    base_identity: &str,
+    selected_resource_placements: &[VulkanSelectedResourcePlacementPlan],
+) -> Result<String, VulkanResidentTokenModelPackageError> {
+    if base_identity.is_empty() {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "mounted runtime execution identity requires a base identity",
+        ));
+    }
+    if selected_resource_placements.is_empty() {
+        return Ok(base_identity.to_string());
+    }
+    let mut placements = selected_resource_placements
+        .iter()
+        .map(|placement| {
+            let mut assignments = placement
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    serde_json::json!({
+                        "resource_index": assignment.resource_index,
+                        "device_id": assignment.device_id,
+                    })
+                })
+                .collect::<Vec<_>>();
+            assignments.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+            serde_json::json!({
+                "selector_id": placement.selector_id,
+                "assignments": assignments,
+            })
+        })
+        .collect::<Vec<_>>();
+    placements.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    let identity = serde_json::json!({
+        "schema": "nerve.mounted_runtime_execution_identity.v1",
+        "base_identity": base_identity,
+        "selected_resource_placements": placements,
+    });
+    let bytes = serde_json::to_vec(&identity).map_err(|error| {
+        VulkanResidentTokenModelPackageError::new(format!(
+            "failed to serialize mounted runtime execution identity: {error}",
+        ))
+    })?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 #[cfg(test)]
 mod runtime_execution_identity_tests {
     use super::*;
@@ -221,5 +268,28 @@ mod runtime_execution_identity_tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn mounted_execution_identity_includes_selected_resource_ownership() {
+        let placement = |device_id: &str| VulkanSelectedResourcePlacementPlan {
+            selector_id: "experts".to_string(),
+            assignments: vec![crate::vulkan_distributed::VulkanSelectedResourceAssignment {
+                resource_index: 0,
+                device_id: device_id.to_string(),
+            }],
+            device_loads: Vec::new(),
+            maximum_first_moment_ns: 0,
+            maximum_second_moment_ns2: 0,
+        };
+        let base = canonical_mounted_runtime_execution_identity("base", &[]).unwrap();
+        let owner = canonical_mounted_runtime_execution_identity("base", &[placement("gpu0")])
+            .unwrap();
+        let helper = canonical_mounted_runtime_execution_identity("base", &[placement("gpu1")])
+            .unwrap();
+
+        assert_eq!(base, "base");
+        assert_ne!(owner, helper);
+        assert_eq!(owner.len(), 64);
     }
 }
