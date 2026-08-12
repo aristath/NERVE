@@ -51,6 +51,72 @@ where
 }
 
 impl VulkanCompiledResourceDeviceStore {
+    fn retire_cohort_evicted_group_publications(
+        &self,
+        selected_group_ids: &BTreeSet<String>,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        if selected_group_ids.is_empty() {
+            return Ok(());
+        }
+        let mut address_state = self.address_state.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource address state was poisoned",
+            )
+        })?;
+        let publications = selected_group_ids
+            .iter()
+            .map(|group_id| {
+                address_state
+                    .publications
+                    .get(group_id)
+                    .cloned()
+                    .filter(|publications| !publications.is_empty())
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "cohort-evicted group {group_id:?} has no address publication",
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        {
+            let VulkanCompiledResourceDeviceAddressState {
+                transfer,
+                address_table,
+                ..
+            } = &mut *address_state;
+            address_table
+                .clear_group(transfer, &publications)
+                .map_err(compiled_device_store_vulkan_error)?;
+        }
+        for group_id in selected_group_ids {
+            address_state.promoted_representations.remove(group_id);
+            address_state.publications.remove(group_id);
+            let VulkanCompiledResourceDeviceAddressState {
+                group_chunks,
+                chunk_groups,
+                group_blocks,
+                block_groups,
+                ..
+            } = &mut *address_state;
+            detach_compiled_resource_group_cohorts(group_id, group_chunks, chunk_groups);
+            detach_compiled_resource_group_cohorts(group_id, group_blocks, block_groups);
+        }
+        if let Some(memory_plan) = &self.memory_plan {
+            memory_plan
+                .lock()
+                .map_err(|_| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource memory plan was poisoned",
+                    )
+                })?
+                .release_dynamic_groups(selected_group_ids)?;
+        }
+        Ok(())
+    }
+
     fn evict_exact_inactive_groups(
         &self,
         selected_group_ids: &BTreeSet<String>,
@@ -152,11 +218,13 @@ impl VulkanCompiledResourceDeviceStore {
         protected_group_ids: &BTreeSet<String>,
         owner: DeviceResourceResidencyOwnerId,
         shared_host_mutation: Option<&VulkanCompiledResourceSharedHostCacheMutation<'_>>,
+        cohort_mutation: Option<&VulkanCompiledResourceDistributedCohortMutation<'_>>,
     ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
         self.reclaim_compiled_resource_wave_payload(
             selector_id,
             plans,
             protected_group_ids,
+            cohort_mutation,
         )?;
         let mut admission = self.reserve_compiled_resource_wave_tiers(device, plans)?;
         let result = self.load_admitted_compiled_resource_wave(
@@ -167,6 +235,7 @@ impl VulkanCompiledResourceDeviceStore {
             owner,
             &mut admission,
             shared_host_mutation,
+            cohort_mutation,
         );
         match result {
             Ok(()) => Ok(()),
@@ -193,6 +262,7 @@ impl VulkanCompiledResourceDeviceStore {
         owner: DeviceResourceResidencyOwnerId,
         admission: &mut VulkanCompiledResourceWaveAdmission,
         shared_host_mutation: Option<&VulkanCompiledResourceSharedHostCacheMutation<'_>>,
+        cohort_mutation: Option<&VulkanCompiledResourceDistributedCohortMutation<'_>>,
     ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
         let device_capacity_permit = if self.residency_policy.evicts_inactive_resources() {
             self.evict_for_compiled_resource_wave(
@@ -201,6 +271,7 @@ impl VulkanCompiledResourceDeviceStore {
                 plans,
                 protected_group_ids,
                 admission,
+                cohort_mutation,
             )?
         } else {
             None
@@ -277,6 +348,7 @@ impl VulkanCompiledResourceDeviceStore {
         selector_id: &str,
         plans: &[VulkanCompiledResourceLoadPlan],
         protected_group_ids: &BTreeSet<String>,
+        cohort_mutation: Option<&VulkanCompiledResourceDistributedCohortMutation<'_>>,
     ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
         let residency_requirement = || {
             let snapshot = self
@@ -334,6 +406,36 @@ impl VulkanCompiledResourceDeviceStore {
         let candidates = compiled_resource_selector_fair_eviction_candidates(
             &candidates,
             &snapshot.directory,
+            &self.group_selector_ids,
+            &self.selector_payload_budgets,
+            selector_id,
+            new_payload_bytes,
+        )?;
+        if let (Some(coordinator), Some(mutation)) =
+            (self.distributed_cohort_coordinator()?, cohort_mutation)
+        {
+            coordinator.evict_inactive_cohorts_for_store(
+                self,
+                &candidates,
+                required_payload_bytes,
+                mutation,
+            )?;
+        }
+        let (_, _, required_payload_bytes) = residency_requirement()?;
+        if required_payload_bytes == 0 {
+            return Ok(());
+        }
+        let candidates = self
+            .manager
+            .eviction_candidates(protected_group_ids)
+            .map_err(compiled_device_store_residency_error)?;
+        let candidates = compiled_resource_selector_fair_eviction_candidates(
+            &candidates,
+            &self
+                .manager
+                .snapshot()
+                .map_err(compiled_device_store_residency_error)?
+                .directory,
             &self.group_selector_ids,
             &self.selector_payload_budgets,
             selector_id,
@@ -771,6 +873,7 @@ impl VulkanCompiledResourceDeviceStore {
         plans: &[VulkanCompiledResourceLoadPlan],
         protected_group_ids: &BTreeSet<String>,
         admission: &VulkanCompiledResourceWaveAdmission,
+        cohort_mutation: Option<&VulkanCompiledResourceDistributedCohortMutation<'_>>,
     ) -> Result<Option<VulkanDeviceLocalMemoryPermit>, VulkanCompiledResourceDeviceStoreError> {
         let residency_requirement = || {
             let snapshot = self
@@ -882,6 +985,43 @@ impl VulkanCompiledResourceDeviceStore {
                     .map_err(compiled_device_store_vulkan_error)
             };
         }
+        let candidates = self
+            .manager
+            .eviction_candidates(protected_group_ids)
+            .map_err(compiled_device_store_residency_error)?;
+        let candidates = compiled_resource_selector_fair_eviction_candidates(
+            &candidates,
+            &snapshot.directory,
+            &self.group_selector_ids,
+            &self.selector_payload_budgets,
+            selector_id,
+            new_payload_bytes,
+        )?;
+        if let (Some(coordinator), Some(mutation)) =
+            (self.distributed_cohort_coordinator()?, cohort_mutation)
+        {
+            coordinator.evict_inactive_cohorts_for_store(
+                self,
+                &candidates,
+                required_payload_bytes.max(required_device_bytes),
+                mutation,
+            )?;
+        }
+        let settled_after_cohorts = residency_requirement()?;
+        if settled_after_cohorts.2 == 0 && settled_after_cohorts.4 == 0 {
+            return if settled_after_cohorts.3 == 0 {
+                Ok(None)
+            } else {
+                device
+                    .reserve_device_local_memory_capacity(settled_after_cohorts.3)
+                    .map(Some)
+                    .map_err(compiled_device_store_vulkan_error)
+            };
+        }
+        let snapshot = settled_after_cohorts.0;
+        let new_payload_bytes = settled_after_cohorts.1;
+        let required_payload_bytes = settled_after_cohorts.2;
+        let required_device_bytes = settled_after_cohorts.4;
         let candidates = self
             .manager
             .eviction_candidates(protected_group_ids)

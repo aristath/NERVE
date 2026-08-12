@@ -43,11 +43,25 @@ struct VulkanCompiledResourceDistributedCohortCoordinator {
         VulkanCompiledResourceDistributedCohortKey,
         VulkanCompiledResourceDistributedCohortPlan,
     >,
-    group_keys: BTreeMap<
-        (String, String),
-        BTreeSet<VulkanCompiledResourceDistributedCohortKey>,
+    selection_keys: BTreeMap<
+        (String, usize),
+        VulkanCompiledResourceDistributedCohortKey,
     >,
     expected_logical_device_ids: BTreeSet<String>,
+    physical_store_counts:
+        std::sync::Mutex<BTreeMap<VulkanCompiledResourceDistributedCohortKey, usize>>,
+    physical_group_keys: std::sync::Mutex<
+        BTreeMap<
+            (usize, String),
+            BTreeSet<VulkanCompiledResourceDistributedCohortKey>,
+        >,
+    >,
+    overlap_keys: std::sync::Mutex<
+        BTreeMap<
+            VulkanCompiledResourceDistributedCohortKey,
+            BTreeSet<VulkanCompiledResourceDistributedCohortKey>,
+        >,
+    >,
     mutation: std::sync::Mutex<()>,
     stores: std::sync::Mutex<
         BTreeMap<String, std::sync::Weak<VulkanCompiledResourceDeviceStore>>,
@@ -55,6 +69,7 @@ struct VulkanCompiledResourceDistributedCohortCoordinator {
 }
 
 struct VulkanCompiledResourceDistributedCohortMutation<'a> {
+    coordinator: &'a VulkanCompiledResourceDistributedCohortCoordinator,
     _guard: std::sync::MutexGuard<'a, ()>,
 }
 
@@ -63,10 +78,7 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
         plan: &VulkanDistributedSelectedResourceStorePlan,
     ) -> Result<Self, VulkanCompiledResourceDeviceStoreError> {
         let mut plans = BTreeMap::new();
-        let mut group_keys = BTreeMap::<
-            (String, String),
-            BTreeSet<VulkanCompiledResourceDistributedCohortKey>,
-        >::new();
+        let mut selection_keys = BTreeMap::new();
         let expected_logical_device_ids = plan
             .devices
             .iter()
@@ -117,13 +129,6 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
                         "distributed residency cohort logical extent overflowed",
                     )
                 })?;
-                group_keys
-                    .entry((
-                        member.logical_device_id.clone(),
-                        key.atomic_group_id.clone(),
-                    ))
-                    .or_default()
-                    .insert(key.clone());
             }
             let cohort_plan = VulkanCompiledResourceDistributedCohortPlan {
                 key: key.clone(),
@@ -135,11 +140,26 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
                     key.selector_id, key.resource_index,
                 )));
             }
+            if selection_keys
+                .insert(
+                    (key.selector_id.clone(), key.resource_index),
+                    key.clone(),
+                )
+                .is_some()
+            {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "distributed residency selector {:?} index {} belongs to multiple cohorts",
+                    key.selector_id, key.resource_index,
+                )));
+            }
         }
         Ok(Self {
             plans,
-            group_keys,
+            selection_keys,
             expected_logical_device_ids,
+            physical_store_counts: std::sync::Mutex::new(BTreeMap::new()),
+            physical_group_keys: std::sync::Mutex::new(BTreeMap::new()),
+            overlap_keys: std::sync::Mutex::new(BTreeMap::new()),
             mutation: std::sync::Mutex::new(()),
             stores: std::sync::Mutex::new(BTreeMap::new()),
         })
@@ -151,6 +171,7 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
     ) -> Result<bool, VulkanCompiledResourceDeviceStoreError> {
         let candidate = Self::new(plan)?;
         Ok(self.plans == candidate.plans
+            && self.selection_keys == candidate.selection_keys
             && self.expected_logical_device_ids == candidate.expected_logical_device_ids)
     }
 
@@ -166,6 +187,7 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
             )
         })?;
         Ok(VulkanCompiledResourceDistributedCohortMutation {
+            coordinator: self,
             _guard: guard,
         })
     }
@@ -214,11 +236,71 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
             .flat_map(|plan| plan.members.iter())
             .map(|member| member.logical_device_id.as_str())
             .collect::<BTreeSet<_>>();
-        if registered != required {
+        if !required.is_subset(&registered) {
             return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
                 "distributed residency cohorts require logical stores {required:?}, registered {registered:?}",
             )));
         }
+        let mut physical_store_counts = BTreeMap::new();
+        let mut physical_group_keys = BTreeMap::<
+            (usize, String),
+            BTreeSet<VulkanCompiledResourceDistributedCohortKey>,
+        >::new();
+        for (key, plan) in &self.plans {
+            let mut physical_stores = BTreeSet::new();
+            for member in &plan.members {
+                let store = stores
+                    .get(&member.logical_device_id)
+                    .and_then(std::sync::Weak::upgrade)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "distributed residency cohort {:?} has no live store for logical device {:?}",
+                            key.atomic_group_id, member.logical_device_id,
+                        ))
+                    })?;
+                let store_identity = Arc::as_ptr(&store) as usize;
+                physical_stores.insert(store_identity);
+                let group_id = store.selector_resource_group_id(
+                    &key.selector_id,
+                    key.resource_index,
+                )?;
+                physical_group_keys
+                    .entry((store_identity, group_id))
+                    .or_default()
+                    .insert(key.clone());
+            }
+            physical_store_counts.insert(key.clone(), physical_stores.len());
+        }
+        let mut overlap_keys = self
+            .plans
+            .keys()
+            .cloned()
+            .map(|key| (key.clone(), BTreeSet::from([key])))
+            .collect::<BTreeMap<_, _>>();
+        for keys in physical_group_keys.values() {
+            for key in keys {
+                overlap_keys
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(keys.iter().cloned());
+            }
+        }
+        drop(stores);
+        *self.physical_store_counts.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "distributed residency physical-store catalog was poisoned",
+            )
+        })? = physical_store_counts;
+        *self.physical_group_keys.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "distributed residency physical-group catalog was poisoned",
+            )
+        })? = physical_group_keys;
+        *self.overlap_keys.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "distributed residency overlap catalog was poisoned",
+            )
+        })? = overlap_keys;
         Ok(())
     }
 
@@ -227,10 +309,56 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
         store: &VulkanCompiledResourceDeviceStore,
         group_id: &str,
     ) -> bool {
-        store.logical_device_ids().iter().any(|device_id| {
-            self.group_keys
-                .contains_key(&(device_id.clone(), group_id.to_string()))
-        })
+        self.physical_group_keys
+            .lock()
+            .ok()
+            .and_then(|groups| {
+                groups
+                    .get(&(store as *const _ as usize, group_id.to_string()))
+                    .cloned()
+            })
+            .is_some_and(|keys| {
+                keys.iter()
+                    .any(|key| self.cohort_spans_multiple_physical_stores(key))
+            })
+    }
+
+    fn cohort_spans_multiple_physical_stores(
+        &self,
+        key: &VulkanCompiledResourceDistributedCohortKey,
+    ) -> bool {
+        self.physical_store_counts
+            .lock()
+            .ok()
+            .and_then(|counts| counts.get(key).copied())
+            .is_some_and(|count| count > 1)
+    }
+
+    fn cohort_key_closure(
+        &self,
+        start: &VulkanCompiledResourceDistributedCohortKey,
+    ) -> Result<BTreeSet<VulkanCompiledResourceDistributedCohortKey>, VulkanCompiledResourceDeviceStoreError>
+    {
+        let overlaps = self.overlap_keys.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "distributed residency overlap catalog was poisoned",
+            )
+        })?;
+        let mut closure = BTreeSet::new();
+        let mut pending = vec![start.clone()];
+        while let Some(key) = pending.pop() {
+            if !closure.insert(key.clone()) {
+                continue;
+            }
+            let adjacent = overlaps.get(&key).ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "distributed residency overlap catalog omits cohort {:?}",
+                    key.atomic_group_id,
+                ))
+            })?;
+            pending.extend(adjacent.iter().filter(|key| !closure.contains(*key)).cloned());
+        }
+        Ok(closure)
     }
 
     fn cohort_for_selection(
@@ -238,11 +366,9 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
         selector_id: &str,
         resource_index: usize,
     ) -> Option<&VulkanCompiledResourceDistributedCohortPlan> {
-        self.plans
-            .values()
-            .find(|plan| {
-                plan.key.selector_id == selector_id && plan.key.resource_index == resource_index
-            })
+        self.selection_keys
+            .get(&(selector_id.to_string(), resource_index))
+            .and_then(|key| self.plans.get(key))
     }
 
     fn plan_fault_resolution(
@@ -341,6 +467,197 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
                 .collect(),
             commit_observation_indices: commits,
         })
+    }
+
+    fn eviction_keys_for_store(
+        &self,
+        store: &VulkanCompiledResourceDeviceStore,
+        candidates: &[DeviceResourceResidencyEvictionCandidate],
+    ) -> Vec<VulkanCompiledResourceDistributedCohortKey> {
+        self.eviction_keys_for_physical_candidates(store as *const _ as usize, candidates)
+    }
+
+    fn eviction_keys_for_physical_candidates(
+        &self,
+        store_identity: usize,
+        candidates: &[DeviceResourceResidencyEvictionCandidate],
+    ) -> Vec<VulkanCompiledResourceDistributedCohortKey> {
+        let Ok(physical_group_keys) = self.physical_group_keys.lock() else {
+            return Vec::new();
+        };
+        let mut seen = BTreeSet::new();
+        candidates
+            .iter()
+            .flat_map(|candidate| {
+                physical_group_keys
+                    .get(&(store_identity, candidate.group_id.clone()))
+                    .into_iter()
+                    .flatten()
+            })
+            .filter(|key| self.cohort_spans_multiple_physical_stores(key))
+            .filter(|key| seen.insert((*key).clone()))
+            .cloned()
+            .collect()
+    }
+
+    fn evict_inactive_cohorts_for_store(
+        &self,
+        triggering_store: &VulkanCompiledResourceDeviceStore,
+        candidates: &[DeviceResourceResidencyEvictionCandidate],
+        required_local_bytes: usize,
+        mutation: &VulkanCompiledResourceDistributedCohortMutation<'_>,
+    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        if required_local_bytes == 0 {
+            return Ok(0);
+        }
+        if !mutation.belongs_to(self) {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "distributed residency eviction received a foreign cohort mutation",
+            ));
+        }
+        let keys = self.eviction_keys_for_store(triggering_store, candidates);
+        let registered = self.stores.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "distributed residency cohort store registry was poisoned",
+            )
+        })?;
+        let stores = registered
+            .iter()
+            .map(|(logical_device_id, store)| {
+                store.upgrade().map(|store| (logical_device_id.clone(), store)).ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(format!(
+                        "distributed residency store {logical_device_id:?} was dropped while its coordinator remains mounted",
+                    ))
+                })
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        drop(registered);
+        let mut released_local_bytes = 0usize;
+        let mut processed_keys = BTreeSet::new();
+        for key in keys {
+            if released_local_bytes >= required_local_bytes {
+                break;
+            }
+            if processed_keys.contains(&key) {
+                continue;
+            }
+            let mut physical = BTreeMap::<
+                usize,
+                (Arc<VulkanCompiledResourceDeviceStore>, BTreeSet<String>),
+            >::new();
+            let closure_keys = self.cohort_key_closure(&key)?;
+            for current_key in &closure_keys {
+                let plan = self
+                    .plans
+                    .get(current_key)
+                    .expect("eviction closure key came from the cohort catalog");
+                for member in &plan.members {
+                    let store = stores.get(&member.logical_device_id).ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "distributed residency cohort {:?} has no store for logical device {:?}",
+                            current_key.atomic_group_id, member.logical_device_id,
+                        ))
+                    })?;
+                    let group_id = store.selector_resource_group_id(
+                        &current_key.selector_id,
+                        current_key.resource_index,
+                    )?;
+                    physical
+                        .entry(Arc::as_ptr(store) as usize)
+                        .or_insert_with(|| (Arc::clone(store), BTreeSet::new()))
+                        .1
+                        .insert(group_id.clone());
+                }
+            }
+            processed_keys.extend(closure_keys);
+            if !physical.values().any(|(store, _)| {
+                std::ptr::eq(store.as_ref(), triggering_store)
+            }) {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "distributed residency eviction cohort {:?} does not include its triggering store",
+                    key.atomic_group_id,
+                )));
+            }
+            let physical = physical.into_values().collect::<Vec<_>>();
+            let mut other_store_mutations = Vec::new();
+            for (store, _) in &physical {
+                if std::ptr::eq(store.as_ref(), triggering_store) {
+                    continue;
+                }
+                other_store_mutations.push(store.residency_mutation.lock().map_err(|_| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource residency mutation lock was poisoned",
+                    )
+                })?);
+            }
+            let members = physical
+                .iter()
+                .map(|(store, group_ids)| {
+                    DeviceResourceResidencyCohortMember::new(
+                        store.manager.clone(),
+                        group_ids.clone(),
+                    )
+                    .map_err(compiled_device_store_residency_error)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let cohort = DeviceResourceResidencyCohort::new(
+                format!(
+                    "{}:{}:{}",
+                    key.selector_id, key.resource_index, key.atomic_group_id,
+                ),
+                members,
+            )
+            .map_err(compiled_device_store_residency_error)?;
+            let eviction = match cohort.evict_inactive() {
+                Ok(eviction) => eviction,
+                Err(error) if error.kind() == DeviceResourceResidencyErrorKind::InUse => {
+                    continue;
+                }
+                Err(error) => return Err(compiled_device_store_residency_error(error)),
+            };
+            for (store, group_ids) in &physical {
+                store.retire_cohort_evicted_group_publications(group_ids)?;
+                if std::ptr::eq(store.as_ref(), triggering_store) {
+                    released_local_bytes = group_ids.iter().try_fold(
+                        released_local_bytes,
+                        |total, group_id| {
+                            total
+                                .checked_add(
+                                    store.group_payload_byte_count(group_id).ok_or_else(|| {
+                                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                                            "distributed residency group {group_id:?} has no payload accounting",
+                                        ))
+                                    })?,
+                                )
+                                .ok_or_else(|| {
+                                    VulkanCompiledResourceDeviceStoreError::new(
+                                        "distributed residency eviction byte count overflowed",
+                                    )
+                                })
+                        },
+                    )?;
+                }
+            }
+            let expected_group_count = physical
+                .iter()
+                .map(|(_, group_ids)| group_ids.len())
+                .sum::<usize>();
+            if eviction.release().group_count != expected_group_count {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "distributed residency cohort eviction released {} of {expected_group_count} physical groups",
+                    eviction.release().group_count,
+                )));
+            }
+            drop(eviction);
+            drop(other_store_mutations);
+        }
+        Ok(released_local_bytes)
+    }
+}
+
+impl VulkanCompiledResourceDistributedCohortMutation<'_> {
+    fn belongs_to(&self, coordinator: &VulkanCompiledResourceDistributedCohortCoordinator) -> bool {
+        std::ptr::eq(self.coordinator, coordinator)
     }
 }
 

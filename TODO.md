@@ -209,9 +209,18 @@ For every numbered item below:
   independently demand-resident: an unavailable expert publishes an immutable
   fault at the exact causal checkpoint, only affected shards resume, and
   resident experts plus already committed graph progress are not replayed.
-- Use atomic residency groups for a tensor-sharded expert. It is runnable only
-  when all required fragments are resident, and eviction must never leave a
-  partially resident unusable expert.
+- Hardware-neutral atomic residency acceptance is complete. The mounted plan
+  now records the exact physical fragments of each tensor-sharded expert;
+  immediate decode and multi-lane prefill resolve all fragment faults through
+  one shared coordinator; no gate is acknowledged until every required load
+  succeeds; failure rolls back only transaction-owned fragments; and pressure
+  eviction closes transitively over every cohort sharing a physical group,
+  atomically retires all physical directory members, then clears each store's
+  publications and tier accounting. Co-located logical shards remain ordinary
+  local residency rather than ceremonial distributed cohorts. The remaining
+  acceptance is the explicitly authorized mounted proof that load failure,
+  eviction, cancellation, and teardown preserve this invariant in live Vulkan
+  execution and restore exact pre-run reservations.
 - Prove and separately measure the compiler-declared intra-expert TP candidate,
   including its dynamic output-row gate/up to local input-column down-projection
   batch path. Do not shard every expert merely because the mechanism exists.

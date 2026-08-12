@@ -64,7 +64,7 @@ fn distributed_cohort_catalog_preserves_exact_fragment_membership() {
     assert_eq!(cohort.members[0].logical_device_id, "gpu0");
     assert_eq!(cohort.members[1].logical_device_id, "gpu1");
     assert!(coordinator.cohort_for_selection("experts", 2).is_none());
-    assert_eq!(coordinator.group_keys.len(), 2);
+    assert_eq!(coordinator.selection_keys.len(), 1);
     let _mutation = coordinator.begin_mutation().unwrap();
 }
 
@@ -105,6 +105,41 @@ fn distributed_cohort_catalog_rejects_gaps_and_duplicate_devices() {
             .is_err(),
         );
     }
+}
+
+#[test]
+fn distributed_cohort_catalog_rejects_multiple_residency_contracts_for_one_selection() {
+    use crate::vulkan_distributed::{
+        VulkanDistributedSelectedResourceResidencyCohortMemberPlan,
+        VulkanDistributedSelectedResourceResidencyCohortPlan,
+    };
+
+    let members = vec![
+        VulkanDistributedSelectedResourceResidencyCohortMemberPlan {
+            device_id: "gpu0".to_string(),
+            logical_start: 0,
+            logical_count: 32,
+        },
+        VulkanDistributedSelectedResourceResidencyCohortMemberPlan {
+            device_id: "gpu1".to_string(),
+            logical_start: 32,
+            logical_count: 32,
+        },
+    ];
+    let mut plan = distributed_cohort_store_plan(members.clone());
+    plan.tensor_sharded_residency_cohorts.push(
+        VulkanDistributedSelectedResourceResidencyCohortPlan {
+            selector_id: "experts".to_string(),
+            resource_index: 3,
+            atomic_group_id: "conflicting-expert-3".to_string(),
+            members,
+        },
+    );
+
+    let error = VulkanCompiledResourceDistributedCohortCoordinator::new(&plan)
+        .err()
+        .expect("one selection must not belong to multiple physical cohorts");
+    assert!(error.to_string().contains("belongs to multiple cohorts"));
 }
 
 #[test]
@@ -257,4 +292,90 @@ fn distributed_fault_plan_deduplicates_cohort_loads_and_keeps_local_resources_lo
         ],
     );
     assert_eq!(plan.commit_observation_indices, vec![0, 1]);
+}
+
+#[test]
+fn distributed_cohort_eviction_candidates_preserve_lru_order_and_deduplicate_selections() {
+    use crate::vulkan_distributed::{
+        VulkanDistributedSelectedResourceResidencyCohortMemberPlan,
+        VulkanDistributedSelectedResourceResidencyCohortPlan,
+    };
+
+    let members = vec![
+            VulkanDistributedSelectedResourceResidencyCohortMemberPlan {
+                device_id: "gpu0".to_string(),
+                logical_start: 0,
+                logical_count: 32,
+            },
+            VulkanDistributedSelectedResourceResidencyCohortMemberPlan {
+                device_id: "gpu1".to_string(),
+                logical_start: 32,
+                logical_count: 32,
+            },
+        ];
+    let mut store_plan = distributed_cohort_store_plan(members.clone());
+    store_plan.tensor_sharded_residency_cohorts.push(
+        VulkanDistributedSelectedResourceResidencyCohortPlan {
+            selector_id: "experts".to_string(),
+            resource_index: 4,
+            atomic_group_id: "expert-4".to_string(),
+            members,
+        },
+    );
+    let coordinator = VulkanCompiledResourceDistributedCohortCoordinator::new(&store_plan).unwrap();
+    *coordinator.physical_store_counts.lock().unwrap() = coordinator
+        .selection_keys
+        .values()
+        .cloned()
+        .map(|key| (key, 2))
+        .collect();
+    let key3 = coordinator.selection_keys[&("experts".to_string(), 3)].clone();
+    let key4 = coordinator.selection_keys[&("experts".to_string(), 4)].clone();
+    *coordinator.physical_group_keys.lock().unwrap() = BTreeMap::from([
+        ((7, "fragment-a".to_string()), BTreeSet::from([key3.clone()])),
+        ((7, "fragment-b".to_string()), BTreeSet::from([key3.clone()])),
+        ((7, "fragment-c".to_string()), BTreeSet::from([key4.clone()])),
+    ]);
+    *coordinator.overlap_keys.lock().unwrap() = BTreeMap::from([
+        (key3.clone(), BTreeSet::from([key3.clone(), key4.clone()])),
+        (key4.clone(), BTreeSet::from([key3.clone(), key4.clone()])),
+    ]);
+    let candidates = vec![
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "local".to_string(),
+            byte_count: 8,
+            last_access_epoch: 1,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "fragment-c".to_string(),
+            byte_count: 32,
+            last_access_epoch: 2,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "fragment-a".to_string(),
+            byte_count: 32,
+            last_access_epoch: 3,
+        },
+        DeviceResourceResidencyEvictionCandidate {
+            group_id: "fragment-b".to_string(),
+            byte_count: 32,
+            last_access_epoch: 4,
+        },
+    ];
+
+    let keys = coordinator.eviction_keys_for_physical_candidates(7, &candidates);
+
+    assert_eq!(
+        keys.iter().map(|key| key.resource_index).collect::<Vec<_>>(),
+        vec![4, 3],
+    );
+    assert_eq!(
+        coordinator
+            .cohort_key_closure(&key3)
+            .unwrap()
+            .iter()
+            .map(|key| key.resource_index)
+            .collect::<Vec<_>>(),
+        vec![3, 4],
+    );
 }

@@ -1076,6 +1076,10 @@ impl VulkanCompiledResourceDeviceStore {
         &self.logical_device_ids
     }
 
+    fn group_payload_byte_count(&self, group_id: &str) -> Option<usize> {
+        self.group_payload_bytes.get(group_id).copied()
+    }
+
     fn attach_distributed_cohort_coordinator(
         &self,
         coordinator: Arc<VulkanCompiledResourceDistributedCohortCoordinator>,
@@ -1267,9 +1271,32 @@ impl VulkanCompiledResourceDeviceStore {
         resource_indices: &[usize],
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
-        // Shared-cache mutation must precede every individual store mutation.
-        // A reservation may reclaim another store, so reversing this order
-        // allows two simultaneous loads to wait on each other's store lock.
+        let coordinator = self.distributed_cohort_coordinator()?;
+        let cohort_mutation = coordinator
+            .as_ref()
+            .map(|coordinator| coordinator.begin_mutation())
+            .transpose()?;
+        self.load_selector_resources_while_active_with_cohort_mutation(
+            device,
+            selector_id,
+            resource_indices,
+            owner,
+            cohort_mutation.as_ref(),
+        )
+    }
+
+    fn load_selector_resources_while_active_with_cohort_mutation(
+        &self,
+        device: &VulkanComputeDevice,
+        selector_id: &str,
+        resource_indices: &[usize],
+        owner: DeviceResourceResidencyOwnerId,
+        cohort_mutation: Option<&VulkanCompiledResourceDistributedCohortMutation<'_>>,
+    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        // The distributed cohort mutation (when present) precedes the shared
+        // cache, which in turn precedes every individual store mutation. A
+        // reservation may reclaim another store, so reversing this order can
+        // make simultaneous loads wait on each other's store lock.
         let shared_host_mutation = self
             .shared_host_cache
             .as_ref()
@@ -1286,6 +1313,7 @@ impl VulkanCompiledResourceDeviceStore {
             resource_indices,
             owner,
             shared_host_mutation.as_ref(),
+            cohort_mutation,
         )
     }
 
@@ -1296,6 +1324,40 @@ impl VulkanCompiledResourceDeviceStore {
         resource_indices: &[usize],
         owner: DeviceResourceResidencyOwnerId,
     ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        self.load_selector_resources_for_resume_with_cohort_mutation(
+            device,
+            selector_id,
+            resource_indices,
+            owner,
+            None,
+        )
+    }
+
+    fn load_selector_resources_for_resume_with_cohort_mutation(
+        &self,
+        device: &VulkanComputeDevice,
+        selector_id: &str,
+        resource_indices: &[usize],
+        owner: DeviceResourceResidencyOwnerId,
+        cohort_mutation: Option<&VulkanCompiledResourceDistributedCohortMutation<'_>>,
+    ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        let coordinator = self.distributed_cohort_coordinator()?;
+        let acquired_mutation = match (&coordinator, cohort_mutation) {
+            (Some(coordinator), Some(mutation)) if mutation.belongs_to(coordinator) => None,
+            (Some(_), Some(_)) => {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource load received a foreign distributed cohort mutation",
+                ));
+            }
+            (Some(coordinator), None) => Some(coordinator.begin_mutation()?),
+            (None, Some(_)) => {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource load received a cohort mutation without a coordinator",
+                ));
+            }
+            (None, None) => None,
+        };
+        let cohort_mutation = cohort_mutation.or(acquired_mutation.as_ref());
         device
             .restore_device_local_memory_headroom_after_quiescence()
             .map_err(compiled_device_store_vulkan_error)?;
@@ -1316,6 +1378,7 @@ impl VulkanCompiledResourceDeviceStore {
             resource_indices,
             owner,
             shared_host_mutation.as_ref(),
+            cohort_mutation,
         )?;
         Ok(loaded)
     }
@@ -1327,6 +1390,7 @@ impl VulkanCompiledResourceDeviceStore {
         resource_indices: &[usize],
         owner: DeviceResourceResidencyOwnerId,
         shared_host_mutation: Option<&VulkanCompiledResourceSharedHostCacheMutation<'_>>,
+        cohort_mutation: Option<&VulkanCompiledResourceDistributedCohortMutation<'_>>,
     ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
         if resource_indices.is_empty() {
             return Err(VulkanCompiledResourceDeviceStoreError::new(
@@ -1380,6 +1444,7 @@ impl VulkanCompiledResourceDeviceStore {
                 &protected_group_ids,
                 owner.clone(),
                 shared_host_mutation,
+                cohort_mutation,
             )?;
         }
         Ok(plans.len())

@@ -361,14 +361,16 @@ impl VulkanDistributedSelectedResourceGate {
         &self,
         device: &VulkanComputeDevice,
         resource_indices: &[usize],
+        cohort_mutation: Option<&VulkanCompiledResourceDistributedCohortMutation<'_>>,
     ) -> Result<(), VulkanDistributedDispatchRunnerError> {
         self.context
             .store
-            .load_selector_resources_for_resume(
+            .load_selector_resources_for_resume_with_cohort_mutation(
                 device,
                 &self.selector_id,
                 &resource_indices,
                 self.context.owner.clone(),
+                cohort_mutation,
             )
             .map(|_| ())
             .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))
@@ -493,7 +495,11 @@ pub(crate) fn resolve_distributed_selected_resource_misses<'a>(
         .collect::<Result<Vec<_>, _>>()?;
     for load in &plan.loads {
         let (gate, device) = gates[load.observation_index];
-        if let Err(load_error) = gate.load_pending_resources(device, &load.resource_indices) {
+        if let Err(load_error) = gate.load_pending_resources(
+            device,
+            &load.resource_indices,
+            _mutation.as_ref(),
+        ) {
             let rollback_errors = rollback
                 .iter()
                 .rev()
