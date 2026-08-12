@@ -282,20 +282,6 @@ fn mount_distributed_calibration_selected_resources(
     Ok(Some(mounted))
 }
 
-/// One exact compiler-emitted selected-resource transaction. The component
-/// target identifies the logical implementation family; the selector and
-/// resource index identify one independently resident arithmetic path inside
-/// it. Contract IDs are explicit so alternate physical representations are
-/// measured independently instead of being averaged together.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VulkanRuntimeSelectedResourceExecutionCalibrationTarget {
-    pub component: VulkanRuntimePlacementCalibrationTarget,
-    pub selector_id: String,
-    pub resource_index: usize,
-    pub phase: VulkanTargetedComponentExecutionPhase,
-    pub selected_contract_ids: BTreeSet<String>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanRuntimeSelectedResourceExecutionCalibrationReport {
     pub physical_device_id: String,
@@ -356,6 +342,7 @@ impl VulkanRuntimeSelectedResourceExecutionCalibrationReport {
             || self.target.selector_id.is_empty()
             || self.target.selected_contract_ids.is_empty()
             || !valid_sha256_digest(&self.resource_execution_class_id)
+            || self.resource_execution_class_id != self.target.resource_execution_class_id
             || self.resource_payload_byte_count == 0
             || self.selector_selection_count == 0
             || self.warmup_execution_ns == 0
@@ -544,129 +531,44 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
         target: &VulkanRuntimeSelectedResourceExecutionCalibrationTarget,
         maximum_total_resident_parameter_bytes: usize,
     ) -> Result<Option<Self>, VulkanResidentTokenModelPackageError> {
-        let logical_device_id = "calibration:selected_resource".to_string();
-        let planning_peer_id = "calibration:selected_resource:planning_peer".to_string();
-        let planning_device_ids = vec![logical_device_id.clone(), planning_peer_id];
-        let mut placed_model = vulkan_runtime_model_with_component_placement(
+        let blueprint = VulkanRuntimeSelectedResourceExecutionBlueprint::prepare(
+            &device,
+            manifest_dir,
             runtime_model,
-            "calibration:unmounted",
-            &BTreeMap::from([(
-                target.component.component_id.clone(),
-                logical_device_id.clone(),
-            )]),
-        )
-        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        placed_model = placed_model.with_component_shard_devices(
-            &target.component.component_id,
-            planning_device_ids.clone(),
+            &target.component,
+            &target.selector_id,
+            target.phase,
+            &target.selected_contract_ids,
         )?;
-        let capacity = placed_model
-            .package
-            .max_context_activations
-            .clamp(
-                1,
-                VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_STATE_ACTIVATIONS,
-            );
-        let tensor_index = Arc::new(placed_model.load_runtime_tensor_index(manifest_dir)?);
-        let contract = Arc::new(
-            instantiate_runtime_resource_contract(&placed_model)
-                .map_err(|error| distributed_calibration_error_value(error.to_string()))?,
-        );
-        let selector = contract
-            .selectors
-            .iter()
-            .find(|selector| selector.id == target.selector_id)
-            .cloned()
-            .ok_or_else(|| {
-                distributed_calibration_error_value(format!(
-                    "selected-resource execution selector {:?} is absent",
-                    target.selector_id,
-                ))
-            })?;
-        if selector.execution_scope != placed_model.execution_scope
-            || selector.component_id != target.component.component_id
-            || target.resource_index >= selector.resource_count
-        {
+        let VulkanRuntimeSelectedResourceExecutionBlueprint {
+            logical_device_id,
+            placed_model,
+            tensor_index,
+            contract,
+            selector,
+            loaded_manifest,
+            contract_phase,
+            full_execution_plan,
+            resource_execution_class_ids,
+        } = blueprint;
+        if target.resource_index >= selector.resource_count {
             return distributed_calibration_error(
                 "selected-resource execution selector does not own the requested component resource",
             );
         }
-        let residency_plan = plan_vulkan_runtime_residency_with_contract(
-            manifest_dir,
-            &placed_model,
-            &tensor_index,
-            capacity,
-            0,
-            ResourceResidencyPolicy::DemandRetained,
-            &contract,
-        )
-        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let targeted_plan = VulkanResidentTargetedModelPackageDeviceSlicePlan::prepare(
-            &device,
-            manifest_dir,
-            &placed_model,
-            &target.component.component_id,
-            &logical_device_id,
-            capacity,
-            Arc::clone(&tensor_index),
-            Arc::clone(&contract),
-            residency_plan,
-        )?;
-        let loaded_manifest = resident_package_loaded_kernel_manifest_for_slice_plans(
-            std::slice::from_ref(&targeted_plan.slice_plan),
-        )?;
-        let artifact_manifest = VulkanPhysicalKernelArtifactManifest::new(
-            loaded_manifest
-                .physical_artifacts
-                .iter()
-                .map(|artifact| artifact.artifact.clone())
-                .collect(),
-        );
-        let graph = placed_model.executable_circuit_graph()?;
-        let (_, placement_plan, _) = plan_resident_package_placed_stream_circuit_with_tensor_index(
-            &logical_device_id,
-            &placed_model.placement,
-            &graph,
-            manifest_dir,
-            &tensor_index,
-            placed_model.package.activation_element_bytes,
-        )?;
-        let (contract_phase, execution_shape) =
-            distributed_contract_phase_and_shape(target.phase);
-        let full_execution_plan = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_with_resource_contract_and_contracts(
-            &[(&logical_device_id, &targeted_plan.slice_plan.prepared_plan)],
-            &tensor_index,
-            &artifact_manifest,
-            &BTreeMap::from([(
-                target.component.component_id.clone(),
-                planning_device_ids,
-            )]),
-            &placement_plan.edges,
-            device.min_storage_buffer_offset_alignment(),
-            contract_phase,
-            execution_shape,
-            &placed_model.execution_scope,
-            &contract,
-            &target.selected_contract_ids,
-        )
-        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let classes = full_execution_plan
-            .selected_resource_execution_classes(&target.selector_id)
-            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        if classes.component_id != target.component.component_id {
-            return distributed_calibration_error(
-                "selected-resource execution class belongs to a different component",
-            );
-        }
-        let resource_execution_class_id = classes
-            .resource_execution_class_ids
+        let planned_resource_execution_class_id = resource_execution_class_ids
             .get(target.resource_index)
-            .cloned()
             .ok_or_else(|| {
                 distributed_calibration_error_value(
                     "selected-resource execution class omits the requested resource",
                 )
             })?;
+        if planned_resource_execution_class_id != &target.resource_execution_class_id {
+            return distributed_calibration_error(
+                "selected-resource execution class changed after calibration target discovery",
+            );
+        }
+        let resource_execution_class_id = target.resource_execution_class_id.clone();
         let execution_plan = full_execution_plan
             .isolated_selected_resource_transaction(
                 &target.selector_id,
@@ -1330,6 +1232,7 @@ pub fn calibrate_vulkan_runtime_selected_resource_execution(
         || target.component.signature_id.is_empty()
         || target.component.component_id.is_empty()
         || target.selector_id.is_empty()
+        || !valid_sha256_digest(&target.resource_execution_class_id)
         || target.selected_contract_ids.is_empty()
         || target.phase.activation_batch_width() == 0
         || policy.warmup_units != 1
@@ -1682,6 +1585,7 @@ mod runtime_selected_resource_execution_calibration_tests {
                 },
                 selector_id: "experts".to_string(),
                 resource_index: 4,
+                resource_execution_class_id: resource_execution_class_id.clone(),
                 phase: VulkanTargetedComponentExecutionPhase::Decode,
                 selected_contract_ids: BTreeSet::from(["contract".to_string()]),
             },
