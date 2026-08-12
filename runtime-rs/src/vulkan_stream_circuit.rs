@@ -185,6 +185,7 @@ include!("vulkan_stream_circuit/compiled_resource_store_residency.rs");
 include!("vulkan_stream_circuit/sparse_moe_execution.rs");
 include!("vulkan_stream_circuit/selection_telemetry.rs");
 include!("vulkan_stream_circuit/host_memory_capacity.rs");
+include!("vulkan_stream_circuit/placed_model_package_constructors.rs");
 include!("vulkan_stream_circuit/placed_model_package_loader.rs");
 include!("vulkan_stream_circuit/placed_stream_processor.rs");
 include!("vulkan_stream_circuit/placed_prompt_event.rs");
