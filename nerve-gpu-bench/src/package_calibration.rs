@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::io;
 use std::path::Path;
@@ -46,8 +47,18 @@ pub fn run_package_calibration(
     println!(
         "calibrated package={} signature={} representative={} requested_component={} phase={} batch_width={} targets={:?} observations={} contract_candidates={} sampled={} best_measured_ns={} output={}",
         package.source_path().display(),
-        measurement.target.signature_id,
-        measurement.target.component_id,
+        measurement
+            .targets
+            .iter()
+            .map(|target| target.signature_id.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        measurement
+            .targets
+            .iter()
+            .map(|target| target.component_id.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
         component,
         match phase {
             PackageCalibrationPhase::Decode => "decode",
@@ -73,7 +84,7 @@ pub fn run_package_calibration(
 }
 
 pub struct PackageCalibrationMeasurement {
-    pub target: VulkanRuntimePlacementCalibrationTarget,
+    pub targets: Vec<VulkanRuntimePlacementCalibrationTarget>,
     pub catalog: VulkanPlacementCalibrationCatalog,
     pub reports: Vec<VulkanRuntimeDistributedPlacementCalibrationReport>,
 }
@@ -98,7 +109,7 @@ pub fn measure_package_candidates(
             "package calibration owner has no hardware-process profile",
         )
     })?;
-    let runtime_model = package.runtime_model_for_owner(owner_id, owner_profile, runtime)?;
+    let runtime_models = package.runtime_models_for_owner(owner_id, owner_profile, runtime)?;
     let execution_phase = match phase {
         PackageCalibrationPhase::Decode => VulkanTargetedComponentExecutionPhase::Decode,
         PackageCalibrationPhase::Prefill {
@@ -107,18 +118,35 @@ pub fn measure_package_candidates(
             activation_batch_width,
         },
     };
-    let target = vulkan_runtime_placement_calibration_target_for_component(
-        &runtime_model,
-        component,
-        execution_phase,
-    )?;
-    measure_package_candidates_for_runtime_model(
-        package,
-        &runtime_model,
-        &target,
-        phase,
-        ordered_target_ids,
-    )
+    let mut signatures = BTreeSet::new();
+    let mut targets = Vec::new();
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    let mut reports = Vec::new();
+    for runtime_model in &runtime_models {
+        let target = vulkan_runtime_placement_calibration_target_for_component(
+            runtime_model,
+            component,
+            execution_phase,
+        )?;
+        if !signatures.insert(target.signature_id.clone()) {
+            continue;
+        }
+        let measurement = measure_package_candidates_for_runtime_model(
+            package,
+            runtime_model,
+            &target,
+            phase,
+            ordered_target_ids,
+        )?;
+        targets.extend(measurement.targets);
+        catalog.merge(&measurement.catalog)?;
+        reports.extend(measurement.reports);
+    }
+    Ok(PackageCalibrationMeasurement {
+        targets,
+        catalog,
+        reports,
+    })
 }
 
 pub fn measure_package_candidates_for_runtime_model(
@@ -136,8 +164,7 @@ pub fn measure_package_candidates_for_runtime_model(
             activation_batch_width,
         },
     };
-    let opened = open_calibration_targets(ordered_target_ids)?;
-    let devices = opened.devices;
+    let devices = open_calibration_targets(ordered_target_ids)?;
 
     let before = capture_device_snapshots(&devices)?;
     print_device_snapshots("before", &before);
@@ -238,7 +265,7 @@ pub fn measure_package_candidates_for_runtime_model(
         }
     };
     Ok(PackageCalibrationMeasurement {
-        target: target.clone(),
+        targets: vec![target.clone()],
         catalog,
         reports,
     })

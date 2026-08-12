@@ -11,11 +11,6 @@ use nerve_runtime::{
     VulkanDeviceLocalMemoryPressure,
 };
 
-pub struct OpenCalibrationTargets {
-    pub devices: Vec<(String, Rc<VulkanComputeDevice>)>,
-    pub hardware_profiles: BTreeMap<String, HardwareProcessProfile>,
-}
-
 pub fn discover_calibration_hardware_profiles(
     ordered_target_ids: &[String],
 ) -> Result<BTreeMap<String, HardwareProcessProfile>, Box<dyn Error>> {
@@ -45,17 +40,16 @@ struct DeviceActivityObservation {
 
 pub fn open_calibration_targets(
     ordered_target_ids: &[String],
-) -> Result<OpenCalibrationTargets, Box<dyn Error>> {
+) -> Result<Vec<(String, Rc<VulkanComputeDevice>)>, Box<dyn Error>> {
     let allowed_target_ids = validate_calibration_target_ids(ordered_target_ids)?;
     let device_catalog =
         VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(&allowed_target_ids)?;
-    let profiles = device_catalog.available_hardware_profiles()?;
     let available_by_id = device_catalog
         .available_compute_devices()
         .iter()
         .map(|device| (device.physical_device_id.clone(), device.clone()))
         .collect::<BTreeMap<_, _>>();
-    let devices = ordered_target_ids
+    ordered_target_ids
         .iter()
         .map(|physical_device_id| {
             let info = available_by_id.get(physical_device_id).ok_or_else(|| {
@@ -77,12 +71,7 @@ pub fn open_calibration_targets(
             }
             Ok((physical_device_id.clone(), device))
         })
-        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-    let hardware_profiles = hardware_profiles_for_target_ids(ordered_target_ids, &profiles)?;
-    Ok(OpenCalibrationTargets {
-        devices,
-        hardware_profiles,
-    })
+        .collect()
 }
 
 fn validate_calibration_target_ids(

@@ -71,6 +71,47 @@ impl CalibrationPackage {
         hardware_profile: &HardwareProcessProfile,
         config: CalibrationRuntimeConfig,
     ) -> Result<VulkanResidentRuntimeModel, io::Error> {
+        let placed =
+            self.placed_runtime_model_for_owner(owner_physical_device_id, hardware_profile)?;
+        let execution = self.execution_envelope(config)?;
+        placed
+            .select_and_apply_runtime_implementations(
+                &self.manifest_dir,
+                &BTreeMap::from([(
+                    owner_physical_device_id.to_string(),
+                    hardware_profile.clone(),
+                )]),
+                execution,
+            )
+            .map(|(runtime_model, _)| runtime_model)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+    }
+
+    pub fn runtime_models_for_owner(
+        &self,
+        owner_physical_device_id: &str,
+        hardware_profile: &HardwareProcessProfile,
+        config: CalibrationRuntimeConfig,
+    ) -> Result<Vec<VulkanResidentRuntimeModel>, io::Error> {
+        let placed =
+            self.placed_runtime_model_for_owner(owner_physical_device_id, hardware_profile)?;
+        placed
+            .applicable_runtime_implementation_variants(
+                &self.manifest_dir,
+                &BTreeMap::from([(
+                    owner_physical_device_id.to_string(),
+                    hardware_profile.clone(),
+                )]),
+                self.execution_envelope(config)?,
+            )
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+    }
+
+    fn placed_runtime_model_for_owner(
+        &self,
+        owner_physical_device_id: &str,
+        hardware_profile: &HardwareProcessProfile,
+    ) -> Result<VulkanResidentRuntimeModel, io::Error> {
         if owner_physical_device_id.is_empty()
             || hardware_profile.hardware_identity.stable_device_id != owner_physical_device_id
         {
@@ -97,18 +138,7 @@ impl CalibrationPackage {
             &placement,
         )
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-        let execution = self.execution_envelope(config)?;
-        placed
-            .select_and_apply_runtime_implementations(
-                &self.manifest_dir,
-                &BTreeMap::from([(
-                    owner_physical_device_id.to_string(),
-                    hardware_profile.clone(),
-                )]),
-                execution,
-            )
-            .map(|(runtime_model, _)| runtime_model)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+        Ok(placed)
     }
 
     pub fn execution_envelope(
@@ -292,5 +322,19 @@ mod tests {
                 })
                 .count()
         );
+
+        let variants = package
+            .runtime_models_for_owner(
+                &owner,
+                &profile,
+                CalibrationRuntimeConfig {
+                    context_size: Some(8),
+                    speculative_draft_tokens: Some(0),
+                    residency_policy: ResourceResidencyPolicy::Eager,
+                },
+            )
+            .unwrap();
+        assert_eq!(variants.len(), 1);
+        assert!(variants[0].implementation_selection.is_none());
     }
 }

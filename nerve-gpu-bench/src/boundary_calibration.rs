@@ -10,8 +10,8 @@ use nerve_runtime::{
 };
 
 use crate::calibration_device_state::{
-    capture_device_snapshots, open_calibration_targets, print_device_snapshots,
-    quiesce_and_verify_device_snapshots,
+    capture_device_snapshots, discover_calibration_hardware_profiles, open_calibration_targets,
+    print_device_snapshots, quiesce_and_verify_device_snapshots,
 };
 use crate::cli::PackageCalibrationPhase;
 use crate::output::write_atomic;
@@ -49,8 +49,9 @@ pub fn measure_boundary_candidate(
     target_id: &str,
     runtime: CalibrationRuntimeConfig,
 ) -> Result<VulkanPlacementCalibrationCatalog, Box<dyn Error>> {
-    let opened = open_calibration_targets(&[source_id.to_string(), target_id.to_string()])?;
-    let source_profile = opened.hardware_profiles.get(source_id).ok_or_else(|| {
+    let profiles =
+        discover_calibration_hardware_profiles(&[source_id.to_string(), target_id.to_string()])?;
+    let source_profile = profiles.get(source_id).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "boundary calibration source has no hardware-process profile",
@@ -58,6 +59,15 @@ pub fn measure_boundary_candidate(
     })?;
     let runtime_model = package.runtime_model_for_owner(source_id, source_profile, runtime)?;
     let frame_byte_counts = vulkan_runtime_placement_transfer_byte_counts(&runtime_model)?;
+    measure_boundary_candidate_for_byte_counts(phase, source_id, target_id, &frame_byte_counts)
+}
+
+pub fn measure_boundary_candidate_for_byte_counts(
+    phase: PackageCalibrationPhase,
+    source_id: &str,
+    target_id: &str,
+    frame_byte_counts: &[usize],
+) -> Result<VulkanPlacementCalibrationCatalog, Box<dyn Error>> {
     if frame_byte_counts.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -67,7 +77,7 @@ pub fn measure_boundary_candidate(
     }
     let execution_phase = phase.execution_phase();
     let activation_batch_width = phase.activation_batch_width();
-    let devices = opened.devices;
+    let devices = open_calibration_targets(&[source_id.to_string(), target_id.to_string()])?;
     let before = capture_device_snapshots(&devices)?;
     print_device_snapshots("before", &before);
     let source = &devices[0].1;
@@ -79,7 +89,7 @@ pub fn measure_boundary_candidate(
         target,
         execution_phase,
         activation_batch_width,
-        &frame_byte_counts,
+        frame_byte_counts,
     );
     let restoration_result = quiesce_and_verify_device_snapshots(&devices, &before);
     let reports = match (calibration_result, restoration_result) {

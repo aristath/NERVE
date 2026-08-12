@@ -6,14 +6,15 @@ use std::path::Path;
 use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, VulkanPlacementExecutionStrategy,
     VulkanRuntimeDistributedPlacementCalibrationReport, VulkanRuntimePlacementCalibrationTarget,
+    vulkan_runtime_placement_transfer_byte_counts,
 };
 
-use crate::boundary_calibration::measure_boundary_candidate;
+use crate::boundary_calibration::measure_boundary_candidate_for_byte_counts;
 use crate::calibration_device_state::discover_calibration_hardware_profiles;
 use crate::calibration_package::CalibrationPackage;
 use crate::calibration_package::CalibrationRuntimeConfig;
 use crate::calibration_suite_plan::{expand_target_orders, plan_calibration_suite};
-use crate::load_wave_calibration::measure_load_wave_candidate;
+use crate::load_wave_calibration::measure_load_wave_candidate_for_runtime_model;
 use crate::output::write_atomic;
 use crate::package_calibration::measure_package_candidates_for_runtime_model;
 
@@ -34,6 +35,7 @@ struct MeasuredTargetOrder {
 struct SelectedComponentCalibrationCase {
     phase: crate::cli::PackageCalibrationPhase,
     owner_target_id: String,
+    runtime_variant_index: usize,
     target: VulkanRuntimePlacementCalibrationTarget,
 }
 
@@ -41,6 +43,7 @@ struct SelectedComponentCalibrationCase {
 struct SelectedLoadWaveCalibrationCase {
     phase: crate::cli::PackageCalibrationPhase,
     owner_target_id: String,
+    runtime_variant_index: usize,
     component_id: String,
     selector_id: String,
     resource_indices: Vec<usize>,
@@ -64,20 +67,25 @@ pub fn run_calibration_suite(
                 .get(owner_target_id)
                 .expect("every requested calibration target has a profile");
             package
-                .runtime_model_for_owner(owner_target_id, profile, runtime)
-                .map(|model| (owner_target_id.clone(), model))
+                .runtime_models_for_owner(owner_target_id, profile, runtime)
+                .map(|models| (owner_target_id.clone(), models))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     let plans = runtime_models
         .iter()
-        .map(|(owner_target_id, runtime_model)| {
-            plan_calibration_suite(
-                runtime_model,
-                target_ids,
-                prefill_widths,
-                maximum_group_size,
-            )
-            .map(|plan| (owner_target_id.clone(), plan))
+        .flat_map(|(owner_target_id, runtime_models)| {
+            runtime_models
+                .iter()
+                .enumerate()
+                .map(move |(runtime_variant_index, runtime_model)| {
+                    plan_calibration_suite(
+                        runtime_model,
+                        target_ids,
+                        prefill_widths,
+                        maximum_group_size,
+                    )
+                    .map(|plan| ((owner_target_id.clone(), runtime_variant_index), plan))
+                })
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     let reference_plan = plans.values().next().ok_or_else(|| {
@@ -88,6 +96,16 @@ pub fn run_calibration_suite(
     })?;
     let component_cases = selected_component_calibration_cases(&plans);
     let load_wave_cases = selected_load_wave_calibration_cases(&plans);
+    let boundary_frame_byte_counts = runtime_models
+        .values()
+        .flatten()
+        .map(vulkan_runtime_placement_transfer_byte_counts)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     let mut measured_component_candidates = 0usize;
     let mut unavailable_component_candidates = 0usize;
@@ -101,7 +119,7 @@ pub fn run_calibration_suite(
         {
             let measurement = measure_package_candidates_for_runtime_model(
                 &package,
-                &runtime_models[&case.owner_target_id],
+                &runtime_models[&case.owner_target_id][case.runtime_variant_index],
                 &case.target,
                 case.phase,
                 order,
@@ -127,7 +145,7 @@ pub fn run_calibration_suite(
             for order in expanded {
                 let measurement = measure_package_candidates_for_runtime_model(
                     &package,
-                    &runtime_models[&case.owner_target_id],
+                    &runtime_models[&case.owner_target_id][case.runtime_variant_index],
                     &case.target,
                     case.phase,
                     &order,
@@ -147,25 +165,24 @@ pub fn run_calibration_suite(
     }
 
     for case in &reference_plan.boundary_cases {
-        let measured = measure_boundary_candidate(
-            &package,
+        let measured = measure_boundary_candidate_for_byte_counts(
             case.phase,
             &case.source_target_id,
             &case.destination_target_id,
-            runtime,
+            &boundary_frame_byte_counts,
         )?;
         catalog.merge(&measured)?;
     }
 
     for case in &load_wave_cases {
-        let measured = measure_load_wave_candidate(
+        let measured = measure_load_wave_candidate_for_runtime_model(
             &package,
+            &runtime_models[&case.owner_target_id][case.runtime_variant_index],
             &case.component_id,
             &case.selector_id,
             case.phase,
             &case.resource_indices,
             &case.owner_target_id,
-            runtime,
         )?;
         catalog.merge(&measured.catalog)?;
     }
@@ -190,10 +207,10 @@ pub fn run_calibration_suite(
 }
 
 fn selected_component_calibration_cases(
-    plans: &BTreeMap<String, crate::calibration_suite_plan::CalibrationSuitePlan>,
+    plans: &BTreeMap<(String, usize), crate::calibration_suite_plan::CalibrationSuitePlan>,
 ) -> Vec<SelectedComponentCalibrationCase> {
     let mut selected = BTreeMap::new();
-    for (owner_target_id, plan) in plans {
+    for ((owner_target_id, runtime_variant_index), plan) in plans {
         for case in &plan.component_cases {
             selected
                 .entry((
@@ -204,6 +221,7 @@ fn selected_component_calibration_cases(
                 .or_insert_with(|| SelectedComponentCalibrationCase {
                     phase: case.phase,
                     owner_target_id: owner_target_id.clone(),
+                    runtime_variant_index: *runtime_variant_index,
                     target: case.target.clone(),
                 });
         }
@@ -212,10 +230,10 @@ fn selected_component_calibration_cases(
 }
 
 fn selected_load_wave_calibration_cases(
-    plans: &BTreeMap<String, crate::calibration_suite_plan::CalibrationSuitePlan>,
+    plans: &BTreeMap<(String, usize), crate::calibration_suite_plan::CalibrationSuitePlan>,
 ) -> Vec<SelectedLoadWaveCalibrationCase> {
     let mut selected = BTreeMap::new();
-    for (owner_target_id, plan) in plans {
+    for ((owner_target_id, runtime_variant_index), plan) in plans {
         for case in &plan.load_wave_cases {
             selected
                 .entry((
@@ -228,6 +246,7 @@ fn selected_load_wave_calibration_cases(
                 .or_insert_with(|| SelectedLoadWaveCalibrationCase {
                     phase: case.phase,
                     owner_target_id: owner_target_id.clone(),
+                    runtime_variant_index: *runtime_variant_index,
                     component_id: case.component_id.clone(),
                     selector_id: case.selector_id.clone(),
                     resource_indices: case.resource_indices.clone(),
@@ -368,8 +387,9 @@ mod tests {
                 .all(|case| case.phase == crate::cli::PackageCalibrationPhase::Decode)
         );
         let plans = BTreeMap::from([
-            (targets[0].clone(), plan.clone()),
-            (targets[1].clone(), plan.clone()),
+            ((targets[0].clone(), 0), plan.clone()),
+            ((targets[0].clone(), 1), plan.clone()),
+            ((targets[1].clone(), 0), plan.clone()),
         ]);
         let cases = selected_component_calibration_cases(&plans);
         let owners = cases
@@ -379,6 +399,10 @@ mod tests {
 
         assert_eq!(owners, BTreeSet::from(["owner-a", "owner-b"]));
         assert_eq!(cases.len(), plan.component_cases.len() * owners.len());
+        assert!(
+            cases.iter().all(|case| case.runtime_variant_index == 0),
+            "an identical representation must be calibrated once per owner"
+        );
         assert!(
             cases
                 .iter()
