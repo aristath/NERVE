@@ -57,9 +57,7 @@ impl VulkanRuntimeDistributedPlacementCalibrationReport {
             output_artifact: self.output_artifact.clone(),
             output_equivalence,
             state_digest: self.state_digest.clone(),
-            resident_bytes_by_physical_device: self
-                .resident_parameter_bytes_by_device
-                .clone(),
+            resident_bytes_by_physical_device: self.resident_parameter_bytes_by_device.clone(),
             transient_peak_bytes_by_physical_device: self
                 .resident_transient_bytes_by_device
                 .clone(),
@@ -120,12 +118,9 @@ struct VulkanRuntimeDistributedPlacementSession {
     _distributed_activation_buffers: VulkanDistributedActivationBuffers,
     edge_synchronizations: VulkanPlacedEdgeTimelineSynchronizations,
     _distributed_parameter_buffers: VulkanDistributedParameterBuffers,
-    distributed_resource_stores:
-        BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
-    _distributed_dynamic_resource_buffers:
-        BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
-    _distributed_transaction_predicates:
-        BTreeMap<String, Arc<VulkanResidentBuffer>>,
+    distributed_resource_stores: BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
+    _distributed_dynamic_resource_buffers: BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
+    _distributed_transaction_predicates: BTreeMap<String, Arc<VulkanResidentBuffer>>,
     _parameter_pool: VulkanResidentBufferPool,
     resident_parameter_bytes_by_device: BTreeMap<String, usize>,
     resident_transient_bytes_by_device: BTreeMap<String, usize>,
@@ -142,8 +137,10 @@ pub fn calibrate_vulkan_runtime_distributed_placement_candidate_with_policy(
     runtime_model: &VulkanResidentRuntimeModel,
     target: &VulkanRuntimePlacementCalibrationTarget,
     policy: VulkanRuntimePlacementCalibrationPolicy,
-) -> Result<Option<VulkanRuntimeDistributedPlacementCalibrationReport>, VulkanResidentTokenModelPackageError>
-{
+) -> Result<
+    Option<VulkanRuntimeDistributedPlacementCalibrationReport>,
+    VulkanResidentTokenModelPackageError,
+> {
     calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
         devices,
         manifest_dir.as_ref(),
@@ -161,8 +158,10 @@ pub fn calibrate_vulkan_runtime_distributed_prefill_placement_candidate_with_pol
     target: &VulkanRuntimePlacementCalibrationTarget,
     activation_batch_width: usize,
     policy: VulkanRuntimePlacementCalibrationPolicy,
-) -> Result<Option<VulkanRuntimeDistributedPlacementCalibrationReport>, VulkanResidentTokenModelPackageError>
-{
+) -> Result<
+    Option<VulkanRuntimeDistributedPlacementCalibrationReport>,
+    VulkanResidentTokenModelPackageError,
+> {
     if activation_batch_width == 0 {
         return distributed_calibration_error(
             "distributed prefill calibration requires a positive activation batch width",
@@ -187,8 +186,10 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
     target: &VulkanRuntimePlacementCalibrationTarget,
     phase: VulkanTargetedComponentExecutionPhase,
     policy: VulkanRuntimePlacementCalibrationPolicy,
-) -> Result<Option<VulkanRuntimeDistributedPlacementCalibrationReport>, VulkanResidentTokenModelPackageError>
-{
+) -> Result<
+    Option<VulkanRuntimeDistributedPlacementCalibrationReport>,
+    VulkanResidentTokenModelPackageError,
+> {
     if devices.is_empty() {
         return distributed_calibration_error(
             "runtime shard calibration requires at least one device",
@@ -251,15 +252,19 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
         let warmup_useful_units = policy
             .warmup_units
             .checked_mul(activation_batch_width)
-            .ok_or_else(|| distributed_calibration_error_value(
-                "distributed calibration warmup work overflowed",
-            ))?;
+            .ok_or_else(|| {
+                distributed_calibration_error_value(
+                    "distributed calibration warmup work overflowed",
+                )
+            })?;
         let measured_useful_units = policy
             .measured_units
             .checked_mul(activation_batch_width)
-            .ok_or_else(|| distributed_calibration_error_value(
-                "distributed calibration measured work overflowed",
-            ))?;
+            .ok_or_else(|| {
+                distributed_calibration_error_value(
+                    "distributed calibration measured work overflowed",
+                )
+            })?;
         let warmup = session.execute(
             warmup_useful_units,
             0,
@@ -288,7 +293,10 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
                 .iter()
                 .zip(&session.physical_device_ids)
                 .map(|(logical_id, physical_id)| {
-                    (physical_id.clone(), bytes.get(logical_id).copied().unwrap_or(0))
+                    (
+                        physical_id.clone(),
+                        bytes.get(logical_id).copied().unwrap_or(0),
+                    )
                 })
                 .collect::<BTreeMap<_, _>>()
         };
@@ -370,11 +378,13 @@ fn distributed_calibration_execution_case(
 
     let mut devices = devices
         .iter()
-        .map(|(physical_device_id, device)| VulkanPlacementDeviceExecutionIdentity {
-            physical_device_id: physical_device_id.clone(),
-            api_version: device.api_version(),
-            driver_version: device.driver_version(),
-        })
+        .map(
+            |(physical_device_id, device)| VulkanPlacementDeviceExecutionIdentity {
+                physical_device_id: physical_device_id.clone(),
+                api_version: device.api_version(),
+                driver_version: device.driver_version(),
+            },
+        )
         .collect::<Vec<_>>();
     devices.sort();
 
@@ -385,8 +395,8 @@ fn distributed_calibration_execution_case(
             .iter()
             .zip(&island.implementation_digests)
         {
-            if let Some(existing) = contract_digests
-                .insert(contract_id.clone(), implementation_digest.clone())
+            if let Some(existing) =
+                contract_digests.insert(contract_id.clone(), implementation_digest.clone())
                 && existing != *implementation_digest
             {
                 return distributed_calibration_error(format!(
@@ -444,23 +454,22 @@ fn distributed_calibration_execution_case(
             operations.push(reduction);
         }
         for shard in &dispatch.shards {
-            let parameter_bytes = shard.parameters.iter().try_fold(
-                0usize,
-                |total, parameter| {
-                    total.checked_add(parameter.byte_count).ok_or_else(|| {
-                        distributed_calibration_error_value(
-                            "distributed calibration shard parameter bytes overflowed",
-                        )
-                    })
-                },
-            )?;
+            let parameter_bytes =
+                shard
+                    .parameters
+                    .iter()
+                    .try_fold(0usize, |total, parameter| {
+                        total.checked_add(parameter.byte_count).ok_or_else(|| {
+                            distributed_calibration_error_value(
+                                "distributed calibration shard parameter bytes overflowed",
+                            )
+                        })
+                    })?;
             shards.push(VulkanPlacementShardIdentity {
                 dispatch_ordinal,
                 physical_device_id: physical_id(&shard.device_id)?,
-                distribution: distributed_calibration_distribution_name(
-                    dispatch.distribution,
-                )
-                .to_string(),
+                distribution: distributed_calibration_distribution_name(dispatch.distribution)
+                    .to_string(),
                 logical_start: shard.row_start,
                 logical_count: shard.row_count,
                 selected_resource_indices: shard.selected_resource_indices.clone(),
@@ -526,11 +535,8 @@ fn distributed_calibration_execution_case(
             nerve_execution_contracts::ExecutionPhase::Prefill
         }
     };
-    let input_fixture_digest = distributed_calibration_fixture_identity(
-        execution_phase,
-        &shape,
-        0,
-    )?;
+    let input_fixture_digest =
+        distributed_calibration_fixture_identity(execution_phase, &shape, 0)?;
     let equivalence = distributed_calibration_equivalence(execution_plan)?;
     Ok(VulkanPlacementExecutionCaseIdentity {
         behavior: VulkanPlacementBehaviorIdentity {
@@ -601,16 +607,18 @@ fn distributed_calibration_equivalence_from_contracts(
             "distributed calibration equivalence requires an executable dispatch",
         );
     };
-    if contracts[..contracts.len() - 1].iter().any(|(equivalence, _)| {
-        equivalence.output != VulkanDistributedEquivalenceKind::BitExact
-    }) {
+    if contracts[..contracts.len() - 1]
+        .iter()
+        .any(|(equivalence, _)| equivalence.output != VulkanDistributedEquivalenceKind::BitExact)
+    {
         return distributed_calibration_error(
             "distributed calibration cannot compose a tolerant intermediate without a compiler-declared region equivalence",
         );
     }
-    if contracts.iter().any(|(equivalence, _)| {
-        equivalence.state != VulkanDistributedEquivalenceKind::BitExact
-    }) {
+    if contracts
+        .iter()
+        .any(|(equivalence, _)| equivalence.state != VulkanDistributedEquivalenceKind::BitExact)
+    {
         return distributed_calibration_error(
             "distributed calibration cannot validate tolerant state without a typed compiled state layout",
         );
@@ -627,9 +635,9 @@ fn distributed_calibration_equivalence_from_contracts(
             Some(VulkanDistributedReductionFinalizationPlan::StoreF32) => {
                 Some(VulkanPlacementScalarFormat::F32)
             }
-            Some(
-                VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. },
-            ) => Some(VulkanPlacementScalarFormat::Bf16),
+            Some(VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. }) => {
+                Some(VulkanPlacementScalarFormat::Bf16)
+            }
             None => {
                 return distributed_calibration_error(
                     "tolerant distributed output has no typed reduction finalization",
@@ -761,12 +769,17 @@ fn distributed_calibration_fixture_identity(
     shape: &VulkanPlacementShapeClass,
     seed: u32,
 ) -> Result<String, VulkanResidentTokenModelPackageError> {
-    let payload = serde_json::to_vec(&("nerve.distributed_calibration_fixture.v1", phase, shape, seed))
-        .map_err(|error| {
-            distributed_calibration_error_value(format!(
-                "failed to encode distributed calibration fixture identity: {error}",
-            ))
-        })?;
+    let payload = serde_json::to_vec(&(
+        "nerve.distributed_calibration_fixture.v1",
+        phase,
+        shape,
+        seed,
+    ))
+    .map_err(|error| {
+        distributed_calibration_error_value(format!(
+            "failed to encode distributed calibration fixture identity: {error}",
+        ))
+    })?;
     Ok(format!("sha256:{:x}", Sha256::digest(payload)))
 }
 
@@ -782,9 +795,7 @@ fn distributed_calibration_artifact_digest(
         .collect::<Vec<_>>();
     artifacts.sort_by(|left, right| left.artifact.family_id.cmp(&right.artifact.family_id));
     if artifacts.is_empty() {
-        return distributed_calibration_error(
-            "distributed calibration artifact identity is empty",
-        );
+        return distributed_calibration_error("distributed calibration artifact identity is empty");
     }
     for artifact in artifacts {
         let manifest_bytes = serde_json::to_vec(&artifact.artifact).map_err(|error| {
@@ -835,26 +846,64 @@ fn distributed_calibration_execution_graph_digest(
     tick_plan: &VulkanMountedPlacedStreamTickPlan,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"nerve.distributed_calibration_execution_graph.v1\0");
-    digest.update(target.component_id.as_bytes());
+    digest.update(b"nerve.distributed_calibration_execution_graph.v2\0");
+    // The target signature already identifies the complete compiler-emitted
+    // physical transaction while deliberately excluding semantic labels. Keep
+    // that property here: equivalent repeated components must share placement
+    // evidence, while a different stage/IO topology must not.
+    digest.update(target.signature_id.as_bytes());
     digest.update([0]);
-    digest.update(target.terminal_node_id.as_bytes());
+    digest.update(tick_plan.stage_count.to_le_bytes());
+    digest.update(tick_plan.receive_stage_count.to_le_bytes());
+    digest.update(tick_plan.dispatch_stage_count.to_le_bytes());
+    digest.update(tick_plan.publish_stage_count.to_le_bytes());
     for stage in &tick_plan.stages {
-        let VulkanMountedPlacedStreamTickStage::Dispatch { dispatch, .. } = stage else {
-            continue;
-        };
-        digest.update(dispatch.dispatch_index.to_le_bytes());
-        digest.update(dispatch.kernel_id.as_bytes());
-        digest.update([0]);
-        digest.update(dispatch.component_id.as_bytes());
-        digest.update([0]);
-        digest.update(dispatch.node_id.as_bytes());
-        digest.update([0]);
-        digest.update(dispatch.op.as_bytes());
-        digest.update(dispatch.descriptor_count.to_le_bytes());
-        digest.update(dispatch.resident_descriptor_count.to_le_bytes());
+        match stage {
+            VulkanMountedPlacedStreamTickStage::ReceiveEdge { byte_capacity, .. } => {
+                digest.update([0]);
+                digest.update(byte_capacity.to_le_bytes());
+            }
+            VulkanMountedPlacedStreamTickStage::Dispatch { dispatch, .. } => {
+                digest.update([1]);
+                digest.update(dispatch.descriptor_count.to_le_bytes());
+                digest.update(dispatch.resident_descriptor_count.to_le_bytes());
+                digest.update(dispatch.reads.len().to_le_bytes());
+                for read in &dispatch.reads {
+                    distributed_calibration_update_io_topology_digest(&mut digest, read);
+                }
+                digest.update(dispatch.writes.len().to_le_bytes());
+                for write in &dispatch.writes {
+                    distributed_calibration_update_io_topology_digest(&mut digest, write);
+                }
+            }
+            VulkanMountedPlacedStreamTickStage::PublishEdge { byte_capacity, .. } => {
+                digest.update([2]);
+                digest.update(byte_capacity.to_le_bytes());
+            }
+        }
     }
     format!("sha256:{:x}", digest.finalize())
+}
+
+fn distributed_calibration_update_io_topology_digest(
+    digest: &mut Sha256,
+    io: &VulkanMountedPlacedStreamTickIo,
+) {
+    match io {
+        VulkanMountedPlacedStreamTickIo::ModelSignal { .. } => digest.update([0]),
+        VulkanMountedPlacedStreamTickIo::LocalEdgeBuffer { byte_capacity, .. } => {
+            digest.update([1]);
+            digest.update(byte_capacity.to_le_bytes());
+        }
+        VulkanMountedPlacedStreamTickIo::IncomingEdgeBuffer { byte_capacity, .. } => {
+            digest.update([2]);
+            digest.update(byte_capacity.to_le_bytes());
+        }
+        VulkanMountedPlacedStreamTickIo::OutgoingEdgeBuffer { byte_capacity, .. } => {
+            digest.update([3]);
+            digest.update(byte_capacity.to_le_bytes());
+        }
+    }
 }
 
 struct VulkanRuntimeDistributedPlacementExecution {
@@ -980,8 +1029,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             .map(|device| device.min_storage_buffer_offset_alignment())
             .max()
             .unwrap_or(1);
-        let (contract_phase, execution_shape) =
-            distributed_contract_phase_and_shape(phase);
+        let (contract_phase, execution_shape) = distributed_contract_phase_and_shape(phase);
         let full_distributed_execution_plan =
             VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_with_resource_contract(
                 &[(
@@ -1087,16 +1135,13 @@ impl VulkanRuntimeDistributedPlacementSession {
                         "sampled distributed dispatch order or geometry differs from its full plan",
                     );
                 }
-                let sampled_rows = sampled.shards.iter().try_fold(
-                    0usize,
-                    |total, shard| {
-                        total.checked_add(shard.row_count).ok_or_else(|| {
-                            distributed_calibration_error_value(
-                                "sampled distributed work rows overflowed",
-                            )
-                        })
-                    },
-                )?;
+                let sampled_rows = sampled.shards.iter().try_fold(0usize, |total, shard| {
+                    total.checked_add(shard.row_count).ok_or_else(|| {
+                        distributed_calibration_error_value(
+                            "sampled distributed work rows overflowed",
+                        )
+                    })
+                })?;
                 if sampled_rows == 0 || sampled_rows > full.output_rows {
                     return distributed_calibration_error(
                         "sampled distributed work rows fall outside the full dispatch geometry",
@@ -1110,14 +1155,17 @@ impl VulkanRuntimeDistributedPlacementSession {
                 })
             })
             .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
-        let sampled_workload = distributed_execution_plan.dispatches.iter().any(|dispatch| {
-            dispatch
-                .shards
-                .iter()
-                .map(|shard| shard.row_count)
-                .sum::<usize>()
-                < dispatch.output_rows
-        });
+        let sampled_workload = distributed_execution_plan
+            .dispatches
+            .iter()
+            .any(|dispatch| {
+                dispatch
+                    .shards
+                    .iter()
+                    .map(|shard| shard.row_count)
+                    .sum::<usize>()
+                    < dispatch.output_rows
+            });
         let used_devices = distributed_execution_plan
             .dispatches
             .iter()
@@ -1132,12 +1180,11 @@ impl VulkanRuntimeDistributedPlacementSession {
         let activation_plan =
             VulkanDistributedActivationBufferPlan::from_execution_plan(&distributed_execution_plan)
                 .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let parameter_plan =
-            VulkanDistributedParameterAllocationPlan::from_sampled_execution_plan(
-                &distributed_execution_plan,
-                &tensor_index,
-            )
-            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        let parameter_plan = VulkanDistributedParameterAllocationPlan::from_sampled_execution_plan(
+            &distributed_execution_plan,
+            &tensor_index,
+        )
+        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         let mut resident_parameter_bytes_by_device = logical_device_ids
             .iter()
             .map(|device_id| (device_id.clone(), 0usize))
@@ -1170,15 +1217,19 @@ impl VulkanRuntimeDistributedPlacementSession {
         let total_resident_parameter_bytes = resident_parameter_bytes_by_device
             .values()
             .try_fold(0usize, |total, bytes| total.checked_add(*bytes))
-            .ok_or_else(|| distributed_calibration_error_value(
-                "distributed calibration total parameter bytes overflowed",
-            ))?;
+            .ok_or_else(|| {
+                distributed_calibration_error_value(
+                    "distributed calibration total parameter bytes overflowed",
+                )
+            })?;
         if total_resident_parameter_bytes > maximum_total_resident_parameter_bytes
-            || resident_parameter_bytes_by_device.iter().any(|(device_id, bytes)| {
-                maximum_resident_parameter_bytes_by_logical_device
-                    .get(device_id)
-                    .is_none_or(|capacity| bytes > capacity)
-            })
+            || resident_parameter_bytes_by_device
+                .iter()
+                .any(|(device_id, bytes)| {
+                    maximum_resident_parameter_bytes_by_logical_device
+                        .get(device_id)
+                        .is_none_or(|capacity| bytes > capacity)
+                })
         {
             return Ok(None);
         }
@@ -1231,16 +1282,15 @@ impl VulkanRuntimeDistributedPlacementSession {
                         })
                 })
                 .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let Some(selected_resource_mount) =
-            mount_distributed_calibration_selected_resources(
-                manifest_dir,
-                &placed_model.execution_scope,
-                &contract,
-                &distributed_execution_plan,
-                &logical_devices,
-                remaining_dynamic_parameter_budget,
-                &remaining_dynamic_parameter_bytes_by_device,
-            )?
+        let Some(selected_resource_mount) = mount_distributed_calibration_selected_resources(
+            manifest_dir,
+            &placed_model.execution_scope,
+            &contract,
+            &distributed_execution_plan,
+            &logical_devices,
+            remaining_dynamic_parameter_budget,
+            &remaining_dynamic_parameter_bytes_by_device,
+        )?
         else {
             return Ok(None);
         };
@@ -1281,9 +1331,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                             .get(device_id)
                             .map(Rc::as_ref)
                             .ok_or_else(|| {
-                                format!(
-                                    "missing distributed calibration device {device_id:?}"
-                                )
+                                format!("missing distributed calibration device {device_id:?}")
                             })
                     },
                 )
@@ -1341,10 +1389,8 @@ impl VulkanRuntimeDistributedPlacementSession {
                 ))
             })?;
         let tick_plan = distributed_calibration_dispatch_tick_plan(&mounted_bound);
-        let artifact_digest = distributed_calibration_artifact_digest(
-            &loaded_manifest,
-            &targeted.slice,
-        )?;
+        let artifact_digest =
+            distributed_calibration_artifact_digest(&loaded_manifest, &targeted.slice)?;
         let execution_graph_digest =
             distributed_calibration_execution_graph_digest(target, &tick_plan);
         let execution_plan =
@@ -1384,7 +1430,10 @@ impl VulkanRuntimeDistributedPlacementSession {
                 &logical_device_ids,
                 activation_plan.route,
                 activation_plan.allocations.iter().map(|allocation| {
-                    (allocation.owner_device_id.as_str(), allocation.byte_capacity)
+                    (
+                        allocation.owner_device_id.as_str(),
+                        allocation.byte_capacity,
+                    )
                 }),
             )?;
         let owner_total = resident_transient_bytes_by_device
@@ -1480,9 +1529,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                         &distributed_parameter_buffers,
                         &selected_resource_mount.dynamic_buffers,
                     )
-                    .map_err(|error| {
-                        distributed_calibration_error_value(error.to_string())
-                    })?,
+                    .map_err(|error| distributed_calibration_error_value(error.to_string()))?,
                 )
             }
         };
@@ -1565,12 +1612,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             }
             VulkanTargetedComponentExecutionPhase::Prefill {
                 activation_batch_width,
-            } => self.execute_prefill(
-                useful_units,
-                activation_batch_width,
-                seed,
-                maximum_duration,
-            ),
+            } => self.execute_prefill(useful_units, activation_batch_width, seed, maximum_duration),
         }
     }
 
@@ -1617,9 +1659,10 @@ impl VulkanRuntimeDistributedPlacementSession {
             seed,
         )?;
         let started = Instant::now();
-        let schedule = VulkanMountedPlacedResidentInProcessSchedule::from_tick_plans(&[
-            &self.placed_slice.resident_execution_plan.tick_plan,
-        ])
+        let schedule = VulkanMountedPlacedResidentInProcessSchedule::from_tick_plans(&[&self
+            .placed_slice
+            .resident_execution_plan
+            .tick_plan])
         .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         let distributed_runners = self.distributed_runners.as_ref().ok_or_else(|| {
             distributed_calibration_error_value(
@@ -1663,9 +1706,9 @@ impl VulkanRuntimeDistributedPlacementSession {
                 duration_ns: elapsed_nanoseconds(unit_started).max(1),
             });
         }
-        let execution_ns = windows
-            .iter()
-            .fold(0u64, |total, window| total.saturating_add(window.duration_ns));
+        let execution_ns = windows.iter().fold(0u64, |total, window| {
+            total.saturating_add(window.duration_ns)
+        });
         let captured_output = distributed_calibration_output_artifact(
             &self.placed_slice.mounted,
             &self.terminal_dispatch,
@@ -1760,9 +1803,11 @@ impl VulkanRuntimeDistributedPlacementSession {
                             .package_slice
                             .dynamic_state_capacity_activations,
                     )
-                    .map_err(|_| distributed_calibration_error_value(
-                        "distributed prefill state capacity exceeds u32",
-                    ))?,
+                    .map_err(|_| {
+                        distributed_calibration_error_value(
+                            "distributed prefill state capacity exceeds u32",
+                        )
+                    })?,
                     VulkanComponentBatchCompletionMode::Blocking,
                 )
                 .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
@@ -1776,9 +1821,9 @@ impl VulkanRuntimeDistributedPlacementSession {
         runner
             .commit_causal_state_prefix(activation_batch_width)
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let execution_ns = windows
-            .iter()
-            .fold(0u64, |total, window| total.saturating_add(window.duration_ns));
+        let execution_ns = windows.iter().fold(0u64, |total, window| {
+            total.saturating_add(window.duration_ns)
+        });
         let captured_output = distributed_calibration_prefill_output_artifact(
             runner,
             &self.placed_slice,
@@ -1819,9 +1864,8 @@ impl VulkanRuntimeDistributedPlacementSession {
             activation_batch_width,
             execution_ns: execution_ns.max(1),
             windows,
-            physical_dispatch_count: repetitions.saturating_mul(
-                local_dispatch_count.saturating_add(distributed_dispatch_count),
-            ),
+            physical_dispatch_count: repetitions
+                .saturating_mul(local_dispatch_count.saturating_add(distributed_dispatch_count)),
             shard_count,
             output_digest,
             output_artifact,
@@ -2128,16 +2172,16 @@ fn distributed_calibration_write_prefill_fixture(
                 .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
             let byte_count = frame_byte_capacity
                 .checked_mul(activation_batch_width)
-                .ok_or_else(|| distributed_calibration_error_value(
-                    "distributed prefill fixture size overflowed",
-                ))?;
+                .ok_or_else(|| {
+                    distributed_calibration_error_value(
+                        "distributed prefill fixture size overflowed",
+                    )
+                })?;
             signal
                 .buffer
                 .write_bytes(&targeted_fixture_bytes(
                     byte_count,
-                    seed.wrapping_add(
-                        u32::try_from(dispatch.dispatch_index).unwrap_or(u32::MAX),
-                    ),
+                    seed.wrapping_add(u32::try_from(dispatch.dispatch_index).unwrap_or(u32::MAX)),
                     descriptor.binding,
                 ))
                 .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
@@ -2176,9 +2220,9 @@ fn distributed_calibration_prefill_output_artifact(
         };
         let byte_count = frame_byte_capacity
             .checked_mul(activation_batch_width)
-            .ok_or_else(|| distributed_calibration_error_value(
-                "distributed prefill output size overflowed",
-            ))?;
+            .ok_or_else(|| {
+                distributed_calibration_error_value("distributed prefill output size overflowed")
+            })?;
         segments.push(VulkanPlacementOutputSegment {
             binding: descriptor.binding,
             name: descriptor.name.clone(),
@@ -2282,23 +2326,96 @@ fn distributed_calibration_error_value(
 mod runtime_distributed_placement_calibration_strategy_tests {
     use super::*;
 
+    fn digest_target(component_id: &str, node_id: &str) -> VulkanRuntimePlacementCalibrationTarget {
+        VulkanRuntimePlacementCalibrationTarget {
+            signature_id: "same-physical-signature".to_string(),
+            component_id: component_id.to_string(),
+            component_ids: vec![component_id.to_string()],
+            terminal_node_id: node_id.to_string(),
+            implementation: "physical-implementation".to_string(),
+            planned_resident_parameter_bytes: 0,
+        }
+    }
+
+    fn digest_plan(
+        component_id: &str,
+        node_id: &str,
+        edge_bytes: usize,
+    ) -> VulkanMountedPlacedStreamTickPlan {
+        VulkanMountedPlacedStreamTickPlan {
+            backend_id: "vulkan".to_string(),
+            device_id: "semantic-device-label".to_string(),
+            stages: vec![VulkanMountedPlacedStreamTickStage::Dispatch {
+                stage_index: 17,
+                dispatch: VulkanMountedPlacedStreamTickDispatch {
+                    dispatch_index: 91,
+                    kernel_id: format!("kernel-for-{component_id}"),
+                    component_id: component_id.to_string(),
+                    node_id: node_id.to_string(),
+                    op: "semantic-op-label".to_string(),
+                    descriptor_count: 3,
+                    resident_descriptor_count: 1,
+                    reads: vec![
+                        VulkanMountedPlacedStreamTickIo::ModelSignal {
+                            signal_id: format!("input-for-{component_id}"),
+                        },
+                        VulkanMountedPlacedStreamTickIo::LocalEdgeBuffer {
+                            edge_index: 41,
+                            buffer_index: 7,
+                            byte_capacity: edge_bytes,
+                        },
+                    ],
+                    writes: vec![VulkanMountedPlacedStreamTickIo::ModelSignal {
+                        signal_id: format!("output-for-{component_id}"),
+                    }],
+                },
+            }],
+            stage_count: 1,
+            receive_stage_count: 0,
+            dispatch_stage_count: 1,
+            publish_stage_count: 0,
+            local_edge_read_count: 1,
+            local_edge_write_count: 0,
+            incoming_edge_read_count: 0,
+            outgoing_edge_write_count: 0,
+            model_input_read_count: 1,
+            model_output_write_count: 1,
+            can_execute: true,
+        }
+    }
+
+    #[test]
+    fn execution_graph_identity_reuses_equivalent_components_without_hiding_topology() {
+        let first = distributed_calibration_execution_graph_digest(
+            &digest_target("block.0", "down.0"),
+            &digest_plan("block.0", "down.0", 8_192),
+        );
+        let relabeled = distributed_calibration_execution_graph_digest(
+            &digest_target("block.19", "down.19"),
+            &digest_plan("block.19", "down.19", 8_192),
+        );
+        let different_topology = distributed_calibration_execution_graph_digest(
+            &digest_target("block.19", "down.19"),
+            &digest_plan("block.19", "down.19", 16_384),
+        );
+
+        assert_eq!(first, relabeled);
+        assert_ne!(first, different_topology);
+    }
+
     #[test]
     fn calibration_selects_contracts_by_phase_and_lane_shape() {
         assert_eq!(
-            distributed_contract_phase_and_shape(
-                VulkanTargetedComponentExecutionPhase::Decode,
-            ),
+            distributed_contract_phase_and_shape(VulkanTargetedComponentExecutionPhase::Decode,),
             (
                 nerve_execution_contracts::ExecutionPhase::Decode,
                 nerve_execution_contracts::ExecutionShape::SingleLane,
             ),
         );
         assert_eq!(
-            distributed_contract_phase_and_shape(
-                VulkanTargetedComponentExecutionPhase::Prefill {
-                    activation_batch_width: 64,
-                },
-            ),
+            distributed_contract_phase_and_shape(VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width: 64,
+            },),
             (
                 nerve_execution_contracts::ExecutionPhase::Prefill,
                 nerve_execution_contracts::ExecutionShape::MultiLane,
