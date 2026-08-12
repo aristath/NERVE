@@ -259,6 +259,133 @@ def test_compiler_declares_only_an_executable_local_shard_handoff(
     )
 
 
+def test_dense_ffn_pair_emits_one_compatible_local_tensor_parallel_island(
+    tmp_path: Path,
+) -> None:
+    down, circuit, tensor_index, _ = bf16_down_fixture(tmp_path)
+    gate_up = {
+        "id": "gate_up",
+        "op": "parallel_linear_silu_multiply",
+        "inputs": ["normalized"],
+        "outputs": ["activated"],
+        "params": ["gate", "up"],
+    }
+    circuit["nodes"].insert(0, gate_up)
+    circuit["parameters"]["refs"].update(
+        {
+            "gate": {"tensor": "gate.weight"},
+            "up": {"tensor": "up.weight"},
+        }
+    )
+    for tensor in ("gate.weight", "up.weight"):
+        tensor_index["tensors"][tensor] = {
+            "dtype": "BF16",
+            "shape": [256, 4],
+            "parameter_count": 256 * 4,
+            "byte_count": 256 * 4 * 2,
+            "layout": "row_major",
+        }
+
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
+    derive_tensor_parallel_linear_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered_dir,
+        tensor_index,
+        target=NativeTarget(),  # type: ignore[arg-type]
+    )
+
+    shader_dir = tmp_path / "shaders"
+    shader_dir.mkdir()
+    gate_shader = shader_dir / "gate-up.spv"
+    down_shader = shader_dir / "down.spv"
+    gate_shader.write_bytes(b"gate-up")
+    down_shader.write_bytes(b"down")
+    down_implementation = physical_kernel_implementations_for_node(
+        circuit, down, tensor_index
+    )[0]
+    down_implementation["shader_path"] = down_implementation[
+        "shader_path"
+    ].replace(".comp", ".spv")
+    physical_down_shader = tmp_path / down_implementation["shader_path"]
+    physical_down_shader.write_bytes(b"input-column-down")
+
+    gate_contracts = build_kernel_physical_execution_contracts(
+        node=gate_up,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        kernel={
+            "source_node_ids": ["gate_up"],
+            "semantic_module_ids": ["layer.feed_forward.gate_up"],
+            "shader_path": str(gate_shader.relative_to(tmp_path)),
+            "local_size_x": 64,
+            "workgroup_count_x": 128,
+            "batch_implementations": [],
+            "physical_implementations": [],
+        },
+        package_dir=tmp_path,
+    )
+    down_contracts = build_kernel_physical_execution_contracts(
+        node=down,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        kernel={
+            "source_node_ids": ["down_residual"],
+            "semantic_module_ids": ["layer.feed_forward.down_residual"],
+            "shader_path": str(down_shader.relative_to(tmp_path)),
+            "local_size_x": 64,
+            "workgroup_count_x": 2,
+            "batch_implementations": [],
+            "physical_implementations": [down_implementation],
+        },
+        package_dir=tmp_path,
+    )
+
+    gate_distributed = next(
+        contract
+        for contract in gate_contracts
+        if contract["strategy"] == "tensor_parallel"
+    )
+    down_distributed = next(
+        contract
+        for contract in down_contracts
+        if contract["execution_form"] == "partitioned_input_partial_output"
+    )
+    expected_handoff = [
+        {
+            "signal": "activated",
+            "producer_binding": 1,
+            "consumer_binding": 0,
+            "format": "bf16",
+        }
+    ]
+    assert gate_distributed["execution_form"] == (
+        "replicated_input_partitioned_output"
+    )
+    assert gate_distributed["local_intermediates"] == expected_handoff
+    assert down_distributed["local_intermediates"] == expected_handoff
+    assert gate_distributed["outputs"][0]["collection"] == "concatenated"
+    assert down_distributed["inputs"][0] == {
+        "binding": 0,
+        "distribution": "sharded",
+        "dimension": 0,
+        "alignment_elements": TP_INPUT_BLOCK_COLUMNS,
+    }
+    assert gate_distributed["partition_extent"]["elements"] == 256
+    assert down_distributed["partition_extent"]["elements"] == 256
+    assert down_distributed["outputs"][0]["reduction"] == {
+        "operation": "sum_f32",
+        "dimension_name": "output_rows",
+        "finalization": {
+            "kind": "add_bf16_residual_to_bf16",
+            "residual_binding": 1,
+        },
+    }
+    assert down_distributed["formats"]["accumulation"] == "f32"
+    assert down_distributed["phases"] == ["decode", "prefill"]
+
+
 def test_compiler_declares_expert_intermediate_private_on_both_kernels() -> None:
     gate_up = {
         "id": "expert_gate_up",

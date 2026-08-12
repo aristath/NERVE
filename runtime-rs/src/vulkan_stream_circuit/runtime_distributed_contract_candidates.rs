@@ -3,6 +3,14 @@ pub struct VulkanRuntimeDistributedContractCandidate {
     pub contract_ids: BTreeSet<String>,
 }
 
+#[derive(Clone, Copy)]
+struct VulkanRuntimeDistributedContractChoice<'a> {
+    contract: &'a nerve_execution_contracts::PhysicalExecutionContract,
+    execution_index: usize,
+    input_signals: &'a [String],
+    output_signals: &'a [String],
+}
+
 pub fn vulkan_runtime_distributed_contract_candidates(
     runtime_model: &VulkanResidentRuntimeModel,
     target: &VulkanRuntimePlacementCalibrationTarget,
@@ -15,6 +23,17 @@ pub fn vulkan_runtime_distributed_contract_candidates(
         .ok_or_else(|| {
             VulkanRuntimeResidencyPlanError(format!(
                 "distributed contract discovery found no execution for component {:?}",
+                target.component_id,
+            ))
+        })?;
+    let component = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == target.component_id)
+        .ok_or_else(|| {
+            VulkanRuntimeResidencyPlanError(format!(
+                "distributed contract discovery found no circuit for component {:?}",
                 target.component_id,
             ))
         })?;
@@ -41,7 +60,7 @@ pub fn vulkan_runtime_distributed_contract_candidates(
     let mut alternatives = execution
         .kernels
         .iter()
-        .filter_map(|kernel| {
+        .map(|kernel| {
             let mut contracts = kernel
                 .physical_execution_contracts
                 .iter()
@@ -54,17 +73,50 @@ pub fn vulkan_runtime_distributed_contract_candidates(
                 })
                 .collect::<Vec<_>>();
             contracts.sort_by(|left, right| left.contract_id.cmp(&right.contract_id));
-            (!contracts.is_empty()).then_some(contracts)
+            if contracts.is_empty() {
+                return Ok(None);
+            }
+            let node = component
+                .circuit
+                .nodes
+                .iter()
+                .find(|node| node.id == kernel.node_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "distributed contract discovery found no circuit node for kernel {}.{}",
+                        target.component_id, kernel.node_id,
+                    ))
+                })?;
+            Ok::<_, VulkanRuntimeResidencyPlanError>(Some(
+                contracts
+                    .into_iter()
+                    .map(|contract| VulkanRuntimeDistributedContractChoice {
+                        contract,
+                        execution_index: kernel.execution_index,
+                        input_signals: &node.inputs,
+                        output_signals: &node.outputs,
+                    })
+                    .collect::<Vec<_>>(),
+            ))
         })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
         .collect::<Vec<_>>();
     if alternatives.is_empty() {
         return Ok(Vec::new());
     }
     alternatives.sort_by(|left, right| {
         left[0]
+            .contract
             .member_node_ids
-            .cmp(&right[0].member_node_ids)
-            .then_with(|| left[0].operation_family.cmp(&right[0].operation_family))
+            .cmp(&right[0].contract.member_node_ids)
+            .then_with(|| {
+                left[0]
+                    .contract
+                    .operation_family
+                    .cmp(&right[0].contract.operation_family)
+            })
     });
 
     let mut selected = Vec::with_capacity(alternatives.len());
@@ -82,9 +134,9 @@ pub fn vulkan_runtime_distributed_contract_candidates(
 }
 
 fn enumerate_distributed_contract_candidates<'a>(
-    alternatives: &[Vec<&'a nerve_execution_contracts::PhysicalExecutionContract>],
+    alternatives: &[Vec<VulkanRuntimeDistributedContractChoice<'a>>],
     index: usize,
-    selected: &mut Vec<&'a nerve_execution_contracts::PhysicalExecutionContract>,
+    selected: &mut Vec<VulkanRuntimeDistributedContractChoice<'a>>,
     candidates: &mut BTreeSet<BTreeSet<String>>,
 ) -> Result<(), VulkanRuntimeResidencyPlanError> {
     if index == alternatives.len() {
@@ -92,7 +144,7 @@ fn enumerate_distributed_contract_candidates<'a>(
             candidates.insert(
                 selected
                     .iter()
-                    .map(|contract| contract.contract_id.clone())
+                    .map(|choice| choice.contract.contract_id.clone())
                     .collect(),
             );
         }
@@ -108,14 +160,14 @@ fn enumerate_distributed_contract_candidates<'a>(
         selected,
         candidates,
     )?;
-    for contract in &alternatives[index] {
-        contract.validate().map_err(|error| {
+    for choice in &alternatives[index] {
+        choice.contract.validate().map_err(|error| {
             VulkanRuntimeResidencyPlanError(format!(
                 "distributed contract candidate {:?} is invalid: {error}",
-                contract.contract_id,
+                choice.contract.contract_id,
             ))
         })?;
-        selected.push(contract);
+        selected.push(*choice);
         enumerate_distributed_contract_candidates(
             alternatives,
             index + 1,
@@ -128,29 +180,55 @@ fn enumerate_distributed_contract_candidates<'a>(
 }
 
 fn selected_contracts_have_complete_local_handoffs(
-    selected: &[&nerve_execution_contracts::PhysicalExecutionContract],
+    selected: &[VulkanRuntimeDistributedContractChoice<'_>],
 ) -> Result<bool, VulkanRuntimeResidencyPlanError> {
     let mut declarations = BTreeMap::<
         (String, u32, u32, String),
-        usize,
+        (Vec<(usize, usize)>, Vec<(usize, usize)>),
     >::new();
-    for contract in selected {
-        for local in &contract.local_intermediates {
+    for (choice_index, choice) in selected.iter().enumerate() {
+        for local in &choice.contract.local_intermediates {
             let key = (
                 local.signal.clone(),
                 local.producer_binding,
                 local.consumer_binding,
                 local.format.clone(),
             );
-            let count = declarations.entry(key).or_default();
-            *count = count.checked_add(1).ok_or_else(|| {
-                VulkanRuntimeResidencyPlanError(
-                    "distributed local-handoff declaration count overflowed".to_string(),
-                )
-            })?;
+            let is_producer = choice.output_signals.contains(&local.signal)
+                && choice
+                    .contract
+                    .outputs
+                    .iter()
+                    .any(|output| output.binding == local.producer_binding);
+            let is_consumer = choice.input_signals.contains(&local.signal)
+                && choice
+                    .contract
+                    .inputs
+                    .iter()
+                    .any(|input| input.binding == local.consumer_binding);
+            if !is_producer && !is_consumer {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "distributed contract {:?} declares local signal {:?} without producing or consuming its typed binding",
+                    choice.contract.contract_id, local.signal,
+                )));
+            }
+            let (producers, consumers) = declarations.entry(key).or_default();
+            if is_producer {
+                producers.push((choice_index, choice.execution_index));
+            }
+            if is_consumer {
+                consumers.push((choice_index, choice.execution_index));
+            }
         }
     }
-    Ok(declarations.values().all(|count| *count == 2))
+    Ok(declarations.values().all(|(producers, consumers)| {
+        matches!(
+            (producers.as_slice(), consumers.as_slice()),
+            ([(producer_choice, producer_index)], [(consumer_choice, consumer_index)])
+                if producer_choice != consumer_choice
+                    && producer_index.checked_add(1) == Some(*consumer_index)
+        )
+    }))
 }
 
 #[cfg(test)]
@@ -235,10 +313,88 @@ mod runtime_distributed_contract_candidate_tests {
         ];
         let mut consumer = producer.clone();
         consumer.contract_id = format!("sha256:{}", "f".repeat(64));
+        let producer_inputs = vec!["normalized".to_string()];
+        let producer_outputs = vec!["private-shard".to_string()];
+        let consumer_inputs = vec!["private-shard".to_string()];
+        let consumer_outputs = vec!["hidden".to_string()];
+        let producer = VulkanRuntimeDistributedContractChoice {
+            contract: &producer,
+            execution_index: 4,
+            input_signals: &producer_inputs,
+            output_signals: &producer_outputs,
+        };
+        let consumer = VulkanRuntimeDistributedContractChoice {
+            contract: &consumer,
+            execution_index: 5,
+            input_signals: &consumer_inputs,
+            output_signals: &consumer_outputs,
+        };
 
-        assert!(!selected_contracts_have_complete_local_handoffs(&[&producer]).unwrap());
+        assert!(!selected_contracts_have_complete_local_handoffs(&[producer]).unwrap());
         assert!(
-            selected_contracts_have_complete_local_handoffs(&[&producer, &consumer]).unwrap()
+            selected_contracts_have_complete_local_handoffs(&[producer, consumer]).unwrap()
+        );
+    }
+
+    #[test]
+    fn local_handoff_rejects_duplicate_producers_and_nonadjacent_consumers() {
+        let model = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let mut first = model
+            .component_executions
+            .iter()
+            .flat_map(|execution| &execution.kernels)
+            .flat_map(|kernel| &kernel.physical_execution_contracts)
+            .find(|contract| contract.strategy.is_distributed())
+            .expect("fixture has a distributed contract")
+            .clone();
+        first.local_intermediates = vec![
+            nerve_execution_contracts::LocalIntermediateContract {
+                signal: "private-shard".to_string(),
+                producer_binding: 1,
+                consumer_binding: 0,
+                format: "bf16:private-layout".to_string(),
+            },
+        ];
+        let mut second = first.clone();
+        second.contract_id = format!("sha256:{}", "e".repeat(64));
+        let producer_inputs = vec!["normalized".to_string()];
+        let producer_outputs = vec!["private-shard".to_string()];
+        let consumer_inputs = vec!["private-shard".to_string()];
+        let consumer_outputs = vec!["hidden".to_string()];
+        let producer = VulkanRuntimeDistributedContractChoice {
+            contract: &first,
+            execution_index: 4,
+            input_signals: &producer_inputs,
+            output_signals: &producer_outputs,
+        };
+        let duplicate_producer = VulkanRuntimeDistributedContractChoice {
+            contract: &second,
+            execution_index: 5,
+            input_signals: &producer_inputs,
+            output_signals: &producer_outputs,
+        };
+        let nonadjacent_consumer = VulkanRuntimeDistributedContractChoice {
+            contract: &second,
+            execution_index: 6,
+            input_signals: &consumer_inputs,
+            output_signals: &consumer_outputs,
+        };
+
+        assert!(
+            !selected_contracts_have_complete_local_handoffs(&[
+                producer,
+                duplicate_producer,
+            ])
+            .unwrap()
+        );
+        assert!(
+            !selected_contracts_have_complete_local_handoffs(&[
+                producer,
+                nonadjacent_consumer,
+            ])
+            .unwrap()
         );
     }
 
@@ -261,7 +417,22 @@ mod runtime_distributed_contract_candidate_tests {
         assert!(first.local_intermediates.is_empty());
         assert!(second.local_intermediates.is_empty());
 
-        let alternatives = vec![vec![*first], vec![*second]];
+        let inputs = Vec::<String>::new();
+        let outputs = Vec::<String>::new();
+        let alternatives = vec![
+            vec![VulkanRuntimeDistributedContractChoice {
+                contract: first,
+                execution_index: 0,
+                input_signals: &inputs,
+                output_signals: &outputs,
+            }],
+            vec![VulkanRuntimeDistributedContractChoice {
+                contract: second,
+                execution_index: 1,
+                input_signals: &inputs,
+                output_signals: &outputs,
+            }],
+        ];
         let mut selected = Vec::new();
         let mut candidates = BTreeSet::new();
         enumerate_distributed_contract_candidates(
