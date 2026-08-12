@@ -1673,14 +1673,13 @@ fn local_shard_handoff(
     dense_local_shard_handoff(producer, consumer) || expert_local_shard_handoff(producer, consumer)
 }
 
-/// Proves that two adjacent expert kernels consume the same atomic expert
-/// selection on the same devices. Parameters-per-resource and descriptor
-/// bindings are intentionally allowed to differ: gate/up and down projections
-/// are separate kernels, while one selector-owned atomic group contains every
-/// tensor required by both. If any selector, route, group, or ownership fact
-/// differs, the operations remain separate execution islands and therefore
-/// separate residency transactions.
-fn selected_resource_expert_handoff(
+/// Proves that two adjacent selected-resource kernels consume the same atomic
+/// cohort on the same devices. Parameter projections and descriptor bindings
+/// are intentionally allowed to differ: separate kernels can consume distinct
+/// members of one all-or-nothing residency group. If any selector, route,
+/// cohort, or shard range differs, the operations remain separate execution
+/// islands and therefore separate residency transactions.
+fn selected_resource_cohort_handoff(
     producer: &VulkanDistributedDispatchPlan,
     consumer: &VulkanDistributedDispatchPlan,
 ) -> bool {
@@ -1714,17 +1713,11 @@ fn selected_resource_expert_handoff(
                 && producer_partition.resource_count == consumer_partition.resource_count
                 && producer_partition.selection_count_per_activation
                     == consumer_partition.selection_count_per_activation
-                && producer_partition.parameter_partitions
-                    == consumer_partition.parameter_partitions
                 && producer_partition.atomic_group_ids == consumer_partition.atomic_group_ids
                 && producer_partition.atomic_group_byte_counts
                     == consumer_partition.atomic_group_byte_counts
                 && producer_partition.atomic_group_resource_ids
-                    == consumer_partition.atomic_group_resource_ids
-                && producer_partition.parameter_resource_ids
-                    == consumer_partition.parameter_resource_ids
-                && producer_partition.parameter_resource_byte_counts
-                    == consumer_partition.parameter_resource_byte_counts;
+                    == consumer_partition.atomic_group_resource_ids;
             if !selector_identity_matches {
                 return false;
             }
@@ -1744,12 +1737,9 @@ fn selected_resource_expert_handoff(
                 return false;
             }
 
-            producer
-                .shards
-                .iter()
-                .zip(&consumer.shards)
-                .all(|(producer_shard, consumer_shard)| {
-                    producer_shard
+            producer.shards.iter().zip(&consumer.shards).all(
+                |(producer_shard, consumer_shard)| {
+                    let whole_resources_match = producer_shard
                         .selected_resource_indices
                         .get(&producer_partition.selector_id)
                         .zip(
@@ -1757,8 +1747,27 @@ fn selected_resource_expert_handoff(
                                 .selected_resource_indices
                                 .get(&consumer_partition.selector_id),
                         )
-                        .is_some_and(|(producer, consumer)| producer == consumer)
-                })
+                        .is_some_and(|(producer, consumer)| producer == consumer);
+                    let fragments_match = producer_shard
+                        .selected_resource_fragments
+                        .get(&producer_partition.selector_id)
+                        .zip(
+                            consumer_shard
+                                .selected_resource_fragments
+                                .get(&consumer_partition.selector_id),
+                        )
+                        .is_some_and(|(producer, consumer)| {
+                            producer.len() == consumer.len()
+                                && producer.iter().zip(consumer).all(|(producer, consumer)| {
+                                    producer.resource_index == consumer.resource_index
+                                        && producer.atomic_group_id == consumer.atomic_group_id
+                                        && producer.logical_start == consumer.logical_start
+                                        && producer.logical_count == consumer.logical_count
+                                })
+                        });
+                    whole_resources_match ^ fragments_match
+                },
+            )
         })
 }
 
@@ -1788,7 +1797,7 @@ fn expert_local_shard_handoff(
         && producer.output_collection == OutputCollection::Routed
         && consumer.input_distribution == InputDistribution::Routed
         && same_distributed_activation(&producer.output_activation, &consumer.input_activation)
-        && selected_resource_expert_handoff(producer, consumer)
+        && selected_resource_cohort_handoff(producer, consumer)
         && producer.shards.len() == consumer.shards.len()
         && producer
             .shards
@@ -1832,6 +1841,7 @@ fn dense_local_shard_handoff(
         && producer.output_collection == OutputCollection::Concatenated
         && consumer.distribution == VulkanDistributedDispatchDistribution::InputColumns
         && consumer.input_distribution == InputDistribution::Sharded
+        && selected_resource_cohort_handoff(producer, consumer)
         && producer
             .shards
             .iter()

@@ -28,7 +28,6 @@ pub struct VulkanDistributedSelectedResourceOwnership {
     pub selection_signal: String,
     pub resource_count: usize,
     pub selection_count_per_activation: usize,
-    pub parameter_partitions: Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
     pub owned_resource_indices: Vec<usize>,
     pub atomic_group_ids: Vec<String>,
     pub atomic_group_byte_counts: Vec<usize>,
@@ -61,12 +60,6 @@ struct VulkanDistributedSelectedResourceSelectorIdentity {
     selection_signal: String,
     resource_count: usize,
     selection_count_per_activation: usize,
-    parameter_partitions: Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
-    atomic_group_ids: Vec<String>,
-    atomic_group_byte_counts: Vec<usize>,
-    atomic_group_resource_ids: Vec<Vec<String>>,
-    parameter_resource_ids: Vec<Vec<String>>,
-    parameter_resource_byte_counts: Vec<Vec<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,19 +85,8 @@ impl VulkanDistributedSelectedResourceStorePlan {
     fn merged_for_alternatives(
         plans: &[VulkanDistributedSelectedResourceStorePlan],
     ) -> Result<Self, VulkanDistributedPlanError> {
-        let mut selector_identities = BTreeMap::<
-            String,
-            (
-                String,
-                String,
-                String,
-                String,
-                String,
-                usize,
-                usize,
-                Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
-            ),
-        >::new();
+        let mut selector_identities =
+            BTreeMap::<String, VulkanDistributedSelectedResourceSelectorIdentity>::new();
         let mut canonical_resources = BTreeMap::<(String, usize), (String, usize)>::new();
         let mut resources_by_device_selector =
             BTreeMap::<(String, String), BTreeMap<usize, (String, usize)>>::new();
@@ -154,16 +136,15 @@ impl VulkanDistributedSelectedResourceStorePlan {
                                 .to_string(),
                         ));
                     }
-                    let identity = (
-                        selector.execution_scope.clone(),
-                        selector.component_id.clone(),
-                        selector.node_id.clone(),
-                        selector.domain_id.clone(),
-                        selector.selection_signal.clone(),
-                        selector.resource_count,
-                        selector.selection_count_per_activation,
-                        selector.parameter_partitions.clone(),
-                    );
+                    let identity = VulkanDistributedSelectedResourceSelectorIdentity {
+                        execution_scope: selector.execution_scope.clone(),
+                        component_id: selector.component_id.clone(),
+                        node_id: selector.node_id.clone(),
+                        domain_id: selector.domain_id.clone(),
+                        selection_signal: selector.selection_signal.clone(),
+                        resource_count: selector.resource_count,
+                        selection_count_per_activation: selector.selection_count_per_activation,
+                    };
                     if let Some(existing) =
                         selector_identities.insert(selector.selector_id.clone(), identity.clone())
                         && existing != identity
@@ -243,15 +224,14 @@ impl VulkanDistributedSelectedResourceStorePlan {
             }
             device_selectors.entry(device_id).or_default().push(
                 VulkanDistributedSelectedResourceOwnership {
-                    execution_scope: identity.0.clone(),
+                    execution_scope: identity.execution_scope.clone(),
                     selector_id,
-                    component_id: identity.1.clone(),
-                    node_id: identity.2.clone(),
-                    domain_id: identity.3.clone(),
-                    selection_signal: identity.4.clone(),
-                    resource_count: identity.5,
-                    selection_count_per_activation: identity.6,
-                    parameter_partitions: identity.7.clone(),
+                    component_id: identity.component_id.clone(),
+                    node_id: identity.node_id.clone(),
+                    domain_id: identity.domain_id.clone(),
+                    selection_signal: identity.selection_signal.clone(),
+                    resource_count: identity.resource_count,
+                    selection_count_per_activation: identity.selection_count_per_activation,
                     owned_resource_indices,
                     atomic_group_ids,
                     atomic_group_byte_counts,
@@ -274,15 +254,14 @@ impl VulkanDistributedSelectedResourceStorePlan {
             }
             device_selectors.entry(device_id).or_default().push(
                 VulkanDistributedSelectedResourceOwnership {
-                    execution_scope: identity.0.clone(),
+                    execution_scope: identity.execution_scope.clone(),
                     selector_id,
-                    component_id: identity.1.clone(),
-                    node_id: identity.2.clone(),
-                    domain_id: identity.3.clone(),
-                    selection_signal: identity.4.clone(),
-                    resource_count: identity.5,
-                    selection_count_per_activation: identity.6,
-                    parameter_partitions: identity.7.clone(),
+                    component_id: identity.component_id.clone(),
+                    node_id: identity.node_id.clone(),
+                    domain_id: identity.domain_id.clone(),
+                    selection_signal: identity.selection_signal.clone(),
+                    resource_count: identity.resource_count,
+                    selection_count_per_activation: identity.selection_count_per_activation,
                     owned_resource_indices: Vec::new(),
                     atomic_group_ids: Vec::new(),
                     atomic_group_byte_counts: Vec::new(),
@@ -306,6 +285,8 @@ impl VulkanDistributedSelectedResourceStorePlan {
             .collect::<BTreeSet<_>>();
         let mut identities =
             BTreeMap::<String, VulkanDistributedSelectedResourceSelectorIdentity>::new();
+        let mut cohort_identities =
+            BTreeMap::<(String, usize), (String, usize, Vec<String>)>::new();
         let mut group_devices = BTreeMap::<(String, String), String>::new();
         let mut resources_by_device_selector = BTreeMap::<(String, String), BTreeSet<usize>>::new();
         let mut fragments_by_device_selector_resource = BTreeMap::<
@@ -324,14 +305,6 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     selection_signal: partition.selection_signal.clone(),
                     resource_count: partition.resource_count,
                     selection_count_per_activation: partition.selection_count_per_activation,
-                    parameter_partitions: partition.parameter_partitions.clone(),
-                    atomic_group_ids: partition.atomic_group_ids.clone(),
-                    atomic_group_byte_counts: partition.atomic_group_byte_counts.clone(),
-                    atomic_group_resource_ids: partition.atomic_group_resource_ids.clone(),
-                    parameter_resource_ids: partition.parameter_resource_ids.clone(),
-                    parameter_resource_byte_counts: partition
-                        .parameter_resource_byte_counts
-                        .clone(),
                 };
                 if let Some(existing) =
                     identities.insert(partition.selector_id.clone(), identity.clone())
@@ -341,6 +314,23 @@ impl VulkanDistributedSelectedResourceStorePlan {
                         "selected resource selector {:?} changes identity between distributed dispatches",
                         partition.selector_id
                     )));
+                }
+                for resource_index in 0..partition.resource_count {
+                    let cohort_identity = (
+                        partition.atomic_group_ids[resource_index].clone(),
+                        partition.atomic_group_byte_counts[resource_index],
+                        partition.atomic_group_resource_ids[resource_index].clone(),
+                    );
+                    if let Some(existing) = cohort_identities.insert(
+                        (partition.selector_id.clone(), resource_index),
+                        cohort_identity.clone(),
+                    ) && existing != cohort_identity
+                    {
+                        return Err(VulkanDistributedPlanError(format!(
+                            "selected resource selector {:?} resource {resource_index} changes atomic cohort identity between distributed dispatches",
+                            partition.selector_id,
+                        )));
+                    }
                 }
 
                 if !partition.parameter_partitions.is_empty() {
@@ -423,11 +413,22 @@ impl VulkanDistributedSelectedResourceStorePlan {
             let owned_resource_indices = indices.into_iter().collect::<Vec<_>>();
             let atomic_group_ids = owned_resource_indices
                 .iter()
-                .map(|index| identity.atomic_group_ids[*index].clone())
+                .map(|index| {
+                    cohort_identities
+                        .get(&(selector_id.clone(), *index))
+                        .expect("whole-resource ownership has an atomic cohort identity")
+                        .0
+                        .clone()
+                })
                 .collect::<Vec<_>>();
             let atomic_group_byte_counts = owned_resource_indices
                 .iter()
-                .map(|index| identity.atomic_group_byte_counts[*index])
+                .map(|index| {
+                    cohort_identities
+                        .get(&(selector_id.clone(), *index))
+                        .expect("whole-resource ownership has an atomic cohort identity")
+                        .1
+                })
                 .collect::<Vec<_>>();
             device_selectors.entry(device_id).or_default().push(
                 VulkanDistributedSelectedResourceOwnership {
@@ -439,7 +440,6 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     selection_signal: identity.selection_signal.clone(),
                     resource_count: identity.resource_count,
                     selection_count_per_activation: identity.selection_count_per_activation,
-                    parameter_partitions: identity.parameter_partitions.clone(),
                     owned_resource_indices,
                     atomic_group_ids,
                     atomic_group_byte_counts,
@@ -455,10 +455,10 @@ impl VulkanDistributedSelectedResourceStorePlan {
         for ((device_id, selector_id, resource_index), fragment) in
             fragments_by_device_selector_resource
         {
-            let identity = identities.get(&selector_id).expect(
-                "selected resource fragments were created from a validated selector identity",
-            );
-            let expected_resource_ids = identity.atomic_group_resource_ids[resource_index]
+            let expected_resource_ids = cohort_identities
+                .get(&(selector_id.clone(), resource_index))
+                .expect("selected resource fragment has an atomic cohort identity")
+                .2
                 .iter()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>();
@@ -519,7 +519,6 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     selection_signal: identity.selection_signal.clone(),
                     resource_count: identity.resource_count,
                     selection_count_per_activation: identity.selection_count_per_activation,
-                    parameter_partitions: identity.parameter_partitions.clone(),
                     owned_resource_indices: Vec::new(),
                     atomic_group_ids: Vec::new(),
                     atomic_group_byte_counts: Vec::new(),

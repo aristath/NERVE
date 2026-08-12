@@ -2632,6 +2632,194 @@ mod tests {
     }
 
     #[test]
+    fn tensor_parallel_expert_dispatches_merge_distinct_parameter_fragments_into_one_cohort() {
+        let mut gate_up = fixture_plan("row_major").dispatches.remove(0);
+        gate_up.dispatch_index = 4;
+        gate_up.node_id = "expert-gate-up".to_string();
+        gate_up.distribution = VulkanDistributedDispatchDistribution::OutputRows;
+        gate_up.selected_resource_partitions =
+            vec![VulkanDistributedSelectedResourcePartitionPlan {
+                execution_scope: "model".to_string(),
+                selector_id: "routed-experts".to_string(),
+                node_id: "router".to_string(),
+                domain_id: "experts".to_string(),
+                selection_signal: "routes".to_string(),
+                address_table_binding: 4,
+                parameter_slots_binding: 5,
+                resource_count: 1,
+                parameters_per_resource: 2,
+                parameter_partitions: vec![
+                    VulkanDistributedSelectedResourceParameterPartitionPlan {
+                        parameter_slot: 0,
+                        dimension: 0,
+                        kind: ParameterPartitionKind::Contiguous,
+                        alignment_elements: 1,
+                        logical_elements_per_index: 1,
+                    },
+                    VulkanDistributedSelectedResourceParameterPartitionPlan {
+                        parameter_slot: 1,
+                        dimension: 0,
+                        kind: ParameterPartitionKind::Contiguous,
+                        alignment_elements: 1,
+                        logical_elements_per_index: 1,
+                    },
+                ],
+                selection_count_per_activation: 1,
+                atomic_group_ids: vec!["expert-0".to_string()],
+                atomic_group_byte_counts: vec![288],
+                atomic_group_resource_ids: vec![vec![
+                    "expert-0-gate".to_string(),
+                    "expert-0-up".to_string(),
+                    "expert-0-down".to_string(),
+                ]],
+                parameter_resource_ids: vec![vec![
+                    "expert-0-gate".to_string(),
+                    "expert-0-up".to_string(),
+                ]],
+                parameter_resource_byte_counts: vec![vec![96, 96]],
+            }];
+        for shard in &mut gate_up.shards {
+            let byte_offset = 96 * shard.row_start / gate_up.output_rows;
+            let byte_count = 96 * shard.row_count / gate_up.output_rows;
+            shard.selected_resource_indices.clear();
+            shard.selected_resource_fragments.insert(
+                "routed-experts".to_string(),
+                vec![VulkanDistributedSelectedResourceFragmentPlan {
+                    resource_index: 0,
+                    atomic_group_id: "expert-0".to_string(),
+                    logical_start: shard.row_start,
+                    logical_count: shard.row_count,
+                    parameters: vec![
+                        VulkanDistributedSelectedResourceParameterFragmentPlan {
+                            parameter_slot: 0,
+                            resource_id: "expert-0-gate".to_string(),
+                            resource_byte_count: 96,
+                            byte_offset,
+                            byte_count,
+                        },
+                        VulkanDistributedSelectedResourceParameterFragmentPlan {
+                            parameter_slot: 1,
+                            resource_id: "expert-0-up".to_string(),
+                            resource_byte_count: 96,
+                            byte_offset,
+                            byte_count,
+                        },
+                    ],
+                }],
+            );
+        }
+        gate_up.local_intermediates = vec![nerve_execution_contracts::LocalIntermediateContract {
+            signal: gate_up.output_activation.signal_id.clone(),
+            producer_binding: u32::try_from(gate_up.output_activation.binding).unwrap(),
+            consumer_binding: 0,
+            format: "bf16".to_string(),
+        }];
+        let mut routes = gate_up.input_activation.clone();
+        routes.binding = 8;
+        routes.signal_id = "routes".to_string();
+        routes.slot += 8;
+        gate_up.auxiliary_input_activations = vec![routes];
+        gate_up.auxiliary_input_distributions = vec![InputDistribution::Replicated];
+
+        let mut down = gate_up.clone();
+        down.dispatch_index = 5;
+        down.node_id = "expert-down".to_string();
+        down.distribution = VulkanDistributedDispatchDistribution::InputColumns;
+        down.input_activation = gate_up.output_activation.clone();
+        down.input_activation.binding = 0;
+        down.input_distribution = InputDistribution::Sharded;
+        down.selected_resource_partitions[0].address_table_binding = 6;
+        down.selected_resource_partitions[0].parameter_slots_binding = 7;
+        down.selected_resource_partitions[0].parameters_per_resource = 1;
+        down.selected_resource_partitions[0].parameter_partitions.truncate(1);
+        down.selected_resource_partitions[0].parameter_resource_ids =
+            vec![vec!["expert-0-down".to_string()]];
+        down.selected_resource_partitions[0].parameter_resource_byte_counts = vec![vec![96]];
+        for (gate_up_shard, shard) in gate_up.shards.iter().zip(&mut down.shards) {
+            let byte_offset = 96 * shard.row_start / down.output_rows;
+            let byte_count = 96 * shard.row_count / down.output_rows;
+            shard.input_range.byte_offset = gate_up_shard.output_byte_offset;
+            shard.input_range.byte_count = gate_up_shard.output_byte_count;
+            shard.selected_resource_fragments.insert(
+                "routed-experts".to_string(),
+                vec![VulkanDistributedSelectedResourceFragmentPlan {
+                    resource_index: 0,
+                    atomic_group_id: "expert-0".to_string(),
+                    logical_start: shard.row_start,
+                    logical_count: shard.row_count,
+                    parameters: vec![VulkanDistributedSelectedResourceParameterFragmentPlan {
+                        parameter_slot: 0,
+                        resource_id: "expert-0-down".to_string(),
+                        resource_byte_count: 96,
+                        byte_offset,
+                        byte_count,
+                    }],
+                }],
+            );
+        }
+
+        let mut plan = fixture_plan("row_major");
+        plan.dispatches = vec![gate_up, down];
+        let ownership =
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&plan).unwrap();
+
+        assert_eq!(
+            resolved_physical_execution_islands(
+                &plan.dispatches,
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+            .unwrap()
+            .len(),
+            1,
+        );
+        assert_eq!(ownership.unique_atomic_group_count, plan.device_ids.len());
+        assert_eq!(ownership.total_addressable_bytes, 288);
+        for device in &ownership.devices {
+            let [selector] = device.selectors.as_slice() else {
+                panic!("each participant must own one selector cohort")
+            };
+            let [fragment] = selector.fragmented_resources.as_slice() else {
+                panic!("each participant must own one expert fragment")
+            };
+            assert_eq!(fragment.resources.len(), 3);
+            assert_eq!(
+                fragment
+                    .resources
+                    .iter()
+                    .map(|resource| resource.resource_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["expert-0-down", "expert-0-gate", "expert-0-up"],
+            );
+            assert_eq!(
+                device.maximum_atomic_group_bytes,
+                fragment
+                    .resources
+                    .iter()
+                    .map(|resource| resource.byte_count)
+                    .sum::<usize>(),
+            );
+        }
+
+        let mut mismatched = plan.clone();
+        mismatched.dispatches[1].selected_resource_partitions[0].atomic_group_byte_counts[0] += 1;
+        assert!(
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&mismatched)
+                .unwrap_err()
+                .to_string()
+                .contains("changes atomic cohort identity")
+        );
+        assert_eq!(
+            resolved_physical_execution_islands(
+                &mismatched.dispatches,
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+            .unwrap()
+            .len(),
+            2,
+        );
+    }
+
+    #[test]
     fn contract_declared_output_rows_flow_into_local_input_column_shards() {
         let mut producer = fixture_plan("row_major").dispatches.remove(0);
         producer.dispatch_index = 7;
