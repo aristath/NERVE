@@ -339,7 +339,11 @@ pub fn vulkan_runtime_placement_calibration_target_for_component(
     vulkan_runtime_placement_calibration_target_from_execution(component_id, execution, phase)
 }
 
-fn vulkan_runtime_placement_calibration_targets_for_phase(
+/// Discovers one representative for every distinct compiler-emitted
+/// transaction in the requested execution phase. Component instance names
+/// are deliberately excluded from equivalence; all exact executable and
+/// geometry facts remain part of each signature.
+pub fn vulkan_runtime_placement_calibration_targets_for_phase(
     runtime_model: &VulkanResidentRuntimeModel,
     phase: VulkanTargetedComponentExecutionPhase,
 ) -> Result<Vec<VulkanRuntimePlacementCalibrationTarget>, VulkanRuntimeResidencyPlanError> {

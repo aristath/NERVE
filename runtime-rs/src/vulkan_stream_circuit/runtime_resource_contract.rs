@@ -19,7 +19,7 @@ impl Error for VulkanRuntimeResourceContractError {}
 /// graph. Immutable resources, groups, and partition templates retain their
 /// compiled content identities; only bindings, selectors, and physical
 /// checkpoints acquire runtime-instance identities.
-fn instantiate_runtime_resource_contract(
+pub fn instantiate_runtime_resource_contract(
     runtime_model: &VulkanResidentRuntimeModel,
 ) -> Result<CompiledResourceResidencyContract, VulkanRuntimeResourceContractError> {
     let source = &runtime_model.package.resource_residency;

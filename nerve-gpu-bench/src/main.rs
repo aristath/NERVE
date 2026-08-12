@@ -1,6 +1,9 @@
 mod benchmark;
 mod boundary_calibration;
 mod calibration_device_state;
+mod calibration_package;
+mod calibration_suite;
+mod calibration_suite_plan;
 mod catalog_merge;
 mod cli;
 mod discovery;
@@ -56,6 +59,24 @@ fn run() -> Result<(), Box<dyn Error>> {
         Command::Summarize { input } => {
             let payload = fs::read_to_string(&input)?;
             print_json_summary(&payload)?;
+        }
+        Command::CalibrateSuite {
+            package,
+            mut target_ids,
+            prefill_widths,
+            maximum_group_size,
+            output,
+        } => {
+            if target_ids.is_empty() {
+                target_ids = executable_vulkan_target_ids(discover_targets());
+            }
+            calibration_suite::run_calibration_suite(
+                &package,
+                &target_ids,
+                &prefill_widths,
+                maximum_group_size,
+                &output,
+            )?;
         }
         Command::CalibratePackage {
             package,
@@ -154,6 +175,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn executable_vulkan_target_ids(targets: Vec<model::Target>) -> Vec<String> {
+    targets
+        .into_iter()
+        .filter(|target| {
+            target.backend == "vulkan"
+                && target.vulkan.is_some()
+                && target.stable_target_id.starts_with("vulkan-uuid:")
+        })
+        .map(|target| target.stable_target_id)
+        .collect()
 }
 
 fn resolve_max_group_size(requested: Option<usize>, selected_target_count: usize) -> usize {

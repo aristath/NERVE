@@ -24,6 +24,13 @@ pub enum Command {
     Summarize {
         input: PathBuf,
     },
+    CalibrateSuite {
+        package: PathBuf,
+        target_ids: Vec<String>,
+        prefill_widths: Vec<usize>,
+        maximum_group_size: Option<usize>,
+        output: PathBuf,
+    },
     CalibratePackage {
         package: PathBuf,
         component: String,
@@ -74,6 +81,24 @@ pub enum PackageCalibrationPhase {
     Prefill { activation_batch_width: usize },
 }
 
+impl PackageCalibrationPhase {
+    pub fn execution_phase(self) -> nerve_execution_contracts::ExecutionPhase {
+        match self {
+            Self::Decode => nerve_execution_contracts::ExecutionPhase::Decode,
+            Self::Prefill { .. } => nerve_execution_contracts::ExecutionPhase::Prefill,
+        }
+    }
+
+    pub fn activation_batch_width(self) -> usize {
+        match self {
+            Self::Decode => 1,
+            Self::Prefill {
+                activation_batch_width,
+            } => activation_batch_width,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError(String);
 
@@ -98,6 +123,7 @@ where
         "list" => parse_list(args.collect()),
         "summarize" => parse_input_file_command("summarize", args.collect()),
         "validate" => parse_validate(args.collect()),
+        "calibrate-suite" => parse_calibrate_suite(args.collect()),
         "calibrate-package" => parse_calibrate_package(args.collect()),
         "calibrate-boundaries" => parse_calibrate_boundaries(args.collect()),
         "calibrate-load-wave" => parse_calibrate_load_wave(args.collect()),
@@ -108,6 +134,87 @@ where
             usage()
         ))),
     }
+}
+
+fn parse_calibrate_suite(arguments: Vec<String>) -> Result<Command, CliError> {
+    let mut package = None;
+    let mut target_ids = Vec::new();
+    let mut prefill_widths = Vec::new();
+    let mut maximum_group_size = None;
+    let mut output = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--package" => set_once_path(&mut package, &arguments, &mut index, "--package")?,
+            "--target" => target_ids.push(required_value(&arguments, &mut index, "--target")?),
+            "--prefill-width" => {
+                let value = parse_usize(
+                    &required_value(&arguments, &mut index, "--prefill-width")?,
+                    "--prefill-width",
+                )?;
+                if value == 0 {
+                    return Err(CliError(
+                        "--prefill-width must be greater than zero".to_string(),
+                    ));
+                }
+                prefill_widths.push(value);
+            }
+            "--max-group-size" => {
+                let value = parse_usize(
+                    &required_value(&arguments, &mut index, "--max-group-size")?,
+                    "--max-group-size",
+                )?;
+                if value == 0 {
+                    return Err(CliError(
+                        "--max-group-size must be greater than zero".to_string(),
+                    ));
+                }
+                if maximum_group_size.replace(value).is_some() {
+                    return Err(CliError(
+                        "--max-group-size may only be specified once".to_string(),
+                    ));
+                }
+            }
+            "--output" => set_once_path(&mut output, &arguments, &mut index, "--output")?,
+            other => {
+                return Err(CliError(format!(
+                    "unknown calibrate-suite argument {other:?}\n\n{}",
+                    usage()
+                )));
+            }
+        }
+        index += 1;
+    }
+    let package =
+        package.ok_or_else(|| CliError("calibrate-suite requires --package PATH".to_string()))?;
+    if let Some(target_id) = target_ids
+        .iter()
+        .find(|target_id| !is_canonical_vulkan_target_id(target_id))
+    {
+        return Err(CliError(format!(
+            "calibrate-suite target {target_id:?} is not a canonical vulkan-uuid identity"
+        )));
+    }
+    let mut distinct_target_ids = target_ids.clone();
+    distinct_target_ids.sort();
+    distinct_target_ids.dedup();
+    if distinct_target_ids.len() != target_ids.len() {
+        return Err(CliError(
+            "calibrate-suite requires distinct target identities".to_string(),
+        ));
+    }
+    prefill_widths.sort_unstable();
+    prefill_widths.dedup();
+    let output =
+        output.ok_or_else(|| CliError("calibrate-suite requires --output PATH".to_string()))?;
+    Ok(Command::CalibrateSuite {
+        package,
+        target_ids,
+        prefill_widths,
+        maximum_group_size,
+        output,
+    })
 }
 
 fn parse_calibrate_load_wave(arguments: Vec<String>) -> Result<Command, CliError> {
@@ -662,7 +769,7 @@ fn parse_usize_allow_zero(value: &str, option: &str) -> Result<usize, CliError> 
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench calibrate-load-wave --package PACKAGE.json --component ID --selector ID --phase decode|prefill [--batch-width N] --resource-index N ... --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-suite --package PACKAGE.json [--target VULKAN_UUID ...] [--prefill-width N ...] [--max-group-size N] --output CATALOG.json\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench calibrate-load-wave --package PACKAGE.json --component ID --selector ID --phase decode|prefill [--batch-width N] --resource-index N ... --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -854,6 +961,121 @@ mod tests {
             Command::Summarize { input } => assert_eq!(input, PathBuf::from("result.json")),
             _ => panic!("expected summarize command"),
         }
+    }
+
+    #[test]
+    fn parses_package_driven_calibration_suite() {
+        let first = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let second = "vulkan-uuid:ffeeddccbbaa99887766554433221100";
+        assert_eq!(
+            parse_args(
+                [
+                    "calibrate-suite",
+                    "--package",
+                    "compiled/vulkan_resident_package.json",
+                    "--target",
+                    first,
+                    "--target",
+                    second,
+                    "--prefill-width",
+                    "64",
+                    "--prefill-width",
+                    "8",
+                    "--prefill-width",
+                    "64",
+                    "--max-group-size",
+                    "2",
+                    "--output",
+                    "optimization/placement-calibration-catalog.json",
+                ]
+                .map(str::to_string),
+            )
+            .unwrap(),
+            Command::CalibrateSuite {
+                package: PathBuf::from("compiled/vulkan_resident_package.json"),
+                target_ids: vec![first.to_string(), second.to_string()],
+                prefill_widths: vec![8, 64],
+                maximum_group_size: Some(2),
+                output: PathBuf::from("optimization/placement-calibration-catalog.json"),
+            },
+        );
+    }
+
+    #[test]
+    fn calibration_suite_allows_runtime_target_discovery() {
+        assert_eq!(
+            parse_args(
+                [
+                    "calibrate-suite",
+                    "--package",
+                    "package.json",
+                    "--output",
+                    "catalog.json",
+                ]
+                .map(str::to_string),
+            )
+            .unwrap(),
+            Command::CalibrateSuite {
+                package: PathBuf::from("package.json"),
+                target_ids: Vec::new(),
+                prefill_widths: Vec::new(),
+                maximum_group_size: None,
+                output: PathBuf::from("catalog.json"),
+            },
+        );
+    }
+
+    #[test]
+    fn calibration_suite_rejects_ambiguous_targets_and_zero_limits() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let base = [
+            "calibrate-suite",
+            "--package",
+            "package.json",
+            "--output",
+            "catalog.json",
+        ];
+        let duplicate_targets = base
+            .iter()
+            .copied()
+            .chain(["--target", target, "--target", target])
+            .map(str::to_string);
+        assert!(
+            parse_args(duplicate_targets)
+                .unwrap_err()
+                .to_string()
+                .contains("distinct target identities")
+        );
+        for (option, expected) in [
+            ("--prefill-width", "prefill-width must be greater than zero"),
+            (
+                "--max-group-size",
+                "max-group-size must be greater than zero",
+            ),
+        ] {
+            let arguments = base
+                .iter()
+                .copied()
+                .chain([option, "0"])
+                .map(str::to_string);
+            assert!(
+                parse_args(arguments)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+        let noncanonical = base
+            .iter()
+            .copied()
+            .chain(["--target", "gpu0"])
+            .map(str::to_string);
+        assert!(
+            parse_args(noncanonical)
+                .unwrap_err()
+                .to_string()
+                .contains("canonical vulkan-uuid")
+        );
     }
 
     #[test]

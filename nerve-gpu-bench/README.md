@@ -122,8 +122,40 @@ only benchmark artifacts intended for future automatic placement consumption;
 the compact `nerve.placement_bench` ranking remains historical hardware
 evidence.
 
-Create exact placement evidence from an actual compiled model package with an
-explicit ordered candidate (the first target is the owner):
+Create the canonical exact catalog for an actual compiled package with the
+package-driven suite:
+
+```sh
+cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
+  calibrate-suite \
+  --package /path/to/compiled/vulkan_resident_package.json \
+  --prefill-width 8 \
+  --prefill-width 64 \
+  --output /path/to/compiled/optimization/placement-calibration-catalog.json
+```
+
+With no `--target`, the suite discovers every current Vulkan compute target.
+Repeated `--target vulkan-uuid:...` arguments restrict a run explicitly.
+Every selected target is inspected immediately before each workload; existing
+allocations are preserved and reduce only that target's safe calibration
+budget. `--max-group-size` may bound an investigative run, but defaults to the
+selected target count and has no architectural device-count limit.
+
+The suite discovers one representative for every exact compiler-emitted
+component signature in decode and each requested prefill width. It measures all
+single targets and directed pairs first, then expands non-dominated ordered
+groups while retaining alternatives with different owners, outputs, participant
+sets, or memory tradeoffs. It also measures every directed graph-boundary pair
+and representative compiler-declared lazy-load wave on every selected target.
+Each candidate uses one warmup and one timed call, validates canonical output
+and state, and proves reservation restoration before it can enter the catalog.
+The final catalog is validated and written atomically only after the entire
+sequential suite succeeds; a failure leaves any previously published catalog
+untouched.
+
+The lower-level commands remain useful for investigating one exact case.
+Create component evidence with an explicit ordered candidate (the first target
+is the owner):
 
 ```sh
 cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
