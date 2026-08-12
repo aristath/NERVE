@@ -20,7 +20,7 @@ from nerve.physical_representations import (
     FP8_PREQUANTIZATION_CONTRACT,
     PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT,
     SPARSE_MOE_FP8_INTERMEDIATE_CONTRACT,
-    fixed_mxfp4_resource_representation_dispatch,
+    independent_expert_resource_representation_dispatch,
 )
 from nerve.physical_execution_contracts import (
     build_kernel_physical_execution_contracts,
@@ -1373,7 +1373,7 @@ def component_kernel_spec(
         "independent_sparse_moe_down",
     }:
         spec["resource_representation_dispatch"] = (
-            fixed_mxfp4_resource_representation_dispatch()
+            independent_expert_resource_representation_dispatch(shader_file)
         )
     if parallel_block_stages is not None:
         spec["batch_implementations"].append(

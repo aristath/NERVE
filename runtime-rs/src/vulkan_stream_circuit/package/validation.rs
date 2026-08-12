@@ -10,6 +10,17 @@ pub(super) fn validate_physical_execution_contracts(
     );
     for execution in executions {
         for kernel in &execution.kernels {
+            if let Some(dispatch) = &kernel.resource_representation_dispatch {
+                dispatch.validate().map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "invalid resource-representation dispatch on {}.{}: {error}",
+                            execution.component_id, kernel.node_id,
+                        ),
+                    )
+                })?;
+            }
             if kernel.physical_execution_contracts.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

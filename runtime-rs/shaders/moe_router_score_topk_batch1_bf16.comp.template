@@ -21,17 +21,23 @@ layout(set = 0, binding = 3) buffer SelectionTelemetry {
 
 layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
 
-const uint NUM_EXPERTS = {{NUM_EXPERTS}}u;
-const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
+const uint ROUTED_RESOURCE_COUNT = {{ROUTED_RESOURCE_COUNT}}u;
+const uint ROUTED_SELECTION_COUNT = {{ROUTED_SELECTION_COUNT}}u;
+const uint ALWAYS_SELECTED_RESOURCE_START = {{ALWAYS_SELECTED_RESOURCE_START}}u;
+const uint ALWAYS_SELECTED_RESOURCE_COUNT = {{ALWAYS_SELECTED_RESOURCE_COUNT}}u;
+const uint TOTAL_RESOURCE_COUNT = ROUTED_RESOURCE_COUNT + ALWAYS_SELECTED_RESOURCE_COUNT;
+const uint TOTAL_SELECTION_COUNT = ROUTED_SELECTION_COUNT + ALWAYS_SELECTED_RESOURCE_COUNT;
+const float ALWAYS_SELECTED_WEIGHT = {{ALWAYS_SELECTED_WEIGHT}};
 const uint ROUTER_ACTIVATION = {{ROUTER_ACTIVATION}}u;
 const bool NORMALIZE_SELECTED = {{NORMALIZE_SELECTED}} != 0;
 const float ROUTED_SCALE = {{ROUTED_SCALE}};
-const uint ROUTER_WORDS = (NUM_EXPERTS + 1u) / 2u;
+const uint ROUTER_WORDS = (ROUTED_RESOURCE_COUNT + 1u) / 2u;
 
-shared uint top_indices[EXPERTS_PER_TOKEN];
-shared uint selected_experts[NUM_EXPERTS];
-shared float raw_values[NUM_EXPERTS];
-shared float router_values[NUM_EXPERTS];
+shared uint top_indices[TOTAL_SELECTION_COUNT];
+shared float top_weights[TOTAL_SELECTION_COUNT];
+shared uint selected_experts[ROUTED_RESOURCE_COUNT];
+shared float raw_values[ROUTED_RESOURCE_COUNT];
+shared float router_values[ROUTED_RESOURCE_COUNT];
 shared float subgroup_values[64];
 shared uint subgroup_experts[64];
 shared float softmax_maximum;
@@ -71,7 +77,7 @@ float selection_score(uint expert) {
 void initialize_softmax(uint lane) {
     if (ROUTER_ACTIVATION != 1u) return;
     float lane_maximum = -uintBitsToFloat(0x7f800000u);
-    for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+    for (uint expert = lane; expert < ROUTED_RESOURCE_COUNT; expert += gl_WorkGroupSize.x) {
         lane_maximum = max(lane_maximum, raw_values[expert]);
     }
     float subgroup_maximum = subgroupMax(lane_maximum);
@@ -85,7 +91,7 @@ void initialize_softmax(uint lane) {
     }
     barrier();
     float lane_sum = 0.0;
-    for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+    for (uint expert = lane; expert < ROUTED_RESOURCE_COUNT; expert += gl_WorkGroupSize.x) {
         lane_sum += exp(raw_values[expert] - softmax_maximum);
     }
     float subgroup_sum = subgroupAdd(lane_sum);
@@ -105,7 +111,7 @@ void main() {
     if (batch_index >= batch_control.batch_width) return;
     uint lane = gl_LocalInvocationID.x;
     uint router_base = batch_index * ROUTER_WORDS;
-    for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+    for (uint expert = lane; expert < ROUTED_RESOURCE_COUNT; expert += gl_WorkGroupSize.x) {
         raw_values[expert] = unpack_bf16(
             router_logits.words[router_base + (expert >> 1u)], expert
         );
@@ -113,15 +119,15 @@ void main() {
     }
     barrier();
     initialize_softmax(lane);
-    for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+    for (uint expert = lane; expert < ROUTED_RESOURCE_COUNT; expert += gl_WorkGroupSize.x) {
         router_values[expert] = activate_router_value(raw_values[expert]);
     }
     barrier();
 
-    for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+    for (uint route = 0u; route < ROUTED_SELECTION_COUNT; route++) {
         float best_score = -uintBitsToFloat(0x7f800000u);
         uint best_expert = 0xffffffffu;
-        for (uint expert = lane; expert < NUM_EXPERTS; expert += gl_WorkGroupSize.x) {
+        for (uint expert = lane; expert < ROUTED_RESOURCE_COUNT; expert += gl_WorkGroupSize.x) {
             float score = selection_score(expert);
             if (
                 selected_experts[expert] == 0u
@@ -160,21 +166,11 @@ void main() {
     if (lane == 0u) {
         float denominator = 0.0;
         if (NORMALIZE_SELECTED) {
-            for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+            for (uint route = 0u; route < ROUTED_SELECTION_COUNT; route++) {
                 denominator += router_values[top_indices[route]];
             }
         }
-        for (uint route = 1u; route < EXPERTS_PER_TOKEN; route++) {
-            uint expert = top_indices[route];
-            uint insertion = route;
-            while (insertion > 0u && top_indices[insertion - 1u] > expert) {
-                top_indices[insertion] = top_indices[insertion - 1u];
-                insertion--;
-            }
-            top_indices[insertion] = expert;
-        }
-        uint route_base = batch_index * EXPERTS_PER_TOKEN;
-        for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+        for (uint route = 0u; route < ROUTED_SELECTION_COUNT; route++) {
             uint expert = top_indices[route];
             float weight = router_values[expert];
             if (NORMALIZE_SELECTED) {
@@ -182,18 +178,41 @@ void main() {
             } else {
                 weight *= ROUTED_SCALE;
             }
+            top_weights[route] = weight;
+        }
+        for (uint offset = 0u; offset < ALWAYS_SELECTED_RESOURCE_COUNT; offset++) {
+            uint route = ROUTED_SELECTION_COUNT + offset;
+            top_indices[route] = ALWAYS_SELECTED_RESOURCE_START + offset;
+            top_weights[route] = ALWAYS_SELECTED_WEIGHT;
+        }
+        for (uint route = 1u; route < TOTAL_SELECTION_COUNT; route++) {
+            uint expert = top_indices[route];
+            float weight = top_weights[route];
+            uint insertion = route;
+            while (insertion > 0u && top_indices[insertion - 1u] > expert) {
+                top_indices[insertion] = top_indices[insertion - 1u];
+                top_weights[insertion] = top_weights[insertion - 1u];
+                insertion--;
+            }
+            top_indices[insertion] = expert;
+            top_weights[insertion] = weight;
+        }
+        uint route_base = batch_index * TOTAL_SELECTION_COUNT;
+        for (uint route = 0u; route < TOTAL_SELECTION_COUNT; route++) {
+            uint expert = top_indices[route];
+            float weight = top_weights[route];
             expert_routes.words[route_base + route] =
                 (f32_to_bf16(weight) << 16u) | expert;
             atomicAdd(selection_telemetry.counts[expert], 1u);
         }
-        for (uint left_route = 0u; left_route < EXPERTS_PER_TOKEN; left_route++) {
+        for (uint left_route = 0u; left_route < TOTAL_SELECTION_COUNT; left_route++) {
             uint left = top_indices[left_route];
-            for (uint right_route = left_route + 1u; right_route < EXPERTS_PER_TOKEN; right_route++) {
+            for (uint right_route = left_route + 1u; right_route < TOTAL_SELECTION_COUNT; right_route++) {
                 uint right = top_indices[right_route];
                 if (left < right) {
-                    uint preceding = left * (2u * NUM_EXPERTS - left - 1u) / 2u;
+                    uint preceding = left * (2u * TOTAL_RESOURCE_COUNT - left - 1u) / 2u;
                     uint pair_index = preceding + right - left - 1u;
-                    atomicAdd(selection_telemetry.counts[NUM_EXPERTS + pair_index], 1u);
+                    atomicAdd(selection_telemetry.counts[TOTAL_RESOURCE_COUNT + pair_index], 1u);
                 }
             }
         }

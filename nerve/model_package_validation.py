@@ -1,7 +1,7 @@
 from nerve.model_package_integrity import *
 from nerve.model_package_common import *
 from nerve.physical_representations import (
-    fixed_mxfp4_resource_representation_dispatch,
+    independent_expert_resource_representation_dispatch,
 )
 from nerve.resource_residency import validate_resource_residency_contract
 from nerve.model_package_assets import *
@@ -631,7 +631,9 @@ def validate_compiled_component_executions(
                 )
             validate_kernel_stream_control_contract(circuit, node, kernel)
             expected_resource_dispatch = (
-                fixed_mxfp4_resource_representation_dispatch()
+                independent_expert_resource_representation_dispatch(
+                    kernel["shader_path"]
+                )
                 if node.get("op")
                 in {
                     "independent_sparse_moe_gate_up",

@@ -21,17 +21,71 @@ def independent_moe_route_shader_file(
     tensor_index: Json,
 ) -> str:
     attrs = node.get("attrs", {})
-    num_experts = int(attrs.get("num_experts", 0))
-    experts_per_token = int(attrs.get("experts_per_token", 0))
+    routed_resource_count = int(attrs.get("routed_resource_count", 0))
+    routed_selection_count = int(attrs.get("routed_selection_count", 0))
+    always_selected = attrs.get("always_selected_resources")
     selection = str(attrs.get("selection", ""))
     activation = str(attrs.get("activation", ""))
     normalize_selected = bool(attrs.get("normalize_selected"))
     routed_scale = float(attrs.get("routed_scaling_factor", 0.0))
 
-    if not 0 < experts_per_token <= num_experts <= 4096:
+    if (
+        not 0 < routed_selection_count <= routed_resource_count <= 4096
+        or not isinstance(always_selected, list)
+        or not always_selected
+    ):
         raise ModelCompileError(
             f"independent MoE router node {node['id']!r} has invalid routing "
-            f"geometry e{num_experts} k{experts_per_token}"
+            f"geometry r{routed_resource_count} k{routed_selection_count}"
+        )
+    always_weights: list[float] = []
+    for offset, resource in enumerate(always_selected):
+        expected_index = routed_resource_count + offset
+        weight = (
+            float(resource.get("weight", 0.0))
+            if isinstance(resource, dict)
+            else 0.0
+        )
+        if (
+            not isinstance(resource, dict)
+            or set(resource) != {"resource_index", "weight"}
+            or resource.get("resource_index") != expected_index
+            or not math.isfinite(weight)
+            or weight <= 0.0
+        ):
+            raise ModelCompileError(
+                f"independent MoE router node {node['id']!r} has a malformed "
+                f"always-selected resource at offset {offset}"
+            )
+        always_weights.append(weight)
+    if len(set(always_weights)) != 1:
+        raise ModelCompileError(
+            f"independent MoE router node {node['id']!r} requires one common "
+            "always-selected resource weight"
+        )
+    always_count = len(always_selected)
+    total_resource_count = routed_resource_count + always_count
+    total_selection_count = routed_selection_count + always_count
+    selection_domain = attrs.get("selection_domain")
+    expected_selection_domain = {
+        "id": "experts",
+        "resource_count": total_resource_count,
+        "selection_signal": node["outputs"][0] if len(node.get("outputs", [])) == 1 else "",
+        "encoding": {
+            "element_type": "u32",
+            "selection_count_per_activation": total_selection_count,
+            "index_shift": 0,
+            "index_mask": (1 << (total_resource_count - 1).bit_length()) - 1,
+        },
+    }
+    if (
+        total_resource_count > 4096
+        or int(attrs.get("experts_per_token", 0)) != total_selection_count
+        or selection_domain != expected_selection_domain
+    ):
+        raise ModelCompileError(
+            f"independent MoE router node {node['id']!r} has an inconsistent "
+            "total selection-domain contract"
         )
     if activation not in {"sigmoid", "softmax", "sqrtsoftplus"}:
         raise ModelCompileError(
@@ -48,7 +102,10 @@ def independent_moe_route_shader_file(
             f"independent MoE router node {node['id']!r} must have one route output"
         )
 
-    geometry = f"{activation}_bf16_e{num_experts}_k{experts_per_token}"
+    geometry = (
+        f"{activation}_bf16_r{routed_resource_count}_k{routed_selection_count}_"
+        f"a{always_count}w{shader_float_token(always_weights[0])}"
+    )
     policy = (
         f"norm{int(normalize_selected)}_scale{shader_float_token(routed_scale)}"
     )
@@ -61,7 +118,8 @@ def independent_moe_route_shader_file(
         bias_id = node["params"][0]
         bias_dtype = parameter_dtype_for_id(circuit, bias_id, tensor_index)
         if (
-            parameter_shape_for_id(circuit, bias_id, tensor_index) != [num_experts]
+            parameter_shape_for_id(circuit, bias_id, tensor_index)
+            != [routed_resource_count]
             or bias_dtype not in {"F32", "BF16"}
             or parameter_layout_for_id(circuit, bias_id, tensor_index)
             != ROW_MAJOR_LAYOUT
@@ -92,7 +150,7 @@ def independent_moe_route_shader_file(
         if (
             len(table_shape) != 2
             or int(table_shape[0]) <= 0
-            or int(table_shape[1]) != experts_per_token
+            or int(table_shape[1]) != routed_selection_count
             or table_dtype not in {"I32", "I64"}
             or parameter_layout_for_id(circuit, table_id, tensor_index)
             != ROW_MAJOR_LAYOUT

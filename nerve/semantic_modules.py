@@ -442,6 +442,7 @@ def _feature_transform_modules(component: Json) -> list[Json]:
         )
         return modules
 
+    independent = feed_forward.get("expert_storage") == "independent_resources"
     modules.extend(
         [
             _module(
@@ -454,18 +455,35 @@ def _feature_transform_modules(component: Json) -> list[Json]:
             _module(
                 "layer.feature_transform.expert_bank",
                 "selected_expert_bank",
-                "Execute only the routed experts from the packed expert bank",
+                (
+                    "Execute routed and always-selected experts from one "
+                    "independently addressable expert bank"
+                    if independent
+                    else "Execute only the routed experts from the packed expert bank"
+                ),
                 parent="layer.feature_transform",
                 nodes=["sparse_moe_gate_up", "sparse_moe_down"],
             ),
             _module(
                 "layer.feature_transform.reduction",
                 "expert_reduction",
-                "Reduce routed expert results and combine optional shared output",
+                (
+                    "Reduce the selected expert results"
+                    if independent
+                    else "Reduce routed expert results and combine optional shared output"
+                ),
                 parent="layer.feature_transform",
-                nodes=["moe_reduce", "shared_and_sparse_expert_add"],
+                nodes=(
+                    ["moe_reduce"]
+                    if independent
+                    else ["moe_reduce", "shared_and_sparse_expert_add"]
+                ),
                 optional=True,
             ),
+        ]
+    )
+    if not independent:
+        modules.append(
             _module(
                 "layer.feature_transform.shared_expert",
                 "shared_expert",
@@ -482,11 +500,9 @@ def _feature_transform_modules(component: Json) -> list[Json]:
                     "shared_expert_gate",
                 ],
                 optional=True,
-            ),
-        ]
-    )
+            )
+        )
     for expert_index in range(int(feed_forward["num_experts"])):
-        independent = feed_forward.get("expert_storage") == "independent_resources"
         expert_params = (
             [
                 f"routed_expert_{expert_index:03d}_w1",
@@ -500,7 +516,11 @@ def _feature_transform_modules(component: Json) -> list[Json]:
             _module(
                 f"layer.feature_transform.expert_bank.expert_{expert_index:03d}",
                 "expert",
-                f"Packed sparse expert {expert_index}",
+                (
+                    f"Independently addressable routed expert {expert_index}"
+                    if independent
+                    else f"Packed sparse expert {expert_index}"
+                ),
                 parent="layer.feature_transform.expert_bank",
                 params=expert_params,
                 virtual=True,
@@ -525,6 +545,27 @@ def _feature_transform_modules(component: Json) -> list[Json]:
                     "resource_granularity": (
                         "expert" if independent else "expert_axis_partition"
                     ),
+                },
+            )
+        )
+    if independent and int(feed_forward.get("shared_expert_count", 0)):
+        modules.append(
+            _module(
+                "layer.feature_transform.expert_bank.always_selected_000",
+                "always_selected_expert",
+                "Independently addressable expert selected for every activation",
+                parent="layer.feature_transform.expert_bank",
+                params=[
+                    "shared_expert_w1",
+                    "shared_expert_w2",
+                    "shared_expert_w3",
+                ],
+                virtual=True,
+                attrs={
+                    "expert_index": int(feed_forward["num_experts"]),
+                    "selection_policy": "always",
+                    "parameter_slices": [],
+                    "resource_granularity": "expert",
                 },
             )
         )

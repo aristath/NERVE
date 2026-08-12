@@ -443,13 +443,28 @@ def test_compiler_renders_score_selected_sqrtsoftplus_router(
         "outputs": ["routes"],
         "params": ["selection_bias"],
         "attrs": {
-            "num_experts": 256,
-            "experts_per_token": 6,
+            "experts_per_token": 7,
+            "routed_resource_count": 256,
+            "routed_selection_count": 6,
+            "always_selected_resources": [
+                {"resource_index": 256, "weight": 1.0}
+            ],
             "selection": "score_topk",
             "activation": "sqrtsoftplus",
             "normalize_selected": True,
             "routed_scaling_factor": 1.5,
             "selection_bias": "router.selection_bias",
+            "selection_domain": {
+                "id": "experts",
+                "resource_count": 257,
+                "selection_signal": "routes",
+                "encoding": {
+                    "element_type": "u32",
+                    "selection_count_per_activation": 7,
+                    "index_shift": 0,
+                    "index_mask": 511,
+                },
+            },
         },
     }
     tensor_index = {
@@ -462,11 +477,11 @@ def test_compiler_renders_score_selected_sqrtsoftplus_router(
         }
     }
     primary = (
-        "moe_router_score_topk_sqrtsoftplus_bf16_e256_k6_"
+        "moe_router_score_topk_sqrtsoftplus_bf16_r256_k6_a1w1_"
         "norm1_scale1.5_biasf32.comp"
     )
     batch = (
-        "moe_router_batch1_score_topk_sqrtsoftplus_bf16_e256_k6_"
+        "moe_router_batch1_score_topk_sqrtsoftplus_bf16_r256_k6_a1w1_"
         "norm1_scale1.5_biasf32.comp"
     )
 
@@ -492,13 +507,146 @@ def test_compiler_renders_score_selected_sqrtsoftplus_router(
     assert "binding = 1) buffer ExpertRoutes" in primary_source
     assert "binding = 2) readonly buffer RouterSelectionBias" in primary_source
     assert "binding = 3) buffer SelectionTelemetry" in primary_source
-    assert "selection_telemetry.counts[NUM_EXPERTS + pair_index]" in primary_source
+    assert "const uint TOTAL_RESOURCE_COUNT = ROUTED_RESOURCE_COUNT +" in primary_source
+    assert "const uint TOTAL_SELECTION_COUNT = ROUTED_SELECTION_COUNT +" in primary_source
+    assert "top_indices[route] = ALWAYS_SELECTED_RESOURCE_START + offset;" in primary_source
+    assert "top_weights[route] = ALWAYS_SELECTED_WEIGHT;" in primary_source
+    assert (
+        "selection_telemetry.counts[TOTAL_RESOURCE_COUNT + pair_index]"
+        in primary_source
+    )
     assert "gl_WorkGroupID.y" in batch_source
     assert "batch_index * ROUTER_WORDS" in batch_source
-    assert "batch_index * EXPERTS_PER_TOKEN" in batch_source
+    assert "batch_index * TOTAL_SELECTION_COUNT" in batch_source
     assert "{{" not in primary_source
     assert "{{" not in batch_source
     compile_shader_artifacts(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("always_selected", "message"),
+    [
+        ([], "invalid routing geometry"),
+        ([{"resource_index": 258, "weight": 1.0}], "malformed"),
+        ([{"resource_index": 256, "weight": 0.0}], "malformed"),
+        (
+            [
+                {"resource_index": 256, "weight": 1.0},
+                {"resource_index": 257, "weight": 0.5},
+            ],
+            "one common always-selected resource weight",
+        ),
+    ],
+)
+def test_independent_router_rejects_ambiguous_always_selected_contracts(
+    always_selected: list[dict[str, object]],
+    message: str,
+) -> None:
+    node = {
+        "id": "route",
+        "op": "moe_route",
+        "inputs": ["router_logits"],
+        "outputs": ["routes"],
+        "params": ["selection_bias"],
+        "attrs": {
+            "experts_per_token": 7,
+            "routed_resource_count": 256,
+            "routed_selection_count": 6,
+            "always_selected_resources": always_selected,
+            "selection": "score_topk",
+            "activation": "sqrtsoftplus",
+            "normalize_selected": True,
+            "routed_scaling_factor": 1.5,
+            "selection_domain": {
+                "id": "experts",
+                "resource_count": 257,
+                "selection_signal": "routes",
+                "encoding": {
+                    "element_type": "u32",
+                    "selection_count_per_activation": 7,
+                    "index_shift": 0,
+                    "index_mask": 511,
+                },
+            },
+        },
+    }
+    circuit = {
+        "parameters": {
+            "refs": {"selection_bias": {"tensor": "router.selection_bias"}}
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "router.selection_bias": {
+                "dtype": "F32",
+                "shape": [256],
+                "layout": "row_major",
+            }
+        }
+    }
+
+    with pytest.raises(ModelCompileError, match=message):
+        shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            {"hidden_size": 4096, "intermediate_size": 2176},
+        )
+
+
+def test_independent_router_rejects_stale_total_selection_domain() -> None:
+    node = {
+        "id": "route",
+        "op": "moe_route",
+        "inputs": ["router_logits"],
+        "outputs": ["routes"],
+        "params": ["selection_bias"],
+        "attrs": {
+            "experts_per_token": 6,
+            "routed_resource_count": 256,
+            "routed_selection_count": 6,
+            "always_selected_resources": [
+                {"resource_index": 256, "weight": 1.0}
+            ],
+            "selection": "score_topk",
+            "activation": "sqrtsoftplus",
+            "normalize_selected": True,
+            "routed_scaling_factor": 1.5,
+            "selection_domain": {
+                "id": "experts",
+                "resource_count": 256,
+                "selection_signal": "routes",
+                "encoding": {
+                    "element_type": "u32",
+                    "selection_count_per_activation": 6,
+                    "index_shift": 0,
+                    "index_mask": 255,
+                },
+            },
+        },
+    }
+    circuit = {
+        "parameters": {
+            "refs": {"selection_bias": {"tensor": "router.selection_bias"}}
+        }
+    }
+    tensor_index = {
+        "tensors": {
+            "router.selection_bias": {
+                "dtype": "F32",
+                "shape": [256],
+                "layout": "row_major",
+            }
+        }
+    }
+
+    with pytest.raises(ModelCompileError, match="total selection-domain contract"):
+        shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            {"hidden_size": 4096, "intermediate_size": 2176},
+        )
 
 
 def test_compiler_renders_token_table_sqrtsoftplus_router(
@@ -519,13 +667,28 @@ def test_compiler_renders_token_table_sqrtsoftplus_router(
         "outputs": ["routes"],
         "params": ["route_table"],
         "attrs": {
-            "num_experts": 256,
-            "experts_per_token": 6,
+            "experts_per_token": 7,
+            "routed_resource_count": 256,
+            "routed_selection_count": 6,
+            "always_selected_resources": [
+                {"resource_index": 256, "weight": 1.0}
+            ],
             "selection": "token_id_table",
             "activation": "sqrtsoftplus",
             "normalize_selected": True,
             "routed_scaling_factor": 1.5,
             "route_table": "router.token_routes",
+            "selection_domain": {
+                "id": "experts",
+                "resource_count": 257,
+                "selection_signal": "routes",
+                "encoding": {
+                    "element_type": "u32",
+                    "selection_count_per_activation": 7,
+                    "index_shift": 0,
+                    "index_mask": 511,
+                },
+            },
         },
     }
     tensor_index = {
@@ -538,11 +701,11 @@ def test_compiler_renders_token_table_sqrtsoftplus_router(
         }
     }
     primary = (
-        "moe_router_token_table_sqrtsoftplus_bf16_e256_k6_v129280_"
+        "moe_router_token_table_sqrtsoftplus_bf16_r256_k6_a1w1_v129280_"
         "norm1_scale1.5_tablei64.comp"
     )
     batch = (
-        "moe_router_batch1_token_table_sqrtsoftplus_bf16_e256_k6_v129280_"
+        "moe_router_batch1_token_table_sqrtsoftplus_bf16_r256_k6_a1w1_v129280_"
         "norm1_scale1.5_tablei64.comp"
     )
 
@@ -563,6 +726,8 @@ def test_compiler_renders_token_table_sqrtsoftplus_router(
     assert "const uint VOCAB_SIZE = 129280u;" in primary_source
     assert "const uint TABLE_WORD_STRIDE = 2u;" in primary_source
     assert "route_table.words[table_element * TABLE_WORD_STRIDE]" in primary_source
+    assert "high_word != 0u" in primary_source
+    assert "for (uint previous = 0u; previous < lane; previous++)" in primary_source
     assert "sqrt(softplus(value))" in primary_source
     assert "weight = weight / denominator * ROUTED_SCALE;" in primary_source
     assert "binding = 0) readonly buffer RouterLogits" in primary_source
@@ -570,11 +735,17 @@ def test_compiler_renders_token_table_sqrtsoftplus_router(
     assert "binding = 2) buffer ExpertRoutes" in primary_source
     assert "binding = 3) readonly buffer RouteTable" in primary_source
     assert "binding = 4) buffer SelectionTelemetry" in primary_source
-    assert "selection_telemetry.counts[NUM_EXPERTS + pair_index]" in primary_source
+    assert "selected_indices[route] = ALWAYS_SELECTED_RESOURCE_START + offset;" in primary_source
+    assert "selected_values[route] = ALWAYS_SELECTED_WEIGHT;" in primary_source
+    assert "high_word != 0u" in batch_source
+    assert (
+        "selection_telemetry.counts[TOTAL_RESOURCE_COUNT + pair_index]"
+        in primary_source
+    )
     assert "gl_WorkGroupID.y" in batch_source
     assert "token_ids.values[batch_index]" in batch_source
     assert "batch_index * ROUTER_WORDS" in batch_source
-    assert "batch_index * EXPERTS_PER_TOKEN" in batch_source
+    assert "batch_index * TOTAL_SELECTION_COUNT" in batch_source
     assert "{{" not in primary_source
     assert "{{" not in batch_source
     compile_shader_artifacts(tmp_path)

@@ -4754,7 +4754,8 @@ if (
         r"(?:_(tensor_parallel))?"
         r"(?:_(prequant))?_"
         r"(?:(input_block_major_b128)_)?"
-        r"mxfp4_e2m1(?:_(resident_fp8_e4m3|adaptive_fp8_e4m3))?_g32_"
+        r"mxfp4_e2m1(?:_(resident_fp8_e4m3|adaptive_fp8_e4m3))?_g32"
+        r"(?:_native_fp8_e4m3_se8m0_b128_nf(\d+))?_"
         r"h(\d+)_i(\d+)_e(\d+)_k(\d+)"
         r"(?:_limit([0-9eE+.-]+))?\.comp",
         shader_file,
@@ -4767,6 +4768,7 @@ if (
             prequant,
             input_block_major,
             weight_representation,
+            native_fp8_start,
             hidden_size,
             intermediate_size,
             num_experts,
@@ -4786,6 +4788,14 @@ if (
             or (stage == "gate_up") != (swiglu_limit is not None)
             or (tensor_parallel is not None and batch_mode is not None)
             or (
+                native_fp8_start is not None
+                and (tensor_parallel is not None or input_block_major is not None)
+            )
+            or (
+                native_fp8_start is not None
+                and not 0 < int(native_fp8_start) < num_experts
+            )
+            or (
                 tensor_parallel is not None
                 and (
                     (stage == "down") != (input_block_major is not None)
@@ -4803,6 +4813,7 @@ if (
                 "HIDDEN_SIZE": str(hidden_size),
                 "INTERMEDIATE_SIZE": str(intermediate_size),
                 "NUM_EXPERTS": str(num_experts),
+                "NATIVE_FP8_RESOURCE_START": native_fp8_start or str(num_experts),
                 "EXPERTS_PER_TOKEN": str(experts_per_token),
                 "TILE_ROWS": str(32 if stage == "gate_up" else 64),
                 "SWIGLU_LIMIT": swiglu_limit or "0",
@@ -4820,7 +4831,8 @@ if (
 
     independent_score_router_shape = re.fullmatch(
         r"moe_router(?:_(batch1))?_score_topk_"
-        r"(sigmoid|softmax|sqrtsoftplus)_bf16_e(\d+)_k(\d+)_"
+        r"(sigmoid|softmax|sqrtsoftplus)_bf16_r(\d+)_k(\d+)_"
+        r"a(\d+)w([0-9eE+.-]+)_"
         r"norm([01])_scale([0-9eE+.-]+)_bias(f32|bf16)\.comp",
         shader_file,
     )
@@ -4830,15 +4842,23 @@ if (
             activation,
             num_experts,
             experts_per_token,
+            always_selected_count,
+            always_selected_weight,
             normalize_selected,
             routed_scale,
             bias_dtype,
         ) = independent_score_router_shape.groups()
-        num_experts, experts_per_token = map(int, (num_experts, experts_per_token))
-        if not 0 < experts_per_token <= num_experts <= 4096:
+        num_experts, experts_per_token, always_selected_count = map(
+            int, (num_experts, experts_per_token, always_selected_count)
+        )
+        if (
+            not 0 < experts_per_token <= num_experts <= 4096
+            or always_selected_count <= 0
+            or num_experts + always_selected_count > 4096
+        ):
             raise ModelCompileError(
                 f"invalid independent sparse expert routing e{num_experts} "
-                f"k{experts_per_token}"
+                f"k{experts_per_token} a{always_selected_count}"
             )
         return render_shader_template(
             source_dir,
@@ -4848,8 +4868,11 @@ if (
                 else "moe_router_score_topk_batch1_bf16.comp.template"
             ),
             {
-                "NUM_EXPERTS": str(num_experts),
-                "EXPERTS_PER_TOKEN": str(experts_per_token),
+                "ROUTED_RESOURCE_COUNT": str(num_experts),
+                "ROUTED_SELECTION_COUNT": str(experts_per_token),
+                "ALWAYS_SELECTED_RESOURCE_START": str(num_experts),
+                "ALWAYS_SELECTED_RESOURCE_COUNT": str(always_selected_count),
+                "ALWAYS_SELECTED_WEIGHT": always_selected_weight,
                 "ROUTER_ACTIVATION": str(
                     {"sigmoid": 0, "softmax": 1, "sqrtsoftplus": 2}[activation]
                 ),
@@ -4869,7 +4892,8 @@ if (
 
     token_table_router_shape = re.fullmatch(
         r"moe_router(?:_(batch1))?_token_table_"
-        r"(sigmoid|sqrtsoftplus)_bf16_e(\d+)_k(\d+)_v(\d+)_"
+        r"(sigmoid|sqrtsoftplus)_bf16_r(\d+)_k(\d+)_"
+        r"a(\d+)w([0-9eE+.-]+)_v(\d+)_"
         r"norm([01])_scale([0-9eE+.-]+)_tablei(32|64)\.comp",
         shader_file,
     )
@@ -4879,18 +4903,26 @@ if (
             activation,
             num_experts,
             experts_per_token,
+            always_selected_count,
+            always_selected_weight,
             vocab_size,
             normalize_selected,
             routed_scale,
             table_width,
         ) = token_table_router_shape.groups()
-        num_experts, experts_per_token, vocab_size = map(
-            int, (num_experts, experts_per_token, vocab_size)
+        num_experts, experts_per_token, always_selected_count, vocab_size = map(
+            int,
+            (num_experts, experts_per_token, always_selected_count, vocab_size),
         )
-        if not 0 < experts_per_token <= num_experts <= 4096 or vocab_size <= 0:
+        if (
+            not 0 < experts_per_token <= num_experts <= 4096
+            or always_selected_count <= 0
+            or num_experts + always_selected_count > 4096
+            or vocab_size <= 0
+        ):
             raise ModelCompileError(
                 f"invalid token-table sparse expert routing e{num_experts} "
-                f"k{experts_per_token} v{vocab_size}"
+                f"k{experts_per_token} a{always_selected_count} v{vocab_size}"
             )
         return render_shader_template(
             source_dir,
@@ -4900,8 +4932,11 @@ if (
                 else "moe_router_token_table_batch1_bf16.comp.template"
             ),
             {
-                "NUM_EXPERTS": str(num_experts),
-                "EXPERTS_PER_TOKEN": str(experts_per_token),
+                "ROUTED_RESOURCE_COUNT": str(num_experts),
+                "ROUTED_SELECTION_COUNT": str(experts_per_token),
+                "ALWAYS_SELECTED_RESOURCE_START": str(num_experts),
+                "ALWAYS_SELECTED_RESOURCE_COUNT": str(always_selected_count),
+                "ALWAYS_SELECTED_WEIGHT": always_selected_weight,
                 "VOCAB_SIZE": str(vocab_size),
                 "TABLE_WORD_STRIDE": "1" if table_width == "32" else "2",
                 "ROUTER_ACTIVATION": "0" if activation == "sigmoid" else "2",

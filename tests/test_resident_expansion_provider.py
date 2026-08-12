@@ -76,6 +76,7 @@ from nerve.resident_representations import (
 from nerve.physical_representations import (
     adaptive_mxfp4_resource_representation_dispatch,
     fixed_mxfp4_resource_representation_dispatch,
+    independent_expert_resource_representation_dispatch,
 )
 from tests.test_representation_optimizer_contracts import hardware_profile_contract
 
@@ -284,6 +285,95 @@ def _source_package(package: Path) -> tuple[dict, dict]:
     return manifest, tensor_index
 
 
+def _add_native_shared_expert(
+    package: Path,
+    manifest: dict,
+    tensor_index: dict,
+) -> None:
+    component = manifest["circuit_graph"]["components"][0]
+    execution = manifest["component_executions"][0]
+    residency = manifest["resource_residency"]
+    refs = component["params"]["refs"]
+    tensors = tensor_index["tensors"]
+    nodes = {node["id"]: node for node in component["circuit"]["nodes"]}
+    projection_parameters = {
+        "projection_down": ("shared_down_weight", "shared_down_scale"),
+        "projection_gate_up": (
+            "shared_gate_weight",
+            "shared_gate_scale",
+            "shared_up_weight",
+            "shared_up_scale",
+        ),
+    }
+    for parameter_ids in projection_parameters.values():
+        for offset in range(0, len(parameter_ids), 2):
+            weight_name = parameter_ids[offset]
+            scale_name = parameter_ids[offset + 1]
+            refs[weight_name] = {"tensor": weight_name, "role": "expert_weight"}
+            refs[scale_name] = {"tensor": scale_name, "role": "expert_scale"}
+            tensors[weight_name] = {
+                "dtype": "F8_E4M3",
+                "shape": [_HIDDEN_SIZE, _INTERMEDIATE_SIZE],
+                "byte_count": _HIDDEN_SIZE * _INTERMEDIATE_SIZE,
+                "layout": "row_major",
+            }
+            tensors[scale_name] = {
+                "dtype": "F8_E8M0",
+                "shape": [1, 1],
+                "byte_count": 1,
+                "layout": "row_major",
+            }
+            resource_id = f"resource_{weight_name}"
+            residency["resources"].append(
+                {
+                    "id": resource_id,
+                    "lifetime": "dynamic",
+                    "ranges": [{"byte_count": _HIDDEN_SIZE * _INTERMEDIATE_SIZE}],
+                }
+            )
+            node_id = (
+                "projection_down" if "down" in weight_name else "projection_gate_up"
+            )
+            parameter_slot = 0 if "down" in weight_name or "gate" in weight_name else 2
+            residency["bindings"].append(
+                {
+                    "component_id": _COMPONENT_ID,
+                    "node_id": node_id,
+                    "parameter_id": weight_name,
+                    "mapping": {
+                        "kind": "selected_atomic_group",
+                        "selector_index": 1,
+                        "parameter_slot": parameter_slot,
+                        "resource_id": resource_id,
+                    },
+                }
+            )
+    for node_id, parameter_ids in projection_parameters.items():
+        node = nodes[node_id]
+        node["params"].extend(parameter_ids)
+        node["attrs"]["experts_per_token"] = 2
+        node["attrs"]["selected_parameter_accesses"][0]["mapping"].append(
+            {"selector": 1, "parameter_ids": list(parameter_ids)}
+        )
+    for kernel in execution["kernels"]:
+        kernel["shader_path"] = kernel["shader_path"].replace(
+            "_g32_h128_i128_e1_k1",
+            "_g32_native_fp8_e4m3_se8m0_b128_nf1_h128_i128_e2_k2",
+        )
+        batch = kernel["batch_implementations"][0]["stages"][0]
+        batch["shader_path"] = batch["shader_path"].replace(
+            "_g32_h128_i128_e1_k1",
+            "_g32_native_fp8_e4m3_se8m0_b128_nf1_h128_i128_e2_k2",
+        )
+        kernel["resource_representation_dispatch"] = (
+            independent_expert_resource_representation_dispatch(
+                kernel["shader_path"]
+            )
+        )
+    (package / "tensors.json").write_text(json.dumps(tensor_index))
+    (package / "vulkan_resident_package.json").write_text(json.dumps(manifest))
+
+
 def _opportunity(package: Path) -> ResidentExpansionOpportunity:
     manifest, tensor_index = _source_package(package)
     features = list(MXFP4_TO_FP8_REQUIRED_FEATURES)
@@ -462,8 +552,11 @@ def _discovery_problem(
     package: Path,
     *,
     supports_fp8: bool = True,
+    include_native_shared: bool = False,
 ) -> ProviderProblem:
-    manifest, _tensor_index = _source_package(package)
+    manifest, tensor_index = _source_package(package)
+    if include_native_shared:
+        _add_native_shared_expert(package, manifest, tensor_index)
     component = manifest["circuit_graph"]["components"][0]
     refs = component["params"]["refs"]
     scopes = []
@@ -640,6 +733,47 @@ def test_registry_discovers_a_generic_sparse_component_without_model_identity(
     assert toolchain.physical_optimizer is not None
 
 
+def test_resident_expansion_derives_only_compact_prefix_of_mixed_expert_bank(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "mixed_expert_package"
+    report = ProviderRegistry.from_providers(
+        descriptors=load_builtin_representation_descriptors(),
+        providers=(ExactResidentExpertExpansionProvider(),),
+    ).run(
+        _discovery_problem(
+            package,
+            include_native_shared=True,
+        )
+    )
+
+    assert report.evaluations[0].status == "completed"
+    assert report.evaluations[0].error is None
+    assert len(report.candidates) == 1
+    region = report.candidates[0].target_lowering["regions"][0]
+    assert region["geometry"] == {
+        "hidden_size": 128,
+        "intermediate_size": 128,
+        "expert_count": 2,
+        "experts_per_token": 2,
+    }
+    assert {
+        record["parameter_id"] for record in region["resident_derivations"]
+    } == {"down_weight", "gate_weight", "up_weight"}
+    assert all(
+        "_native_fp8_e4m3_se8m0_b128_nf1_" in replacement["source_path"]
+        for replacement in region["shader_replacements"]
+    )
+    assert _verify_source_coverage(
+        PackageSourceArtifactResolver(package),
+        region,
+    ) == {
+        "component_id": _COMPONENT_ID,
+        "selected_weight_count": 3,
+        "execution_path_count": 4,
+    }
+
+
 def test_resident_expansion_requests_only_exact_graph_structure_analysis() -> None:
     provider = ExactResidentExpertExpansionProvider()
 
@@ -694,7 +828,7 @@ def test_registry_rejects_a_sparse_weight_shared_across_component_boundaries(
     assert not report.candidates
     assert evaluation.structural_match is not None
     assert any(
-        "does not own one exact compact dynamic resource" in reason
+        "does not own one exact independently selected dynamic resource" in reason
         for reason in evaluation.structural_match.reasons
     )
 

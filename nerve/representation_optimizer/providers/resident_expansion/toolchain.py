@@ -7,8 +7,7 @@ from pathlib import Path
 from nerve.compilation import Json, ModelCompileError
 from nerve.model_package_shader_templates import render_shader_source
 from nerve.physical_representations import (
-    adaptive_mxfp4_resource_representation_dispatch,
-    fixed_mxfp4_resource_representation_dispatch,
+    independent_expert_resource_representation_dispatch,
 )
 from nerve.quantized_transforms import MXFP4_E2M1_FP8_E4M3_BITS
 from nerve.representation_optimizer.automation.target import CandidateToolchain
@@ -246,15 +245,19 @@ def _write_region_overlay(
         )
     for node_id in resident_node_ids:
         kernel = _unique(execution["kernels"], "node_id", node_id)
+        source_shader_path = str(kernel.get("shader_path", ""))
         if kernel.get("resource_representation_dispatch") != (
-            fixed_mxfp4_resource_representation_dispatch()
+            independent_expert_resource_representation_dispatch(source_shader_path)
         ):
             raise ModelCompileError(
                 f"resident expansion source kernel {node_id!r} has no exact "
                 "MXFP4 resource-representation contract"
             )
         kernel["resource_representation_dispatch"] = (
-            adaptive_mxfp4_resource_representation_dispatch()
+            independent_expert_resource_representation_dispatch(
+                source_shader_path,
+                adaptive=True,
+            )
         )
     replacement_counts = {}
     for replacement in region["shader_replacements"]:

@@ -17,6 +17,9 @@ from nerve.physical_representations import (
 INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS = 32
 INDEPENDENT_MXFP4_DOWN_TILE_ROWS = 64
 INDEPENDENT_MXFP4_TP_COLUMNS = 128
+INDEPENDENT_NATIVE_FP8_BLOCK = 128
+MXFP4_EXPERT_FORMAT = "mxfp4_e2m1_g32"
+NATIVE_FP8_EXPERT_FORMAT = "fp8_e4m3_e8m0_b128"
 
 
 def independent_sparse_moe_shader_file(
@@ -67,6 +70,7 @@ def independent_sparse_moe_shader_file(
     parameters_per_expert = 4 if stage == "gate_up" else 2
     expected_parameters: list[str] = []
     input_block_major_layout: bool | None = None
+    resource_formats: list[str] = []
     for expert, entry in enumerate(mapping):
         parameter_ids = entry.get("parameter_ids") if isinstance(entry, dict) else None
         if (
@@ -88,8 +92,9 @@ def independent_sparse_moe_shader_file(
         )
         rows = intermediate_size if stage == "gate_up" else hidden_size
         columns = hidden_size if stage == "gate_up" else intermediate_size
+        matrix_formats: list[str] = []
         for weight_id, scale_id in matrix_pairs:
-            matrix_is_input_block_major = _validate_mxfp4_matrix(
+            matrix_format, matrix_is_input_block_major = _validate_expert_matrix(
                 circuit,
                 tensor_index,
                 weight_id,
@@ -98,13 +103,23 @@ def independent_sparse_moe_shader_file(
                 columns=columns,
                 node_id=str(node["id"]),
             )
-            if input_block_major_layout is None:
+            matrix_formats.append(matrix_format)
+            if matrix_format == MXFP4_EXPERT_FORMAT and input_block_major_layout is None:
                 input_block_major_layout = matrix_is_input_block_major
-            elif input_block_major_layout != matrix_is_input_block_major:
+            elif (
+                matrix_format == MXFP4_EXPERT_FORMAT
+                and input_block_major_layout != matrix_is_input_block_major
+            ):
                 raise ModelCompileError(
                     f"independent sparse expert node {node['id']!r} mixes "
                     "incompatible physical matrix layouts"
                 )
+        if len(set(matrix_formats)) != 1:
+            raise ModelCompileError(
+                f"independent sparse expert node {node['id']!r} resource {expert} "
+                "mixes incompatible matrix representations"
+            )
+        resource_formats.append(matrix_formats[0])
     if node.get("params") != expected_parameters:
         raise ModelCompileError(
             f"independent sparse expert node {node['id']!r} does not preserve its "
@@ -114,6 +129,26 @@ def independent_sparse_moe_shader_file(
         raise ModelCompileError(
             f"independent sparse expert node {node['id']!r} has invalid routing "
             f"geometry e{num_experts} k{experts_per_token}"
+        )
+    native_fp8_start = next(
+        (
+            index
+            for index, resource_format in enumerate(resource_formats)
+            if resource_format == NATIVE_FP8_EXPERT_FORMAT
+        ),
+        num_experts,
+    )
+    if resource_formats != [MXFP4_EXPERT_FORMAT] * native_fp8_start + [
+        NATIVE_FP8_EXPERT_FORMAT
+    ] * (num_experts - native_fp8_start):
+        raise ModelCompileError(
+            f"independent sparse expert node {node['id']!r} requires one "
+            "selector-ordered compact-to-native representation boundary"
+        )
+    if native_fp8_start == 0:
+        raise ModelCompileError(
+            f"independent sparse expert node {node['id']!r} has no compact "
+            "resource prefix for the mixed MXFP4/native FP8 kernel"
         )
     suffix = f"h{hidden_size}_i{intermediate_size}_e{num_experts}_k{experts_per_token}"
     if stage == "gate_up":
@@ -132,13 +167,18 @@ def independent_sparse_moe_shader_file(
                 "input-block-major gate/up parameters"
             )
         representation += "_input_block_major_b128"
+    mixed_suffix = (
+        f"_native_fp8_e4m3_se8m0_b128_nf{native_fp8_start}"
+        if native_fp8_start < num_experts
+        else ""
+    )
     return (
         f"independent_sparse_moe_{stage}{representation}_"
-        f"mxfp4_e2m1_g32_{suffix}.comp"
+        f"mxfp4_e2m1_g32{mixed_suffix}_{suffix}.comp"
     )
 
 
-def _validate_mxfp4_matrix(
+def _validate_expert_matrix(
     circuit: Json,
     tensor_index: Json,
     weight_id: str,
@@ -147,7 +187,7 @@ def _validate_mxfp4_matrix(
     rows: int,
     columns: int,
     node_id: str,
-) -> bool:
+) -> tuple[str, bool]:
     refs = circuit.get("parameters", {}).get("refs", {})
     weight_ref = refs.get(weight_id)
     scale_ref = refs.get(scale_id)
@@ -167,7 +207,7 @@ def _validate_mxfp4_matrix(
             f"independent sparse expert node {node_id!r} has missing MXFP4 "
             f"parameters {weight_id!r} and {scale_id!r}"
         )
-    valid_quantization = {
+    valid_mxfp4_quantization = {
         "format": "mxfp4_e2m1",
         "bits": 4,
         "element_type": "float",
@@ -202,18 +242,42 @@ def _validate_mxfp4_matrix(
         and weight.get("logical_shape") == [rows, columns]
         and scale.get("shape") == [rows, columns // 32]
     )
-    if (
+    valid_mxfp4 = not (
         weight.get("dtype") != "I8"
         or not (row_major or input_block_major)
         or weight.get("layout", ROW_MAJOR_LAYOUT) != ROW_MAJOR_LAYOUT
-        or quantization != valid_quantization
+        or quantization != valid_mxfp4_quantization
         or scale.get("dtype") != "F8_E8M0"
         or scale.get("layout", ROW_MAJOR_LAYOUT) != ROW_MAJOR_LAYOUT
         or weight.get("byte_count") != expected_weight_bytes
         or scale.get("byte_count") != expected_scale_bytes
-    ):
-        raise ModelCompileError(
-            f"independent sparse expert node {node_id!r} has incompatible MXFP4 "
-            f"parameters {weight_id!r} and {scale_id!r}"
-        )
-    return input_block_major
+    )
+    if valid_mxfp4:
+        return MXFP4_EXPERT_FORMAT, input_block_major
+
+    native_scale_shape = [
+        (rows + INDEPENDENT_NATIVE_FP8_BLOCK - 1) // INDEPENDENT_NATIVE_FP8_BLOCK,
+        (columns + INDEPENDENT_NATIVE_FP8_BLOCK - 1)
+        // INDEPENDENT_NATIVE_FP8_BLOCK,
+    ]
+    valid_native_fp8 = (
+        weight.get("dtype") == "F8_E4M3"
+        and weight.get("shape") == [rows, columns]
+        and weight.get("logical_shape", [rows, columns]) == [rows, columns]
+        and weight.get("physical_layout") is None
+        and weight.get("layout", ROW_MAJOR_LAYOUT) == ROW_MAJOR_LAYOUT
+        and weight.get("byte_count") == rows * columns
+        and quantization is None
+        and scale.get("dtype") == "F8_E8M0"
+        and scale.get("shape") == native_scale_shape
+        and scale.get("physical_layout") is None
+        and scale.get("layout", ROW_MAJOR_LAYOUT) == ROW_MAJOR_LAYOUT
+        and scale.get("byte_count") == native_scale_shape[0] * native_scale_shape[1]
+    )
+    if valid_native_fp8:
+        return NATIVE_FP8_EXPERT_FORMAT, False
+    raise ModelCompileError(
+        f"independent sparse expert node {node_id!r} has incompatible MXFP4 or "
+        "native FP8 expert "
+        f"matrix parameters {weight_id!r} and {scale_id!r}"
+    )

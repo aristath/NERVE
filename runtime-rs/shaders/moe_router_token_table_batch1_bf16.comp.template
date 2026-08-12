@@ -24,17 +24,22 @@ layout(set = 0, binding = 4) buffer SelectionTelemetry {
 
 layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
 
-const uint NUM_EXPERTS = {{NUM_EXPERTS}}u;
-const uint EXPERTS_PER_TOKEN = {{EXPERTS_PER_TOKEN}}u;
+const uint ROUTED_RESOURCE_COUNT = {{ROUTED_RESOURCE_COUNT}}u;
+const uint ROUTED_SELECTION_COUNT = {{ROUTED_SELECTION_COUNT}}u;
+const uint ALWAYS_SELECTED_RESOURCE_START = {{ALWAYS_SELECTED_RESOURCE_START}}u;
+const uint ALWAYS_SELECTED_RESOURCE_COUNT = {{ALWAYS_SELECTED_RESOURCE_COUNT}}u;
+const uint TOTAL_RESOURCE_COUNT = ROUTED_RESOURCE_COUNT + ALWAYS_SELECTED_RESOURCE_COUNT;
+const uint TOTAL_SELECTION_COUNT = ROUTED_SELECTION_COUNT + ALWAYS_SELECTED_RESOURCE_COUNT;
+const float ALWAYS_SELECTED_WEIGHT = {{ALWAYS_SELECTED_WEIGHT}};
 const uint VOCAB_SIZE = {{VOCAB_SIZE}}u;
 const uint TABLE_WORD_STRIDE = {{TABLE_WORD_STRIDE}}u;
 const uint ROUTER_ACTIVATION = {{ROUTER_ACTIVATION}}u;
 const bool NORMALIZE_SELECTED = {{NORMALIZE_SELECTED}} != 0;
 const float ROUTED_SCALE = {{ROUTED_SCALE}};
-const uint ROUTER_WORDS = (NUM_EXPERTS + 1u) / 2u;
+const uint ROUTER_WORDS = (ROUTED_RESOURCE_COUNT + 1u) / 2u;
 
-shared uint selected_indices[EXPERTS_PER_TOKEN];
-shared float selected_values[EXPERTS_PER_TOKEN];
+shared uint selected_indices[TOTAL_SELECTION_COUNT];
+shared float selected_values[TOTAL_SELECTION_COUNT];
 shared uint invalid_route;
 
 float bf16_to_f32(uint value) {
@@ -68,11 +73,23 @@ void main() {
     if (token_id >= VOCAB_SIZE) return;
     if (lane == 0u) invalid_route = 0u;
     barrier();
-    if (lane < EXPERTS_PER_TOKEN) {
-        uint table_element = token_id * EXPERTS_PER_TOKEN + lane;
+    if (lane < ROUTED_SELECTION_COUNT) {
+        uint table_element = token_id * ROUTED_SELECTION_COUNT + lane;
         uint expert = route_table.words[table_element * TABLE_WORD_STRIDE];
-        if (expert >= NUM_EXPERTS) atomicOr(invalid_route, 1u);
-        expert = min(expert, NUM_EXPERTS - 1u);
+        uint high_word = TABLE_WORD_STRIDE == 2u
+            ? route_table.words[table_element * TABLE_WORD_STRIDE + 1u]
+            : 0u;
+        if (expert >= ROUTED_RESOURCE_COUNT || high_word != 0u) {
+            atomicOr(invalid_route, 1u);
+        }
+        for (uint previous = 0u; previous < lane; previous++) {
+            uint previous_element = token_id * ROUTED_SELECTION_COUNT + previous;
+            if (
+                expert
+                == route_table.words[previous_element * TABLE_WORD_STRIDE]
+            ) atomicOr(invalid_route, 1u);
+        }
+        expert = min(expert, ROUTED_RESOURCE_COUNT - 1u);
         selected_indices[lane] = expert;
         float logit = unpack_bf16(
             router_logits.words[batch_index * ROUTER_WORDS + (expert >> 1u)], expert
@@ -84,11 +101,26 @@ void main() {
     if (lane == 0u) {
         float denominator = 0.0;
         if (NORMALIZE_SELECTED) {
-            for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+            for (uint route = 0u; route < ROUTED_SELECTION_COUNT; route++) {
                 denominator += selected_values[route];
             }
         }
-        for (uint route = 1u; route < EXPERTS_PER_TOKEN; route++) {
+        for (uint route = 0u; route < ROUTED_SELECTION_COUNT; route++) {
+            uint expert = selected_indices[route];
+            float weight = selected_values[route];
+            if (NORMALIZE_SELECTED) {
+                weight = weight / denominator * ROUTED_SCALE;
+            } else {
+                weight *= ROUTED_SCALE;
+            }
+            selected_values[route] = weight;
+        }
+        for (uint offset = 0u; offset < ALWAYS_SELECTED_RESOURCE_COUNT; offset++) {
+            uint route = ROUTED_SELECTION_COUNT + offset;
+            selected_indices[route] = ALWAYS_SELECTED_RESOURCE_START + offset;
+            selected_values[route] = ALWAYS_SELECTED_WEIGHT;
+        }
+        for (uint route = 1u; route < TOTAL_SELECTION_COUNT; route++) {
             uint expert = selected_indices[route];
             float value = selected_values[route];
             uint insertion = route;
@@ -100,27 +132,22 @@ void main() {
             selected_indices[insertion] = expert;
             selected_values[insertion] = value;
         }
-        uint route_base = batch_index * EXPERTS_PER_TOKEN;
-        for (uint route = 0u; route < EXPERTS_PER_TOKEN; route++) {
+        uint route_base = batch_index * TOTAL_SELECTION_COUNT;
+        for (uint route = 0u; route < TOTAL_SELECTION_COUNT; route++) {
             uint expert = selected_indices[route];
             float weight = selected_values[route];
-            if (NORMALIZE_SELECTED) {
-                weight = weight / denominator * ROUTED_SCALE;
-            } else {
-                weight *= ROUTED_SCALE;
-            }
             expert_routes.words[route_base + route] =
                 (f32_to_bf16(weight) << 16u) | expert;
             atomicAdd(selection_telemetry.counts[expert], 1u);
         }
-        for (uint left_route = 0u; left_route < EXPERTS_PER_TOKEN; left_route++) {
+        for (uint left_route = 0u; left_route < TOTAL_SELECTION_COUNT; left_route++) {
             uint left = selected_indices[left_route];
-            for (uint right_route = left_route + 1u; right_route < EXPERTS_PER_TOKEN; right_route++) {
+            for (uint right_route = left_route + 1u; right_route < TOTAL_SELECTION_COUNT; right_route++) {
                 uint right = selected_indices[right_route];
                 if (left < right) {
-                    uint preceding = left * (2u * NUM_EXPERTS - left - 1u) / 2u;
+                    uint preceding = left * (2u * TOTAL_RESOURCE_COUNT - left - 1u) / 2u;
                     uint pair_index = preceding + right - left - 1u;
-                    atomicAdd(selection_telemetry.counts[NUM_EXPERTS + pair_index], 1u);
+                    atomicAdd(selection_telemetry.counts[TOTAL_RESOURCE_COUNT + pair_index], 1u);
                 }
             }
         }

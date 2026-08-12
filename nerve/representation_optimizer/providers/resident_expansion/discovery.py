@@ -429,7 +429,7 @@ def _component_opportunity(
                 scale_name = scale_ref.get("tensor")
                 weight = tensors.get(weight_name)
                 scale = tensors.get(scale_name)
-                _validate_tensor_pair(
+                source_representation = _tensor_pair_representation(
                     weight,
                     scale,
                     weight_name=weight_name,
@@ -441,15 +441,6 @@ def _component_opportunity(
                         intermediate_size if role.endswith("down") else hidden_size
                     ),
                 )
-                derivation = mxfp4_to_fp8_resident_derivation(
-                    weight,
-                    compiler_target,
-                )
-                if derivation is None:
-                    raise ModelCompileError(
-                        f"component {component_id!r} weight {weight_name!r} "
-                        "has no exact native resident expansion"
-                    )
                 binding = bindings.get((component_id, node_id, weight_id))
                 if binding is None:
                     raise ModelCompileError(
@@ -478,7 +469,18 @@ def _component_opportunity(
                 ):
                     raise ModelCompileError(
                         f"component {component_id!r} weight {weight_id!r} "
-                        "does not own one exact compact dynamic resource"
+                        "does not own one exact independently selected dynamic resource"
+                    )
+                if source_representation == "native_fp8_e4m3_e8m0_b128":
+                    continue
+                derivation = mxfp4_to_fp8_resident_derivation(
+                    weight,
+                    compiler_target,
+                )
+                if derivation is None:
+                    raise ModelCompileError(
+                        f"component {component_id!r} weight {weight_name!r} "
+                        "has no exact native resident expansion"
                     )
                 weight_derivations.append(
                     ResidentWeightDerivation(
@@ -662,7 +664,7 @@ def _selector_mapping(node: Json, stride: int, expert_count: int) -> list[Json]:
     return mapping
 
 
-def _validate_tensor_pair(
+def _tensor_pair_representation(
     weight: object,
     scale: object,
     *,
@@ -670,7 +672,7 @@ def _validate_tensor_pair(
     scale_name: object,
     output_size: int,
     input_size: int,
-) -> None:
+) -> str:
     if not isinstance(weight_name, str) or not isinstance(scale_name, str):
         raise ModelCompileError("expert parameter has no tensor binding")
     if not isinstance(weight, dict) or not isinstance(scale, dict):
@@ -679,7 +681,7 @@ def _validate_tensor_pair(
         )
     quantization = weight.get("quantization")
     expected_weight_bytes = output_size * input_size // 2
-    if (
+    valid_mxfp4 = not (
         weight.get("dtype") != "I8"
         or weight.get("shape") != [output_size, input_size // 2]
         or weight.get("logical_shape") != [output_size, input_size]
@@ -699,11 +701,34 @@ def _validate_tensor_pair(
         or scale.get("shape") != [output_size, input_size // 32]
         or scale.get("byte_count") != output_size * input_size // 32
         or scale.get("layout") != "row_major"
+    )
+    if valid_mxfp4:
+        return "mxfp4_e2m1_g32"
+    native_scale_shape = [
+        (output_size + 127) // 128,
+        (input_size + 127) // 128,
+    ]
+    if (
+        weight.get("dtype") == "F8_E4M3"
+        and weight.get("shape") == [output_size, input_size]
+        and weight.get("logical_shape", [output_size, input_size])
+        == [output_size, input_size]
+        and weight.get("byte_count") == output_size * input_size
+        and weight.get("layout") == "row_major"
+        and weight.get("physical_layout") is None
+        and weight.get("quantization") is None
+        and scale.get("dtype") == "F8_E8M0"
+        and scale.get("shape") == native_scale_shape
+        and scale.get("byte_count")
+        == native_scale_shape[0] * native_scale_shape[1]
+        and scale.get("layout") == "row_major"
+        and scale.get("physical_layout") is None
     ):
-        raise ModelCompileError(
-            f"expert tensor pair {weight_name!r}/{scale_name!r} has an "
-            "unsupported compact numeric contract"
-        )
+        return "native_fp8_e4m3_e8m0_b128"
+    raise ModelCompileError(
+        f"expert tensor pair {weight_name!r}/{scale_name!r} has an unsupported "
+        "compact MXFP4 or native FP8 numeric contract"
+    )
 
 
 def _shader_replacement(

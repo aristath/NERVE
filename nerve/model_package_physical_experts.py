@@ -106,8 +106,16 @@ def independent_expert_physical_implementations(
     if pair is None or not local_intermediates:
         return []
     gate_up, down = pair
-    independent_sparse_moe_shader_file(circuit, gate_up, tensor_index)
-    independent_sparse_moe_shader_file(circuit, down, tensor_index)
+    source_shader_files = (
+        independent_sparse_moe_shader_file(circuit, gate_up, tensor_index),
+        independent_sparse_moe_shader_file(circuit, down, tensor_index),
+    )
+    if any("_native_fp8_e4m3_se8m0_b128_" in path for path in source_shader_files):
+        # The current intra-expert partition ABI describes one physical matrix
+        # geometry for every selected resource. A heterogeneous selector bank
+        # remains eligible for whole-expert parallelism, but must not advertise
+        # an invalid homogeneous tensor-parallel implementation.
+        return []
     attrs = node["attrs"]
     hidden_size = int(attrs["hidden_size"])
     intermediate_size = int(attrs["intermediate_size"])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from nerve.compilation import Json, ModelCompileError
 
@@ -18,9 +19,12 @@ PAIRPACKED_INT8_PREQUANTIZATION_CONTRACT = (
 )
 ATTENTION_PARTIALS_CONTRACT = "bf16_attention_partition_partials_f32.v1"
 KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA = (
-    "nerve.kernel_resource_representation_dispatch.v1"
+    "nerve.kernel_resource_representation_dispatch.v2"
 )
 MXFP4_E2M1_G32_RESOURCE_REPRESENTATION = "mxfp4_e2m1_g32"
+SELECTOR_MAPPED_MXFP4_OR_NATIVE_FP8_RESOURCE_REPRESENTATION = (
+    "selector_mapped_mxfp4_e2m1_g32_or_fp8_e4m3_e8m0_b128"
+)
 MXFP4_E2M1_TO_FP8_E4M3_RESIDENT_DERIVATION = "mxfp4_e2m1_to_fp8_e4m3"
 
 
@@ -28,6 +32,7 @@ def fixed_mxfp4_resource_representation_dispatch() -> Json:
     return {
         "schema": KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA,
         "source_representation": MXFP4_E2M1_G32_RESOURCE_REPRESENTATION,
+        "source_representation_boundary": None,
         "resident_derivation": None,
         "selection": "fixed_source",
     }
@@ -37,8 +42,33 @@ def adaptive_mxfp4_resource_representation_dispatch() -> Json:
     return {
         "schema": KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA,
         "source_representation": MXFP4_E2M1_G32_RESOURCE_REPRESENTATION,
+        "source_representation_boundary": None,
         "resident_derivation": (MXFP4_E2M1_TO_FP8_E4M3_RESIDENT_DERIVATION),
         "selection": "resource_address_tag",
+    }
+
+
+def independent_expert_resource_representation_dispatch(
+    shader_file: str,
+    *,
+    adaptive: bool = False,
+) -> Json:
+    mixed = re.search(r"_native_fp8_e4m3_se8m0_b128_nf(\d+)_", shader_file)
+    source_representation = MXFP4_E2M1_G32_RESOURCE_REPRESENTATION
+    boundary = None
+    if mixed is not None:
+        source_representation = (
+            SELECTOR_MAPPED_MXFP4_OR_NATIVE_FP8_RESOURCE_REPRESENTATION
+        )
+        boundary = int(mixed.group(1))
+    return {
+        "schema": KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA,
+        "source_representation": source_representation,
+        "source_representation_boundary": boundary,
+        "resident_derivation": (
+            MXFP4_E2M1_TO_FP8_E4M3_RESIDENT_DERIVATION if adaptive else None
+        ),
+        "selection": "resource_address_tag" if adaptive else "fixed_source",
     }
 
 

@@ -21,6 +21,12 @@ from nerve.model_package_shader_selection import (
 from nerve.model_package_shader_templates import copy_shader_templates
 from nerve.model_package_common import ModelCompileError
 from nerve.model_package_manifest import component_kernel_spec
+from nerve.model_package_derived_tensors import (
+    derive_tensor_parallel_independent_expert_tensors,
+)
+from nerve.model_package_physical_experts import (
+    independent_expert_physical_implementations,
+)
 from nerve.model_package_tensors import physical_input_prequantization_spec
 from nerve.model_transpiler_tensor_index import make_tensor_index
 
@@ -282,8 +288,9 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
         workgroup_count_x=4,
     )
     assert gate_kernel["resource_representation_dispatch"] == {
-        "schema": "nerve.kernel_resource_representation_dispatch.v1",
+        "schema": "nerve.kernel_resource_representation_dispatch.v2",
         "source_representation": "mxfp4_e2m1_g32",
+        "source_representation_boundary": None,
         "resident_derivation": None,
         "selection": "fixed_source",
     }
@@ -384,3 +391,258 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     assert "{{" not in adaptive_down_source
     assert "{{" not in adaptive_down_batch_source
     compile_shader_artifacts(tmp_path)
+
+
+def test_renders_one_selected_bank_with_compact_and_native_fp8_experts(
+    tmp_path: Path,
+) -> None:
+    hidden_size = 128
+    intermediate_size = 128
+    refs: dict[str, dict[str, str]] = {}
+    tensors: dict[str, dict[str, object]] = {}
+    gate_mapping: list[dict[str, object]] = []
+    down_mapping: list[dict[str, object]] = []
+
+    def add_mxfp4(expert: int, projection: str, rows: int, columns: int) -> list[str]:
+        stem = f"expert_{expert}.{projection}"
+        weight_id = f"expert_{expert}_{projection}"
+        scale_id = f"{weight_id}_scale"
+        weight_name = f"{stem}.weight"
+        scale_name = f"{stem}.scale"
+        refs[weight_id] = {"tensor": weight_name}
+        refs[scale_id] = {"tensor": scale_name}
+        tensors[weight_name] = {
+            "dtype": "I8",
+            "shape": [rows, columns // 2],
+            "logical_shape": [rows, columns],
+            "layout": "row_major",
+            "byte_count": rows * columns // 2,
+            "quantization": {
+                "format": "mxfp4_e2m1",
+                "bits": 4,
+                "element_type": "float",
+                "values_per_byte": 2,
+                "packing_axis": 1,
+                "packing_order": "low_nibble_then_high_nibble_along_k",
+                "group_size": 32,
+                "scales": scale_name,
+                "scale_dtype": "F8_E8M0",
+                "scale_mode": "power_of_two_per_output_row_k_group",
+            },
+        }
+        tensors[scale_name] = {
+            "dtype": "F8_E8M0",
+            "shape": [rows, columns // 32],
+            "layout": "row_major",
+            "byte_count": rows * columns // 32,
+        }
+        return [weight_id, scale_id]
+
+    def add_native_fp8(
+        expert: int, projection: str, rows: int, columns: int
+    ) -> list[str]:
+        stem = f"expert_{expert}.{projection}"
+        weight_id = f"expert_{expert}_{projection}"
+        scale_id = f"{weight_id}_scale"
+        weight_name = f"{stem}.weight"
+        scale_name = f"{stem}.scale"
+        refs[weight_id] = {"tensor": weight_name}
+        refs[scale_id] = {"tensor": scale_name}
+        tensors[weight_name] = {
+            "dtype": "F8_E4M3",
+            "shape": [rows, columns],
+            "layout": "row_major",
+            "byte_count": rows * columns,
+        }
+        tensors[scale_name] = {
+            "dtype": "F8_E8M0",
+            "shape": [(rows + 127) // 128, (columns + 127) // 128],
+            "layout": "row_major",
+            "byte_count": ((rows + 127) // 128) * ((columns + 127) // 128),
+        }
+        return [weight_id, scale_id]
+
+    for expert, add_matrix in enumerate((add_mxfp4, add_native_fp8)):
+        gate_mapping.append(
+            {
+                "selector": expert,
+                "parameter_ids": [
+                    *add_matrix(expert, "w1", intermediate_size, hidden_size),
+                    *add_matrix(expert, "w3", intermediate_size, hidden_size),
+                ],
+            }
+        )
+        down_mapping.append(
+            {
+                "selector": expert,
+                "parameter_ids": add_matrix(
+                    expert, "w2", hidden_size, intermediate_size
+                ),
+            }
+        )
+
+    circuit = {"parameters": {"refs": refs}}
+    common_attrs = {
+        "hidden_size": hidden_size,
+        "intermediate_size": intermediate_size,
+        "experts_per_token": 2,
+    }
+    gate = {
+        "id": "gate_up",
+        "op": "independent_sparse_moe_gate_up",
+        "inputs": ["hidden", "routes"],
+        "outputs": ["intermediates"],
+        "params": [
+            parameter for entry in gate_mapping for parameter in entry["parameter_ids"]
+        ],
+        "attrs": {
+            **common_attrs,
+            "swiglu_limit": 10.0,
+            "selected_parameter_accesses": [
+                {"selection_signal": "routes", "mapping": gate_mapping}
+            ],
+        },
+    }
+    down = {
+        "id": "down",
+        "op": "independent_sparse_moe_down",
+        "inputs": ["intermediates", "routes"],
+        "outputs": ["expert_outputs"],
+        "params": [
+            parameter for entry in down_mapping for parameter in entry["parameter_ids"]
+        ],
+        "attrs": {
+            **common_attrs,
+            "selected_parameter_accesses": [
+                {"selection_signal": "routes", "mapping": down_mapping}
+            ],
+        },
+    }
+    tensor_index = {"tensors": tensors}
+    dimensions = {
+        "hidden_size": hidden_size,
+        "intermediate_size": intermediate_size,
+    }
+    gate_shader = (
+        "independent_sparse_moe_gate_up_mxfp4_e2m1_g32_"
+        "native_fp8_e4m3_se8m0_b128_nf1_h128_i128_e2_k2_limit10.comp"
+    )
+    down_shader = (
+        "independent_sparse_moe_down_mxfp4_e2m1_g32_"
+        "native_fp8_e4m3_se8m0_b128_nf1_h128_i128_e2_k2.comp"
+    )
+    pair_circuit = {**circuit, "nodes": [gate, down]}
+    lowered = tmp_path / "lowered"
+    lowered.mkdir()
+    (lowered / "circuit.json").write_text(json.dumps(pair_circuit))
+    original_tensor_index = deepcopy(tensor_index)
+
+    class NativeFp8Target:
+        @staticmethod
+        def supports_native_dtype(dtype: str) -> bool:
+            return dtype == "F8_E4M3"
+
+    derive_tensor_parallel_independent_expert_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered,
+        tensor_index,
+        target=NativeFp8Target(),  # type: ignore[arg-type]
+    )
+    assert json.loads((lowered / "circuit.json").read_text()) == pair_circuit
+    assert tensor_index == original_tensor_index
+
+    assert shader_file_for_node(circuit, gate, tensor_index, dimensions) == gate_shader
+    assert shader_file_for_node(circuit, down, tensor_index, dimensions) == down_shader
+    gate_kernel = component_kernel_spec(
+        execution_index=0,
+        node=gate,
+        circuit=pair_circuit,
+        shader_file=gate_shader,
+        local_size_x=512,
+        workgroup_count_x=1,
+        tensor_index=tensor_index,
+    )
+    assert gate_kernel["resource_representation_dispatch"] == {
+        "schema": "nerve.kernel_resource_representation_dispatch.v2",
+        "source_representation": (
+            "selector_mapped_mxfp4_e2m1_g32_or_fp8_e4m3_e8m0_b128"
+        ),
+        "source_representation_boundary": 1,
+        "resident_derivation": None,
+        "selection": "fixed_source",
+    }
+    assert "physical_implementations" not in gate_kernel
+    assert (
+        independent_expert_physical_implementations(
+            pair_circuit,
+            gate,
+            tensor_index,
+            local_intermediates=[
+                {
+                    "signal": "intermediates",
+                    "producer_binding": 2,
+                    "consumer_binding": 0,
+                }
+            ],
+        )
+        == []
+    )
+    gate_batch = frame_parallel_batch_shader_file(gate_shader)
+    down_batch = frame_parallel_batch_shader_file(down_shader)
+    assert gate_batch is not None
+    assert down_batch is not None
+    adaptive_shaders = {
+        shader.replace(
+            "_mxfp4_e2m1_",
+            "_mxfp4_e2m1_adaptive_fp8_e4m3_",
+            1,
+        )
+        for shader in (gate_shader, down_shader, gate_batch, down_batch)
+    }
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    copy_shader_templates(
+        shader_source_dir,
+        tmp_path,
+        {gate_shader, down_shader, gate_batch, down_batch, *adaptive_shaders},
+    )
+    for shader_file in (
+        gate_shader,
+        down_shader,
+        gate_batch,
+        down_batch,
+        *sorted(adaptive_shaders),
+    ):
+        source = (tmp_path / shader_file).read_text()
+        assert "const uint NATIVE_FP8_RESOURCE_START = 1u;" in source
+        assert "bool expert_uses_native_fp8(uint expert)" in source
+        assert "read_native_fp8_scale" in source
+        assert (
+            "#define DYNAMIC_WEIGHT_REPRESENTATION 1" in source
+        ) == (shader_file in adaptive_shaders)
+        assert "{{" not in source
+    compile_shader_artifacts(tmp_path)
+
+    all_native = deepcopy(tensor_index)
+    for tensor_name, metadata in list(all_native["tensors"].items()):
+        quantization = metadata.get("quantization")
+        if not isinstance(quantization, dict):
+            continue
+        rows, columns = metadata["logical_shape"]
+        scale = all_native["tensors"][quantization["scales"]]
+        metadata.clear()
+        metadata.update(
+            {
+                "dtype": "F8_E4M3",
+                "shape": [rows, columns],
+                "layout": "row_major",
+                "byte_count": rows * columns,
+            }
+        )
+        scale.update(
+            {
+                "shape": [(rows + 127) // 128, (columns + 127) // 128],
+                "byte_count": ((rows + 127) // 128) * ((columns + 127) // 128),
+            }
+        )
+    with pytest.raises(ModelCompileError, match="no compact resource prefix"):
+        shader_file_for_node(circuit, gate, all_native, dimensions)

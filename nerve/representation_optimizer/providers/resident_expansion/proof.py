@@ -8,8 +8,7 @@ from pathlib import Path
 from nerve.compilation import Json, ModelCompileError
 from nerve.model_package_shader_templates import render_shader_source
 from nerve.physical_representations import (
-    adaptive_mxfp4_resource_representation_dispatch,
-    fixed_mxfp4_resource_representation_dispatch,
+    independent_expert_resource_representation_dispatch,
 )
 from nerve.quantized_transforms import (
     MXFP4_E2M1_FP8_E4M3_BITS,
@@ -30,6 +29,9 @@ from nerve.representation_optimizer.providers.resident_expansion.contracts impor
     PROOF_SCHEMA,
     PROOF_VERIFIER_ID,
     TARGET_LOWERING_SCHEMA,
+)
+from nerve.representation_optimizer.providers.resident_expansion.discovery import (
+    _tensor_pair_representation,
 )
 from nerve.representation_optimizer.providers.source_artifacts import (
     PackageSourceArtifactResolver,
@@ -303,10 +305,14 @@ def _verify_overlay(
     for node_id in resident_node_ids:
         target_kernel = _unique(restored_execution["kernels"], "node_id", node_id)
         source_kernel = _unique(source_execution["kernels"], "node_id", node_id)
+        source_shader_path = str(source_kernel.get("shader_path", ""))
         if target_kernel.get("resource_representation_dispatch") != (
-            adaptive_mxfp4_resource_representation_dispatch()
+            independent_expert_resource_representation_dispatch(
+                source_shader_path,
+                adaptive=True,
+            )
         ) or source_kernel.get("resource_representation_dispatch") != (
-            fixed_mxfp4_resource_representation_dispatch()
+            independent_expert_resource_representation_dispatch(source_shader_path)
         ):
             raise ModelCompileError(
                 "resident expansion overlay has an inconsistent explicit "
@@ -461,11 +467,17 @@ def _verify_source_coverage(
                 )
             for parameter_slot in range(0, stride, 2):
                 parameter_id = parameter_ids[parameter_slot]
+                scale_parameter_id = parameter_ids[parameter_slot + 1]
                 tensor_ref = refs.get(parameter_id)
+                scale_ref = refs.get(scale_parameter_id)
                 tensor_name = (
                     tensor_ref.get("tensor") if isinstance(tensor_ref, dict) else None
                 )
+                scale_name = (
+                    scale_ref.get("tensor") if isinstance(scale_ref, dict) else None
+                )
                 tensor = tensors.get(tensor_name)
+                scale = tensors.get(scale_name)
                 binding = bindings.get((component_id, node_id, parameter_id))
                 binding_mapping = (
                     binding.get("mapping") if isinstance(binding, dict) else None
@@ -496,6 +508,25 @@ def _verify_source_coverage(
                     raise ModelCompileError(
                         f"resident expansion source resource {resource_id!r} drifted"
                     )
+                attrs = node.get("attrs", {})
+                source_representation = _tensor_pair_representation(
+                    tensor,
+                    scale,
+                    weight_name=tensor_name,
+                    scale_name=scale_name,
+                    output_size=int(
+                        attrs["hidden_size"]
+                        if node["op"].endswith("down")
+                        else attrs["intermediate_size"]
+                    ),
+                    input_size=int(
+                        attrs["intermediate_size"]
+                        if node["op"].endswith("down")
+                        else attrs["hidden_size"]
+                    ),
+                )
+                if source_representation == "native_fp8_e4m3_e8m0_b128":
+                    continue
                 derivation = mxfp4_to_fp8_resident_derivation(
                     tensor,
                     {

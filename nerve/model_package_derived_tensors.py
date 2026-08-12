@@ -35,8 +35,18 @@ def derive_tensor_parallel_independent_expert_tensors(
             if pair is None:
                 continue
             gate_up, down = pair
-            independent_sparse_moe_shader_file(circuit, gate_up, tensor_index)
-            independent_sparse_moe_shader_file(circuit, down, tensor_index)
+            source_shader_files = (
+                independent_sparse_moe_shader_file(circuit, gate_up, tensor_index),
+                independent_sparse_moe_shader_file(circuit, down, tensor_index),
+            )
+            if any(
+                "_native_fp8_e4m3_se8m0_b128_" in path
+                for path in source_shader_files
+            ):
+                # The current shard-contiguous ABI describes one geometry for
+                # every selector. Preserve the canonical heterogeneous bank
+                # until a mixed physical partition contract exists.
+                continue
             intermediate_size = int(gate_up["attrs"]["intermediate_size"])
             partition_count = intermediate_size // TP_INPUT_BLOCK_COLUMNS
             gate_accesses = gate_up["attrs"]["selected_parameter_accesses"]

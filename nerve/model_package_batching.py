@@ -159,7 +159,8 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
     if re.fullmatch(
         r"independent_sparse_moe_(?:gate_up|down)(?:_prequant)?"
         r"(?:_input_block_major_b128)?_mxfp4_e2m1"
-        r"(?:_resident_fp8_e4m3)?_g32_"
+        r"(?:_(?:resident|adaptive)_fp8_e4m3)?_g32"
+        r"(?:_native_fp8_e4m3_se8m0_b128_nf\d+)?_"
         r"h\d+_i\d+_e\d+_k\d+(?:_limit[0-9eE+.-]+)?\.comp",
         shader_file,
     ):
@@ -171,7 +172,8 @@ def frame_parallel_batch_shader_file(shader_file: str) -> str | None:
         )
     if re.fullmatch(
         r"moe_router_(?:score_topk|token_table)_"
-        r"(?:sigmoid|softmax|sqrtsoftplus)_bf16_e\d+_k\d+_"
+        r"(?:sigmoid|softmax|sqrtsoftplus)_bf16_r\d+_k\d+_"
+        r"a\d+w[0-9eE+.-]+_"
         r"(?:v\d+_)?norm[01]_scale[0-9eE+.-]+_"
         r"(?:bias(?:f32|bf16)|tablei(?:32|64))\.comp",
         shader_file,
@@ -257,7 +259,8 @@ def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
     independent = re.fullmatch(
         r"independent_sparse_moe_(gate_up|down)(?:_prequant)?"
         r"(?:_input_block_major_b128)?_mxfp4_e2m1"
-        r"(?:_resident_fp8_e4m3)?_g32_"
+        r"(?:_(?:resident|adaptive)_fp8_e4m3)?_g32"
+        r"(?:_native_fp8_e4m3_se8m0_b128_nf\d+)?_"
         r"h(\d+)_i(\d+)_e\d+_k(\d+)(?:_limit[0-9eE+.-]+)?\.comp",
         shader_file,
     )

@@ -264,8 +264,37 @@ fn validate_runtime_mxfp4_derivation_targets(
                     node.id,
                 ))
             })?;
+        let source_kernel = execution
+            .kernels
+            .iter()
+            .find(|kernel| kernel.node_id == node.id)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "runtime resident derivation node {:?} has no source kernel",
+                    node.id,
+                ))
+            })?;
+        let source_dispatch = source_kernel
+            .resource_representation_dispatch
+            .as_ref()
+            .filter(|contract| contract.provides_fixed_mxfp4_source())
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "runtime resident derivation node {:?} is not backed by an explicit compact MXFP4 source partition",
+                    node.id,
+                ))
+            })?;
+        let compact_resource_count = source_dispatch
+            .compact_mxfp4_resource_count(accesses.len())
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "runtime resident derivation node {:?} has an invalid source-representation boundary",
+                    node.id,
+                ))
+            })?;
         let weight_parameters = accesses
             .iter()
+            .take(compact_resource_count)
             .flat_map(|mapping| {
                 mapping
                     .get("parameter_ids")
@@ -298,26 +327,6 @@ fn validate_runtime_mxfp4_derivation_targets(
                 node.id,
             ));
         }
-        let source_kernel = execution
-            .kernels
-            .iter()
-            .find(|kernel| kernel.node_id == node.id)
-            .ok_or_else(|| {
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "runtime resident derivation node {:?} has no source kernel",
-                    node.id,
-                ))
-            })?;
-        if source_kernel
-            .resource_representation_dispatch
-            .as_ref()
-            .is_none_or(|contract| !contract.is_exact_mxfp4_source())
-        {
-            return runtime_resident_derivation_error(format!(
-                "runtime resident derivation node {:?} is not backed by an explicit exact compact MXFP4 resource-representation contract",
-                node.id,
-            ));
-        }
         let target_kernel = target_execution
             .kernels
             .iter()
@@ -328,13 +337,16 @@ fn validate_runtime_mxfp4_derivation_targets(
                     node.id,
                 ))
             })?;
-        if target_kernel
+        let target_dispatch = target_kernel
             .resource_representation_dispatch
             .as_ref()
-            .is_none_or(|contract| {
-                !contract.selects_resident_derivation(request.derivation.kind)
-            })
-        {
+            .filter(|contract| {
+                contract.selects_resident_derivation(request.derivation.kind)
+                    && contract.source_representation == source_dispatch.source_representation
+                    && contract.source_representation_boundary
+                        == source_dispatch.source_representation_boundary
+            });
+        if target_dispatch.is_none() {
             return runtime_resident_derivation_error(format!(
                 "runtime resident derivation node {:?} does not declare address-tag selection of the matching resident representation",
                 node.id,
@@ -701,6 +713,7 @@ mod runtime_resident_derivation_tests {
             schema: KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA.to_string(),
             source_representation:
                 VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32,
+            source_representation_boundary: None,
             resident_derivation,
             selection,
         }
@@ -717,23 +730,43 @@ mod runtime_resident_derivation_tests {
             VulkanResidentKernelResourceRepresentationSelection::ResourceAddressTag,
         );
 
-        assert!(source.is_exact_mxfp4_source());
+        assert!(source.provides_fixed_mxfp4_source());
+        assert_eq!(source.validate(), Ok(()));
         assert!(!source.selects_resident_derivation(
             CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
         ));
-        assert!(!adaptive.is_exact_mxfp4_source());
+        assert!(!adaptive.provides_fixed_mxfp4_source());
         assert!(adaptive.selects_resident_derivation(
             CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
         ));
+        assert_eq!(adaptive.validate(), Ok(()));
+
+        let mixed = VulkanResidentKernelResourceRepresentationDispatchSpec {
+            schema: KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA.to_string(),
+            source_representation:
+                VulkanResidentKernelSourceResourceRepresentation::SelectorMappedMxfp4OrNativeFp8,
+            source_representation_boundary: Some(256),
+            resident_derivation: None,
+            selection: VulkanResidentKernelResourceRepresentationSelection::FixedSource,
+        };
+        assert!(mixed.provides_fixed_mxfp4_source());
+        assert_eq!(mixed.compact_mxfp4_resource_count(257), Some(256));
+        assert_eq!(mixed.compact_mxfp4_resource_count(256), None);
+        assert_eq!(mixed.validate(), Ok(()));
 
         let malformed = dispatch(
             Some(CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3),
             VulkanResidentKernelResourceRepresentationSelection::FixedSource,
         );
-        assert!(!malformed.is_exact_mxfp4_source());
+        assert!(!malformed.provides_fixed_mxfp4_source());
         assert!(!malformed.selects_resident_derivation(
             CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
         ));
+        assert!(malformed.validate().is_err());
+
+        let mut malformed_boundary = mixed.clone();
+        malformed_boundary.source_representation_boundary = None;
+        assert!(malformed_boundary.validate().is_err());
     }
 
     #[test]

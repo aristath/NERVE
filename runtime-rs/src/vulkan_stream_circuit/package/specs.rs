@@ -161,13 +161,14 @@ pub struct VulkanResidentComponentKernelSpec {
 }
 
 pub const KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA: &str =
-    "nerve.kernel_resource_representation_dispatch.v1";
+    "nerve.kernel_resource_representation_dispatch.v2";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VulkanResidentKernelResourceRepresentationDispatchSpec {
     pub schema: String,
     pub source_representation: VulkanResidentKernelSourceResourceRepresentation,
+    pub source_representation_boundary: Option<u32>,
     pub resident_derivation: Option<CompiledResourceResidentDerivationKind>,
     pub selection: VulkanResidentKernelResourceRepresentationSelection,
 }
@@ -176,6 +177,8 @@ pub struct VulkanResidentKernelResourceRepresentationDispatchSpec {
 #[serde(rename_all = "snake_case")]
 pub enum VulkanResidentKernelSourceResourceRepresentation {
     Mxfp4E2m1G32,
+    #[serde(rename = "selector_mapped_mxfp4_e2m1_g32_or_fp8_e4m3_e8m0_b128")]
+    SelectorMappedMxfp4OrNativeFp8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,10 +189,69 @@ pub enum VulkanResidentKernelResourceRepresentationSelection {
 }
 
 impl VulkanResidentKernelResourceRepresentationDispatchSpec {
-    pub(crate) fn is_exact_mxfp4_source(&self) -> bool {
+    fn contains_mxfp4_source(&self) -> bool {
+        matches!(
+            self.source_representation,
+            VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32
+                | VulkanResidentKernelSourceResourceRepresentation::SelectorMappedMxfp4OrNativeFp8
+        )
+    }
+
+    fn has_valid_source_partition(&self) -> bool {
+        match self.source_representation {
+            VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32 => {
+                self.source_representation_boundary.is_none()
+            }
+            VulkanResidentKernelSourceResourceRepresentation::SelectorMappedMxfp4OrNativeFp8 => {
+                self.source_representation_boundary.is_some_and(|count| count > 0)
+            }
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if self.schema != KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA {
+            return Err("resource-representation dispatch schema is unsupported");
+        }
+        if !self.has_valid_source_partition() {
+            return Err("resource-representation dispatch source partition is invalid");
+        }
+        match (self.resident_derivation, self.selection) {
+            (
+                None,
+                VulkanResidentKernelResourceRepresentationSelection::FixedSource,
+            )
+            | (
+                Some(_),
+                VulkanResidentKernelResourceRepresentationSelection::ResourceAddressTag,
+            ) => Ok(()),
+            _ => Err("resource-representation dispatch selection is inconsistent"),
+        }
+    }
+
+    pub(crate) fn compact_mxfp4_resource_count(
+        &self,
+        total_resource_count: usize,
+    ) -> Option<usize> {
+        if self.schema != KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA {
+            return None;
+        }
+        match self.source_representation {
+            VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32 => self
+                .source_representation_boundary
+                .is_none()
+                .then_some(total_resource_count),
+            VulkanResidentKernelSourceResourceRepresentation::SelectorMappedMxfp4OrNativeFp8 => {
+                usize::try_from(self.source_representation_boundary?).ok().filter(
+                    |count| *count > 0 && *count < total_resource_count,
+                )
+            }
+        }
+    }
+
+    pub(crate) fn provides_fixed_mxfp4_source(&self) -> bool {
         self.schema == KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA
-            && self.source_representation
-                == VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32
+            && self.contains_mxfp4_source()
+            && self.has_valid_source_partition()
             && self.resident_derivation.is_none()
             && self.selection
                 == VulkanResidentKernelResourceRepresentationSelection::FixedSource
@@ -200,8 +262,8 @@ impl VulkanResidentKernelResourceRepresentationDispatchSpec {
         derivation: CompiledResourceResidentDerivationKind,
     ) -> bool {
         self.schema == KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA
-            && self.source_representation
-                == VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32
+            && self.contains_mxfp4_source()
+            && self.has_valid_source_partition()
             && self.resident_derivation == Some(derivation)
             && self.selection
                 == VulkanResidentKernelResourceRepresentationSelection::ResourceAddressTag
