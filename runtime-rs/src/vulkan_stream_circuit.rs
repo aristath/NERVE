@@ -86,6 +86,13 @@ use crate::vulkan_compute::{
     VulkanComputeDeviceCatalog, VulkanStableResourceArenaStats,
     reset_vulkan_resident_execution_counters, vulkan_resident_execution_counters,
 };
+#[cfg(test)]
+use crate::vulkan_distributed::{
+    VulkanDistributedActivationBufferAllocation, VulkanDistributedDeviceParameterExclusions,
+    VulkanDistributedParameterAllocation, VulkanDistributedPrivateIntermediateBufferAllocation,
+    VulkanDistributedPrivateIntermediateDeviceAllocation,
+    VulkanDistributedReductionBufferAllocation,
+};
 use crate::vulkan_distributed::{
     VulkanDistributedActivationBufferPlan, VulkanDistributedActivationBuffers,
     VulkanDistributedActivationRange, VulkanDistributedActivationSlot,
@@ -194,6 +201,7 @@ include!("vulkan_stream_circuit/compiled_resource_physical_placement.rs");
 include!("vulkan_stream_circuit/physical_residency_checkpoint.rs");
 include!("vulkan_stream_circuit/residency_backpressure_scheduler.rs");
 include!("vulkan_stream_circuit/runtime_residency_plan.rs");
+include!("vulkan_stream_circuit/runtime_physical_execution_residency.rs");
 include!("vulkan_stream_circuit/runtime_auto_placement.rs");
 include!("vulkan_stream_circuit/runtime_placement_calibration.rs");
 include!("vulkan_stream_circuit/placement_equivalence.rs");

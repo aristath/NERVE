@@ -32,15 +32,13 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     distributed_activation_plan: VulkanDistributedActivationBufferPlan,
     distributed_parameter_allocation_plan: VulkanDistributedParameterAllocationPlan,
     distributed_parameter_exclusion_plan: VulkanDistributedParameterExclusionPlan,
+    physical_execution_residency_plan: VulkanRuntimePhysicalExecutionResidencyPlan,
     distributed_selected_resource_store_plan: VulkanDistributedSelectedResourceStorePlan,
     distributed_loaded_manifest: VulkanLoadedKernelArtifactCatalog,
     distributed_parameter_buffers: Arc<VulkanDistributedParameterBuffers>,
-    distributed_dynamic_resource_buffers:
-        BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
-    compiled_resource_device_stores:
-        BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
-    compiled_resource_physical_placements:
-        Vec<VulkanCompiledResourcePhysicalPlacement>,
+    distributed_dynamic_resource_buffers: BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
+    compiled_resource_device_stores: BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
+    compiled_resource_physical_placements: Vec<VulkanCompiledResourcePhysicalPlacement>,
     runtime_component_instances: Vec<VulkanRuntimeComponentInstance>,
 }
 
@@ -75,9 +73,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
     fn adaptive_resource_stores(&self) -> Vec<Arc<VulkanCompiledResourceDeviceStore>> {
         let mut stores = BTreeMap::new();
         for store in self.compiled_resource_device_stores.values() {
-            if store.supports_adaptive_retiering()
-                || store.supports_adaptive_representations()
-            {
+            if store.supports_adaptive_retiering() || store.supports_adaptive_representations() {
                 stores
                     .entry(store.device_id().to_string())
                     .or_insert_with(|| Arc::clone(store));
@@ -162,8 +158,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 if let Some(declaration) = transient_state_declaration_for_resident_state_buffer(
                     state,
                     self.dynamic_state_capacity_activations,
-                )?
-                {
+                )? {
                     declarations.insert(declaration.key.clone(), declaration);
                 }
             }
@@ -182,11 +177,9 @@ fn transient_state_declaration_for_resident_state_buffer(
                 .max_dynamic_activations
                 .map(|limit| limit.min(package_dynamic_state_capacity_activations))
                 .unwrap_or(package_dynamic_state_capacity_activations);
-            let activation_capacity =
-                maximum_activation_count.min(VULKAN_BACKEND_LOOP_MAX_WINDOW);
-            TransientStateBlockShape::new(bytes_per_activation, activation_capacity).and_then(
-                |shape| shape.with_maximum_activation_count(maximum_activation_count),
-            )
+            let activation_capacity = maximum_activation_count.min(VULKAN_BACKEND_LOOP_MAX_WINDOW);
+            TransientStateBlockShape::new(bytes_per_activation, activation_capacity)
+                .and_then(|shape| shape.with_maximum_activation_count(maximum_activation_count))
         }
         None => match state.static_bytes {
             Some(static_bytes) => TransientStateBlockShape::mutable_singleton(static_bytes),
