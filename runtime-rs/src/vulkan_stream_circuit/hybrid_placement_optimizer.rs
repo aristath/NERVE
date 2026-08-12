@@ -614,6 +614,7 @@ mod hybrid_placement_optimizer_tests {
             .enumerate()
             .map(|(index, (id, bytes))| VulkanPlacementShardIdentity {
                 dispatch_ordinal: 0,
+                participant_ordinal: index,
                 physical_device_id: (*id).to_string(),
                 distribution: "output_rows".to_string(),
                 logical_start: index,

@@ -373,6 +373,11 @@ fn distributed_calibration_execution_case(
         .cloned()
         .zip(devices.iter().map(|(physical_id, _)| physical_id.clone()))
         .collect::<BTreeMap<_, _>>();
+    let participant_ordinal_by_logical = logical_device_ids
+        .iter()
+        .enumerate()
+        .map(|(ordinal, logical_id)| (logical_id.as_str(), ordinal))
+        .collect::<BTreeMap<_, _>>();
     let physical_id = |logical_id: &str| {
         physical_id_by_logical
             .get(logical_id)
@@ -462,6 +467,15 @@ fn distributed_calibration_execution_case(
             operations.push(reduction);
         }
         for shard in &dispatch.shards {
+            let participant_ordinal = participant_ordinal_by_logical
+                .get(shard.device_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    distributed_calibration_error_value(format!(
+                        "distributed calibration shard references unknown logical device {:?}",
+                        shard.device_id,
+                    ))
+                })?;
             let parameter_bytes =
                 shard
                     .parameters
@@ -484,6 +498,7 @@ fn distributed_calibration_execution_case(
                 )?;
             shards.push(VulkanPlacementShardIdentity {
                 dispatch_ordinal,
+                participant_ordinal,
                 physical_device_id: physical_id(&shard.device_id)?,
                 distribution: distributed_calibration_distribution_name(dispatch.distribution)
                     .to_string(),

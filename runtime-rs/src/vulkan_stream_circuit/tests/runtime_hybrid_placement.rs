@@ -72,6 +72,64 @@ fn hybrid_test_observation(
     }
 }
 
+fn hybrid_test_distributed_observation(
+    behavior: VulkanPlacementBehaviorIdentity,
+    duration_ns: u64,
+) -> VulkanPlacementCalibrationObservation {
+    VulkanPlacementCalibrationObservation {
+        execution_case: VulkanPlacementExecutionCaseIdentity {
+            behavior,
+            strategy: VulkanPlacementExecutionStrategy::TensorParallel,
+            devices: vec![hybrid_test_device("gpu0"), hybrid_test_device("gpu1")],
+            shards: vec![
+                VulkanPlacementShardIdentity {
+                    dispatch_ordinal: 0,
+                    participant_ordinal: 0,
+                    physical_device_id: "gpu0".to_string(),
+                    distribution: "output_rows".to_string(),
+                    logical_start: 0,
+                    logical_count: 4,
+                    selected_resource_indices_by_partition: BTreeMap::new(),
+                    parameter_bytes: 5,
+                },
+                VulkanPlacementShardIdentity {
+                    dispatch_ordinal: 0,
+                    participant_ordinal: 1,
+                    physical_device_id: "gpu1".to_string(),
+                    distribution: "output_rows".to_string(),
+                    logical_start: 4,
+                    logical_count: 4,
+                    selected_resource_indices_by_partition: BTreeMap::new(),
+                    parameter_bytes: 5,
+                },
+            ],
+            input_physical_device_id: "gpu0".to_string(),
+            output_physical_device_id: "gpu0".to_string(),
+            owner_physical_device_id: "gpu0".to_string(),
+            transports: Vec::new(),
+        },
+        warmup_call_count: 1,
+        measured_call_count: 1,
+        complete_transaction: true,
+        duration_ns,
+        useful_activation_count: 1,
+        output_digest: "output".to_string(),
+        output_artifact: None,
+        output_equivalence: VulkanPlacementOutputEquivalenceEvidence::BitExact,
+        state_digest: "state".to_string(),
+        resident_bytes_by_physical_device: BTreeMap::from([
+            ("gpu0".to_string(), 5),
+            ("gpu1".to_string(), 5),
+        ]),
+        transient_peak_bytes_by_physical_device: BTreeMap::from([
+            ("gpu0".to_string(), 2),
+            ("gpu1".to_string(), 2),
+        ]),
+        host_resident_bytes: 0,
+        host_transient_peak_bytes: 0,
+    }
+}
+
 fn hybrid_test_catalog(model: &VulkanResidentRuntimeModel) -> VulkanPlacementCalibrationCatalog {
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     let mut signatures = model
@@ -192,4 +250,130 @@ fn runtime_hybrid_planner_rejects_missing_or_ambiguous_behavior_evidence() {
     )
     .unwrap_err();
     assert!(ambiguous.0.contains("2 exact calibration behavior cohorts"));
+}
+
+#[test]
+fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    let mut signatures = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| {
+            vulkan_runtime_placement_calibration_target_for_component(
+                &model,
+                &component.component_id,
+                VulkanTargetedComponentExecutionPhase::Decode,
+            )
+            .unwrap()
+            .signature_id
+        })
+        .collect::<Vec<_>>();
+    signatures.sort();
+    signatures.dedup();
+    for signature in signatures {
+        let behavior = hybrid_test_behavior(&signature);
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: behavior.clone(),
+                output_digest: "output".to_string(),
+                output_artifact: None,
+                state_digest: "state".to_string(),
+            })
+            .unwrap();
+        catalog
+            .record_observation(hybrid_test_distributed_observation(behavior, 8))
+            .unwrap();
+    }
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+    let placement = plan_vulkan_runtime_hybrid_ordered_graph(
+        &model,
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+    let lowered = lower_vulkan_runtime_hybrid_phase_placement(&model, &placement).unwrap();
+
+    assert_eq!(
+        lowered.execution_phase,
+        nerve_execution_contracts::ExecutionPhase::Decode
+    );
+    assert_eq!(lowered.activation_batch_width, 1);
+    assert_eq!(lowered.execution_cases_by_component.len(), 3);
+    assert!(
+        lowered
+            .component_device_pools
+            .values()
+            .all(|devices| devices == &["gpu0", "gpu1"])
+    );
+    assert!(
+        lowered
+            .runtime_model
+            .placement
+            .component_shard_devices
+            .is_empty()
+    );
+    assert!(
+        lowered
+            .runtime_model
+            .circuit_graph
+            .components
+            .iter()
+            .filter(|component| component.runtime_role.is_signal_processor())
+            .all(|component| {
+                lowered
+                    .runtime_model
+                    .placement
+                    .device_for_component(&component.component_id)
+                    == "gpu0"
+            })
+    );
+
+    let mut stale = placement.clone();
+    let VulkanHybridScheduledStep::Region { execution_case, .. } = &mut stale.plan.steps[0] else {
+        panic!("first hybrid step must be a component region");
+    };
+    execution_case.behavior.compiled_execution_signature = "stale-signature".to_string();
+    assert!(
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &stale)
+            .unwrap_err()
+            .0
+            .contains("does not match compiled component")
+    );
+
+    let mut conflicting_order = placement.clone();
+    let VulkanHybridScheduledStep::Region { execution_case, .. } =
+        &mut conflicting_order.plan.steps[0]
+    else {
+        panic!("first hybrid step must be a component region");
+    };
+    execution_case.shards[1].participant_ordinal = 0;
+    assert!(
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &conflicting_order)
+            .unwrap_err()
+            .0
+            .contains("conflicting calibrated participant order")
+    );
+
+    let mut incomplete = placement;
+    let VulkanHybridScheduledStep::Region { execution_case, .. } = &mut incomplete.plan.steps[0]
+    else {
+        panic!("first hybrid step must be a component region");
+    };
+    execution_case.shards.clear();
+    assert!(
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &incomplete)
+            .unwrap_err()
+            .0
+            .contains("exact shard coverage")
+    );
 }

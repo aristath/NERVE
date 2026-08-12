@@ -1,5 +1,5 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v5";
+    "nerve.vulkan_placement_calibration_catalog.v6";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +111,10 @@ pub struct VulkanPlacementShapeClass {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VulkanPlacementShardIdentity {
     pub dispatch_ordinal: usize,
+    /// Stable position of this shard's physical participant in the calibrated
+    /// execution pool. Logical ranges cannot recover this for every split
+    /// strategy (input-column shards can share the same output-row range).
+    pub participant_ordinal: usize,
     pub physical_device_id: String,
     pub distribution: String,
     pub logical_start: usize,
@@ -691,6 +695,7 @@ fn validate_observation(
         || transient_devices != devices
         || case.shards.iter().any(|shard| {
             !devices.contains(shard.physical_device_id.as_str())
+                || shard.participant_ordinal >= case.devices.len()
                 || shard.logical_count == 0
                 || (shard.parameter_bytes == 0
                     && shard.selected_resource_indices_by_partition.is_empty())
@@ -790,6 +795,7 @@ mod placement_calibration_catalog_tests {
                 devices,
                 shards: vec![VulkanPlacementShardIdentity {
                     dispatch_ordinal: 0,
+                    participant_ordinal: 0,
                     physical_device_id: owner.to_string(),
                     distribution: "output_rows".to_string(),
                     logical_start: 0,
@@ -873,6 +879,10 @@ mod placement_calibration_catalog_tests {
             .get_mut(&0)
             .unwrap() = vec![2, 1];
         assert!(catalog.record_observation(malformed).is_err());
+
+        let mut invalid_participant = selected.clone();
+        invalid_participant.execution_case.shards[0].participant_ordinal = 2;
+        assert!(catalog.record_observation(invalid_participant).is_err());
 
         let mut skipped_partition = selected;
         let indices = skipped_partition.execution_case.shards[0]
