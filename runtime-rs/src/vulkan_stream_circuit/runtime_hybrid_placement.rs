@@ -256,7 +256,11 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         let behaviors = catalog
-            .candidate_behaviors_for_compiled_execution(&target.signature_id, execution_phase)
+            .candidate_behaviors_for_compiled_execution(
+                &target.signature_id,
+                crate::RUNTIME_IMPLEMENTATION_FINGERPRINT,
+                execution_phase,
+            )
             .into_iter()
             .filter(|behavior| {
                 behavior.shape.activation_batch_width == phase.activation_batch_width()
@@ -324,6 +328,7 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
                 )
             })?;
         for observation in catalog.directed_boundary_candidates(
+            crate::RUNTIME_IMPLEMENTATION_FINGERPRINT,
             execution_phase,
             activation_batch_width,
             byte_count,
@@ -371,7 +376,11 @@ pub fn vulkan_runtime_hybrid_phase_is_calibrated(
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         let behavior_count = catalog
-            .candidate_behaviors_for_compiled_execution(&target.signature_id, execution_phase)
+            .candidate_behaviors_for_compiled_execution(
+                &target.signature_id,
+                crate::RUNTIME_IMPLEMENTATION_FINGERPRINT,
+                execution_phase,
+            )
             .into_iter()
             .filter(|behavior| {
                 behavior.shape.activation_batch_width == phase.activation_batch_width()
@@ -431,6 +440,7 @@ pub fn vulkan_runtime_hybrid_calibrated_prefill_widths(
         let mut behavior_count_by_width = BTreeMap::<usize, usize>::new();
         for behavior in catalog.candidate_behaviors_for_compiled_execution(
             &target.signature_id,
+            crate::RUNTIME_IMPLEMENTATION_FINGERPRINT,
             nerve_execution_contracts::ExecutionPhase::Prefill,
         ) {
             *behavior_count_by_width
@@ -814,6 +824,8 @@ fn validate_runtime_hybrid_case_for_component(
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     if execution_case.behavior.compiled_execution_signature != target.signature_id
+        || execution_case.behavior.runtime_implementation_fingerprint
+            != crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
         || execution_case.behavior.phase != execution_phase
         || execution_case.behavior.shape.activation_batch_width != activation_batch_width
     {

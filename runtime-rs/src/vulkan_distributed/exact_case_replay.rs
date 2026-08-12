@@ -62,6 +62,13 @@ fn replay_exact_execution_cases_to_phase(
         });
 
     for (component_id, case) in cases {
+        if case.behavior.runtime_implementation_fingerprint
+            != crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
+        {
+            return exact_case_error(format!(
+                "exact execution case for component {component_id:?} was measured by a different runtime implementation",
+            ));
+        }
         if case.behavior.phase != phase {
             return exact_case_error(format!(
                 "exact execution case for component {component_id:?} belongs to {:?}, not {phase:?}",
@@ -654,7 +661,8 @@ mod exact_case_replay_tests {
         VulkanPlacementExecutionCaseIdentity {
             behavior: VulkanPlacementBehaviorIdentity {
                 compiled_execution_signature: "signature".to_string(),
-                runtime_implementation_fingerprint: "runtime".to_string(),
+                runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
+                    .to_string(),
                 phase: ExecutionPhase::Decode,
                 shape: VulkanPlacementShapeClass {
                     activation_batch_width: 1,
@@ -776,6 +784,41 @@ mod exact_case_replay_tests {
                 .collect::<Vec<_>>(),
             [("owner", 0, 2), ("helper", 2, 2)],
         );
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rejects_stale_runtime_calibration() {
+        let empty = || VulkanDistributedExecutionPlan {
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            storage_buffer_offset_alignment: 4,
+            dispatches: Vec::new(),
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 16,
+            shared_output_byte_capacity: 16,
+            distributed_parameter_byte_count: 0,
+        };
+        let mut plans = VulkanDistributedExecutionPlanSet {
+            decode: VulkanDistributedExecutionPlan {
+                dispatches: vec![tensor_parallel_dispatch()],
+                ..empty()
+            },
+            decode_batch: empty(),
+            prefill: empty(),
+        };
+        let mut stale = tensor_parallel_exact_case();
+        stale.behavior.runtime_implementation_fingerprint = "stale-runtime".to_string();
+
+        let error = plans
+            .apply_exact_execution_cases(
+                &BTreeMap::from([("moe".to_string(), stale)]),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &device_execution_identities(),
+            )
+            .unwrap_err();
+
+        assert!(error.0.contains("different runtime implementation"));
     }
 
     #[test]

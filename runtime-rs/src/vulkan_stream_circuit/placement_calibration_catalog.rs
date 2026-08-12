@@ -467,6 +467,7 @@ impl VulkanPlacementCalibrationCatalog {
     pub fn candidate_behaviors_for_compiled_execution(
         &self,
         compiled_execution_signature: &str,
+        runtime_implementation_fingerprint: &str,
         phase: nerve_execution_contracts::ExecutionPhase,
     ) -> Vec<&VulkanPlacementBehaviorIdentity> {
         let mut behaviors = self
@@ -483,6 +484,11 @@ impl VulkanPlacementCalibrationCatalog {
                         | VulkanPlacementExecutionStrategy::Hybrid
                 ) && observation.execution_case.behavior.compiled_execution_signature
                     == compiled_execution_signature
+                    && observation
+                        .execution_case
+                        .behavior
+                        .runtime_implementation_fingerprint
+                        == runtime_implementation_fingerprint
                     && observation.execution_case.behavior.phase == phase
             })
             .map(|observation| &observation.execution_case.behavior)
@@ -494,6 +500,7 @@ impl VulkanPlacementCalibrationCatalog {
 
     pub fn directed_boundary_candidates(
         &self,
+        runtime_implementation_fingerprint: &str,
         phase: nerve_execution_contracts::ExecutionPhase,
         activation_batch_width: usize,
         byte_count: usize,
@@ -503,6 +510,11 @@ impl VulkanPlacementCalibrationCatalog {
             .filter(|observation| {
                 observation.execution_case.strategy
                     == VulkanPlacementExecutionStrategy::DirectedBoundary
+                    && observation
+                        .execution_case
+                        .behavior
+                        .runtime_implementation_fingerprint
+                        == runtime_implementation_fingerprint
                     && observation.execution_case.behavior.phase == phase
                     && observation
                         .execution_case
@@ -1509,11 +1521,101 @@ mod placement_calibration_catalog_tests {
         assert_eq!(
             catalog.candidate_behaviors_for_compiled_execution(
                 &behavior.compiled_execution_signature,
+                &behavior.runtime_implementation_fingerprint,
                 behavior.phase,
             ),
             vec![&behavior],
         );
         assert_eq!(catalog.candidates_for_behavior(&behavior).len(), 2);
+    }
+
+    #[test]
+    fn runtime_queries_exclude_calibration_from_other_implementations() {
+        let current = behavior();
+        let mut stale = current.clone();
+        stale.runtime_implementation_fingerprint = "stale-runtime".to_string();
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        for candidate in [&current, &stale] {
+            catalog
+                .record_reference(VulkanPlacementCanonicalReference {
+                    behavior: candidate.clone(),
+                    output_digest: "output".to_string(),
+                    output_artifact: None,
+                    state_digest: "state".to_string(),
+                })
+                .unwrap();
+            catalog
+                .record_observation(observation(candidate.clone(), "gpu0", "gpu0", 10, 16))
+                .unwrap();
+        }
+
+        assert_eq!(
+            catalog.candidate_behaviors_for_compiled_execution(
+                &current.compiled_execution_signature,
+                &current.runtime_implementation_fingerprint,
+                current.phase,
+            ),
+            vec![&current],
+        );
+        assert_eq!(
+            catalog.candidate_behaviors_for_compiled_execution(
+                &stale.compiled_execution_signature,
+                &stale.runtime_implementation_fingerprint,
+                stale.phase,
+            ),
+            vec![&stale],
+        );
+    }
+
+    #[test]
+    fn directed_boundary_queries_exclude_other_runtime_implementations() {
+        let current = behavior();
+        let mut stale = current.clone();
+        stale.runtime_implementation_fingerprint = "stale-runtime".to_string();
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        for candidate in [&current, &stale] {
+            catalog
+                .record_reference(VulkanPlacementCanonicalReference {
+                    behavior: candidate.clone(),
+                    output_digest: "output".to_string(),
+                    output_artifact: None,
+                    state_digest: "state".to_string(),
+                })
+                .unwrap();
+            let mut observation =
+                observation(candidate.clone(), "gpu0", "gpu1", 10, 16);
+            observation.execution_case.strategy =
+                VulkanPlacementExecutionStrategy::DirectedBoundary;
+            observation.execution_case.operations =
+                vec![VulkanPlacementOperationGeometry::DirectedTransfer {
+                    contract_id: "contract".to_string(),
+                    byte_count: 16,
+                }];
+            catalog.record_observation(observation).unwrap();
+        }
+
+        assert_eq!(
+            catalog
+                .directed_boundary_candidates(
+                    &current.runtime_implementation_fingerprint,
+                    current.phase,
+                    current.shape.activation_batch_width,
+                    16,
+                )
+                .len(),
+            1,
+        );
+        assert_eq!(
+            catalog
+                .directed_boundary_candidates(
+                    &stale.runtime_implementation_fingerprint,
+                    stale.phase,
+                    stale.shape.activation_batch_width,
+                    16,
+                )
+                .len(),
+            1,
+        );
     }
 
     #[test]

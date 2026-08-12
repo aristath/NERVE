@@ -5,7 +5,7 @@ fn hybrid_test_digest(byte: char) -> String {
 fn hybrid_test_behavior(signature: &str) -> VulkanPlacementBehaviorIdentity {
     VulkanPlacementBehaviorIdentity {
         compiled_execution_signature: signature.to_string(),
-        runtime_implementation_fingerprint: "runtime".to_string(),
+        runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.to_string(),
         phase: nerve_execution_contracts::ExecutionPhase::Decode,
         shape: VulkanPlacementShapeClass {
             activation_batch_width: 1,
@@ -394,6 +394,7 @@ fn runtime_hybrid_planner_ignores_unreplayable_serialized_regions() {
             )
             .unwrap()
             .signature_id,
+            crate::RUNTIME_IMPLEMENTATION_FINGERPRINT,
             nerve_execution_contracts::ExecutionPhase::Decode,
         )
         .into_iter()
@@ -541,6 +542,21 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
     execution_case.behavior.compiled_execution_signature = "stale-signature".to_string();
     assert!(
         lower_vulkan_runtime_hybrid_phase_placement(&model, &stale, &bindings)
+            .unwrap_err()
+            .0
+            .contains("does not match compiled component")
+    );
+
+    let mut stale_runtime = placement.clone();
+    let VulkanHybridScheduledStep::Region { execution_case, .. } =
+        &mut stale_runtime.plan.steps[0]
+    else {
+        panic!("first hybrid step must be a component region");
+    };
+    execution_case.behavior.runtime_implementation_fingerprint =
+        "stale-runtime".to_string();
+    assert!(
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &stale_runtime, &bindings)
             .unwrap_err()
             .0
             .contains("does not match compiled component")
