@@ -249,6 +249,25 @@ impl VulkanResidentTargetedModelPackageDeviceSlicePlan {
             demand_context: Some(demand_context),
         })
     }
+
+    fn materialize_static_excluding_tensors(
+        &self,
+        device: &VulkanComputeDevice,
+        parameter_pool: &VulkanResidentBufferPool,
+        excluded_tensors: &BTreeSet<String>,
+    ) -> Result<VulkanResidentTargetedModelPackageDeviceSlice, VulkanResidentTokenModelPackageError>
+    {
+        let slice = self.slice_plan.clone().materialize(
+            device,
+            &self.tensor_index,
+            excluded_tensors,
+            Some(parameter_pool),
+        )?;
+        Ok(VulkanResidentTargetedModelPackageDeviceSlice {
+            slice,
+            demand_context: None,
+        })
+    }
 }
 
 impl VulkanResidentTargetedModelPackageDeviceSlice {

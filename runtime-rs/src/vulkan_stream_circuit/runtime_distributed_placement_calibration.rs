@@ -94,6 +94,12 @@ struct VulkanRuntimeDistributedPlacementSession {
     _distributed_activation_buffers: VulkanDistributedActivationBuffers,
     edge_synchronizations: VulkanPlacedEdgeTimelineSynchronizations,
     _distributed_parameter_buffers: VulkanDistributedParameterBuffers,
+    distributed_resource_stores:
+        BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
+    _distributed_dynamic_resource_buffers:
+        BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
+    _distributed_transaction_predicates:
+        BTreeMap<String, Arc<VulkanResidentBuffer>>,
     _parameter_pool: VulkanResidentBufferPool,
     resident_parameter_bytes_by_device: BTreeMap<String, usize>,
     resident_transient_bytes_by_device: BTreeMap<String, usize>,
@@ -239,6 +245,8 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
                 })
                 .collect::<BTreeMap<_, _>>()
         };
+        let current_resident_parameter_bytes =
+            session.current_resident_parameter_bytes_by_device()?;
         Ok(VulkanRuntimeDistributedPlacementCalibrationReport {
             physical_device_ids: session.physical_device_ids.clone(),
             target: session.target.clone(),
@@ -253,7 +261,7 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
             output_digest: measured.output_digest,
             state_digest: measured.state_digest,
             resident_parameter_bytes_by_device: remap_device_bytes(
-                &session.resident_parameter_bytes_by_device,
+                &current_resident_parameter_bytes,
             ),
             resident_transient_bytes_by_device: remap_device_bytes(
                 &session.resident_transient_bytes_by_device,
@@ -834,7 +842,7 @@ impl VulkanRuntimeDistributedPlacementSession {
         let (contract_phase, execution_shape) =
             distributed_contract_phase_and_shape(phase);
         let full_distributed_execution_plan =
-            VulkanDistributedExecutionPlan::from_prepared_plans_for_phase(
+            VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_with_resource_contract(
                 &[(
                     owner_device_id.as_str(),
                     &targeted_plan.slice_plan.prepared_plan,
@@ -846,6 +854,8 @@ impl VulkanRuntimeDistributedPlacementSession {
                 alignment,
                 contract_phase,
                 execution_shape,
+                &placed_model.execution_scope,
+                &contract,
             )
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         if full_distributed_execution_plan.dispatches.is_empty() {
@@ -896,6 +906,33 @@ impl VulkanRuntimeDistributedPlacementSession {
         else {
             return Ok(None);
         };
+        let has_distributed_selected_resources = distributed_execution_plan
+            .dispatches
+            .iter()
+            .any(|dispatch| !dispatch.selected_resource_partitions.is_empty());
+        if has_distributed_selected_resources {
+            if phase != VulkanTargetedComponentExecutionPhase::Decode {
+                // Distributed component-batch execution binds dynamic tables,
+                // but it does not yet publish and resume exact per-lane misses.
+                // Treat that physical candidate as unavailable rather than
+                // measuring zero-address expert skips as valid prefill.
+                return Ok(None);
+            }
+            let target_selector_ids = targeted_demand_selector_ids(
+                &contract.selectors,
+                &placed_model.execution_scope,
+                &target.component_id,
+            );
+            let distributed_selector_ids = distributed_execution_plan
+                .dispatches
+                .iter()
+                .flat_map(|dispatch| &dispatch.selected_resource_partitions)
+                .map(|partition| partition.selector_id.clone())
+                .collect::<BTreeSet<_>>();
+            if target_selector_ids != distributed_selector_ids {
+                return Ok(None);
+            }
+        }
         let dispatch_work = full_distributed_execution_plan
             .dispatches
             .iter()
@@ -1012,12 +1049,48 @@ impl VulkanRuntimeDistributedPlacementSession {
                 &parameter_pool,
             )
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let targeted = targeted_plan.materialize_excluding_tensors(
-            owner_device,
-            manifest_dir,
-            &parameter_pool,
-            &owner_exclusions,
-        )?;
+        let mut targeted = if has_distributed_selected_resources {
+            targeted_plan.materialize_static_excluding_tensors(
+                owner_device,
+                &parameter_pool,
+                &owner_exclusions,
+            )?
+        } else {
+            targeted_plan.materialize_excluding_tensors(
+                owner_device,
+                manifest_dir,
+                &parameter_pool,
+                &owner_exclusions,
+            )?
+        };
+        let remaining_dynamic_parameter_budget = maximum_resident_parameter_bytes
+            .checked_sub(total_resident_parameter_bytes)
+            .expect("total static parameter bytes were bounded above");
+        let Some(selected_resource_mount) =
+            mount_distributed_calibration_selected_resources(
+                manifest_dir,
+                &placed_model.execution_scope,
+                &contract,
+                &distributed_execution_plan,
+                &logical_devices,
+                remaining_dynamic_parameter_budget,
+            )?
+        else {
+            return Ok(None);
+        };
+        if has_distributed_selected_resources {
+            targeted.slice.dynamic_resource_buffers = Some(
+                selected_resource_mount
+                    .dynamic_buffers
+                    .get(&owner_device_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        distributed_calibration_error_value(
+                            "distributed selected-resource calibration omitted owner buffers",
+                        )
+                    })?,
+            );
+        }
         let distributed_activation_buffers =
             VulkanDistributedActivationBuffers::allocate(&activation_plan, |device_id| {
                 logical_devices
@@ -1031,9 +1104,9 @@ impl VulkanRuntimeDistributedPlacementSession {
                 VulkanDistributedDispatchRunners::create(
                     &distributed_execution_plan,
                     &distributed_parameter_buffers,
-                    &BTreeMap::new(),
-                    &BTreeMap::new(),
-                    None,
+                    &selected_resource_mount.dynamic_buffers,
+                    &selected_resource_mount.stores,
+                    Some(&selected_resource_mount.transaction_predicates),
                     "target",
                     &distributed_activation_buffers,
                     &loaded_manifest,
@@ -1140,7 +1213,7 @@ impl VulkanRuntimeDistributedPlacementSession {
         // A distributed activation has one physical backing allocation. It is
         // charged to the owner for external device-local memory or to host
         // memory for shared-host transport; imported peer views are aliases.
-        let (mut resident_transient_bytes_by_device, resident_host_transient_bytes) =
+        let (mut resident_transient_bytes_by_device, mut resident_host_transient_bytes) =
             distributed_calibration_activation_backing_bytes(
                 &logical_device_ids,
                 activation_plan.route,
@@ -1156,6 +1229,27 @@ impl VulkanRuntimeDistributedPlacementSession {
                 "distributed owner transient byte accounting overflowed",
             )
         })?;
+        for (device_id, bytes) in &selected_resource_mount.resident_transient_bytes_by_device {
+            let total = resident_transient_bytes_by_device
+                .get_mut(device_id)
+                .ok_or_else(|| {
+                    distributed_calibration_error_value(format!(
+                        "selected-resource transient allocation references unknown device {device_id:?}",
+                    ))
+                })?;
+            *total = total.checked_add(*bytes).ok_or_else(|| {
+                distributed_calibration_error_value(
+                    "selected-resource device transient byte accounting overflowed",
+                )
+            })?;
+        }
+        resident_host_transient_bytes = resident_host_transient_bytes
+            .checked_add(selected_resource_mount.resident_host_transient_bytes)
+            .ok_or_else(|| {
+                distributed_calibration_error_value(
+                    "selected-resource host transient byte accounting overflowed",
+                )
+            })?;
 
         let package_slice = Arc::new(targeted.slice);
         let placed_slice = VulkanResidentInProcessPlacedStreamProcessorDevice {
@@ -1218,7 +1312,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                         true,
                         &distributed_execution_plan,
                         &distributed_parameter_buffers,
-                        &BTreeMap::new(),
+                        &selected_resource_mount.dynamic_buffers,
                     )
                     .map_err(|error| {
                         distributed_calibration_error_value(error.to_string())
@@ -1273,6 +1367,9 @@ impl VulkanRuntimeDistributedPlacementSession {
             _distributed_activation_buffers: distributed_activation_buffers,
             edge_synchronizations: VulkanPlacedEdgeTimelineSynchronizations::default(),
             _distributed_parameter_buffers: distributed_parameter_buffers,
+            distributed_resource_stores: selected_resource_mount.stores,
+            _distributed_dynamic_resource_buffers: selected_resource_mount.dynamic_buffers,
+            _distributed_transaction_predicates: selected_resource_mount.transaction_predicates,
             _parameter_pool: parameter_pool,
             resident_parameter_bytes_by_device,
             resident_transient_bytes_by_device,
@@ -1309,6 +1406,36 @@ impl VulkanRuntimeDistributedPlacementSession {
                 maximum_duration,
             ),
         }
+    }
+
+    fn current_resident_parameter_bytes_by_device(
+        &self,
+    ) -> Result<BTreeMap<String, usize>, VulkanResidentTokenModelPackageError> {
+        let mut current = self.resident_parameter_bytes_by_device.clone();
+        for (device_id, store) in &self.distributed_resource_stores {
+            let store_report = store
+                .residency_report()
+                .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+            let resident_parameter_bytes = store_report
+                .current_device_bytes
+                .checked_sub(store_report.metadata_device_bytes)
+                .ok_or_else(|| {
+                    distributed_calibration_error_value(
+                        "distributed resource store device-byte accounting underflowed",
+                    )
+                })?;
+            let total = current.get_mut(device_id).ok_or_else(|| {
+                distributed_calibration_error_value(format!(
+                    "distributed resource store references unknown calibration device {device_id:?}",
+                ))
+            })?;
+            *total = total.checked_add(resident_parameter_bytes).ok_or_else(|| {
+                distributed_calibration_error_value(
+                    "distributed calibration current parameter bytes overflowed",
+                )
+            })?;
+        }
+        Ok(current)
     }
 
     fn execute_decode(
@@ -1529,6 +1656,9 @@ impl VulkanRuntimeDistributedPlacementSession {
             _distributed_activation_buffers: distributed_activation_buffers,
             edge_synchronizations,
             _distributed_parameter_buffers: distributed_parameter_buffers,
+            distributed_resource_stores,
+            _distributed_dynamic_resource_buffers: distributed_dynamic_resource_buffers,
+            _distributed_transaction_predicates: distributed_transaction_predicates,
             _parameter_pool: parameter_pool,
             resident_parameter_bytes_by_device: _,
             resident_transient_bytes_by_device: _,
@@ -1549,6 +1679,17 @@ impl VulkanRuntimeDistributedPlacementSession {
         drop(edge_synchronizations);
         drop(terminal_dispatch);
         drop(placed_slice);
+        drop(distributed_dynamic_resource_buffers);
+        drop(distributed_transaction_predicates);
+        let mut unloaded_store_pointers = BTreeSet::new();
+        for store in distributed_resource_stores.values() {
+            if unloaded_store_pointers.insert(Arc::as_ptr(store) as usize)
+                && let Err(error) = store.unload()
+            {
+                cleanup_errors.push(error.to_string());
+            }
+        }
+        drop(distributed_resource_stores);
         drop(distributed_activation_buffers);
         drop(distributed_parameter_buffers);
         for device_id in logical_devices.keys() {

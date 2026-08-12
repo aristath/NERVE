@@ -135,6 +135,32 @@ impl VulkanDistributedExecutionPlan {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn from_prepared_plans_for_phase_with_resource_contract(
+        prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
+        tensor_index: &TensorIndex,
+        artifact_manifest: &VulkanPhysicalKernelArtifactManifest,
+        component_device_pools: &BTreeMap<String, Vec<String>>,
+        edge_placements: &[ComponentEdgePlacement],
+        storage_buffer_offset_alignment: usize,
+        phase: ExecutionPhase,
+        execution_shape: ExecutionShape,
+        execution_scope: &str,
+        resource_contract: &CompiledResourceResidencyContract,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        Self::from_prepared_plans_for_phase_and_resources(
+            prepared_plans,
+            tensor_index,
+            artifact_manifest,
+            component_device_pools,
+            edge_placements,
+            storage_buffer_offset_alignment,
+            phase,
+            execution_shape,
+            Some((execution_scope, resource_contract)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn from_prepared_plans_for_phase_and_resources(
         prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
         tensor_index: &TensorIndex,
@@ -714,6 +740,18 @@ fn sampled_distributed_dispatch_shard(
             "distributed dispatch {}.{} has invalid shard geometry",
             dispatch.component_id, dispatch.node_id,
         )));
+    }
+    // A selector-owned expert shard is already the smallest behaviorally
+    // complete unit. Its shader still consumes the full router domain and
+    // skips resources absent from the participant-local address table.
+    // Scaling its logical range would describe work that the dispatch does
+    // not execute and would corrupt calibration identity/accounting.
+    if dispatch.distribution == VulkanDistributedDispatchDistribution::ExpertRange
+        && !source.selected_resource_indices.is_empty()
+    {
+        let mut exact = source.clone();
+        exact.device_id = device_id.to_string();
+        return Ok(exact);
     }
     let proportional_rows = source
         .row_count

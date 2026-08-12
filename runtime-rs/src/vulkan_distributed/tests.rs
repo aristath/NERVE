@@ -661,6 +661,32 @@ mod tests {
     }
 
     #[test]
+    fn sampled_selector_owned_experts_remain_behaviorally_complete() {
+        let mut dispatch = fixture_plan("row_major").dispatches.remove(0);
+        dispatch.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
+        let mut source = dispatch.shards[0].clone();
+        source.selected_resource_indices.insert(
+            "experts".to_string(),
+            (source.row_start..source.row_start + source.row_count).collect(),
+        );
+        let sampled = sampled_distributed_dispatch_shard(
+            &dispatch,
+            &source,
+            "calibration",
+            1,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(sampled.device_id, "calibration");
+        assert_eq!(sampled.row_start, source.row_start);
+        assert_eq!(sampled.row_count, source.row_count);
+        assert_eq!(sampled.workgroup_count_x, source.workgroup_count_x);
+        assert_eq!(sampled.parameters, source.parameters);
+        assert_eq!(sampled.selected_resource_indices, source.selected_resource_indices);
+    }
+
+    #[test]
     fn expert_range_push_constants_include_start_and_count() {
         let mut expert_dispatch = fixture_plan("row_major").dispatches.remove(0);
         expert_dispatch.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
