@@ -2303,6 +2303,29 @@ mod tests {
                 maximum_second_moment_ns2: 0,
             }])
             .unwrap();
+        let mut decode_only = plans.clone();
+        decode_only.decode_batch.dispatches.clear();
+        decode_only.decode_batch.execution_islands.clear();
+        decode_only.prefill.dispatches.clear();
+        decode_only.prefill.execution_islands.clear();
+        decode_only
+            .apply_selected_resource_placements(&[VulkanSelectedResourcePlacementPlan {
+                selector_id: "routed-experts".to_string(),
+                assignments: (0..8)
+                    .map(|resource_index| VulkanSelectedResourceAssignment {
+                        resource_index,
+                        device_id: if resource_index % 2 == 0 {
+                            "owner".to_string()
+                        } else {
+                            "helper".to_string()
+                        },
+                    })
+                    .collect(),
+                device_loads: Vec::new(),
+                maximum_first_moment_ns: 0,
+                maximum_second_moment_ns2: 0,
+            }])
+            .expect("a package without distributed batch or prefill must retain decode expert placement");
         let rewired_ownership =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&rewired).unwrap();
         assert_eq!(

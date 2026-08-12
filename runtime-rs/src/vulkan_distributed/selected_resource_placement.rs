@@ -659,6 +659,13 @@ fn apply_selected_resource_placements_to_phase(
     placements: &BTreeMap<&str, &VulkanSelectedResourcePlacementPlan>,
     phase: nerve_execution_contracts::ExecutionPhase,
 ) -> Result<(), VulkanDistributedPlanError> {
+    if !execution_plan
+        .dispatches
+        .iter()
+        .any(|dispatch| !dispatch.selected_resource_partitions.is_empty())
+    {
+        return Ok(());
+    }
     let mut applied_selectors = BTreeSet::new();
     for dispatch in &mut execution_plan.dispatches {
         if dispatch.selected_resource_partitions.is_empty()
