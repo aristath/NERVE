@@ -5,6 +5,7 @@ use std::path::Path;
 use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, VulkanPlacementExecutionStrategy,
     VulkanRuntimeDistributedPlacementCalibrationReport,
+    vulkan_runtime_distributed_contract_candidates,
 };
 
 use crate::boundary_calibration::measure_boundary_candidate;
@@ -47,8 +48,26 @@ pub fn run_calibration_suite(
     let mut unavailable_component_candidates = 0usize;
 
     for case in &plan.component_cases {
+        let has_distributed_candidates = !vulkan_runtime_distributed_contract_candidates(
+            package.runtime_model(),
+            &case.target,
+            match case.phase {
+                crate::cli::PackageCalibrationPhase::Decode => {
+                    nerve_runtime::VulkanTargetedComponentExecutionPhase::Decode
+                }
+                crate::cli::PackageCalibrationPhase::Prefill {
+                    activation_batch_width,
+                } => nerve_runtime::VulkanTargetedComponentExecutionPhase::Prefill {
+                    activation_batch_width,
+                },
+            },
+        )?
+        .is_empty();
         let mut current_width_measurements = Vec::new();
-        for order in &plan.initial_target_orders {
+        for order in component_calibration_target_orders(
+            &plan.initial_target_orders,
+            has_distributed_candidates,
+        ) {
             let measurement =
                 measure_package_candidates(&package, &case.target, case.phase, order)?;
             if measurement.catalog.observation_count() == 0 {
@@ -142,6 +161,16 @@ fn measured_target_order(
         contract_ids: report.execution_case.contract_ids.clone(),
         strategy: report.execution_case.strategy,
     }
+}
+
+fn component_calibration_target_orders<'a>(
+    initial_target_orders: &'a [Vec<String>],
+    has_distributed_candidates: bool,
+) -> impl Iterator<Item = &'a [String]> + 'a {
+    initial_target_orders
+        .iter()
+        .filter(move |order| has_distributed_candidates || order.len() == 1)
+        .map(Vec::as_slice)
 }
 
 fn non_dominated_target_orders(measurements: &[MeasuredTargetOrder]) -> Vec<Vec<String>> {
@@ -244,6 +273,24 @@ mod tests {
             .into_iter()
             .map(|order| order.into_iter().map(str::to_string).collect())
             .collect::<Vec<Vec<String>>>(),
+        );
+    }
+
+    #[test]
+    fn canonical_only_components_measure_each_target_once() {
+        let orders = vec![
+            vec!["a".to_string()],
+            vec!["b".to_string()],
+            vec!["a".to_string(), "b".to_string()],
+            vec!["b".to_string(), "a".to_string()],
+        ];
+        assert_eq!(
+            component_calibration_target_orders(&orders, false).collect::<Vec<_>>(),
+            vec![orders[0].as_slice(), orders[1].as_slice()],
+        );
+        assert_eq!(
+            component_calibration_target_orders(&orders, true).count(),
+            orders.len(),
         );
     }
 
