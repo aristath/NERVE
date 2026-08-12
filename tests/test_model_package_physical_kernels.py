@@ -12,6 +12,7 @@ from nerve.model_package_common import ModelCompileError
 from nerve.model_package_derived_tensors import (
     TP_INPUT_BLOCK_COLUMNS,
     derive_tensor_parallel_linear_tensors,
+    ensure_input_block_major_tensor,
     input_block_major_tensor_name,
     transposed_tensor_name,
 )
@@ -99,7 +100,7 @@ def test_compiler_derives_contiguous_input_block_major_weights(tmp_path: Path) -
     assert info["physical_execution_only"] is True
 
     destination = tmp_path / "input-block-major.safetensors"
-    header_bytes, _ = write_compiled_derived_matrix_reorder(
+    header_bytes, _, _ = write_compiled_derived_matrix_reorder(
         tensor_name=name,
         info=info,
         destination=destination,
@@ -364,7 +365,7 @@ def test_compiler_derives_fp8_weight_and_scale_physical_resources(
     ] == [(3, weight), (4, scale)]
 
     scale_destination = tmp_path / "scale-transposed.safetensors"
-    scale_header_bytes, _ = write_compiled_derived_matrix_reorder(
+    scale_header_bytes, _, _ = write_compiled_derived_matrix_reorder(
         tensor_name=scale,
         info=tensor_index["tensors"][scale],
         destination=scale_destination,
@@ -376,7 +377,7 @@ def test_compiler_derives_fp8_weight_and_scale_physical_resources(
     np.testing.assert_array_equal(actual_scale, scale_values.T)
 
 
-def test_partitioned_packaging_rejects_a_derived_matrix_reorder(
+def test_partitioned_packaging_seals_each_derived_matrix_range(
     tmp_path: Path,
 ) -> None:
     _, circuit, tensor_index, _ = bf16_down_fixture(tmp_path)
@@ -393,15 +394,76 @@ def test_partitioned_packaging_rejects_a_derived_matrix_reorder(
         "down.weight", TP_INPUT_BLOCK_COLUMNS
     )
 
-    with pytest.raises(
-        ModelCompileError,
-        match="matrix reorder that does not preserve independently verifiable partitions",
-    ):
-        copy_tensor_package(
-            tensor_index,
-            tmp_path / "package",
-            partition_counts={physical_weight: 2},
-        )
+    packaged = copy_tensor_package(
+        tensor_index,
+        tmp_path / "package",
+        partition_counts={physical_weight: 2},
+    )
+
+    info = packaged["tensors"][physical_weight]
+    integrity = info["partition_integrity"]
+    assert integrity["partition_axis"] == 0
+    assert integrity["partition_count"] == 2
+    assert integrity["partition_byte_count"] == info["byte_count"] // 2
+    digest_table = tmp_path / "package" / integrity["digest_table_path"]
+    assert digest_table.stat().st_size == 64
+
+
+@pytest.mark.parametrize(
+    ("dtype", "numpy_dtype"),
+    [("I8", "i1"), ("F8_E8M0", "u1")],
+)
+def test_partitioned_byte_matrix_reorders_preserve_exact_physical_ranges(
+    tmp_path: Path,
+    dtype: str,
+    numpy_dtype: str,
+) -> None:
+    values = np.arange(3 * 8, dtype=numpy_dtype).reshape(3, 8)
+    payload = values.tobytes(order="C")
+    source = tmp_path / f"{dtype}.safetensors"
+    header = compiled_safetensors_header(
+        "source",
+        dtype=dtype,
+        shape=[3, 8],
+        byte_count=len(payload),
+        layout="row_major",
+    )
+    source.write_bytes(struct.pack("<Q", len(header)) + header + payload)
+    tensor_index = {
+        "tensors": {
+            "source": {
+                "dtype": dtype,
+                "shape": [3, 8],
+                "parameter_count": 24,
+                "byte_count": len(payload),
+                "layout": "row_major",
+                "source_file": str(source),
+                "source_header_bytes": len(header),
+                "data_offsets": [0, len(payload)],
+            }
+        }
+    }
+    derived = ensure_input_block_major_tensor(
+        tensor_index,
+        source_tensor="source",
+        block_columns=2,
+    )
+
+    destination = tmp_path / f"{dtype}-block-major.safetensors"
+    header_bytes, _, partition_digests = write_compiled_derived_matrix_reorder(
+        tensor_name=derived,
+        info=tensor_index["tensors"][derived],
+        destination=destination,
+        layout="row_major",
+        partition_count=4,
+    )
+
+    actual = np.frombuffer(
+        destination.read_bytes()[8 + header_bytes :], dtype=numpy_dtype
+    ).reshape(4, 3, 2)
+    expected = values.reshape(3, 4, 2).transpose(1, 0, 2)
+    np.testing.assert_array_equal(actual, expected)
+    assert len(partition_digests) == 4
 
 
 def test_compiler_skips_a_linear_without_legal_physical_geometry(

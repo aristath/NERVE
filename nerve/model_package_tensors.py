@@ -223,7 +223,8 @@ def write_compiled_derived_matrix_reorder(
     info: Json,
     destination: Path,
     layout: str,
-) -> tuple[int, str]:
+    partition_count: int | None = None,
+) -> tuple[int, str, list[bytes]]:
     if layout != ROW_MAJOR_LAYOUT:
         raise ModelCompileError("derived matrix reorders require row-major storage")
     derivation = info.get("derived")
@@ -240,6 +241,8 @@ def write_compiled_derived_matrix_reorder(
     dtype = str(info["dtype"])
     numpy_dtype = {
         "F8_E4M3": np.dtype("u1"),
+        "F8_E8M0": np.dtype("u1"),
+        "I8": np.dtype("i1"),
         "BF16": np.dtype("<u2"),
     }.get(dtype)
     if numpy_dtype is None:
@@ -260,6 +263,17 @@ def write_compiled_derived_matrix_reorder(
             f"derived matrix reorder {tensor_name!r} has inconsistent source storage"
         )
     output_shape = [int(value) for value in info["shape"]]
+    if partition_count is not None and (
+        not isinstance(partition_count, int)
+        or isinstance(partition_count, bool)
+        or partition_count <= 0
+        or not output_shape
+        or output_shape[0] != partition_count
+        or byte_count % partition_count
+    ):
+        raise ModelCompileError(
+            f"derived matrix reorder {tensor_name!r} has an invalid partition count"
+        )
     header_payload = compiled_safetensors_header(
         tensor_name,
         dtype=dtype,
@@ -325,18 +339,27 @@ def write_compiled_derived_matrix_reorder(
     del destination_matrix
     del source_matrix
     digest = sha256()
+    partition_digests: list[bytes] = []
     with destination.open("rb") as destination_handle:
         destination_handle.seek(data_start)
-        remaining = byte_count
-        while remaining:
-            payload = destination_handle.read(min(remaining, 8 * 1024 * 1024))
-            if not payload:
-                raise ModelCompileError(
-                    f"derived matrix reorder {tensor_name!r} ended unexpectedly"
-                )
-            digest.update(payload)
-            remaining -= len(payload)
-    return len(header_payload), digest.hexdigest()
+        ranges = 1 if partition_count is None else partition_count
+        range_bytes = byte_count // ranges
+        for _ in range(ranges):
+            range_digest = sha256() if partition_count is not None else None
+            remaining = range_bytes
+            while remaining:
+                payload = destination_handle.read(min(remaining, 8 * 1024 * 1024))
+                if not payload:
+                    raise ModelCompileError(
+                        f"derived matrix reorder {tensor_name!r} ended unexpectedly"
+                    )
+                digest.update(payload)
+                if range_digest is not None:
+                    range_digest.update(payload)
+                remaining -= len(payload)
+            if range_digest is not None:
+                partition_digests.append(range_digest.digest())
+    return len(header_payload), digest.hexdigest(), partition_digests
 
 
 def write_compiled_derived_fp8_e4m3_output_projection(

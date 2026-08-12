@@ -273,38 +273,13 @@ def copy_tensor_package(
         partition_count = partition_counts.get(tensor_name)
         quantization = info.get("quantization")
         partition_digests: list[bytes] = []
-        if (
+        matrix_reorder = (
             isinstance(derivation, dict)
             and derivation.get("kind")
             in {"matrix_to_input_block_major", "transpose_2d"}
-        ):
-            if partition_count is not None:
-                raise ModelCompileError(
-                    f"selected tensor {tensor_name!r} requires a matrix reorder "
-                    "that does not preserve independently verifiable partitions"
-                )
-            header_bytes, data_sha256 = write_compiled_derived_matrix_reorder(
-                tensor_name=tensor_name,
-                info=info,
-                destination=destination,
-                layout=layout,
-            )
-            relative_destination = relative_json_path(package_dir, destination)
-            info["source_file"] = relative_destination
-            info["data_offsets"] = [0, int(info["byte_count"])]
-            info["data_sha256"] = data_sha256
-            info["layout"] = layout
-            info.pop("derived", None)
-            compiled_sources.append(
-                {
-                    "path": relative_destination,
-                    "safetensors_header_bytes": header_bytes,
-                    "metadata": {"format": "nerve", "layout": layout},
-                }
-            )
-            continue
+        )
         if partition_count is not None and (
-            isinstance(derivation, dict)
+            (isinstance(derivation, dict) and not matrix_reorder)
             or (
                 isinstance(quantization, dict)
                 and quantization.get("format") == "auto_gptq"
@@ -461,7 +436,17 @@ def copy_tensor_package(
                 }
             )
             continue
-        if (
+        if matrix_reorder:
+            header_bytes, data_sha256, partition_digests = (
+                write_compiled_derived_matrix_reorder(
+                    tensor_name=tensor_name,
+                    info=info,
+                    destination=destination,
+                    layout=layout,
+                    partition_count=partition_count,
+                )
+            )
+        elif (
             isinstance(quantization, dict)
             and quantization.get("format") == "auto_gptq"
             and auto_gptq_packing(info) == AUTO_GPTQ_INPUT_MAJOR_PACKING
@@ -547,6 +532,7 @@ def copy_tensor_package(
         info["data_sha256"] = data_sha256
         info["layout"] = layout
         info["safetensors_header_bytes"] = header_bytes
+        info.pop("derived", None)
         info.pop("source_parts", None)
         info.pop("source_header_bytes", None)
         info.pop("layout_hint", None)
