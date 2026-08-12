@@ -1214,6 +1214,26 @@ impl VulkanCompiledResourceDeviceStore {
         execution_scope: &str,
         component_ids: &BTreeSet<String>,
     ) -> Result<Arc<VulkanDynamicResourceBuffers>, VulkanCompiledResourceDeviceStoreError> {
+        self.dynamic_buffers_for_components_with_execution_ownership(
+            device,
+            execution_scope,
+            component_ids,
+            &self.selector_ownership,
+        )
+    }
+
+    pub(crate) fn dynamic_buffers_for_components_with_execution_ownership(
+        &self,
+        device: &VulkanComputeDevice,
+        execution_scope: &str,
+        component_ids: &BTreeSet<String>,
+        execution_ownership: &VulkanCompiledResourceSelectorOwnership,
+    ) -> Result<Arc<VulkanDynamicResourceBuffers>, VulkanCompiledResourceDeviceStoreError> {
+        if !execution_ownership.is_subset_of(&self.selector_ownership) {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource execution ownership exceeds or changes the store addressability envelope",
+            ));
+        }
         let state = self.address_state.lock().map_err(|_| {
             VulkanCompiledResourceDeviceStoreError::new(
                 "compiled resource address state was poisoned",
@@ -1225,7 +1245,7 @@ impl VulkanCompiledResourceDeviceStore {
             &self.layout,
             Some(execution_scope),
             component_ids,
-            Some(&self.selector_ownership),
+            Some(execution_ownership),
         )
         .map(Arc::new)
         .map_err(compiled_device_store_vulkan_error)

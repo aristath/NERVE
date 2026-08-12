@@ -35,6 +35,8 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     physical_execution_residency_plan: VulkanRuntimePhysicalExecutionResidencyPlan,
     mounted_boundary_routes: BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
     selected_resource_placements: Vec<VulkanSelectedResourcePlacementPlan>,
+    distributed_selected_resource_execution_ownership_plan:
+        VulkanDistributedSelectedResourceStorePlan,
     distributed_selected_resource_store_plan: VulkanDistributedSelectedResourceStorePlan,
     distributed_loaded_manifest: VulkanLoadedKernelArtifactCatalog,
     distributed_parameter_buffers: Arc<VulkanDistributedParameterBuffers>,
@@ -103,6 +105,12 @@ impl VulkanResidentInProcessPlacedModelPackage {
         &self,
     ) -> &VulkanDistributedSelectedResourceStorePlan {
         &self.distributed_selected_resource_store_plan
+    }
+
+    pub fn distributed_selected_resource_execution_ownership_plan(
+        &self,
+    ) -> &VulkanDistributedSelectedResourceStorePlan {
+        &self.distributed_selected_resource_execution_ownership_plan
     }
 
     pub fn selected_resource_placements(&self) -> &[VulkanSelectedResourcePlacementPlan] {

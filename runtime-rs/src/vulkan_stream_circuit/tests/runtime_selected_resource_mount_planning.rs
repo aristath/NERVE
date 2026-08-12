@@ -136,6 +136,7 @@ fn exhausted_live_capacity_is_a_valid_but_infeasible_mount_state() {
             schema: "nerve.tensor_index.v1".to_string(),
             tensors: BTreeMap::new(),
         },
+        ResourceResidencyPolicy::DemandRetained,
     )
     .unwrap();
     let capacities = selected_resource_mount_capacities(

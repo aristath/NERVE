@@ -364,6 +364,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
             activation_plan: distributed_activation_plan,
             parameter_allocation_plan: distributed_parameter_allocation_plan,
             parameter_exclusion_plan: distributed_parameter_exclusion_plan,
+            selected_resource_execution_ownership_plan:
+                distributed_selected_resource_execution_ownership_plan,
             selected_resource_store_plan: distributed_selected_resource_store_plan,
             physical_execution_residency_plan,
         } = selected_resource_resolution.plans;
@@ -861,7 +863,29 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 (store, false)
             };
             for logical_device_id in &logical_device_id_list {
-                let mut component_ids = distributed_selected_resource_store_plan
+                let logical_execution_device_ids =
+                    BTreeSet::from([logical_device_id.clone()]);
+                let Some(execution_ownership) =
+                    compiled_resource_selector_ownership_for_device_set(
+                        &runtime_model,
+                        &compiled_resource_contract,
+                        &input_device_id,
+                        &output_device_id,
+                        &logical_execution_device_ids,
+                        mount_speculative_decoders,
+                        &distributed_selected_resource_execution_ownership_plan,
+                    )
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to plan logical compiled-resource execution ownership: {error}"
+                            )),
+                        )
+                    })?
+                else {
+                    continue;
+                };
+                let mut component_ids = distributed_selected_resource_execution_ownership_plan
                     .device(logical_device_id)
                     .into_iter()
                     .flat_map(|device| device.selectors.iter())
@@ -901,10 +925,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 }
                 let logical_device = device_for(logical_device_id)?;
                 let dynamic_buffers = store
-                    .dynamic_buffers_for_components(
+                    .dynamic_buffers_for_components_with_execution_ownership(
                         logical_device,
                         &execution_scope,
                         &component_ids,
+                        &execution_ownership,
                     )
                     .map_err(|error| {
                         VulkanResidentInProcessPlacedRuntimeError::Package(
@@ -1043,7 +1068,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         }
         if resource_residency_policy.is_demand_loaded() {
             attach_distributed_compiled_resource_cohorts(
-                &distributed_selected_resource_store_plan,
+                &distributed_selected_resource_execution_ownership_plan,
                 &compiled_resource_device_stores,
             )
             .map_err(|error| {
@@ -1179,6 +1204,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             physical_execution_residency_plan,
             mounted_boundary_routes,
             selected_resource_placements,
+            distributed_selected_resource_execution_ownership_plan,
             distributed_selected_resource_store_plan,
             distributed_loaded_manifest,
             distributed_parameter_buffers,

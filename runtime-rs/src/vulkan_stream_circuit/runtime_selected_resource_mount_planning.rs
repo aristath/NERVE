@@ -15,6 +15,8 @@ struct VulkanRuntimeDistributedMountPlans {
     activation_plan: VulkanDistributedActivationBufferPlan,
     parameter_allocation_plan: VulkanDistributedParameterAllocationPlan,
     parameter_exclusion_plan: VulkanDistributedParameterExclusionPlan,
+    selected_resource_execution_ownership_plan:
+        VulkanDistributedSelectedResourceStorePlan,
     selected_resource_store_plan: VulkanDistributedSelectedResourceStorePlan,
     physical_execution_residency_plan: VulkanRuntimePhysicalExecutionResidencyPlan,
 }
@@ -32,6 +34,7 @@ impl VulkanRuntimeDistributedMountPlans {
         logical_device_ids: &[String],
         prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
         tensor_index: &TensorIndex,
+        residency_policy: ResourceResidencyPolicy,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
         let activation_plan = VulkanDistributedActivationBufferPlan::from_execution_plan_set(
             &execution_plans,
@@ -50,11 +53,23 @@ impl VulkanRuntimeDistributedMountPlans {
                 tensor_index,
             )
             .map_err(|error| selected_resource_mount_error("parameter exclusion planning", error))?;
-        let selected_resource_store_plan =
+        let selected_resource_execution_ownership_plan =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&execution_plans)
                 .map_err(|error| {
                     selected_resource_mount_error("selected-resource ownership planning", error)
                 })?;
+        let selected_resource_store_plan = if residency_policy.is_demand_loaded() {
+            selected_resource_execution_ownership_plan
+                .with_whole_resource_addressability_envelope()
+                .map_err(|error| {
+                    selected_resource_mount_error(
+                        "selected-resource addressability planning",
+                        error,
+                    )
+                })?
+        } else {
+            selected_resource_execution_ownership_plan.clone()
+        };
         let physical_execution_residency_plan =
             VulkanRuntimePhysicalExecutionResidencyPlan::plan(
                 residency_plan,
@@ -69,6 +84,7 @@ impl VulkanRuntimeDistributedMountPlans {
             activation_plan,
             parameter_allocation_plan,
             parameter_exclusion_plan,
+            selected_resource_execution_ownership_plan,
             selected_resource_store_plan,
             physical_execution_residency_plan,
         })
@@ -99,6 +115,7 @@ fn resolve_vulkan_runtime_selected_resource_mount(
         logical_device_ids,
         prepared_plans,
         tensor_index,
+        residency_policy,
     )?;
     let Some(catalog) = catalog else {
         return Ok(VulkanRuntimeSelectedResourceMountResolution {
@@ -169,6 +186,7 @@ fn resolve_vulkan_runtime_selected_resource_mount(
             logical_device_ids,
             prepared_plans,
             tensor_index,
+            residency_policy,
         )?;
         let Some(candidate_capacities) = selected_resource_mount_capacities(
             runtime_model,
@@ -208,6 +226,7 @@ fn resolve_vulkan_runtime_selected_resource_mount(
             logical_device_ids,
             prepared_plans,
             tensor_index,
+            residency_policy,
         )?,
         placements: Vec::new(),
     }))

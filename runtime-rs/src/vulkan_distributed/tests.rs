@@ -934,6 +934,13 @@ mod tests {
         assert_eq!(ownership.device_count, dispatch.shards.len());
         assert_eq!(ownership.unique_atomic_group_count, dispatch.shards.len());
         assert_eq!(ownership.total_addressable_bytes, 152);
+        assert_eq!(
+            ownership
+                .with_whole_resource_addressability_envelope()
+                .unwrap(),
+            ownership,
+            "tensor fragments are fixed physical contracts, not movable whole experts",
+        );
         let [cohort] = ownership.tensor_sharded_residency_cohorts.as_slice() else {
             panic!("one fragmented expert must produce one logical residency cohort")
         };
@@ -2300,6 +2307,30 @@ mod tests {
             ownership.device("helper").unwrap().selectors[0].owned_resource_indices,
             vec![4, 5, 6, 7]
         );
+        let addressability = ownership
+            .with_whole_resource_addressability_envelope()
+            .unwrap();
+        assert_eq!(addressability.device_count, 2);
+        assert_eq!(addressability.selector_placement_count, 2);
+        assert_eq!(addressability.unique_atomic_group_count, 8);
+        assert_eq!(addressability.total_addressable_bytes, 128);
+        assert!(addressability.tensor_sharded_residency_cohorts.is_empty());
+        for device_id in ["owner", "helper"] {
+            let device = addressability.device(device_id).unwrap();
+            assert_eq!(device.total_addressable_bytes, 64);
+            assert_eq!(device.maximum_load_wave_bytes, 16);
+            assert_eq!(
+                device.selectors[0].owned_resource_indices,
+                (0..8).collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                device.selectors[0].atomic_group_ids,
+                (0..8)
+                    .map(|resource_index| format!("group-{resource_index}"))
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(device.selectors[0].atomic_group_byte_counts, vec![8; 8]);
+        }
         let placement = VulkanSelectedResourcePlacementPlan {
             selector_id: "routed-experts".to_string(),
             assignments: (0..8)

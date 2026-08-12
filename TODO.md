@@ -249,10 +249,15 @@ For every numbered item below:
   proposed makespan; and every move reports its destination load cost plus the
   exact cold break-even activation count. Residency gates now derive arithmetic
   ownership from the concrete dispatch shard rather than the physical store's
-  broader addressability. The remaining work is a quiescent-boundary executor
-  that changes the expert islands and cache quotas transactionally without
-  remounting the backbone, while preventing addressable replicas from executing
-  duplicate arithmetic.
+  broader addressability. Demand-loaded mounts now also build an explicit
+  whole-expert addressability envelope across the current participants while
+  retaining exact per-shard execution ownership in their parameter-slot tables;
+  tensor-fragment projections remain fixed physical contracts. The mounted
+  package exposes the two plans separately, and refuses an execution projection
+  that exceeds or changes its store mapping. The remaining work is a
+  quiescent-boundary executor that changes the expert islands and cache quotas
+  transactionally without remounting the backbone, while preventing addressable
+  replicas from executing duplicate arithmetic.
 - Allow a compiler-declared predictable router dependency to trigger safe
   prefetch or preselection without a DeepSeek-specific runtime branch.
 

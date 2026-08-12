@@ -194,6 +194,18 @@ impl VulkanCompiledResourceSelectorOwnership {
         !self.source_projections_by_selector.is_empty()
     }
 
+    /// Returns whether every executable resource in `self` is addressable by
+    /// `other` with the same physical source projection.
+    pub fn is_subset_of(&self, other: &Self) -> bool {
+        self.resources_by_selector.iter().all(|(selector_id, indices)| {
+            indices.iter().all(|resource_index| {
+                other.owns(selector_id, *resource_index)
+                    && self.source_projection(selector_id, *resource_index)
+                        == other.source_projection(selector_id, *resource_index)
+            })
+        })
+    }
+
     pub fn project_resolved_group(
         &self,
         selector_id: &str,
@@ -501,6 +513,13 @@ mod compiled_resource_selector_ownership_tests {
         assert!(!ownership.owns("experts", 3));
         assert!(ownership.owns("experts", 4));
         assert_eq!(ownership.selector_ids(), BTreeSet::from(["experts".to_string()]));
+        let addressability = VulkanCompiledResourceSelectorOwnership::all(
+            &contract,
+            &BTreeSet::from(["experts".to_string()]),
+        )
+        .unwrap();
+        assert!(ownership.is_subset_of(&addressability));
+        assert!(!addressability.is_subset_of(&ownership));
         let layout = VulkanCompiledResourceAddressLayout {
             slot_count: 8,
             concrete_resource_slots: BTreeMap::new(),
@@ -574,6 +593,16 @@ mod compiled_resource_selector_ownership_tests {
         .unwrap();
         assert!(ownership.owns("experts", 0));
         assert!(ownership.has_source_projections());
+        assert!(ownership.is_subset_of(&ownership));
+        let whole = VulkanCompiledResourceSelectorOwnership::all(
+            &contract,
+            &BTreeSet::from(["experts".to_string()]),
+        )
+        .unwrap();
+        assert!(
+            !ownership.is_subset_of(&whole),
+            "a tensor fragment cannot silently execute against a whole-resource store mapping",
+        );
 
         let resolved = CompiledResourceContractIndex::new(&contract)
             .unwrap()

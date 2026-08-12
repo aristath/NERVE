@@ -102,6 +102,126 @@ impl VulkanDistributedSelectedResourceStorePlan {
         Self::merged_for_alternatives(&alternatives)
     }
 
+    /// Expands whole-resource selectors into a stable addressability envelope
+    /// for their existing execution participants.
+    ///
+    /// This does not change execution ownership. It gives every participant
+    /// that already owns part of a whole-resource selector enough immutable
+    /// addressing metadata to accept a later ownership move without remounting
+    /// the model. Tensor-fragment selectors remain exact: changing their
+    /// projections would change the compiled physical implementation rather
+    /// than merely moving an independently executable resource.
+    pub fn with_whole_resource_addressability_envelope(
+        &self,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        let mut whole_resources = BTreeMap::<
+            String,
+            BTreeMap<usize, (String, usize)>,
+        >::new();
+        let mut whole_participants = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut fragmented_selectors = BTreeSet::new();
+        for device in &self.devices {
+            for selector in &device.selectors {
+                let whole = !selector.owned_resource_indices.is_empty();
+                let fragmented = !selector.fragmented_resources.is_empty();
+                if whole == fragmented
+                    || selector.owned_resource_indices.len() != selector.atomic_group_ids.len()
+                    || selector.owned_resource_indices.len()
+                        != selector.atomic_group_byte_counts.len()
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "selected-resource store plan has invalid addressability for selector {:?} on {:?}",
+                        selector.selector_id, device.device_id,
+                    )));
+                }
+                if fragmented {
+                    fragmented_selectors.insert(selector.selector_id.clone());
+                    continue;
+                }
+                whole_participants
+                    .entry(selector.selector_id.clone())
+                    .or_default()
+                    .insert(device.device_id.clone());
+                let resources = whole_resources
+                    .entry(selector.selector_id.clone())
+                    .or_default();
+                for ((resource_index, atomic_group_id), byte_count) in selector
+                    .owned_resource_indices
+                    .iter()
+                    .copied()
+                    .zip(selector.atomic_group_ids.iter().cloned())
+                    .zip(selector.atomic_group_byte_counts.iter().copied())
+                {
+                    let identity = (atomic_group_id, byte_count);
+                    if let Some(previous) = resources.insert(resource_index, identity.clone())
+                        && previous != identity
+                    {
+                        return Err(VulkanDistributedPlanError(format!(
+                            "selected-resource selector {:?} resource {resource_index} changes atomic identity between participants",
+                            selector.selector_id,
+                        )));
+                    }
+                }
+            }
+        }
+        if fragmented_selectors
+            .iter()
+            .any(|selector_id| whole_resources.contains_key(selector_id))
+        {
+            return Err(VulkanDistributedPlanError(
+                "selected-resource addressability cannot mix whole and tensor-fragment selectors"
+                    .to_string(),
+            ));
+        }
+
+        let mut device_selectors = self
+            .devices
+            .iter()
+            .map(|device| (device.device_id.clone(), device.selectors.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for (selector_id, participants) in whole_participants {
+            let resources = whole_resources
+                .get(&selector_id)
+                .expect("whole selector participants have canonical resources");
+            for device_id in participants {
+                let selectors = device_selectors.get_mut(&device_id).ok_or_else(|| {
+                    VulkanDistributedPlanError(format!(
+                        "selected-resource addressability participant {device_id:?} is absent"
+                    ))
+                })?;
+                let selector = selectors
+                    .iter_mut()
+                    .find(|selector| selector.selector_id == selector_id)
+                    .ok_or_else(|| {
+                        VulkanDistributedPlanError(format!(
+                            "selected-resource addressability participant {device_id:?} omits selector {selector_id:?}"
+                        ))
+                    })?;
+                if resources.len() != selector.resource_count
+                    || resources.keys().copied().ne(0..selector.resource_count)
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "selected-resource selector {selector_id:?} does not cover resources 0..{} across its participants",
+                        selector.resource_count,
+                    )));
+                }
+                selector.owned_resource_indices = resources.keys().copied().collect();
+                selector.atomic_group_ids = resources
+                    .values()
+                    .map(|(group_id, _)| group_id.clone())
+                    .collect();
+                selector.atomic_group_byte_counts = resources
+                    .values()
+                    .map(|(_, byte_count)| *byte_count)
+                    .collect();
+            }
+        }
+        selected_resource_store_plan_from_device_selectors(
+            device_selectors,
+            self.selector_count,
+        )
+    }
+
     fn merged_for_alternatives(
         plans: &[VulkanDistributedSelectedResourceStorePlan],
     ) -> Result<Self, VulkanDistributedPlanError> {
