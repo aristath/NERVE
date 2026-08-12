@@ -4,7 +4,7 @@
 placement planner. It generates a small deterministic dense projection and does
 not read or download models.
 
-The output answers two questions for every supported weight format:
+The output answers three questions for every supported weight format:
 
 1. Which single target or tensor-parallel target group runs one equivalent
    projection fastest?
@@ -131,6 +131,9 @@ cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
   --package /path/to/compiled/vulkan_resident_package.json \
   --prefill-width 8 \
   --prefill-width 64 \
+  --context-size 131072 \
+  --speculative-draft-tokens 7 \
+  --residency-policy demand-paged \
   --output /path/to/compiled/optimization/placement-calibration-catalog.json
 ```
 
@@ -140,6 +143,16 @@ Every selected target is inspected immediately before each workload; existing
 allocations are preserved and reduce only that target's safe calibration
 budget. `--max-group-size` may bound an investigative run, but defaults to the
 selected target count and has no architectural device-count limit.
+
+Package calibration performs runtime representation selection before deriving
+component signatures, distributed contracts, boundary sizes, and lazy-resource
+classes. Pass the same `--context-size`, `--speculative-draft-tokens`, and
+`--residency-policy` used by chat when they differ from package defaults. This
+prevents measurements for a baseline kernel from being consumed as evidence
+for a hardware-selected FP8, INT4, MXFP4, or other implementation. The suite
+builds a separate selected runtime model for each possible owner profile, so a
+heterogeneous target set does not reuse one GPU's representation decision on a
+different GPU.
 
 The suite discovers one representative for every exact compiler-emitted
 component signature in decode and each requested prefill width. It measures all
