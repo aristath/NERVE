@@ -188,6 +188,10 @@ For every numbered item below:
   artifact, representation, phase, geometry, device, and driver; a missing
   class measurement makes that placement unavailable. Never substitute an
   average component duration or derive a resource cost from advertised compute.
+  An execution-class timing must cover one genuine local route occurrence while
+  preserving the compiler-declared selector width. If an artifact cannot skip
+  valid non-local routes, calibrate and consume its exact selected cohort; never
+  divide a multi-route wave and call the quotient a per-resource measurement.
 - Apply the telemetry-aware whole-expert placement plan in the production mount
   and execution-plan path. A planner exercised only by unit tests is not an
   implemented runtime feature.

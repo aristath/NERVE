@@ -180,6 +180,30 @@ fn validate_selected_resource_execution_class_calibration(
         }] => Some((*resource_count, *byte_count)),
         _ => None,
     };
+    let execution_geometry = execution
+        .execution_case
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            VulkanPlacementOperationGeometry::SelectedResourceTransaction {
+                resource_execution_class_id,
+                selector_selection_count,
+                executed_resource_occurrence_count,
+                ..
+            } => Some((
+                resource_execution_class_id.as_str(),
+                *selector_selection_count,
+                *executed_resource_occurrence_count,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let exact_single_occurrence = matches!(
+        execution_geometry.as_slice(),
+        [(class_id, selector_selection_count, 1)]
+            if *class_id == calibration.resource_execution_class_id
+                && *selector_selection_count > 0
+    );
     if execution_device != load_wave_device
         || execution.execution_case.behavior.phase
             != load_wave.execution_case.behavior.phase
@@ -204,9 +228,10 @@ fn validate_selected_resource_execution_class_calibration(
         || execution.warmup_call_count != load_wave.warmup_call_count
         || execution.measured_call_count != load_wave.measured_call_count
         || load_geometry != Some((1, calibration.resource_payload_byte_count))
+        || !exact_single_occurrence
     {
         return Err(VulkanPlacementCalibrationCatalogError(
-            "selected-resource execution and lazy-load evidence do not describe one exact device, phase, shape, call shape, and resource"
+            "selected-resource execution and lazy-load evidence do not describe one exact device, phase, shape, call shape, and executed resource occurrence"
                 .to_string(),
         ));
     }
@@ -442,16 +467,24 @@ mod selected_resource_calibration_catalog_tests {
                 'e',
             ),
             VulkanPlacementExecutionStrategy::SelectedResourceTransaction,
-            vec![VulkanPlacementOperationGeometry::Dispatch {
-                geometry: VulkanPlacementDispatchGeometry {
+            vec![
+                VulkanPlacementOperationGeometry::SelectedResourceTransaction {
                     contract_id: "contract".to_string(),
-                    logical_extent: 4096,
-                    sampled_extent: 4096,
-                    input_width: 4096,
-                    workgroup_count_x: 16,
-                    local_size_x: 256,
+                    resource_execution_class_id: digest('f'),
+                    selector_selection_count: 6,
+                    executed_resource_occurrence_count: 1,
                 },
-            }],
+                VulkanPlacementOperationGeometry::Dispatch {
+                    geometry: VulkanPlacementDispatchGeometry {
+                        contract_id: "contract".to_string(),
+                        logical_extent: 4096,
+                        sampled_extent: 4096,
+                        input_width: 4096,
+                        workgroup_count_x: 16,
+                        local_size_x: 256,
+                    },
+                },
+            ],
             'a',
             'b',
             1_500,
@@ -613,7 +646,7 @@ mod selected_resource_calibration_catalog_tests {
                 )
                 .unwrap_err()
                 .to_string()
-                .contains("one exact device, phase, shape, call shape, and resource")
+                .contains("one exact device, phase, shape, call shape, and executed resource occurrence")
         );
 
         let execution = execution_observation("gpu0");
@@ -634,6 +667,65 @@ mod selected_resource_calibration_catalog_tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn class_join_rejects_a_relabelled_full_selector_wave() {
+        let mut execution = execution_observation("gpu0");
+        let VulkanPlacementOperationGeometry::SelectedResourceTransaction {
+            executed_resource_occurrence_count,
+            ..
+        } = &mut execution.execution_case.operations[0]
+        else {
+            panic!("fixture must begin with selected-resource geometry");
+        };
+        *executed_resource_occurrence_count = 6;
+        let load_wave = load_wave_observation("gpu0", 4096);
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        record_observation_with_reference(&mut catalog, execution.clone());
+        record_observation_with_reference(&mut catalog, load_wave.clone());
+
+        let error = catalog
+            .record_selected_resource_execution_class(
+                VulkanPlacementSelectedResourceExecutionClassCalibration {
+                    resource_execution_class_id: digest('f'),
+                    resource_payload_byte_count: 4096,
+                    execution_case: execution.execution_case,
+                    lazy_load_wave_case: load_wave.execution_case,
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("executed resource occurrence"));
+    }
+
+    #[test]
+    fn selected_resource_geometry_cannot_be_omitted_or_used_by_another_strategy() {
+        let mut missing_geometry = execution_observation("gpu0");
+        missing_geometry.execution_case.operations.remove(0);
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: missing_geometry.execution_case.behavior.clone(),
+                output_digest: missing_geometry.output_digest.clone(),
+                output_artifact: None,
+                state_digest: missing_geometry.state_digest.clone(),
+            })
+            .unwrap();
+        assert!(catalog.record_observation(missing_geometry).is_err());
+
+        let mut wrong_strategy = execution_observation("gpu0");
+        wrong_strategy.execution_case.strategy = VulkanPlacementExecutionStrategy::SingleDevice;
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: wrong_strategy.execution_case.behavior.clone(),
+                output_digest: wrong_strategy.output_digest.clone(),
+                output_artifact: None,
+                state_digest: wrong_strategy.state_digest.clone(),
+            })
+            .unwrap();
+        assert!(catalog.record_observation(wrong_strategy).is_err());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v10";
+    "nerve.vulkan_placement_calibration_catalog.v11";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,6 +58,16 @@ pub enum VulkanPlacementOperationGeometry {
         resource_count: usize,
         byte_count: usize,
     },
+    /// Exact compiler-declared selected-resource work executed by one
+    /// physical transaction. The selector width preserves the real router
+    /// shape while the occurrence count states how many routes performed this
+    /// class's arithmetic locally.
+    SelectedResourceTransaction {
+        contract_id: String,
+        resource_execution_class_id: String,
+        selector_selection_count: usize,
+        executed_resource_occurrence_count: usize,
+    },
 }
 
 impl VulkanPlacementOperationGeometry {
@@ -66,7 +76,8 @@ impl VulkanPlacementOperationGeometry {
             Self::Dispatch { geometry } => &geometry.contract_id,
             Self::DirectedTransfer { contract_id, .. }
             | Self::Reduction { contract_id, .. }
-            | Self::LazyLoadWave { contract_id, .. } => contract_id,
+            | Self::LazyLoadWave { contract_id, .. }
+            | Self::SelectedResourceTransaction { contract_id, .. } => contract_id,
         }
     }
 
@@ -101,6 +112,18 @@ impl VulkanPlacementOperationGeometry {
                 resource_count,
                 byte_count,
             } => !contract_id.is_empty() && *resource_count > 0 && *byte_count > 0,
+            Self::SelectedResourceTransaction {
+                contract_id,
+                resource_execution_class_id,
+                selector_selection_count,
+                executed_resource_occurrence_count,
+            } => {
+                !contract_id.is_empty()
+                    && valid_sha256_digest(resource_execution_class_id)
+                    && *selector_selection_count > 0
+                    && *executed_resource_occurrence_count > 0
+                    && executed_resource_occurrence_count <= selector_selection_count
+            }
         }
     }
 }
@@ -695,6 +718,22 @@ fn validate_observation(
             "placement observation is incomplete or not a bounded complete transaction".to_string(),
         ));
     }
+    let selected_resource_transaction_count = case
+        .operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                VulkanPlacementOperationGeometry::SelectedResourceTransaction { .. }
+            )
+        })
+        .count();
+    let operation_strategy_valid = match case.strategy {
+        VulkanPlacementExecutionStrategy::SelectedResourceTransaction => {
+            selected_resource_transaction_count == 1
+        }
+        _ => selected_resource_transaction_count == 0,
+    };
     let participant_count_valid = match case.strategy {
         VulkanPlacementExecutionStrategy::SingleDevice
         | VulkanPlacementExecutionStrategy::SelectedResourceTransaction => {
@@ -743,7 +782,8 @@ fn validate_observation(
     } else {
         true
     };
-    if !participant_count_valid
+    if !operation_strategy_valid
+        || !participant_count_valid
         || !distributed_shard_coverage_valid
         || !devices.contains(case.input_physical_device_id.as_str())
         || !devices.contains(case.output_physical_device_id.as_str())
