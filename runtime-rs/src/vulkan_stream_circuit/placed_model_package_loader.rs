@@ -1079,6 +1079,18 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )
             })?;
         }
+        let selected_resource_reconfiguration_context =
+            build_vulkan_runtime_selected_resource_reconfiguration_context(
+                &runtime_model,
+                &compiled_resource_contract,
+                &distributed_loaded_manifest,
+                &distributed_execution_plans,
+                &distributed_selected_resource_execution_ownership_plan,
+                &compiled_resource_device_stores,
+                &device_execution_identity_by_logical_device,
+                resource_residency_policy,
+                placement_calibration_catalog,
+            )?;
         let device_slices = device_slices.into_iter().map(Arc::new).collect::<Vec<_>>();
 
         let transducer_parameter_count = if Arc::ptr_eq(
@@ -1204,6 +1216,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             physical_execution_residency_plan,
             mounted_boundary_routes,
             selected_resource_placements,
+            selected_resource_reconfiguration_context,
             distributed_selected_resource_execution_ownership_plan,
             distributed_selected_resource_store_plan,
             distributed_loaded_manifest,
@@ -1340,6 +1353,20 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )),
             ));
         }
+        let selected_resource_adaptation = self
+            .selected_resource_reconfiguration_context
+            .as_ref()
+            .map(|context| {
+                initial_vulkan_runtime_selected_resource_adaptation_state(
+                    Arc::clone(context),
+                    &self.distributed_execution_plans,
+                    source.and_then(|source| source.selected_resource_adaptation.as_ref()),
+                )
+            });
+        let stream_distributed_execution_plans = selected_resource_adaptation
+            .as_ref()
+            .map(|state| &state.execution_plans)
+            .unwrap_or(&self.distributed_execution_plans);
         let mut physical_device_by_logical_device = BTreeMap::new();
         let mut safe_capacity_by_physical_device = BTreeMap::new();
         for device_plan in &self.physical_execution_residency_plan.device_plans {
@@ -1378,6 +1405,22 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )),
             )
         })?;
+        let distributed_dynamic_resource_buffers = self
+            .distributed_dynamic_resource_buffers
+            .iter()
+            .map(|(device_id, template)| {
+                let device = device_for(device_id)?;
+                template
+                    .fork_for_stream(device)
+                    .map(|buffers| (device_id.clone(), buffers))
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        initialize_vulkan_stream_selected_resource_execution_ownership(
+            &distributed_dynamic_resource_buffers,
+            &stream_distributed_execution_plans.decode,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut distributed_activation_buffers = VulkanDistributedActivationBuffers::allocate(
             &self.distributed_activation_plan,
             |device_id| device_for(device_id),
@@ -1403,7 +1446,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &device_for,
         )?;
         let mut distributed_dispatch_indices = BTreeMap::<&str, BTreeSet<usize>>::new();
-        for group in &self.distributed_execution_plans.decode.execution_islands {
+        for group in &stream_distributed_execution_plans.decode.execution_islands {
             distributed_dispatch_indices
                 .entry(group.owner_device_id.as_str())
                 .or_default()
@@ -1435,9 +1478,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
             create_demand_feedback_pipeline_predicates(self, &device_for)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut distributed_dispatch_runners = VulkanDistributedDispatchRunners::create(
-            &self.distributed_execution_plans.decode,
+            &stream_distributed_execution_plans.decode,
             &self.distributed_parameter_buffers,
-            &self.distributed_dynamic_resource_buffers,
+            &distributed_dynamic_resource_buffers,
             &self.compiled_resource_device_stores,
             demand_feedback_predicates.as_ref(),
             &self.execution_scope,
@@ -1522,7 +1565,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )
                 .collect::<Vec<_>>();
             let mounted = package_slice
-                .create_mounted_stream_circuit_with_all_buffer_overrides(
+                .create_mounted_stream_circuit_with_all_buffer_and_dynamic_resource_overrides(
                     device,
                     &activation_overrides,
                     &local_edge_overrides,
@@ -1532,6 +1575,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
                         .unwrap_or_default(),
                     &boundary_overrides,
                     stream_control_buffers
+                        .get(&package_slice.device_id)
+                        .cloned(),
+                    distributed_dynamic_resource_buffers
                         .get(&package_slice.device_id)
                         .cloned(),
                 )
@@ -1548,8 +1594,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )
                 })?;
             let reusable_manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
-            let physical_execution_islands = self
-                .distributed_execution_plans
+            let physical_execution_islands = stream_distributed_execution_plans
                 .decode
                 .execution_islands
                 .iter()
@@ -1863,6 +1908,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
         Ok(VulkanResidentInProcessPlacedStreamProcessor {
             model: self.clone(),
             distributed_dispatch_runners,
+            distributed_dynamic_resource_buffers,
+            selected_resource_adaptation,
             _distributed_activation_buffers: distributed_activation_buffers,
             edge_synchronizations,
             input_transducer,

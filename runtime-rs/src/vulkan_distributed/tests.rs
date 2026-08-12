@@ -827,6 +827,59 @@ mod tests {
     }
 
     #[test]
+    fn warm_gate_ownership_replacement_preserves_participants_and_exact_coverage() {
+        let current = BTreeMap::from([
+            ("gpu0".to_string(), BTreeSet::from([0, 1])),
+            ("gpu1".to_string(), BTreeSet::from([2, 3])),
+        ]);
+        let replacement = BTreeMap::from([
+            ("gpu0".to_string(), BTreeSet::from([0, 2])),
+            ("gpu1".to_string(), BTreeSet::from([1, 3])),
+        ]);
+        validate_selected_resource_execution_ownership_replacement(
+            &current,
+            &replacement,
+            4,
+        )
+        .unwrap();
+
+        let missing_participant = BTreeMap::from([(
+            "gpu0".to_string(),
+            BTreeSet::from([0, 1, 2, 3]),
+        )]);
+        assert!(validate_selected_resource_execution_ownership_replacement(
+            &current,
+            &missing_participant,
+            4,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("same nonempty participant set"));
+        let duplicate = BTreeMap::from([
+            ("gpu0".to_string(), BTreeSet::from([0, 1, 2])),
+            ("gpu1".to_string(), BTreeSet::from([2, 3])),
+        ]);
+        assert!(validate_selected_resource_execution_ownership_replacement(
+            &current,
+            &duplicate,
+            4,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("exactly once"));
+        let empty = BTreeMap::from([
+            ("gpu0".to_string(), BTreeSet::from([0, 1, 2, 3])),
+            ("gpu1".to_string(), BTreeSet::new()),
+        ]);
+        assert!(validate_selected_resource_execution_ownership_replacement(
+            &current,
+            &empty,
+            4,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn fragment_calibration_merges_exact_ranges_and_never_scales_them() {
         let mut dispatch = fixture_plan("row_major").dispatches.remove(0);
         dispatch.selected_resource_partitions =
@@ -2293,6 +2346,22 @@ mod tests {
 
         let ownership =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&plans).unwrap();
+        let execution_placements =
+            selected_resource_placements_from_execution_plan(&plans.decode).unwrap();
+        let [execution_placement] = execution_placements.as_slice() else {
+            panic!("one whole-expert selector must produce one execution placement")
+        };
+        assert_eq!(execution_placement.selector_id, "routed-experts");
+        assert_eq!(execution_placement.assignments.len(), 8);
+        assert_eq!(
+            execution_placement
+                .execution_ownership_by_device(8)
+                .unwrap(),
+            BTreeMap::from([
+                ("helper".to_string(), BTreeSet::from([4, 5, 6, 7])),
+                ("owner".to_string(), BTreeSet::from([0, 1, 2, 3])),
+            ]),
+        );
         assert_eq!(ownership.device_count, 2);
         assert_eq!(ownership.selector_count, 1);
         assert_eq!(ownership.selector_placement_count, 2);

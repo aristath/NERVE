@@ -252,6 +252,8 @@ impl VulkanResidentPlacedComponentBatchRunner {
         let first = processors.first().copied().ok_or(
             VulkanResidentInProcessPlacedRuntimeError::ZeroTickBudget,
         )?;
+        let selected_resource_generation =
+            first.selected_resource_adaptation_generation();
         let lane_capacity = processors.len();
         for processor in processors.iter().copied().skip(1) {
             if processor.device_slices.len() != first.device_slices.len()
@@ -268,6 +270,18 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                     VulkanError(
                         "multi-stream component batch requires identical placed device slices"
+                            .to_string(),
+                    ),
+                ));
+            }
+            if processor.selected_resource_adaptation_generation()
+                != selected_resource_generation
+                || processor.active_decode_batch_distributed_execution_plan()
+                    != first.active_decode_batch_distributed_execution_plan()
+            {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(
+                        "multi-stream component batch requires identical warm selected-resource ownership"
                             .to_string(),
                     ),
                 ));
@@ -291,9 +305,9 @@ impl VulkanResidentPlacedComponentBatchRunner {
             VulkanComponentBatchExecutionMode::IndependentStreams,
             &BTreeMap::new(),
             false,
-            first.model.decode_batch_distributed_execution_plan(),
+            first.active_decode_batch_distributed_execution_plan(),
             &first.model.distributed_parameter_buffers,
-            &first.model.distributed_dynamic_resource_buffers,
+            &first.distributed_dynamic_resource_buffers,
             &first.model.compiled_resource_device_stores,
             &VulkanComponentBatchExecutionScope::all(),
         )

@@ -1,5 +1,9 @@
 pub struct VulkanResidentInProcessPlacedStreamProcessor {
     distributed_dispatch_runners: VulkanDistributedDispatchRunners,
+    distributed_dynamic_resource_buffers:
+        BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
+    selected_resource_adaptation:
+        Option<VulkanRuntimeSelectedResourceAdaptationState>,
     _distributed_activation_buffers: VulkanDistributedActivationBuffers,
     edge_synchronizations: VulkanPlacedEdgeTimelineSynchronizations,
     model: Arc<VulkanResidentInProcessPlacedModelPackage>,

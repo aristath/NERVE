@@ -254,10 +254,15 @@ For every numbered item below:
   retaining exact per-shard execution ownership in their parameter-slot tables;
   tensor-fragment projections remain fixed physical contracts. The mounted
   package exposes the two plans separately, and refuses an execution projection
-  that exceeds or changes its store mapping. The remaining work is a
-  quiescent-boundary executor that changes the expert islands and cache quotas
-  transactionally without remounting the backbone, while preventing addressable
-  replicas from executing duplicate arithmetic.
+  that exceeds or changes its store mapping. The stream-local
+  quiescent-boundary executor is also complete: it changes every accepted
+  selector in one rollback-safe transaction, updates both arithmetic parameter
+  tables and residency-gate ownership without remounting the backbone, keeps
+  addressable replicas from executing duplicate arithmetic, and lets cloned
+  streams inherit adapted ownership without leaking changes into sibling
+  streams. The remaining work is package-wide cache-quota arbitration that
+  aggregates all active streams before changing shared-store eviction budgets,
+  plus measured replication and the explicitly authorized mounted proof.
 - Allow a compiler-declared predictable router dependency to trigger safe
   prefetch or preselection without a DeepSeek-specific runtime branch.
 

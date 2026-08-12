@@ -35,6 +35,8 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     physical_execution_residency_plan: VulkanRuntimePhysicalExecutionResidencyPlan,
     mounted_boundary_routes: BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
     selected_resource_placements: Vec<VulkanSelectedResourcePlacementPlan>,
+    selected_resource_reconfiguration_context:
+        Option<Arc<VulkanRuntimeSelectedResourceReconfigurationContext>>,
     distributed_selected_resource_execution_ownership_plan:
         VulkanDistributedSelectedResourceStorePlan,
     distributed_selected_resource_store_plan: VulkanDistributedSelectedResourceStorePlan,

@@ -486,6 +486,160 @@ pub fn try_plan_vulkan_runtime_selected_resource_placements(
     Ok(Some(placements))
 }
 
+/// Replans whole-resource ownership from one quiescent warm-session telemetry
+/// window. Exact mounted execution and catalog identities remain mandatory.
+/// A proposal is executable only when it retains the mounted participant set
+/// and one similarly sized future window can amortize its measured cold move.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_plan_vulkan_runtime_warm_selected_resource_reconfigurations(
+    execution_plan: &VulkanDistributedExecutionPlan,
+    requirement_plans: &[VulkanRuntimeSelectedResourceExecutionRequirementPlan],
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacities: &[VulkanPlacementSelectedResourceDeviceCapacity],
+    telemetry: &VulkanSelectionTelemetrySnapshot,
+    residency_policy: ResourceResidencyPolicy,
+    phase: nerve_execution_contracts::ExecutionPhase,
+) -> Result<Vec<VulkanSelectedResourceReconfigurationPlan>, VulkanResidentTokenModelPackageError>
+{
+    if !residency_policy.is_demand_loaded() {
+        return Ok(Vec::new());
+    }
+    let current = selected_resource_placements_from_execution_plan(execution_plan)
+        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+    let current_by_selector = current
+        .iter()
+        .map(|placement| (placement.selector_id.as_str(), placement))
+        .collect::<BTreeMap<_, _>>();
+    let requirements_by_selector = requirement_plans
+        .iter()
+        .filter(|requirements| {
+            current_by_selector.contains_key(requirements.selector_id.as_str())
+        })
+        .map(|requirements| (requirements.selector_id.as_str(), requirements))
+        .collect::<BTreeMap<_, _>>();
+    if current_by_selector.keys().copied().collect::<BTreeSet<_>>()
+        != requirements_by_selector
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>()
+    {
+        return distributed_calibration_error(
+            "warm selected-resource requirements do not match mounted whole-resource selectors",
+        );
+    }
+    let mut reconfigurations = Vec::new();
+    for (selector_id, current) in current_by_selector {
+        let requirements = requirements_by_selector[selector_id];
+        let partitions = execution_plan
+            .dispatches
+            .iter()
+            .flat_map(|dispatch| {
+                dispatch
+                    .selected_resource_partitions
+                    .iter()
+                    .filter(|partition| {
+                        partition.selector_id == selector_id
+                            && partition.parameter_partitions.is_empty()
+                    })
+                    .map(move |partition| (dispatch, partition))
+            })
+            .collect::<Vec<_>>();
+        let Some((first_dispatch, partition)) = partitions.first().copied() else {
+            return distributed_calibration_error(
+                "warm selected-resource requirement has no whole-resource dispatch",
+            );
+        };
+        if first_dispatch.component_id != requirements.component_id {
+            return distributed_calibration_error(
+                "warm selected-resource requirement belongs to another component",
+            );
+        }
+        let execution_classes = execution_plan
+            .selected_resource_execution_classes(selector_id)
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        if execution_classes.resource_execution_class_ids
+            != requirements.resource_execution_class_ids
+        {
+            return distributed_calibration_error(
+                "warm selected-resource classes changed after mount",
+            );
+        }
+        let participant_ids = partitions
+            .iter()
+            .flat_map(|(dispatch, _)| {
+                dispatch.shards.iter().map(|shard| shard.device_id.as_str())
+            })
+            .collect::<BTreeSet<_>>();
+        let candidate_capacities = capacities
+            .iter()
+            .filter(|capacity| participant_ids.contains(capacity.device_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if participant_ids.len() < 2
+            || candidate_capacities.len() != participant_ids.len()
+        {
+            return distributed_calibration_error(
+                "warm selected-resource capacity does not cover the mounted participants",
+            );
+        }
+        let Some(devices) = catalog
+            .try_selected_resource_placement_devices(
+                &requirements.requirements,
+                &candidate_capacities,
+            )
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?
+        else {
+            continue;
+        };
+        let matching = telemetry
+            .domains
+            .iter()
+            .filter(|domain| {
+                domain.execution_scope == partition.execution_scope
+                    && domain.component_id == first_dispatch.component_id
+                    && domain.node_id == partition.node_id
+                    && domain.domain_id == partition.domain_id
+            })
+            .collect::<Vec<_>>();
+        let [domain] = matching.as_slice() else {
+            return distributed_calibration_error(format!(
+                "warm selected-resource selector {selector_id:?} has {} exact telemetry domains; expected one",
+                matching.len(),
+            ));
+        };
+        let Some(reconfiguration) =
+            try_plan_warm_selected_resource_reconfiguration(
+                &first_dispatch.component_id,
+                partition,
+                &execution_classes,
+                domain,
+                &devices,
+                residency_policy,
+                phase,
+                current,
+            )
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?
+        else {
+            continue;
+        };
+        let current_participants = current
+            .execution_ownership_by_device(partition.resource_count)
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        let proposed_participants = reconfiguration
+            .proposed
+            .execution_ownership_by_device(partition.resource_count)
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        if current_participants.keys().ne(proposed_participants.keys())
+            || reconfiguration.break_even_activation_count
+                > u128::from(reconfiguration.observed_activation_count)
+        {
+            continue;
+        }
+        reconfigurations.push(reconfiguration);
+    }
+    Ok(reconfigurations)
+}
+
 fn reserve_selected_resource_placement_capacity(
     capacities: &mut [VulkanPlacementSelectedResourceDeviceCapacity],
     placement: &VulkanSelectedResourcePlacementPlan,

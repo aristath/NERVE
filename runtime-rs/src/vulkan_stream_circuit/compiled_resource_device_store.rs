@@ -1262,6 +1262,10 @@ impl VulkanCompiledResourceDeviceStore {
         self.residency_policy
     }
 
+    pub(crate) fn dynamic_device_payload_capacity_bytes(&self) -> usize {
+        self.maximum_dynamic_device_payload_bytes
+    }
+
     pub fn load_selector_resource(
         &self,
         device: &VulkanComputeDevice,

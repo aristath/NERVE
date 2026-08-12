@@ -248,6 +248,44 @@ impl VulkanDistributedSelectedResourceGate {
         self.checkpoint_tag
     }
 
+    pub(crate) fn owned_resource_indices(&self) -> &BTreeSet<usize> {
+        self.gate
+            .owned_resource_indices()
+            .expect("distributed selected-resource gates are mounted with exact ownership")
+    }
+
+    pub(crate) fn replace_execution_ownership_at_quiescent_boundary(
+        &mut self,
+        owned_resource_indices: BTreeSet<usize>,
+    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
+        let addressable_resource_indices = self
+            .context
+            .store
+            .owned_selector_resource_indices(&self.selector_id)
+            .ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "distributed selected-resource store no longer addresses selector {:?}",
+                    self.selector_id,
+                ))
+            })?;
+        if owned_resource_indices.is_empty()
+            || owned_resource_indices
+                .iter()
+                .any(|resource_index| *resource_index >= self.resource_count)
+            || !owned_resource_indices.is_subset(addressable_resource_indices)
+        {
+            return Err(VulkanDistributedDispatchRunnerError(format!(
+                "distributed selected-resource ownership for selector {:?} on {:?} is empty or exceeds its addressability envelope",
+                self.selector_id, self.logical_device_id,
+            )));
+        }
+        self.gate
+            .replace_owned_resource_indices_at_quiescent_boundary(
+                owned_resource_indices,
+            )
+            .map_err(VulkanDistributedDispatchRunnerError::from)
+    }
+
     fn coordinator(
         &self,
     ) -> Result<Option<Arc<VulkanCompiledResourceDistributedCohortCoordinator>>, VulkanDistributedDispatchRunnerError>

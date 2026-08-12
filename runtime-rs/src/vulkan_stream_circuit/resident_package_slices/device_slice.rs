@@ -145,6 +145,28 @@ impl VulkanResidentModelPackageDeviceSlice {
         boundary_overrides: &[VulkanModelBoundaryBufferOverride],
         stream_control_override: Option<Arc<VulkanResidentBuffer>>,
     ) -> Result<VulkanMountedPlacedStreamCircuit, VulkanResidentTokenModelPackageError> {
+        self.create_mounted_stream_circuit_with_all_buffer_and_dynamic_resource_overrides(
+            device,
+            activation_overrides,
+            local_edge_overrides,
+            edge_endpoint_overrides,
+            boundary_overrides,
+            stream_control_override,
+            self.dynamic_resource_buffers.clone(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_mounted_stream_circuit_with_all_buffer_and_dynamic_resource_overrides(
+        &self,
+        device: &VulkanComputeDevice,
+        activation_overrides: &[VulkanActivationSlotBufferOverride],
+        local_edge_overrides: &[VulkanPlacedLocalEdgeBufferOverride],
+        edge_endpoint_overrides: &[VulkanPlacedEdgeEndpointBufferOverride],
+        boundary_overrides: &[VulkanModelBoundaryBufferOverride],
+        stream_control_override: Option<Arc<VulkanResidentBuffer>>,
+        dynamic_resource_buffers: Option<Arc<VulkanDynamicResourceBuffers>>,
+    ) -> Result<VulkanMountedPlacedStreamCircuit, VulkanResidentTokenModelPackageError> {
         VulkanMountedPlacedStreamCircuit::
             from_placed_plan_with_parameter_buffers_and_all_buffer_overrides(
             device,
@@ -156,7 +178,7 @@ impl VulkanResidentModelPackageDeviceSlice {
             edge_endpoint_overrides,
             boundary_overrides,
             stream_control_override,
-            self.dynamic_resource_buffers.clone(),
+            dynamic_resource_buffers,
         )
         .map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(

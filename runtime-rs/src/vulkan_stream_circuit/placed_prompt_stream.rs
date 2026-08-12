@@ -1484,7 +1484,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         let session_run = self
             .session
             .complete_prompt_event(start_stream_tick, event_run)?;
-        self.retier_compiled_resources_at_prompt_boundary()?;
+        self.adapt_compiled_resources_at_prompt_boundary()?;
         Ok(VulkanResidentInProcessPlacedSubmittedInputRun {
             input_event,
             pending_input_event_count: self.pending_input_event_count(),
@@ -1494,11 +1494,13 @@ impl VulkanResidentInProcessPlacedPromptStream {
         })
     }
 
-    fn retier_compiled_resources_at_prompt_boundary(
-        &self,
+    fn adapt_compiled_resources_at_prompt_boundary(
+        &mut self,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let stores = self.package.adaptive_resource_stores();
-        if stores.is_empty() {
+        if stores.is_empty()
+            && self.processor.selected_resource_adaptation.is_none()
+        {
             return Ok(());
         }
         let telemetry = self.processor.selection_telemetry_snapshot(&self.devices)?;
@@ -1531,6 +1533,8 @@ impl VulkanResidentInProcessPlacedPromptStream {
                     ))
                 })?;
         }
+        self.processor
+            .adapt_selected_resource_ownership_at_prompt_boundary(&telemetry)?;
         Ok(())
     }
 }

@@ -58,6 +58,19 @@ fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
     assert!(owned_subset.validate(8, 4, 4).is_err());
     owned_subset.owned_resource_indices = Some(BTreeSet::from([2]));
     assert!(owned_subset.validate(8, 4, 4).is_err());
+    assert_eq!(
+        vulkan_gpu_residency_ownership_words(
+            65,
+            Some(&BTreeSet::from([0, 31, 32, 64])),
+        )
+        .unwrap(),
+        vec![0x8000_0001, 1, 1],
+    );
+    assert!(vulkan_gpu_residency_ownership_words(65, None)
+        .unwrap()
+        .is_empty());
+    assert!(vulkan_gpu_residency_ownership_words(2, Some(&BTreeSet::new())).is_err());
+    assert!(vulkan_gpu_residency_ownership_words(2, Some(&BTreeSet::from([2]))).is_err());
 
     let mut invalid = valid.clone();
     invalid.selection_index_mask = 0x1;

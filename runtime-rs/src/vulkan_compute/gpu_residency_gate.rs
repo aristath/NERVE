@@ -407,18 +407,10 @@ impl VulkanGpuResidencyGate {
             partition_member_count,
         ) = config.address_mapping.gpu_tables()?;
         let resource_count = config.address_mapping.resource_count();
-        let ownership_words = config
-            .owned_resource_indices
-            .as_ref()
-            .map(|indices| {
-                let mut words = vec![0u32; resource_count.div_ceil(u32::BITS as usize)];
-                for index in indices {
-                    words[*index / u32::BITS as usize] |=
-                        1u32 << (*index % u32::BITS as usize);
-                }
-                words
-            })
-            .unwrap_or_default();
+        let ownership_words = vulkan_gpu_residency_ownership_words(
+            resource_count,
+            config.owned_resource_indices.as_ref(),
+        )?;
         let mut configuration_words = vec![
             config.selection_index_shift,
             config.selection_index_mask,
@@ -583,6 +575,52 @@ impl VulkanGpuResidencyGate {
 
     pub fn dispatch(&self) -> &VulkanResidentKernelDispatch {
         &self.dispatch
+    }
+
+    pub(crate) fn owned_resource_indices(&self) -> Option<&BTreeSet<usize>> {
+        self.config.owned_resource_indices.as_ref()
+    }
+
+    /// Replaces the GPU-side arithmetic ownership mask while retaining the
+    /// recorded dispatch and every stable descriptor binding.
+    ///
+    /// The caller must establish a quiescent execution boundary. Gates created
+    /// without an ownership mask intentionally cannot be converted in place:
+    /// their immutable configuration buffer has no ownership-word capacity.
+    pub(crate) fn replace_owned_resource_indices_at_quiescent_boundary(
+        &mut self,
+        owned_resource_indices: BTreeSet<usize>,
+    ) -> Result<(), VulkanError> {
+        if self.config.owned_resource_indices.is_none() {
+            return Err(VulkanError(
+                "GPU residency gate was mounted without mutable ownership capacity"
+                    .to_string(),
+            ));
+        }
+        let resource_count = self.config.address_mapping.resource_count();
+        let ownership_words = vulkan_gpu_residency_ownership_words(
+            resource_count,
+            Some(&owned_resource_indices),
+        )?;
+        let ownership_bytes = u32_words_bytes(&ownership_words);
+        let ownership_byte_offset = VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                VulkanError("GPU residency ownership offset overflowed".to_string())
+            })?;
+        if ownership_byte_offset
+            .checked_add(ownership_bytes.len())
+            .is_none_or(|end| end != self._configuration.byte_capacity())
+        {
+            return Err(VulkanError(
+                "GPU residency gate ownership capacity differs from its resource geometry"
+                    .to_string(),
+            ));
+        }
+        self._configuration
+            .write_bytes_at(ownership_byte_offset, &ownership_bytes)?;
+        self.config.owned_resource_indices = Some(owned_resource_indices);
+        Ok(())
     }
 
     /// Device memory owned only by this gate. Shared selection/address-table
@@ -752,6 +790,29 @@ fn vulkan_gpu_residency_gate_push_constants(
     bytes[8..12].copy_from_slice(&u32::from(restore_downstream).to_le_bytes());
     bytes[12..16].copy_from_slice(&u32::from(restore_transaction).to_le_bytes());
     Ok(bytes)
+}
+
+fn vulkan_gpu_residency_ownership_words(
+    resource_count: usize,
+    owned_resource_indices: Option<&BTreeSet<usize>>,
+) -> Result<Vec<u32>, VulkanError> {
+    let Some(indices) = owned_resource_indices else {
+        return Ok(Vec::new());
+    };
+    if resource_count == 0
+        || indices.is_empty()
+        || indices.iter().any(|index| *index >= resource_count)
+    {
+        return Err(VulkanError(format!(
+            "GPU residency gate resource ownership is empty or exceeds {resource_count} resources"
+        )));
+    }
+    let mut words = vec![0u32; resource_count.div_ceil(u32::BITS as usize)];
+    for index in indices {
+        words[*index / u32::BITS as usize] |=
+            1u32 << (*index % u32::BITS as usize);
+    }
+    Ok(words)
 }
 
 impl VulkanGpuResidencyMissQueue {

@@ -476,9 +476,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             VulkanComponentBatchExecutionMode::CausalSequence,
             &retained_signal_keys,
             capture_causal_state_snapshots,
-            self.model.prefill_distributed_execution_plan(),
+            self.active_prefill_distributed_execution_plan(),
             &self.model.distributed_parameter_buffers,
-            &self.model.distributed_dynamic_resource_buffers,
+            &self.distributed_dynamic_resource_buffers,
             &self.model.compiled_resource_device_stores,
         )?;
         let input_device = devices.get(&self.model.input_device_id).ok_or_else(|| {

@@ -105,6 +105,45 @@ fn selected_resource_gate_lane_layout(
     Ok((activation.signal_byte_capacity, lane_capacity))
 }
 
+pub(crate) fn validate_selected_resource_execution_ownership_replacement(
+    current: &BTreeMap<String, BTreeSet<usize>>,
+    replacement: &BTreeMap<String, BTreeSet<usize>>,
+    resource_count: usize,
+) -> Result<(), VulkanDistributedDispatchRunnerError> {
+    if resource_count == 0
+        || current.len() < 2
+        || current.keys().ne(replacement.keys())
+        || current.values().any(BTreeSet::is_empty)
+        || replacement.values().any(BTreeSet::is_empty)
+    {
+        return Err(VulkanDistributedDispatchRunnerError(
+            "selected-resource reconfiguration must retain the same nonempty participant set"
+                .to_string(),
+        ));
+    }
+    for (label, ownership) in [("current", current), ("replacement", replacement)] {
+        let mut coverage = vec![0u8; resource_count];
+        for resource_index in ownership.values().flatten() {
+            let count = coverage.get_mut(*resource_index).ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "{label} selected-resource ownership exceeds {resource_count} resources",
+                ))
+            })?;
+            *count = count.checked_add(1).ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(
+                    "selected-resource ownership coverage overflowed".to_string(),
+                )
+            })?;
+        }
+        if coverage.iter().any(|count| *count != 1) {
+            return Err(VulkanDistributedDispatchRunnerError(format!(
+                "{label} selected-resource ownership does not cover every resource exactly once",
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn distributed_sequence_for_kind<'a, T>(
     direct: &'a T,
     feedback_indirect: Option<&'a T>,
@@ -1464,6 +1503,121 @@ impl VulkanDistributedDispatchRunners {
             .flat_map(|shard| shard.selected_resource_gates.iter().flatten())
         {
             gate.reset_local_predicate()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replace_selected_resource_execution_ownership_at_quiescent_boundary(
+        &mut self,
+        selector_id: &str,
+        expected_current: &BTreeMap<String, BTreeSet<usize>>,
+        replacement: &BTreeMap<String, BTreeSet<usize>>,
+    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
+        if selector_id.trim().is_empty() {
+            return Err(VulkanDistributedDispatchRunnerError(
+                "selected-resource reconfiguration has no selector".to_string(),
+            ));
+        }
+        let locations = self
+            .dispatches
+            .iter()
+            .enumerate()
+            .flat_map(|(dispatch_index, dispatch)| {
+                dispatch.shards.iter().enumerate().flat_map(
+                    move |(shard_index, shard)| {
+                        shard.selected_resource_gates.iter().enumerate().flat_map(
+                            move |(member_index, gates)| {
+                                gates.iter().enumerate().filter_map(
+                                    move |(gate_index, gate)| {
+                                        (gate.selector_id() == selector_id).then_some((
+                                            dispatch_index,
+                                            shard_index,
+                                            member_index,
+                                            gate_index,
+                                        ))
+                                    },
+                                )
+                            },
+                        )
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let first = locations.first().ok_or_else(|| {
+            VulkanDistributedDispatchRunnerError(format!(
+                "mounted decode runners have no residency gate for selector {selector_id:?}",
+            ))
+        })?;
+        let resource_count = self.dispatches[first.0].shards[first.1]
+            .selected_resource_gates[first.2][first.3]
+            .resource_count();
+        validate_selected_resource_execution_ownership_replacement(
+            expected_current,
+            replacement,
+            resource_count,
+        )?;
+        for (dispatch_index, shard_index, member_index, gate_index) in &locations {
+            let gate = &self.dispatches[*dispatch_index].shards[*shard_index]
+                .selected_resource_gates[*member_index][*gate_index];
+            let expected = expected_current.get(gate.logical_device_id()).ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "selected-resource reconfiguration omits gate participant {:?}",
+                    gate.logical_device_id(),
+                ))
+            })?;
+            if gate.resource_count() != resource_count
+                || gate.owned_resource_indices() != expected
+            {
+                return Err(VulkanDistributedDispatchRunnerError(format!(
+                    "selected-resource gate for selector {selector_id:?} on {:?} is stale or changes geometry",
+                    gate.logical_device_id(),
+                )));
+            }
+        }
+        let gate_devices = locations
+            .iter()
+            .map(|(dispatch_index, shard_index, member_index, gate_index)| {
+                self.dispatches[*dispatch_index].shards[*shard_index]
+                    .selected_resource_gates[*member_index][*gate_index]
+                    .logical_device_id()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let mut updated = 0usize;
+        for (location, device_id) in locations.iter().zip(&gate_devices) {
+            let gate = &mut self.dispatches[location.0].shards[location.1]
+                .selected_resource_gates[location.2][location.3];
+            let next = replacement
+                .get(device_id)
+                .expect("replacement participant coverage was validated")
+                .clone();
+            if let Err(error) =
+                gate.replace_execution_ownership_at_quiescent_boundary(next)
+            {
+                let mut rollback_error = None;
+                for (rollback, rollback_device_id) in locations[..updated]
+                    .iter()
+                    .zip(&gate_devices[..updated])
+                    .rev()
+                {
+                    if let Err(error) = self.dispatches[rollback.0].shards[rollback.1]
+                        .selected_resource_gates[rollback.2][rollback.3]
+                        .replace_execution_ownership_at_quiescent_boundary(
+                            expected_current[rollback_device_id].clone(),
+                        )
+                        && rollback_error.is_none()
+                    {
+                        rollback_error = Some(error);
+                    }
+                }
+                return Err(match rollback_error {
+                    Some(rollback_error) => VulkanDistributedDispatchRunnerError(format!(
+                        "failed to replace selector {selector_id:?} gate ownership: {error}; rollback also failed: {rollback_error}",
+                    )),
+                    None => error,
+                });
+            }
+            updated += 1;
         }
         Ok(())
     }

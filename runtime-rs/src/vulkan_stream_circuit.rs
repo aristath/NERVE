@@ -110,11 +110,15 @@ use crate::vulkan_distributed::{
     VulkanDistributedReductionRunner, VulkanDistributedSelectedResourceFragmentPlan,
     VulkanDistributedSelectedResourcePartitionPlan, VulkanDistributedSelectedResourceStorePlan,
     VulkanPhysicalExecutionIslandPlan, VulkanPhysicalExecutionTransportKind,
-    VulkanSelectedResourcePlacementPlan, allocate_distributed_shared_buffer,
-    create_distributed_reduction_runner_for_buffers, distributed_residency_replay_schedule,
-    distributed_shard_push_constants, resolved_physical_execution_islands,
-    selected_resource_activation, selected_resource_placements_fit_phase_participants,
-    try_plan_selected_resource_placement, vulkan_distributed_placement_strategy,
+    VulkanSelectedResourcePlacementPlan, VulkanSelectedResourceReconfigurationPlan,
+    allocate_distributed_shared_buffer, create_distributed_reduction_runner_for_buffers,
+    distributed_residency_replay_schedule, distributed_shard_push_constants,
+    resolved_physical_execution_islands, selected_resource_activation,
+    selected_resource_placements_fit_phase_participants,
+    selected_resource_placements_from_execution_plan, try_plan_selected_resource_placement,
+    try_plan_warm_selected_resource_reconfiguration,
+    validate_selected_resource_execution_ownership_replacement,
+    vulkan_distributed_placement_strategy,
 };
 
 mod package;
@@ -220,6 +224,7 @@ include!("vulkan_stream_circuit/hybrid_placement_optimizer.rs");
 include!("vulkan_stream_circuit/runtime_hybrid_placement.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_planning.rs");
 include!("vulkan_stream_circuit/runtime_selected_resource_mount_planning.rs");
+include!("vulkan_stream_circuit/runtime_selected_resource_reconfiguration.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_calibration.rs");
 include!("vulkan_stream_circuit/runtime_distributed_contract_candidates.rs");
 include!("vulkan_stream_circuit/runtime_distributed_execution_identity.rs");

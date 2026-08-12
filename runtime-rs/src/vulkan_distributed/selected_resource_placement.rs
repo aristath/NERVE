@@ -272,6 +272,105 @@ pub struct VulkanSelectedResourcePlacementPlan {
     pub maximum_second_moment_ns2: u128,
 }
 
+impl VulkanSelectedResourcePlacementPlan {
+    pub(crate) fn execution_ownership_by_device(
+        &self,
+        resource_count: usize,
+    ) -> Result<BTreeMap<String, BTreeSet<usize>>, VulkanDistributedPlanError> {
+        if self.selector_id.trim().is_empty() || self.assignments.len() != resource_count {
+            return Err(VulkanDistributedPlanError(
+                "selected-resource placement does not cover its complete resource domain"
+                    .to_string(),
+            ));
+        }
+        let mut ownership = BTreeMap::<String, BTreeSet<usize>>::new();
+        let mut covered = vec![false; resource_count];
+        for assignment in &self.assignments {
+            if assignment.device_id.trim().is_empty()
+                || assignment.resource_index >= resource_count
+                || std::mem::replace(&mut covered[assignment.resource_index], true)
+            {
+                return Err(VulkanDistributedPlanError(
+                    "selected-resource placement repeats a resource or has an invalid owner"
+                        .to_string(),
+                ));
+            }
+            ownership
+                .entry(assignment.device_id.clone())
+                .or_default()
+                .insert(assignment.resource_index);
+        }
+        if covered.iter().any(|covered| !covered) {
+            return Err(VulkanDistributedPlanError(
+                "selected-resource placement leaves an unowned resource".to_string(),
+            ));
+        }
+        Ok(ownership)
+    }
+}
+
+pub(crate) fn selected_resource_placements_from_execution_plan(
+    execution_plan: &VulkanDistributedExecutionPlan,
+) -> Result<Vec<VulkanSelectedResourcePlacementPlan>, VulkanDistributedPlanError> {
+    let mut assignments_by_selector =
+        BTreeMap::<String, (usize, Vec<VulkanSelectedResourceAssignment>)>::new();
+    for dispatch in &execution_plan.dispatches {
+        for partition in &dispatch.selected_resource_partitions {
+            if !partition.parameter_partitions.is_empty() {
+                continue;
+            }
+            let mut assignments = dispatch
+                .shards
+                .iter()
+                .flat_map(|shard| {
+                    shard
+                        .selected_resource_indices
+                        .get(&partition.selector_id)
+                        .into_iter()
+                        .flatten()
+                        .map(|resource_index| VulkanSelectedResourceAssignment {
+                            resource_index: *resource_index,
+                            device_id: shard.device_id.clone(),
+                        })
+                })
+                .collect::<Vec<_>>();
+            assignments.sort_by_key(|assignment| assignment.resource_index);
+            let candidate = VulkanSelectedResourcePlacementPlan {
+                selector_id: partition.selector_id.clone(),
+                assignments: assignments.clone(),
+                device_loads: Vec::new(),
+                maximum_first_moment_ns: 0,
+                maximum_second_moment_ns2: 0,
+            };
+            candidate.execution_ownership_by_device(partition.resource_count)?;
+            match assignments_by_selector.entry(partition.selector_id.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((partition.resource_count, assignments));
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if entry.get() != &(partition.resource_count, assignments) =>
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "selected-resource selector {:?} changes ownership between connected dispatches",
+                        partition.selector_id,
+                    )));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+        }
+    }
+    Ok(assignments_by_selector
+        .into_iter()
+        .map(|(selector_id, (_, assignments))| VulkanSelectedResourcePlacementPlan {
+            selector_id,
+            assignments,
+            device_loads: Vec::new(),
+            maximum_first_moment_ns: 0,
+            maximum_second_moment_ns2: 0,
+        })
+        .collect())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanSelectedResourcePlacementMove {
     pub resource_index: usize,
