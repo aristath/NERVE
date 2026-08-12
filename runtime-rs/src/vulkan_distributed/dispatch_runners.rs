@@ -85,6 +85,26 @@ fn physical_island_reduction_dispatch(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanDistributedCoordinatorKind {
+    None,
+    NumericReduction,
+    ResidencyCommit,
+}
+
+fn physical_island_coordinator_kind(
+    island: &VulkanPhysicalExecutionIslandPlan,
+    has_shard_residency_predicates: bool,
+) -> Result<VulkanDistributedCoordinatorKind, VulkanDistributedDispatchRunnerError> {
+    if physical_island_reduction_dispatch(island)?.is_some() {
+        Ok(VulkanDistributedCoordinatorKind::NumericReduction)
+    } else if has_shard_residency_predicates {
+        Ok(VulkanDistributedCoordinatorKind::ResidencyCommit)
+    } else {
+        Ok(VulkanDistributedCoordinatorKind::None)
+    }
+}
+
 pub(crate) fn distributed_shard_push_constants(
     planned_dispatch: &VulkanDistributedDispatchPlan,
     planned_shard: &VulkanDistributedDispatchShard,
@@ -809,9 +829,14 @@ impl VulkanDistributedDispatchRunners {
                     .map_err(VulkanDistributedDispatchRunnerError::from)?,
                 );
             }
-            let reduction = match physical_island_reduction_dispatch(planned_island)? {
-                None => None,
-                Some(planned_dispatch) => {
+            let coordinator_kind = physical_island_coordinator_kind(
+                planned_island,
+                !owner_shard_residency_predicates.is_empty(),
+            )?;
+            let reduction = match coordinator_kind {
+                VulkanDistributedCoordinatorKind::NumericReduction => {
+                    let planned_dispatch = physical_island_reduction_dispatch(planned_island)?
+                        .expect("numeric coordinator kind has a reduction dispatch");
                     Some(create_distributed_reduction_runner(
                         owner_device,
                         planned_dispatch,
@@ -822,18 +847,31 @@ impl VulkanDistributedDispatchRunners {
                         &owner_shard_residency_predicates,
                     )?)
                 }
+                VulkanDistributedCoordinatorKind::None
+                | VulkanDistributedCoordinatorKind::ResidencyCommit => None,
             };
-            if !owner_shard_residency_predicates.is_empty() && reduction.is_none() {
-                return Err(VulkanDistributedDispatchRunnerError(format!(
-                    "selected-resource dispatch {}..{} has no coordinator reduction to commit shard residency",
-                    leader.dispatch_index, tail.dispatch_index
-                )));
-            }
+            let residency_commit = match coordinator_kind {
+                VulkanDistributedCoordinatorKind::ResidencyCommit => {
+                    let commit = create_distributed_residency_commit_runner(
+                        owner_device,
+                        &leader.component_id,
+                        &tail.node_id,
+                        transaction_predicates.and_then(|predicates| {
+                            predicates.get(&planned_island.owner_device_id)
+                        }),
+                        &owner_shard_residency_predicates,
+                    )?;
+                    Some(commit)
+                }
+                VulkanDistributedCoordinatorKind::None
+                | VulkanDistributedCoordinatorKind::NumericReduction => None,
+            };
             dispatches.push(VulkanDistributedDispatchRunner {
                 planned: planned_island.clone(),
                 shards,
                 helper_synchronization,
                 reduction,
+                residency_commit,
                 dependency_clock: VulkanDistributedDependencyClock::new(),
             });
         }
@@ -1171,12 +1209,12 @@ impl VulkanDistributedDispatchRunners {
                 })
                 .unwrap_or_default();
             let signal_points = synchronization
-                .filter(|_| prepare_owner_continuation || dispatch.reduction.is_some())
+                .filter(|_| prepare_owner_continuation || dispatch.coordinator_sequence().is_some())
                 .map(|sync| {
                     vec![sync.helper_done(dependency_value)]
                 })
                 .unwrap_or_default();
-            let shard_signal_completion = signal_completion && dispatch.reduction.is_none();
+            let shard_signal_completion = signal_completion && dispatch.coordinator_sequence().is_none();
             let submission = if let Some(submission_batch) = submission_batch {
                 submission_batch.enqueue_recorded_sequence(
                     device,
@@ -1211,10 +1249,10 @@ impl VulkanDistributedDispatchRunners {
             }
             submitted.push((device, shard, sequence));
         }
-        if let Some(reduction) = &dispatch.reduction {
+        if let Some(coordinator_sequence) = dispatch.coordinator_sequence() {
             let owner_device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
                 VulkanDistributedDispatchRunnerError(format!(
-                    "failed to resolve distributed reduction owner {:?}: {error}",
+                    "failed to resolve distributed coordinator owner {:?}: {error}",
                     dispatch.planned.owner_device_id
                 ))
             })?;
@@ -1223,34 +1261,34 @@ impl VulkanDistributedDispatchRunners {
                 .iter()
                 .map(|sync| sync.owner_done(dependency_value))
                 .collect::<Vec<_>>();
-            let reduction_submission = if let Some(submission_batch) = submission_batch {
+            let coordinator_submission = if let Some(submission_batch) = submission_batch {
                 submission_batch.enqueue_recorded_sequence(
                     owner_device,
-                    &reduction.sequence,
+                    coordinator_sequence,
                     &wait_points,
                     &[],
                     signal_completion,
                 )
             } else if signal_completion {
                 owner_device.submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
-                    &reduction.sequence,
+                    coordinator_sequence,
                     &wait_points,
                     &[],
                 )
             } else {
                 owner_device
                     .submit_recorded_resident_kernel_sequence_unfenced_with_timeline_semaphores(
-                        &reduction.sequence,
+                        coordinator_sequence,
                         &wait_points,
                         &[],
                     )
             };
-            if let Err(error) = reduction_submission {
+            if let Err(error) = coordinator_submission {
                 for (submitted_device, _, submitted_sequence) in &submitted {
                     let _ = submitted_device.wait_resident_kernel_sequence(submitted_sequence);
                 }
                 return Err(VulkanDistributedDispatchRunnerError(format!(
-                    "failed to submit distributed reduction {}.{} on {:?}: {error}",
+                    "failed to submit distributed coordinator {}.{} on {:?}: {error}",
                     dispatch.planned.leader().component_id,
                     dispatch.planned.tail().node_id,
                     dispatch.planned.owner_device_id
@@ -1387,15 +1425,15 @@ impl VulkanDistributedDispatchRunners {
                 }
             }
         }
-        if let Some(reduction) = &dispatch.reduction {
+        if let Some(coordinator_sequence) = dispatch.coordinator_sequence() {
             let owner_device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
                 VulkanDistributedDispatchRunnerError(format!(
-                    "failed to resolve distributed reduction owner {:?}: {error}",
+                    "failed to resolve distributed coordinator owner {:?}: {error}",
                     dispatch.planned.owner_device_id
                 ))
             })?;
             owner_device
-                .run_recorded_resident_kernel_sequence(&reduction.sequence)
+                .run_recorded_resident_kernel_sequence(coordinator_sequence)
                 .map_err(VulkanDistributedDispatchRunnerError::from)?;
         }
         Ok(Some(VulkanDistributedResolvedResidencyFault {
@@ -1454,18 +1492,18 @@ impl VulkanDistributedDispatchRunners {
                 ));
             }
         }
-        if let Some(reduction) = &dispatch.reduction {
+        if let Some(coordinator_sequence) = dispatch.coordinator_sequence() {
             let owner_device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
                 VulkanDistributedDispatchRunnerError(format!(
-                    "failed to resolve distributed reduction owner {:?}: {error}",
+                    "failed to resolve distributed coordinator owner {:?}: {error}",
                     dispatch.planned.owner_device_id
                 ))
             })?;
-            if let Err(error) = owner_device.wait_resident_kernel_sequence(&reduction.sequence)
+            if let Err(error) = owner_device.wait_resident_kernel_sequence(coordinator_sequence)
                 && first_error.is_none()
             {
                 first_error = Some(format!(
-                    "failed waiting for distributed reduction {}.{} on {:?}: {error}",
+                    "failed waiting for distributed coordinator {}.{} on {:?}: {error}",
                     dispatch.planned.leader().component_id,
                     dispatch.planned.tail().node_id,
                     dispatch.planned.owner_device_id
@@ -1533,7 +1571,21 @@ pub struct VulkanDistributedDispatchRunner {
     pub shards: Vec<VulkanDistributedDispatchShardRunner>,
     helper_synchronization: Vec<VulkanDistributedQueueSynchronization>,
     reduction: Option<VulkanDistributedReductionRunner>,
+    residency_commit: Option<VulkanDistributedResidencyCommitRunner>,
     dependency_clock: VulkanDistributedDependencyClock,
+}
+
+impl VulkanDistributedDispatchRunner {
+    fn coordinator_sequence(&self) -> Option<&VulkanResidentKernelSequence> {
+        self.reduction
+            .as_ref()
+            .map(|reduction| &reduction.sequence)
+            .or_else(|| {
+                self.residency_commit
+                    .as_ref()
+                    .map(|commit| &commit.sequence)
+            })
+    }
 }
 
 pub struct VulkanDistributedDispatchShardRunner {

@@ -30,14 +30,6 @@ fn distributed_sum_f32_spirv_words(
     )
 }
 
-fn distributed_clear_predicate_spirv_words(
-) -> Result<Vec<u32>, VulkanDistributedDispatchRunnerError> {
-    embedded_distributed_reduction_spirv_words(
-        include_bytes!(concat!(env!("OUT_DIR"), "/distributed_clear_predicate.spv")),
-        "clear_predicate",
-    )
-}
-
 fn distributed_sum_f32_add_bf16_residual_spirv_words(
 ) -> Result<Vec<u32>, VulkanDistributedDispatchRunnerError> {
     embedded_distributed_reduction_spirv_words(

@@ -3,6 +3,7 @@ include!("vulkan_distributed/activation_buffers.rs");
 include!("vulkan_distributed/dispatch_shards.rs");
 include!("vulkan_distributed/parameter_buffers.rs");
 include!("vulkan_distributed/queue_dependencies.rs");
+include!("vulkan_distributed/residency_commit_runner.rs");
 include!("vulkan_distributed/reduction_runner.rs");
 include!("vulkan_distributed/dispatch_runners.rs");
 include!("vulkan_distributed/parameter_exclusions.rs");

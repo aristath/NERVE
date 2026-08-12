@@ -2130,6 +2130,14 @@ mod tests {
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].dispatch_indices(), [7, 8]);
         assert_eq!(
+            physical_island_coordinator_kind(&grouped[0], true).unwrap(),
+            VulkanDistributedCoordinatorKind::ResidencyCommit,
+        );
+        assert_eq!(
+            physical_island_coordinator_kind(&grouped[0], false).unwrap(),
+            VulkanDistributedCoordinatorKind::None,
+        );
+        assert_eq!(
             grouped[0]
                 .transient_memory
                 .iter()
@@ -2352,6 +2360,10 @@ mod tests {
                 .unwrap()
                 .dispatch_index,
             8
+        );
+        assert_eq!(
+            physical_island_coordinator_kind(&islands[0], true).unwrap(),
+            VulkanDistributedCoordinatorKind::NumericReduction,
         );
         islands[0].dispatches[0].reduction = islands[0].dispatches[1].reduction.clone();
         assert!(
