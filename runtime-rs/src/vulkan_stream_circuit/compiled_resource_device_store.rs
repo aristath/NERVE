@@ -550,6 +550,8 @@ pub struct VulkanCompiledResourceDeviceStore {
     memory_plan: Option<std::sync::Mutex<VulkanCompiledResourceMemoryPlan>>,
     address_state: std::sync::Mutex<VulkanCompiledResourceDeviceAddressState>,
     residency_mutation: std::sync::Mutex<()>,
+    distributed_cohort_coordinator:
+        std::sync::Mutex<Option<Arc<VulkanCompiledResourceDistributedCohortCoordinator>>>,
     backing_store: CompiledResourceBackingStore,
     representation_backing_store: Option<CompiledResourceBackingStore>,
     manager: DeviceResourceResidencyManager<VulkanResidentCompiledResource>,
@@ -1017,6 +1019,7 @@ impl VulkanCompiledResourceDeviceStore {
                 promoted_representations: BTreeMap::new(),
             }),
             residency_mutation: std::sync::Mutex::new(()),
+            distributed_cohort_coordinator: std::sync::Mutex::new(None),
             backing_store,
             representation_backing_store,
             manager,
@@ -1071,6 +1074,42 @@ impl VulkanCompiledResourceDeviceStore {
 
     pub fn logical_device_ids(&self) -> &[String] {
         &self.logical_device_ids
+    }
+
+    fn attach_distributed_cohort_coordinator(
+        &self,
+        coordinator: Arc<VulkanCompiledResourceDistributedCohortCoordinator>,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        let mut attached = self.distributed_cohort_coordinator.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource distributed cohort attachment was poisoned",
+            )
+        })?;
+        match &*attached {
+            Some(existing) if !Arc::ptr_eq(existing, &coordinator) => {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "compiled resource store {:?} is already attached to another distributed residency coordinator",
+                    self.device_id,
+                )));
+            }
+            Some(_) => {}
+            None => *attached = Some(coordinator),
+        }
+        Ok(())
+    }
+
+    fn distributed_cohort_coordinator(
+        &self,
+    ) -> Result<Option<Arc<VulkanCompiledResourceDistributedCohortCoordinator>>, VulkanCompiledResourceDeviceStoreError>
+    {
+        self.distributed_cohort_coordinator
+            .lock()
+            .map(|coordinator| coordinator.clone())
+            .map_err(|_| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource distributed cohort attachment was poisoned",
+                )
+            })
     }
 
     pub fn register_device_memory_reclaimer(

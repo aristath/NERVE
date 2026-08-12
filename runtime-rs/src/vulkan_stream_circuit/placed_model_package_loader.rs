@@ -1041,6 +1041,19 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 }
             }
         }
+        if resource_residency_policy.is_demand_loaded() {
+            attach_distributed_compiled_resource_cohorts(
+                &distributed_selected_resource_store_plan,
+                &compiled_resource_device_stores,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to attach distributed selected-resource residency cohorts: {error}",
+                    )),
+                )
+            })?;
+        }
         let device_slices = device_slices.into_iter().map(Arc::new).collect::<Vec<_>>();
 
         let transducer_parameter_count = if Arc::ptr_eq(

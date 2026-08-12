@@ -448,6 +448,14 @@ impl VulkanCompiledResourceDeviceStore {
         require_full_capacity: bool,
         granularity: VulkanCompiledResourceEvictionGranularity,
     ) -> Result<usize, VulkanCompiledResourceDeviceStoreError> {
+        let mut protected_group_ids = protected_group_ids.clone();
+        if let Some(coordinator) = self.distributed_cohort_coordinator()? {
+            protected_group_ids.extend(candidates.iter().filter_map(|candidate| {
+                coordinator
+                    .protects_group_on_store(self, &candidate.group_id)
+                    .then(|| candidate.group_id.clone())
+            }));
+        }
         let mut address_state = self.address_state.lock().map_err(|_| {
             VulkanCompiledResourceDeviceStoreError::new(
                 "compiled resource address state was poisoned",
@@ -488,7 +496,7 @@ impl VulkanCompiledResourceDeviceStore {
                 group_cohorts,
                 cohort_groups,
                 &cohort_byte_capacities,
-                protected_group_ids,
+                &protected_group_ids,
                 required_payload_bytes,
                 required_device_bytes,
                 required_host_visible_bytes,

@@ -42,5 +42,6 @@ include!("tests/runtime_hybrid_placement.rs");
 include!("tests/runtime_selected_resource_mount_planning.rs");
 include!("tests/compiled_resource_device_store.rs");
 include!("tests/device_resource_residency.rs");
+include!("tests/compiled_resource_distributed_cohorts.rs");
 include!("tests/physical_residency_checkpoint.rs");
 include!("tests/residency_backpressure_scheduler.rs");
