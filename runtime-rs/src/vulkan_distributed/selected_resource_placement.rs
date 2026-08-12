@@ -1,7 +1,9 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanSelectedResourcePlacementDevice {
     pub device_id: String,
-    pub safe_capacity_bytes: usize,
+    /// Payload bytes that this device may safely keep resident after current
+    /// reservations and fixed runtime allocations have been deducted.
+    pub resident_payload_capacity_bytes: usize,
     /// Exact measured complete expert transaction duration for every resource
     /// in selector order. Zero or missing entries are unavailable evidence.
     pub measured_duration_ns_by_resource: Vec<u64>,
@@ -16,7 +18,11 @@ pub struct VulkanSelectedResourceAssignment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanSelectedResourceDeviceLoad {
     pub device_id: String,
-    pub resident_bytes: usize,
+    /// Total immutable payload addressable through this device's selector
+    /// tables. Demand-paged ownership may exceed resident capacity.
+    pub addressable_bytes: usize,
+    /// Conservative maximum payload required by one selector activation.
+    pub maximum_load_wave_bytes: usize,
     pub first_moment_ns: u128,
     pub second_moment_ns2: u128,
     pub owned_resource_indices: Vec<usize>,
@@ -34,8 +40,9 @@ pub struct VulkanSelectedResourcePlacementPlan {
 #[derive(Clone, Debug)]
 struct VulkanSelectedResourceMutableDeviceLoad {
     device_id: String,
-    safe_capacity_bytes: usize,
-    resident_bytes: usize,
+    resident_payload_capacity_bytes: usize,
+    addressable_bytes: usize,
+    maximum_load_wave_bytes: usize,
     first_moment_ns: u128,
     second_moment_ns2: u128,
     owned_resource_indices: Vec<usize>,
@@ -53,6 +60,7 @@ pub fn plan_selected_resource_placement(
     partition: &VulkanDistributedSelectedResourcePartitionPlan,
     telemetry: &crate::vulkan_stream_circuit::VulkanSelectionTelemetryDomainSnapshot,
     devices: &[VulkanSelectedResourcePlacementDevice],
+    residency_policy: crate::vulkan_stream_circuit::ResourceResidencyPolicy,
 ) -> Result<VulkanSelectedResourcePlacementPlan, VulkanDistributedPlanError> {
     validate_selected_resource_placement_problem(component_id, partition, telemetry, devices)?;
 
@@ -90,8 +98,9 @@ pub fn plan_selected_resource_placement(
         .iter()
         .map(|device| VulkanSelectedResourceMutableDeviceLoad {
             device_id: device.device_id.clone(),
-            safe_capacity_bytes: device.safe_capacity_bytes,
-            resident_bytes: 0,
+            resident_payload_capacity_bytes: device.resident_payload_capacity_bytes,
+            addressable_bytes: 0,
+            maximum_load_wave_bytes: 0,
             first_moment_ns: 0,
             second_moment_ns2: 0,
             owned_resource_indices: Vec::new(),
@@ -103,10 +112,26 @@ pub fn plan_selected_resource_placement(
         let selection_count = u128::from(telemetry.selection_counts[resource_index]);
         let mut candidates = Vec::new();
         for (device_index, (device, load)) in devices.iter().zip(&loads).enumerate() {
-            let Some(resident_bytes) = load.resident_bytes.checked_add(resource_bytes) else {
+            let Some(addressable_bytes) = load.addressable_bytes.checked_add(resource_bytes) else {
                 continue;
             };
-            if resident_bytes > load.safe_capacity_bytes {
+            let maximum_load_wave_bytes = selected_resource_maximum_load_wave_bytes(
+                partition,
+                load.owned_resource_indices
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(resource_index)),
+            )?;
+            let required_resident_bytes = match residency_policy {
+                crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager
+                | crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandRetained => {
+                    addressable_bytes
+                }
+                crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged => {
+                    maximum_load_wave_bytes
+                }
+            };
+            if required_resident_bytes > load.resident_payload_capacity_bytes {
                 continue;
             }
             let duration = u128::from(device.measured_duration_ns_by_resource[resource_index]);
@@ -191,10 +216,13 @@ pub fn plan_selected_resource_placement(
             candidates.push((
                 maximum_second,
                 maximum_first,
-                std::cmp::Reverse(load.safe_capacity_bytes - resident_bytes),
+                std::cmp::Reverse(
+                    load.resident_payload_capacity_bytes - required_resident_bytes,
+                ),
                 device.device_id.as_str(),
                 device_index,
-                resident_bytes,
+                addressable_bytes,
+                maximum_load_wave_bytes,
                 projected_first,
                 projected_second,
             ));
@@ -206,18 +234,20 @@ pub fn plan_selected_resource_placement(
             _,
             _,
             device_index,
-            resident_bytes,
+            addressable_bytes,
+            maximum_load_wave_bytes,
             projected_first,
             projected_second,
         )) = candidates.into_iter().next()
         else {
             return Err(VulkanDistributedPlanError(format!(
-                "selected resource {} for selector {:?} has no measured device with {} bytes of safe remaining capacity",
-                resource_index, partition.selector_id, resource_bytes,
+                "selected resource {} for selector {:?} has no measured device whose resident payload capacity admits its {:?} residency requirement",
+                resource_index, partition.selector_id, residency_policy,
             )));
         };
         let load = &mut loads[device_index];
-        load.resident_bytes = resident_bytes;
+        load.addressable_bytes = addressable_bytes;
+        load.maximum_load_wave_bytes = maximum_load_wave_bytes;
         load.first_moment_ns = projected_first;
         load.second_moment_ns2 = projected_second;
         load.owned_resource_indices.push(resource_index);
@@ -252,7 +282,8 @@ pub fn plan_selected_resource_placement(
         .into_iter()
         .map(|load| VulkanSelectedResourceDeviceLoad {
             device_id: load.device_id,
-            resident_bytes: load.resident_bytes,
+            addressable_bytes: load.addressable_bytes,
+            maximum_load_wave_bytes: load.maximum_load_wave_bytes,
             first_moment_ns: load.first_moment_ns,
             second_moment_ns2: load.second_moment_ns2,
             owned_resource_indices: load.owned_resource_indices,
@@ -265,6 +296,26 @@ pub fn plan_selected_resource_placement(
         maximum_first_moment_ns,
         maximum_second_moment_ns2,
     })
+}
+
+fn selected_resource_maximum_load_wave_bytes(
+    partition: &VulkanDistributedSelectedResourcePartitionPlan,
+    owned_resource_indices: impl IntoIterator<Item = usize>,
+) -> Result<usize, VulkanDistributedPlanError> {
+    let mut byte_counts = owned_resource_indices
+        .into_iter()
+        .map(|resource_index| partition.atomic_group_byte_counts[resource_index])
+        .collect::<Vec<_>>();
+    byte_counts.sort_unstable_by(|left, right| right.cmp(left));
+    byte_counts
+        .into_iter()
+        .take(partition.selection_count_per_activation)
+        .try_fold(0usize, |total, bytes| total.checked_add(bytes))
+        .ok_or_else(|| {
+            VulkanDistributedPlanError(
+                "selected-resource maximum load-wave bytes overflowed".to_string(),
+            )
+        })
 }
 
 impl VulkanDistributedExecutionPlanSet {
@@ -519,7 +570,7 @@ fn validate_selected_resource_placement_problem(
     for device in devices {
         if device.device_id.is_empty()
             || !device_ids.insert(device.device_id.as_str())
-            || device.safe_capacity_bytes == 0
+            || device.resident_payload_capacity_bytes == 0
             || device.measured_duration_ns_by_resource.len() != partition.resource_count
             || device
                 .measured_duration_ns_by_resource
@@ -578,7 +629,7 @@ mod selected_resource_placement_tests {
             .into_iter()
             .map(|device_id| VulkanSelectedResourcePlacementDevice {
                 device_id: device_id.to_string(),
-                safe_capacity_bytes: capacity,
+                resident_payload_capacity_bytes: capacity,
                 measured_duration_ns_by_resource: vec![10; resource_count],
             })
             .collect()
@@ -591,6 +642,7 @@ mod selected_resource_placement_tests {
             &partition(4, 2),
             &telemetry(vec![100; 4], vec![100, 0, 0, 0, 0, 100]),
             &devices(4, 40),
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
         )
         .unwrap();
         let owner = |resource_index| {
@@ -605,8 +657,10 @@ mod selected_resource_placement_tests {
         assert_ne!(owner(0), owner(1));
         assert_ne!(owner(2), owner(3));
         assert_eq!(plan.assignments.len(), 4);
-        assert_eq!(plan.device_loads[0].resident_bytes, 20);
-        assert_eq!(plan.device_loads[1].resident_bytes, 20);
+        assert_eq!(plan.device_loads[0].addressable_bytes, 20);
+        assert_eq!(plan.device_loads[0].maximum_load_wave_bytes, 20);
+        assert_eq!(plan.device_loads[1].addressable_bytes, 20);
+        assert_eq!(plan.device_loads[1].maximum_load_wave_bytes, 20);
     }
 
     #[test]
@@ -616,6 +670,7 @@ mod selected_resource_placement_tests {
             &partition(4, 2),
             &telemetry(vec![1_000, 900, 1, 1], vec![0; 6]),
             &devices(4, 30),
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
         )
         .unwrap();
 
@@ -628,16 +683,62 @@ mod selected_resource_placement_tests {
     }
 
     #[test]
-    fn placement_rejects_insufficient_aggregate_capacity() {
+    fn eager_placement_rejects_insufficient_aggregate_capacity() {
         let error = plan_selected_resource_placement(
             "layer",
             &partition(4, 2),
             &telemetry(vec![1; 4], vec![0; 6]),
             &devices(4, 15),
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
         )
         .unwrap_err();
 
         assert!(error.0.contains("no measured device"));
+    }
+
+    #[test]
+    fn demand_paged_placement_separates_addressable_bank_from_resident_load_wave() {
+        let plan = plan_selected_resource_placement(
+            "layer",
+            &partition(6, 2),
+            &telemetry(vec![1; 6], vec![0; 15]),
+            &devices(6, 20)[..1],
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+        )
+        .unwrap();
+
+        assert_eq!(plan.assignments.len(), 6);
+        assert_eq!(plan.device_loads.len(), 1);
+        assert_eq!(plan.device_loads[0].addressable_bytes, 60);
+        assert_eq!(plan.device_loads[0].maximum_load_wave_bytes, 20);
+    }
+
+    #[test]
+    fn demand_paged_placement_rejects_a_selection_wave_larger_than_resident_capacity() {
+        let error = plan_selected_resource_placement(
+            "layer",
+            &partition(4, 2),
+            &telemetry(vec![1; 4], vec![0; 6]),
+            &devices(4, 15)[..1],
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+        )
+        .unwrap_err();
+
+        assert!(error.0.contains("residency requirement"));
+    }
+
+    #[test]
+    fn demand_retained_placement_requires_eventual_full_residency() {
+        let error = plan_selected_resource_placement(
+            "layer",
+            &partition(6, 2),
+            &telemetry(vec![1; 6], vec![0; 15]),
+            &devices(6, 20)[..1],
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandRetained,
+        )
+        .unwrap_err();
+
+        assert!(error.0.contains("residency requirement"));
     }
 
     #[test]
@@ -650,6 +751,7 @@ mod selected_resource_placement_tests {
                 &partition(4, 2),
                 &telemetry(vec![1; 4], vec![0; 6]),
                 &incomplete_devices,
+                crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
             )
             .is_err()
         );
@@ -659,6 +761,7 @@ mod selected_resource_placement_tests {
                 &partition(4, 2),
                 &telemetry(vec![1; 4], vec![0; 5]),
                 &devices(4, 40),
+                crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
             )
             .is_err()
         );
