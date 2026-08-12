@@ -420,6 +420,12 @@ fn selected_runtime_component_overlay_mounts_only_its_independent_region() {
         .find(|execution| execution.component_id == "layer_00")
         .unwrap()
         .clone();
+    let exact_calibration_target = vulkan_runtime_placement_calibration_target_for_component(
+        &runtime_model,
+        "layer_00",
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
     let candidate_root = package_root.join(
         "optimization/implementations/fixture/candidate",
     );
@@ -642,6 +648,17 @@ fn selected_runtime_component_overlay_mounts_only_its_independent_region() {
                 .starts_with(&package_root))
     );
     assert!(mounted.implementation_selection.is_some());
+    let selected_calibration_target = vulkan_runtime_placement_calibration_target_for_component(
+        &mounted,
+        "layer_00",
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+    assert_ne!(
+        exact_calibration_target.signature_id,
+        selected_calibration_target.signature_id,
+        "calibration evidence must distinguish the mounted representation",
+    );
     mounted.load_runtime_tensor_index(&package_root).unwrap();
 
     std::fs::remove_dir_all(root).unwrap();

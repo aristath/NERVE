@@ -319,6 +319,20 @@ fn runtime_placement_calibration_resolves_the_requested_component_phase_exactly(
 }
 
 #[test]
+fn incomplete_prefill_transaction_is_not_published_as_calibration_evidence() {
+    let runtime_model = fixture_model_runtime_model();
+    let targets = vulkan_runtime_placement_calibration_targets_for_phase(
+        &runtime_model,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 64,
+        },
+    )
+    .unwrap();
+
+    assert!(targets.is_empty());
+}
+
+#[test]
 fn runtime_placement_calibration_rejects_zero_width_prefill_target() {
     let runtime_model = fixture_model_runtime_model();
     let component_id = runtime_model.component_executions[0].component_id.clone();
@@ -950,6 +964,36 @@ fn placement_cost_model_rejects_a_changed_compiled_execution_signature() {
             .to_string()
             .contains("different compiled execution signature")
     );
+}
+
+#[test]
+fn explicit_component_placement_is_the_shared_calibration_and_runtime_transform() {
+    let runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
+    let component_ids = runtime_model
+        .runtime_graph
+        .instances
+        .iter()
+        .map(|instance| instance.instance_id.clone())
+        .collect::<Vec<_>>();
+    let placed = vulkan_runtime_model_with_component_placement(
+        &runtime_model,
+        "physical-owner",
+        &component_ids
+            .iter()
+            .cloned()
+            .map(|component_id| (component_id, "physical-owner".to_string()))
+            .collect(),
+    )
+    .unwrap();
+
+    assert!(
+        placed
+            .runtime_graph
+            .instances
+            .iter()
+            .all(|instance| instance.device_id == "physical-owner")
+    );
+    assert_eq!(placed.placement_device_ids(), ["physical-owner"]);
 }
 
 #[test]

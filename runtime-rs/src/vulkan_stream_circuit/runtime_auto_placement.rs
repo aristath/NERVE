@@ -1640,7 +1640,12 @@ fn runtime_paged_placement_balance(
     })
 }
 
-fn vulkan_runtime_model_with_component_placement(
+/// Returns a copy of a mounted logical model with an explicit physical owner
+/// for every named runtime instance. Instances absent from `placement` use the
+/// caller's default owner. This is the single placement transformation used by
+/// capacity packing, distributed calibration, and representation selection so
+/// those paths cannot construct subtly different selection requests.
+pub fn vulkan_runtime_model_with_component_placement(
     runtime_model: &VulkanResidentRuntimeModel,
     default_device_id: &str,
     placement: &BTreeMap<String, String>,

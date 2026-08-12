@@ -391,6 +391,27 @@ pub fn vulkan_runtime_placement_calibration_targets_for_phase(
     let mut targets = Vec::<VulkanRuntimePlacementCalibrationTarget>::new();
 
     for component_id in signal_component_ids {
+        if matches!(phase, VulkanTargetedComponentExecutionPhase::Prefill { .. }) {
+            let execution = runtime_model
+                .component_executions
+                .iter()
+                .find(|execution| execution.component_id == component_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "runtime placement calibration found no execution for signal processor {component_id:?}",
+                    ))
+                })?;
+            if !execution
+                .kernels
+                .iter()
+                .any(|kernel| kernel.execution_domain.supports_prefill())
+            {
+                // Prefill is an end-to-end transaction. A width unsupported by
+                // even one signal processor cannot be represented by a partial
+                // calibration set and remains on the normal scalar path.
+                return Ok(Vec::new());
+            }
+        }
         let target = vulkan_runtime_placement_calibration_target_for_component(
             runtime_model,
             &component_id,
