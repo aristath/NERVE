@@ -107,18 +107,6 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
             },
         },
         {
-            "id": "moe_reduce",
-            "op": "moe_reduce",
-            "inputs": ["moe_expert_outputs"],
-            "outputs": ["moe_out"],
-            "attrs": {
-                "hidden_size": int(feed_forward["hidden_size"]),
-                "experts_per_token": int(feed_forward["experts_per_token"]),
-                "routed_scaling_factor": 1.0,
-                "routing_weights_already_scaled": True,
-            },
-        },
-        {
             "id": "shared_mlp_gate_projection",
             "op": "linear",
             "inputs": ["ffn_norm_out"],
@@ -145,6 +133,18 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
             "inputs": ["shared_hidden"],
             "outputs": ["shared_out"],
             "params": _linear_params("shared_expert_w2", parameters),
+        },
+        {
+            "id": "moe_reduce",
+            "op": "moe_reduce",
+            "inputs": ["moe_expert_outputs"],
+            "outputs": ["moe_out"],
+            "attrs": {
+                "hidden_size": int(feed_forward["hidden_size"]),
+                "experts_per_token": int(feed_forward["experts_per_token"]),
+                "routed_scaling_factor": 1.0,
+                "routing_weights_already_scaled": True,
+            },
         },
         {
             "id": "shared_and_sparse_expert_add",

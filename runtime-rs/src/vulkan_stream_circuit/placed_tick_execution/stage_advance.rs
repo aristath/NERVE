@@ -385,7 +385,20 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     .execution_plan
                     .distributed_dispatch_at_stage(segment.end_stage_index)
                     .map(|dispatch| dispatch.dispatch_index);
-                let mut wait_points = match completion_dependency
+                // Keep helper queues running while this owner segment touches only
+                // independent signals. The first actual consumer carries the
+                // timeline wait, so queue ordering provides the physical join.
+                let consumes_distributed_completion = completion_dependency.is_some_and(
+                    |(dispatch_index, _)| {
+                        slice.execution_plan.segment_consumes_distributed_completion(
+                            segment.start_stage_index,
+                            dispatch_index,
+                        )
+                    },
+                );
+                let completion_wait = completion_dependency
+                    .filter(|_| consumes_distributed_completion);
+                let mut wait_points = match completion_wait
                     .map(|(dispatch_index, dependency_value)| {
                         distributed_runners.owner_completion_wait_points(
                             slice.device_id(),
@@ -705,7 +718,9 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             )?;
                     }
                 }
-                completion_dependency = None;
+                if consumes_distributed_completion {
+                    completion_dependency = None;
+                }
                 ready_dependency = next_dependency;
                 last_submitted_segment = Some(segment);
                 while slice.cursor.next_stage_index < segment.end_stage_index {

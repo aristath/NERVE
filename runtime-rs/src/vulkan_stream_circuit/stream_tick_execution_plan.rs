@@ -32,6 +32,7 @@ struct VulkanMountedPlacedDistributedDispatchDependencies {
     dispatch_index: usize,
     has_owner_producer: bool,
     has_owner_continuation: bool,
+    completion_consumer_stage_index: Option<usize>,
 }
 
 impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
@@ -196,13 +197,15 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
         )?;
 
         let dispatch_segment_stage_ranges =
-            resident_dispatch_segment_stage_ranges_excluding_dispatches(
+            resident_dispatch_segment_stage_ranges_for_physical_islands(
                 &tick_plan.stages,
                 &distributed_dispatch_indices,
+                &physical_execution_islands,
             );
         let distributed_dispatch_dependencies = distributed_dispatch_dependency_topologies(
             &physical_execution_islands,
             &dispatch_segment_stage_ranges,
+            &tick_plan.stages,
         );
         let mut dispatch_segments = Vec::new();
         for &(start, end) in &dispatch_segment_stage_ranges {
@@ -346,6 +349,17 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
             .copied()
     }
 
+    fn segment_consumes_distributed_completion(
+        &self,
+        stage_index: usize,
+        dispatch_index: usize,
+    ) -> bool {
+        self.distributed_dispatch_dependencies.values().any(|dependency| {
+            dependency.dispatch_index == dispatch_index
+                && dependency.completion_consumer_stage_index == Some(stage_index)
+        })
+    }
+
     fn resident_stream_tick_cursor(
         &self,
         stream_tick: u64,
@@ -372,24 +386,70 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
 fn distributed_dispatch_dependency_topologies(
     physical_execution_islands: &BTreeMap<usize, VulkanMountedPhysicalExecutionIslandStage>,
     dispatch_segment_stage_ranges: &[(usize, usize)],
+    stages: &[VulkanMountedPlacedStreamTickStage],
 ) -> BTreeMap<usize, VulkanMountedPlacedDistributedDispatchDependencies> {
     physical_execution_islands
         .iter()
         .map(|(stage_index, group)| {
-            (
-                *stage_index,
-                VulkanMountedPlacedDistributedDispatchDependencies {
+            let completion_consumer_stage_index = physical_island_completion_consumer_stage(
+                group,
+                stages,
+                dispatch_segment_stage_ranges,
+            );
+            let dependencies = VulkanMountedPlacedDistributedDispatchDependencies {
                     dispatch_index: group.leader().dispatch_index,
                     has_owner_producer: dispatch_segment_stage_ranges
                         .iter()
                         .any(|(_, end)| end == stage_index),
-                    has_owner_continuation: dispatch_segment_stage_ranges
-                        .iter()
-                        .any(|(start, _)| *start == group.end_stage_index),
-                },
-            )
+                    has_owner_continuation: completion_consumer_stage_index.is_some(),
+                    completion_consumer_stage_index,
+            };
+            (*stage_index, dependencies)
         })
         .collect()
+}
+
+fn physical_island_completion_consumer_stage(
+    island: &VulkanMountedPhysicalExecutionIslandStage,
+    stages: &[VulkanMountedPlacedStreamTickStage],
+    dispatch_segment_stage_ranges: &[(usize, usize)],
+) -> Option<usize> {
+    let continuation_start = island.end_stage_index;
+    let mut continuation_end = continuation_start;
+    for (start, end) in dispatch_segment_stage_ranges.iter().copied() {
+        if start == continuation_end {
+            continuation_end = end;
+        } else if start > continuation_end {
+            break;
+        }
+    }
+    if continuation_end == continuation_start {
+        return None;
+    }
+    let produced = island
+        .dispatches
+        .iter()
+        .flat_map(|dispatch| dispatch.writes.iter())
+        .collect::<Vec<_>>();
+    if !produced.is_empty() {
+        for stage in &stages[continuation_start..continuation_end] {
+            let VulkanMountedPlacedStreamTickStage::Dispatch {
+                stage_index,
+                dispatch,
+            } = stage
+            else {
+                continue;
+            };
+            if dispatch
+                .reads
+                .iter()
+                .any(|read| produced.iter().any(|output| *output == read))
+            {
+                return Some(*stage_index);
+            }
+        }
+    }
+    Some(continuation_start)
 }
 
 fn physical_execution_island_stage_groups(
@@ -490,6 +550,39 @@ fn resident_dispatch_segment_stage_ranges_excluding_dispatches(
         ranges.push((start, stage_index));
     }
     ranges
+}
+
+fn resident_dispatch_segment_stage_ranges_for_physical_islands(
+    stages: &[VulkanMountedPlacedStreamTickStage],
+    excluded_dispatch_indices: &BTreeSet<usize>,
+    physical_execution_islands: &BTreeMap<usize, VulkanMountedPhysicalExecutionIslandStage>,
+) -> Vec<(usize, usize)> {
+    let base = resident_dispatch_segment_stage_ranges_excluding_dispatches(
+        stages,
+        excluded_dispatch_indices,
+    );
+    let split_points = physical_execution_islands
+        .values()
+        .filter_map(|island| physical_island_completion_consumer_stage(island, stages, &base))
+        .collect::<BTreeSet<_>>();
+    base.into_iter()
+        .flat_map(|(start, end)| {
+            let mut boundaries = std::iter::once(start)
+                .chain(
+                    split_points
+                        .iter()
+                        .copied()
+                        .filter(|point| *point > start && *point < end),
+                )
+                .chain(std::iter::once(end))
+                .collect::<Vec<_>>();
+            boundaries.dedup();
+            boundaries
+                .windows(2)
+                .map(|range| (range[0], range[1]))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn is_canonical_dispatch_stage(

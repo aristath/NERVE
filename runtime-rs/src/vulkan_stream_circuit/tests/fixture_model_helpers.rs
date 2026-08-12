@@ -470,7 +470,7 @@ fn distributed_dependency_topology_covers_edges_and_adjacent_dispatches() {
 
     assert_eq!(ranges, vec![(1, 2), (4, 5)]);
     assert_eq!(
-        distributed_dispatch_dependency_topologies(&physical_execution_islands, &ranges),
+        distributed_dispatch_dependency_topologies(&physical_execution_islands, &ranges, &stages),
         BTreeMap::from([
             (
                 0,
@@ -478,6 +478,7 @@ fn distributed_dependency_topology_covers_edges_and_adjacent_dispatches() {
                     dispatch_index: 0,
                     has_owner_producer: false,
                     has_owner_continuation: true,
+                    completion_consumer_stage_index: Some(1),
                 },
             ),
             (
@@ -486,6 +487,7 @@ fn distributed_dependency_topology_covers_edges_and_adjacent_dispatches() {
                     dispatch_index: 2,
                     has_owner_producer: true,
                     has_owner_continuation: false,
+                    completion_consumer_stage_index: None,
                 },
             ),
             (
@@ -494,6 +496,7 @@ fn distributed_dependency_topology_covers_edges_and_adjacent_dispatches() {
                     dispatch_index: 3,
                     has_owner_producer: false,
                     has_owner_continuation: true,
+                    completion_consumer_stage_index: Some(4),
                 },
             ),
             (
@@ -502,6 +505,7 @@ fn distributed_dependency_topology_covers_edges_and_adjacent_dispatches() {
                     dispatch_index: 5,
                     has_owner_producer: true,
                     has_owner_continuation: false,
+                    completion_consumer_stage_index: None,
                 },
             ),
         ])
@@ -536,16 +540,98 @@ fn distributed_dependency_topology_uses_composed_group_boundaries() {
 
     assert_eq!(ranges, vec![(0, 2), (4, 6)]);
     assert_eq!(
-        distributed_dispatch_dependency_topologies(&physical_execution_islands, &ranges),
+        distributed_dispatch_dependency_topologies(&physical_execution_islands, &ranges, &stages),
         BTreeMap::from([(
             2,
             VulkanMountedPlacedDistributedDispatchDependencies {
                 dispatch_index: 2,
                 has_owner_producer: true,
                 has_owner_continuation: true,
+                completion_consumer_stage_index: Some(4),
             },
         )])
     );
+}
+
+#[test]
+fn distributed_completion_wait_moves_to_the_first_true_activation_consumer() {
+    let activation = |signal: &str, slot| VulkanMountedPlacedStreamTickIo::ActivationSlot {
+        component_id: "component".to_string(),
+        signal_id: signal.to_string(),
+        slot,
+    };
+    let mut stages = (0..6).map(fixture_tick_dispatch_stage).collect::<Vec<_>>();
+    let VulkanMountedPlacedStreamTickStage::Dispatch { dispatch, .. } = &mut stages[1] else {
+        unreachable!();
+    };
+    dispatch.writes = vec![activation("routed_output", 7)];
+    let VulkanMountedPlacedStreamTickStage::Dispatch { dispatch, .. } = &mut stages[2] else {
+        unreachable!();
+    };
+    dispatch.reads = vec![activation("normalized_hidden", 3)];
+    dispatch.writes = vec![activation("shared_hidden", 4)];
+    let VulkanMountedPlacedStreamTickStage::Dispatch { dispatch, .. } = &mut stages[3] else {
+        unreachable!();
+    };
+    dispatch.reads = vec![activation("shared_hidden", 4)];
+    dispatch.writes = vec![activation("shared_output", 5)];
+    let VulkanMountedPlacedStreamTickStage::Dispatch { dispatch, .. } = &mut stages[4] else {
+        unreachable!();
+    };
+    dispatch.reads = vec![
+        activation("routed_output", 7),
+        activation("shared_output", 5),
+    ];
+    let distributed_indices = BTreeSet::from([1]);
+    let tick_plan = VulkanMountedPlacedStreamTickPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "gpu0".to_string(),
+        stages: stages.clone(),
+        stage_count: stages.len(),
+        receive_stage_count: 0,
+        dispatch_stage_count: stages.len(),
+        publish_stage_count: 0,
+        local_edge_read_count: 0,
+        local_edge_write_count: 0,
+        incoming_edge_read_count: 0,
+        outgoing_edge_write_count: 0,
+        model_input_read_count: 0,
+        model_output_write_count: 0,
+        can_execute: false,
+    };
+    let distributed_stages = distributed_dispatch_stages(&tick_plan, &distributed_indices).unwrap();
+    let islands =
+        physical_execution_island_stage_groups(&distributed_stages, &[vec![1]]).unwrap();
+    let ranges = resident_dispatch_segment_stage_ranges_for_physical_islands(
+        &stages,
+        &distributed_indices,
+        &islands,
+    );
+    let dependencies =
+        distributed_dispatch_dependency_topologies(&islands, &ranges, &stages);
+
+    assert_eq!(ranges, vec![(0, 1), (2, 4), (4, 6)]);
+    assert_eq!(
+        dependencies[&1],
+        VulkanMountedPlacedDistributedDispatchDependencies {
+            dispatch_index: 1,
+            has_owner_producer: true,
+            has_owner_continuation: true,
+            completion_consumer_stage_index: Some(4),
+        }
+    );
+    let execution_plan = VulkanMountedPlacedResidentStreamTickExecutionPlan {
+        tick_plan: Arc::new(tick_plan),
+        dispatch_segment_count: ranges.len(),
+        dispatch_count: 4,
+        distributed_dispatch_count: 1,
+        dispatch_segments: Vec::new(),
+        distributed_dispatch_stages: distributed_stages,
+        physical_execution_islands: islands,
+        distributed_dispatch_dependencies: dependencies,
+    };
+    assert!(!execution_plan.segment_consumes_distributed_completion(2, 1));
+    assert!(execution_plan.segment_consumes_distributed_completion(4, 1));
 }
 
 #[test]
@@ -607,6 +693,7 @@ fn cursor_completes_an_entire_matching_distributed_group() {
                 dispatch_index: 0,
                 has_owner_producer: false,
                 has_owner_continuation: false,
+                completion_consumer_stage_index: None,
             },
         )]),
     };

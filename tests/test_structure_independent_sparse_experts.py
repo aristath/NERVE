@@ -126,6 +126,16 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
         ],
     }
     assert "routed_expert_002_w2" in nodes["sparse_moe_down"]["params"]
+    node_ids = [node["id"] for node in circuit["nodes"]]
+    assert node_ids.index("sparse_moe_down") < node_ids.index(
+        "shared_mlp_gate_projection"
+    )
+    assert node_ids.index("shared_mlp_output_projection") < node_ids.index(
+        "moe_reduce"
+    )
+    assert node_ids.index("moe_reduce") < node_ids.index(
+        "shared_and_sparse_expert_add"
+    )
 
 
 def test_sparse_expert_discovery_depends_on_structure_not_model_identity() -> None:
