@@ -2288,7 +2288,7 @@ impl VulkanCompiledResourceDeviceStore {
                 self.device_id
             )));
         }
-        match &selector.mapping {
+        let resolved = match &selector.mapping {
             CompiledResourceSelectorMapping::GroupTable { atomic_group_ids } => {
                 self.contract_index
                     .resolve_atomic_group(&self.contract, &atomic_group_ids[resource_index])
@@ -2308,7 +2308,14 @@ impl VulkanCompiledResourceDeviceStore {
             VulkanCompiledResourceDeviceStoreError::new(format!(
                 "failed to resolve compiled resource selection: {error}"
             ))
-        })
+        })?;
+        self.selector_ownership
+            .project_resolved_group(selector_id, resource_index, resolved)
+            .map_err(|error| {
+                VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "failed to project compiled resource selection: {error}",
+                ))
+            })
     }
 }
 
@@ -2506,6 +2513,20 @@ fn compiled_resource_selector_cache_policy(
             if !selector_ownership.owns(&selector.id, resource_index) {
                 continue;
             }
+            let byte_count = if let Some(projection) =
+                selector_ownership.source_projection(&selector.id, resource_index)
+            {
+                projection.resources.values().try_fold(
+                    0usize,
+                    |total, resource| total.checked_add(resource.byte_count),
+                ).ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled selector projected group byte count overflowed",
+                    )
+                })?
+            } else {
+                byte_count
+            };
             group_owners
                 .entry(group_id.clone())
                 .or_default()
@@ -2692,6 +2713,15 @@ fn compiled_resource_sparse_group_layouts(
                         .resource_ids
                         .iter()
                         .map(|resource_id| {
+                            if representation == CompiledResourceRepresentation::Source
+                                && let Some(projected) = selector_ownership
+                                    .source_projection(&selector.id, resource_index)
+                                    .and_then(|projection| {
+                                        projection.resources.get(resource_id)
+                                    })
+                            {
+                                return Ok(projected.byte_count);
+                            }
                             contract_index
                                 .resource(contract, resource_id)
                                 .ok_or_else(|| {

@@ -136,6 +136,8 @@ struct DeviceResourceSelection {
     concrete_always: BTreeSet<String>,
     concrete_dynamic: BTreeSet<String>,
     partition_templates: BTreeSet<String>,
+    projected_dynamic_bytes: BTreeMap<String, usize>,
+    projected_group_bytes: BTreeMap<String, usize>,
 }
 
 fn plan_compiled_parameter_residency(
@@ -210,6 +212,10 @@ fn compiled_resource_selector_ownership_for_device_set(
         .map(|selector| selector.selector_id.as_str())
         .collect::<BTreeSet<_>>();
     let mut resources_by_selector = BTreeMap::<String, BTreeSet<usize>>::new();
+    let mut projections_by_selector = BTreeMap::<
+        String,
+        BTreeMap<usize, VulkanCompiledResourceSourceProjection>,
+    >::new();
     for selector in &contract.selectors {
         if distributed_selector_ids.contains(selector.id.as_str()) {
             continue;
@@ -237,18 +243,50 @@ fn compiled_resource_selector_ownership_for_device_set(
             continue;
         }
         for selector in &device.selectors {
-            resources_by_selector
-                .entry(selector.selector_id.clone())
-                .or_default()
-                .extend(selector.owned_resource_indices.iter().copied());
+            if !selector.owned_resource_indices.is_empty() {
+                resources_by_selector
+                    .entry(selector.selector_id.clone())
+                    .or_default()
+                    .extend(selector.owned_resource_indices.iter().copied());
+            }
+            for fragment in &selector.fragmented_resources {
+                let projection = VulkanCompiledResourceSourceProjection {
+                    resources: fragment
+                        .resources
+                        .iter()
+                        .map(|resource| {
+                            (
+                                resource.resource_id.clone(),
+                                VulkanCompiledResourceSourceRangeProjection {
+                                    source_byte_count: resource.source_byte_count,
+                                    byte_offset: resource.byte_offset,
+                                    byte_count: resource.byte_count,
+                                },
+                            )
+                        })
+                        .collect(),
+                };
+                if let Some(previous) = projections_by_selector
+                    .entry(selector.selector_id.clone())
+                    .or_default()
+                    .insert(fragment.resource_index, projection.clone())
+                    && previous != projection
+                {
+                    return Err(VulkanRuntimeResidencyPlanError(format!(
+                        "physical device set combines conflicting fragments for selector {:?} resource {}",
+                        selector.selector_id, fragment.resource_index,
+                    )));
+                }
+            }
         }
     }
-    if resources_by_selector.is_empty() {
+    if resources_by_selector.is_empty() && projections_by_selector.is_empty() {
         Ok(None)
     } else {
-        VulkanCompiledResourceSelectorOwnership::from_resource_indices(
+        VulkanCompiledResourceSelectorOwnership::from_resources_and_source_projections(
             contract,
             resources_by_selector,
+            projections_by_selector,
         )
         .map(Some)
     }
@@ -292,7 +330,44 @@ fn plan_compiled_parameter_residency_for_device_set_with_selector_ownership(
                     matching.len()
                 )));
             };
-            if selector_ownership.owns(&selector.id, *selector_index) {
+            if let Some(projection) =
+                selector_ownership.source_projection(&selector.id, *selector_index)
+            {
+                let CompiledResourceBindingMapping::SelectedAtomicGroup {
+                    atomic_group_id,
+                    ..
+                } = &binding.mapping
+                else {
+                    unreachable!("selected mapping was matched above");
+                };
+                let mut group_bytes = 0usize;
+                for (resource_id, resource) in &projection.resources {
+                    selected.concrete_dynamic.insert(resource_id.clone());
+                    if let Some(previous) = selected
+                        .projected_dynamic_bytes
+                        .insert(resource_id.clone(), resource.byte_count)
+                        && previous != resource.byte_count
+                    {
+                        return Err(VulkanRuntimeResidencyPlanError(format!(
+                            "projected dynamic resource {resource_id:?} has conflicting byte counts",
+                        )));
+                    }
+                    group_bytes = checked_residency_add(
+                        group_bytes,
+                        resource.byte_count,
+                        "projected dynamic group bytes",
+                    )?;
+                }
+                if let Some(previous) = selected
+                    .projected_group_bytes
+                    .insert(atomic_group_id.clone(), group_bytes)
+                    && previous != group_bytes
+                {
+                    return Err(VulkanRuntimeResidencyPlanError(format!(
+                        "projected dynamic group {atomic_group_id:?} has conflicting byte counts",
+                    )));
+                }
+            } else if selector_ownership.owns(&selector.id, *selector_index) {
                 accumulate_compiled_resource_binding(
                     &mut selected,
                     binding,
@@ -432,7 +507,11 @@ fn compiled_parameter_residency_bytes(
         })?;
         maximum_dynamic_bytes = checked_residency_add(
             maximum_dynamic_bytes,
-            compiled_resource_bytes(resource)?,
+            selection
+                .projected_dynamic_bytes
+                .get(resource_id)
+                .copied()
+                .unwrap_or(compiled_resource_bytes(resource)?),
             "maximum dynamic parameter bytes",
         )?;
         for group_index in contract_index.atomic_group_indices_for_resource(resource_id) {
@@ -446,8 +525,13 @@ fn compiled_parameter_residency_bytes(
         let group = contract_index
             .atomic_group(contract, group_id)
             .expect("selected group was indexed above");
-        let group_bytes =
-            group
+        let group_bytes = selection
+            .projected_group_bytes
+            .get(group_id)
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                group
                 .resource_ids
                 .iter()
                 .try_fold(0usize, |total, resource_id| {
@@ -463,7 +547,8 @@ fn compiled_parameter_residency_bytes(
                         compiled_resource_bytes(resource)?,
                         "dynamic atomic group bytes",
                     )
-                })?;
+                })
+            })?;
         staging_headroom_bytes = staging_headroom_bytes.max(group_bytes);
     }
 

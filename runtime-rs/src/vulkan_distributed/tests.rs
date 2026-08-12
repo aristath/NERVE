@@ -912,6 +912,43 @@ mod tests {
             source.selected_resource_fragments
         );
 
+        let mut fragment_plan = fixture_plan("row_major");
+        fragment_plan.dispatches = vec![dispatch.clone()];
+        let ownership =
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&fragment_plan)
+                .unwrap();
+        let phase_set = VulkanDistributedExecutionPlanSet {
+            decode: fragment_plan.clone(),
+            decode_batch: fragment_plan.clone(),
+            prefill: fragment_plan,
+        };
+        assert_eq!(
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&phase_set)
+                .unwrap(),
+            ownership,
+        );
+        assert_eq!(ownership.device_count, dispatch.shards.len());
+        assert_eq!(ownership.unique_atomic_group_count, dispatch.shards.len());
+        assert_eq!(ownership.total_addressable_bytes, 152);
+        for shard in &dispatch.shards {
+            let device = ownership.device(&shard.device_id).unwrap();
+            assert!(device.selectors[0].owned_resource_indices.is_empty());
+            assert_eq!(device.selectors[0].fragmented_resources.len(), 1);
+            let fragment = &device.selectors[0].fragmented_resources[0];
+            assert_eq!(
+                device.maximum_load_wave_bytes,
+                fragment
+                    .resources
+                    .iter()
+                    .map(|resource| resource.byte_count)
+                    .sum::<usize>(),
+            );
+            assert_eq!(
+                fragment.logical_start,
+                shard.row_start,
+            );
+        }
+
         dispatch.shards[1]
             .selected_resource_fragments
             .get_mut("experts")

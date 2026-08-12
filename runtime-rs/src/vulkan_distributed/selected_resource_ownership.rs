@@ -32,6 +32,24 @@ pub struct VulkanDistributedSelectedResourceOwnership {
     pub owned_resource_indices: Vec<usize>,
     pub atomic_group_ids: Vec<String>,
     pub atomic_group_byte_counts: Vec<usize>,
+    pub fragmented_resources: Vec<VulkanDistributedSelectedResourceFragmentOwnership>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedSelectedResourceFragmentOwnership {
+    pub resource_index: usize,
+    pub atomic_group_id: String,
+    pub logical_start: usize,
+    pub logical_count: usize,
+    pub resources: Vec<VulkanDistributedSelectedResourceSourceRange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VulkanDistributedSelectedResourceSourceRange {
+    pub resource_id: String,
+    pub source_byte_count: usize,
+    pub byte_offset: usize,
+    pub byte_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +67,14 @@ struct VulkanDistributedSelectedResourceSelectorIdentity {
     atomic_group_resource_ids: Vec<Vec<String>>,
     parameter_resource_ids: Vec<Vec<String>>,
     parameter_resource_byte_counts: Vec<Vec<usize>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanDistributedSelectedResourceFragmentAccumulator {
+    atomic_group_id: String,
+    logical_start: usize,
+    logical_count: usize,
+    resources: BTreeMap<String, VulkanDistributedSelectedResourceSourceRange>,
 }
 
 impl VulkanDistributedSelectedResourceStorePlan {
@@ -82,10 +108,17 @@ impl VulkanDistributedSelectedResourceStorePlan {
         let mut canonical_resources = BTreeMap::<(String, usize), (String, usize)>::new();
         let mut resources_by_device_selector =
             BTreeMap::<(String, String), BTreeMap<usize, (String, usize)>>::new();
+        let mut fragments_by_device_selector = BTreeMap::<
+            (String, String),
+            BTreeMap<usize, VulkanDistributedSelectedResourceFragmentOwnership>,
+        >::new();
         for plan in plans {
             for device in &plan.devices {
                 for selector in &device.selectors {
-                    if selector.owned_resource_indices.len() != selector.atomic_group_ids.len()
+                    let whole = !selector.owned_resource_indices.is_empty();
+                    let fragmented = !selector.fragmented_resources.is_empty();
+                    if whole == fragmented
+                        || selector.owned_resource_indices.len() != selector.atomic_group_ids.len()
                         || selector.owned_resource_indices.len()
                             != selector.atomic_group_byte_counts.len()
                         || selector
@@ -99,6 +132,26 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     {
                         return Err(VulkanDistributedPlanError(
                             "selected-resource alternative contains invalid ownership".to_string(),
+                        ));
+                    }
+                    if fragmented
+                        && (selector
+                            .fragmented_resources
+                            .windows(2)
+                            .any(|pair| pair[0].resource_index >= pair[1].resource_index)
+                            || selector.fragmented_resources.iter().any(|fragment| {
+                                fragment.resource_index >= selector.resource_count
+                                    || fragment.logical_count == 0
+                                    || fragment.resources.is_empty()
+                                    || fragment
+                                        .resources
+                                        .windows(2)
+                                        .any(|pair| pair[0].resource_id >= pair[1].resource_id)
+                            }))
+                    {
+                        return Err(VulkanDistributedPlanError(
+                            "selected-resource alternative contains invalid fragment ownership"
+                                .to_string(),
                         ));
                     }
                     let identity = (
@@ -120,35 +173,55 @@ impl VulkanDistributedSelectedResourceStorePlan {
                             selector.selector_id,
                         )));
                     }
-                    let device_resources = resources_by_device_selector
-                        .entry((device.device_id.clone(), selector.selector_id.clone()))
-                        .or_default();
-                    for ((resource_index, group_id), byte_count) in selector
-                        .owned_resource_indices
-                        .iter()
-                        .copied()
-                        .zip(selector.atomic_group_ids.iter().cloned())
-                        .zip(selector.atomic_group_byte_counts.iter().copied())
-                    {
-                        let resource = (group_id, byte_count);
-                        if let Some(existing) = canonical_resources.insert(
-                            (selector.selector_id.clone(), resource_index),
-                            resource.clone(),
-                        ) && existing != resource
+                    if whole {
+                        let device_resources = resources_by_device_selector
+                            .entry((device.device_id.clone(), selector.selector_id.clone()))
+                            .or_default();
+                        for ((resource_index, group_id), byte_count) in selector
+                            .owned_resource_indices
+                            .iter()
+                            .copied()
+                            .zip(selector.atomic_group_ids.iter().cloned())
+                            .zip(selector.atomic_group_byte_counts.iter().copied())
                         {
-                            return Err(VulkanDistributedPlanError(format!(
-                                "selected-resource selector {:?} resource {resource_index} changes atomic identity between execution alternatives",
-                                selector.selector_id,
-                            )));
+                            let resource = (group_id, byte_count);
+                            if let Some(existing) = canonical_resources.insert(
+                                (selector.selector_id.clone(), resource_index),
+                                resource.clone(),
+                            ) && existing != resource
+                            {
+                                return Err(VulkanDistributedPlanError(format!(
+                                    "selected-resource selector {:?} resource {resource_index} changes atomic identity between execution alternatives",
+                                    selector.selector_id,
+                                )));
+                            }
+                            if let Some(existing) =
+                                device_resources.insert(resource_index, resource.clone())
+                                && existing != resource
+                            {
+                                return Err(VulkanDistributedPlanError(format!(
+                                    "selected-resource selector {:?} resource {resource_index} conflicts on device {:?}",
+                                    selector.selector_id, device.device_id,
+                                )));
+                            }
                         }
-                        if let Some(existing) =
-                            device_resources.insert(resource_index, resource.clone())
-                            && existing != resource
-                        {
-                            return Err(VulkanDistributedPlanError(format!(
-                                "selected-resource selector {:?} resource {resource_index} conflicts on device {:?}",
-                                selector.selector_id, device.device_id,
-                            )));
+                    }
+                    if fragmented {
+                        let device_fragments = fragments_by_device_selector
+                            .entry((device.device_id.clone(), selector.selector_id.clone()))
+                            .or_default();
+                        for fragment in &selector.fragmented_resources {
+                            if let Some(existing) =
+                                device_fragments.insert(fragment.resource_index, fragment.clone())
+                                && existing != *fragment
+                            {
+                                return Err(VulkanDistributedPlanError(format!(
+                                    "selected-resource selector {:?} resource {} changes fragment ownership on device {:?} between execution alternatives",
+                                    selector.selector_id,
+                                    fragment.resource_index,
+                                    device.device_id,
+                                )));
+                            }
                         }
                     }
                 }
@@ -182,6 +255,38 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     owned_resource_indices,
                     atomic_group_ids,
                     atomic_group_byte_counts,
+                    fragmented_resources: Vec::new(),
+                },
+            );
+        }
+        for ((device_id, selector_id), fragments) in fragments_by_device_selector {
+            let identity = selector_identities
+                .get(&selector_id)
+                .expect("alternative fragment ownership has a selector identity");
+            if device_selectors.get(&device_id).is_some_and(|selectors| {
+                selectors
+                    .iter()
+                    .any(|selector| selector.selector_id == selector_id)
+            }) {
+                return Err(VulkanDistributedPlanError(format!(
+                    "selected-resource selector {selector_id:?} mixes whole-resource and fragment alternatives on device {device_id:?}",
+                )));
+            }
+            device_selectors.entry(device_id).or_default().push(
+                VulkanDistributedSelectedResourceOwnership {
+                    execution_scope: identity.0.clone(),
+                    selector_id,
+                    component_id: identity.1.clone(),
+                    node_id: identity.2.clone(),
+                    domain_id: identity.3.clone(),
+                    selection_signal: identity.4.clone(),
+                    resource_count: identity.5,
+                    selection_count_per_activation: identity.6,
+                    parameter_partitions: identity.7.clone(),
+                    owned_resource_indices: Vec::new(),
+                    atomic_group_ids: Vec::new(),
+                    atomic_group_byte_counts: Vec::new(),
+                    fragmented_resources: fragments.into_values().collect(),
                 },
             );
         }
@@ -203,6 +308,10 @@ impl VulkanDistributedSelectedResourceStorePlan {
             BTreeMap::<String, VulkanDistributedSelectedResourceSelectorIdentity>::new();
         let mut group_devices = BTreeMap::<(String, String), String>::new();
         let mut resources_by_device_selector = BTreeMap::<(String, String), BTreeSet<usize>>::new();
+        let mut fragments_by_device_selector_resource = BTreeMap::<
+            (String, String, usize),
+            VulkanDistributedSelectedResourceFragmentAccumulator,
+        >::new();
 
         for dispatch in &plan.dispatches {
             for partition in &dispatch.selected_resource_partitions {
@@ -232,6 +341,16 @@ impl VulkanDistributedSelectedResourceStorePlan {
                         "selected resource selector {:?} changes identity between distributed dispatches",
                         partition.selector_id
                     )));
+                }
+
+                if !partition.parameter_partitions.is_empty() {
+                    collect_fragmented_selected_resource_partition(
+                        dispatch,
+                        partition,
+                        &execution_devices,
+                        &mut fragments_by_device_selector_resource,
+                    )?;
+                    continue;
                 }
 
                 let mut coverage = vec![0u8; partition.resource_count];
@@ -324,6 +443,87 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     owned_resource_indices,
                     atomic_group_ids,
                     atomic_group_byte_counts,
+                    fragmented_resources: Vec::new(),
+                },
+            );
+        }
+
+        let mut fragments_by_device_selector = BTreeMap::<
+            (String, String),
+            Vec<VulkanDistributedSelectedResourceFragmentOwnership>,
+        >::new();
+        for ((device_id, selector_id, resource_index), fragment) in
+            fragments_by_device_selector_resource
+        {
+            let identity = identities.get(&selector_id).expect(
+                "selected resource fragments were created from a validated selector identity",
+            );
+            let expected_resource_ids = identity.atomic_group_resource_ids[resource_index]
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            let actual_resource_ids = fragment
+                .resources
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if actual_resource_ids != expected_resource_ids {
+                return Err(VulkanDistributedPlanError(format!(
+                    "fragmented selector {selector_id:?} resource {resource_index} does not project every member of atomic group {:?}",
+                    fragment.atomic_group_id,
+                )));
+            }
+            fragments_by_device_selector
+                .entry((device_id, selector_id))
+                .or_default()
+                .push(VulkanDistributedSelectedResourceFragmentOwnership {
+                    resource_index,
+                    atomic_group_id: fragment.atomic_group_id,
+                    logical_start: fragment.logical_start,
+                    logical_count: fragment.logical_count,
+                    resources: fragment.resources.into_values().collect(),
+                });
+        }
+        for ((device_id, selector_id), mut fragmented_resources) in
+            fragments_by_device_selector
+        {
+            let identity = identities.get(&selector_id).expect(
+                "selected resource fragments were created from a validated selector identity",
+            );
+            fragmented_resources.sort_by_key(|fragment| fragment.resource_index);
+            if fragmented_resources
+                .iter()
+                .map(|fragment| fragment.resource_index)
+                .ne(0..identity.resource_count)
+            {
+                return Err(VulkanDistributedPlanError(format!(
+                    "fragmented selector {selector_id:?} on device {device_id:?} does not cover every logical resource",
+                )));
+            }
+            if device_selectors.get(&device_id).is_some_and(|selectors| {
+                selectors
+                    .iter()
+                    .any(|selector| selector.selector_id == selector_id)
+            }) {
+                return Err(VulkanDistributedPlanError(format!(
+                    "selected resource selector {selector_id:?} mixes whole-resource and fragmented ownership on device {device_id:?}",
+                )));
+            }
+            device_selectors.entry(device_id).or_default().push(
+                VulkanDistributedSelectedResourceOwnership {
+                    execution_scope: identity.execution_scope.clone(),
+                    selector_id,
+                    component_id: identity.component_id.clone(),
+                    node_id: identity.node_id.clone(),
+                    domain_id: identity.domain_id.clone(),
+                    selection_signal: identity.selection_signal.clone(),
+                    resource_count: identity.resource_count,
+                    selection_count_per_activation: identity.selection_count_per_activation,
+                    parameter_partitions: identity.parameter_partitions.clone(),
+                    owned_resource_indices: Vec::new(),
+                    atomic_group_ids: Vec::new(),
+                    atomic_group_byte_counts: Vec::new(),
+                    fragmented_resources,
                 },
             );
         }
@@ -336,6 +536,210 @@ impl VulkanDistributedSelectedResourceStorePlan {
             .iter()
             .find(|device| device.device_id == device_id)
     }
+}
+
+fn collect_fragmented_selected_resource_partition(
+    dispatch: &VulkanDistributedDispatchPlan,
+    partition: &VulkanDistributedSelectedResourcePartitionPlan,
+    execution_devices: &BTreeSet<&str>,
+    accumulated: &mut BTreeMap<
+        (String, String, usize),
+        VulkanDistributedSelectedResourceFragmentAccumulator,
+    >,
+) -> Result<(), VulkanDistributedPlanError> {
+    let partitioned_slots = partition
+        .parameter_partitions
+        .iter()
+        .map(|parameter| parameter.parameter_slot)
+        .collect::<BTreeSet<_>>();
+    let mut logical_ranges = vec![Vec::<(usize, usize)>::new(); partition.resource_count];
+    let mut parameter_ranges = vec![
+        vec![Vec::<(usize, usize)>::new(); partition.parameters_per_resource];
+        partition.resource_count
+    ];
+
+    for shard in &dispatch.shards {
+        if !execution_devices.contains(shard.device_id.as_str()) {
+            return Err(VulkanDistributedPlanError(format!(
+                "selected resource shard for {}.{} uses device {:?} outside the execution pool",
+                dispatch.component_id, dispatch.node_id, shard.device_id,
+            )));
+        }
+        if shard
+            .selected_resource_indices
+            .contains_key(&partition.selector_id)
+        {
+            return Err(VulkanDistributedPlanError(format!(
+                "fragmented selector {:?} also declares whole-resource ownership on {:?}",
+                partition.selector_id, shard.device_id,
+            )));
+        }
+        let fragments = shard
+            .selected_resource_fragments
+            .get(&partition.selector_id)
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(format!(
+                    "selected resource shard on {:?} has no exact fragments for selector {:?}",
+                    shard.device_id, partition.selector_id,
+                ))
+            })?;
+        if fragments.len() != partition.resource_count
+            || fragments
+                .iter()
+                .map(|fragment| fragment.resource_index)
+                .ne(0..partition.resource_count)
+        {
+            return Err(VulkanDistributedPlanError(format!(
+                "selected resource shard on {:?} has incomplete fragments for selector {:?}",
+                shard.device_id, partition.selector_id,
+            )));
+        }
+        for fragment in fragments {
+            if fragment.atomic_group_id
+                != partition.atomic_group_ids[fragment.resource_index]
+                || fragment.logical_start != shard.row_start
+                || fragment.logical_count != shard.row_count
+                || fragment.logical_count == 0
+                || fragment.parameters.len() != partition.parameters_per_resource
+                || fragment
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.parameter_slot)
+                    .ne(0..partition.parameters_per_resource)
+            {
+                return Err(VulkanDistributedPlanError(format!(
+                    "selected resource shard on {:?} has invalid fragment geometry for selector {:?} resource {}",
+                    shard.device_id, partition.selector_id, fragment.resource_index,
+                )));
+            }
+            logical_ranges[fragment.resource_index]
+                .push((fragment.logical_start, fragment.logical_count));
+            let key = (
+                shard.device_id.clone(),
+                partition.selector_id.clone(),
+                fragment.resource_index,
+            );
+            let entry = accumulated.entry(key).or_insert_with(|| {
+                VulkanDistributedSelectedResourceFragmentAccumulator {
+                    atomic_group_id: fragment.atomic_group_id.clone(),
+                    logical_start: fragment.logical_start,
+                    logical_count: fragment.logical_count,
+                    resources: BTreeMap::new(),
+                }
+            });
+            if entry.atomic_group_id != fragment.atomic_group_id
+                || entry.logical_start != fragment.logical_start
+                || entry.logical_count != fragment.logical_count
+            {
+                return Err(VulkanDistributedPlanError(format!(
+                    "fragmented selector {:?} resource {} changes physical range between connected dispatches on {:?}",
+                    partition.selector_id, fragment.resource_index, shard.device_id,
+                )));
+            }
+            let mut fragment_resource_ids = BTreeSet::new();
+            for parameter in &fragment.parameters {
+                let parameter_slot = parameter.parameter_slot;
+                if parameter.resource_id
+                    != partition.parameter_resource_ids[fragment.resource_index][parameter_slot]
+                    || parameter.resource_byte_count
+                        != partition.parameter_resource_byte_counts[fragment.resource_index]
+                            [parameter_slot]
+                    || parameter.byte_count == 0
+                    || parameter
+                        .byte_offset
+                        .checked_add(parameter.byte_count)
+                        .is_none_or(|end| end > parameter.resource_byte_count)
+                    || !fragment_resource_ids.insert(parameter.resource_id.as_str())
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "fragmented selector {:?} resource {} has an invalid parameter slot {parameter_slot}",
+                        partition.selector_id, fragment.resource_index,
+                    )));
+                }
+                parameter_ranges[fragment.resource_index][parameter_slot]
+                    .push((parameter.byte_offset, parameter.byte_count));
+                let range = VulkanDistributedSelectedResourceSourceRange {
+                    resource_id: parameter.resource_id.clone(),
+                    source_byte_count: parameter.resource_byte_count,
+                    byte_offset: parameter.byte_offset,
+                    byte_count: parameter.byte_count,
+                };
+                if let Some(previous) =
+                    entry.resources.insert(parameter.resource_id.clone(), range.clone())
+                    && previous != range
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "fragmented selector {:?} resource {} changes source range for {:?} between connected dispatches",
+                        partition.selector_id, fragment.resource_index, parameter.resource_id,
+                    )));
+                }
+            }
+        }
+    }
+
+    for resource_index in 0..partition.resource_count {
+        logical_ranges[resource_index].sort_unstable();
+        validate_contiguous_selected_resource_ranges(
+            &logical_ranges[resource_index],
+            dispatch.output_rows,
+            &format!(
+                "selector {:?} resource {resource_index} logical",
+                partition.selector_id
+            ),
+        )?;
+        for parameter_slot in 0..partition.parameters_per_resource {
+            let ranges = &mut parameter_ranges[resource_index][parameter_slot];
+            ranges.sort_unstable();
+            let expected_bytes =
+                partition.parameter_resource_byte_counts[resource_index][parameter_slot];
+            if partitioned_slots.contains(&parameter_slot) {
+                validate_contiguous_selected_resource_ranges(
+                    ranges,
+                    expected_bytes,
+                    &format!(
+                        "selector {:?} resource {resource_index} parameter {parameter_slot}",
+                        partition.selector_id
+                    ),
+                )?;
+            } else if ranges.len() != dispatch.shards.len()
+                || ranges
+                    .iter()
+                    .any(|range| *range != (0, expected_bytes))
+            {
+                return Err(VulkanDistributedPlanError(format!(
+                    "selector {:?} resource {resource_index} parameter {parameter_slot} is neither exactly partitioned nor fully replicated",
+                    partition.selector_id,
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_contiguous_selected_resource_ranges(
+    ranges: &[(usize, usize)],
+    expected_extent: usize,
+    label: &str,
+) -> Result<(), VulkanDistributedPlanError> {
+    let mut frontier = 0usize;
+    for (start, count) in ranges {
+        if *start != frontier || *count == 0 {
+            return Err(VulkanDistributedPlanError(format!(
+                "fragmented selected-resource {label} ranges are not contiguous",
+            )));
+        }
+        frontier = frontier.checked_add(*count).ok_or_else(|| {
+            VulkanDistributedPlanError(
+                "fragmented selected-resource range coverage overflowed".to_string(),
+            )
+        })?;
+    }
+    if frontier != expected_extent {
+        return Err(VulkanDistributedPlanError(format!(
+            "fragmented selected-resource {label} ranges cover {frontier}, expected {expected_extent}",
+        )));
+    }
+    Ok(())
 }
 
 fn selected_resource_store_plan_from_device_selectors(
@@ -364,6 +768,31 @@ fn selected_resource_store_plan_from_device_selectors(
                 .cloned()
                 .zip(selector.atomic_group_byte_counts.iter().copied())
                 .collect::<Vec<_>>();
+            selector_group_bytes.extend(
+                selector
+                    .fragmented_resources
+                    .iter()
+                    .map(|fragment| {
+                        let bytes = fragment.resources.iter().try_fold(
+                            0usize,
+                            |total, resource| total.checked_add(resource.byte_count),
+                        ).ok_or_else(|| {
+                            VulkanDistributedPlanError(
+                                "selected resource fragment byte count overflowed".to_string(),
+                            )
+                        })?;
+                        Ok((
+                            format!(
+                                "{}@{}+{}",
+                                fragment.atomic_group_id,
+                                fragment.logical_start,
+                                fragment.logical_count,
+                            ),
+                            bytes,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?,
+            );
             selector_group_bytes.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
             let selection_count = selector
                 .selection_count_per_activation
