@@ -528,6 +528,35 @@ def test_compiler_emits_local_batch_and_legal_distributed_contracts(tmp_path: Pa
     assert all("model_name" not in contract for contract in contracts)
 
 
+def test_compiler_keeps_a_dense_format_without_a_partition_contract_local(
+    tmp_path: Path,
+) -> None:
+    node, circuit, tensor_index, kernel = projection_compiler_fixture(
+        tmp_path,
+        dtype="I32",
+    )
+    scalar = tmp_path / "shaders" / "parallel_projection_int4.spv"
+    batch = tmp_path / "shaders" / "parallel_projection_batch_int4.spv"
+    scalar.write_bytes(b"scalar INT4 artifact")
+    batch.write_bytes(b"batch INT4 artifact")
+    kernel["shader_path"] = str(scalar.relative_to(tmp_path))
+    kernel["batch_implementations"][0]["stages"][0]["shader_path"] = str(
+        batch.relative_to(tmp_path)
+    )
+
+    contracts = build_kernel_physical_execution_contracts(
+        node=node,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        kernel=kernel,
+        package_dir=tmp_path,
+    )
+
+    assert contracts
+    assert {contract["strategy"] for contract in contracts} == {"single_device"}
+    assert all(contract["local_intermediates"] == [] for contract in contracts)
+
+
 def test_distributed_contract_rejects_ambiguous_primary_artifacts(tmp_path: Path) -> None:
     node, circuit, tensor_index, kernel = projection_compiler_fixture(tmp_path)
     contracts = build_kernel_physical_execution_contracts(
