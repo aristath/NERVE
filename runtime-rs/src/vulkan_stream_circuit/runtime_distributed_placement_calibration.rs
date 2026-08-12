@@ -1568,6 +1568,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             } => {
                 let runtime_execution_identity = canonical_runtime_execution_identity(
                     &placed_model,
+                    &VulkanRuntimePhysicalExecutionPlan::uniform(&placed_model),
                     capacity,
                     false,
                     ResourceResidencyPolicy::DemandRetained,

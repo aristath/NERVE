@@ -95,15 +95,14 @@ use crate::vulkan_distributed::{
     VulkanDistributedDispatchSequenceKind, VulkanDistributedDispatchSubmission,
     VulkanDistributedEquivalenceKind, VulkanDistributedExecutionPlan,
     VulkanDistributedExecutionPlanSet, VulkanDistributedParameterAllocationPlan,
-    VulkanDistributedPhaseComponentDevicePools,
     VulkanDistributedParameterBuffers, VulkanDistributedParameterExclusionPlan,
-    VulkanDistributedQueueSynchronization, VulkanDistributedReductionBuffer,
-    VulkanDistributedReductionFinalizationPlan, VulkanDistributedReductionPlan,
-    VulkanDistributedReductionRunner, VulkanDistributedSelectedResourcePartitionPlan,
-    VulkanDistributedSelectedResourceStorePlan, VulkanPhysicalExecutionIslandPlan,
-    VulkanPhysicalExecutionTransportKind, allocate_distributed_shared_buffer,
-    create_distributed_reduction_runner_for_buffers, distributed_shard_push_constants,
-    resolved_physical_execution_islands,
+    VulkanDistributedPhaseComponentDevicePools, VulkanDistributedQueueSynchronization,
+    VulkanDistributedReductionBuffer, VulkanDistributedReductionFinalizationPlan,
+    VulkanDistributedReductionPlan, VulkanDistributedReductionRunner,
+    VulkanDistributedSelectedResourcePartitionPlan, VulkanDistributedSelectedResourceStorePlan,
+    VulkanPhysicalExecutionIslandPlan, VulkanPhysicalExecutionTransportKind,
+    allocate_distributed_shared_buffer, create_distributed_reduction_runner_for_buffers,
+    distributed_shard_push_constants, resolved_physical_execution_islands,
 };
 
 mod package;
@@ -166,6 +165,7 @@ include!("vulkan_stream_circuit/parallel_speculative_feedback_state.rs");
 include!("vulkan_stream_circuit/targeted_component_mount.rs");
 include!("vulkan_stream_circuit/targeted_component_execution.rs");
 include!("vulkan_stream_circuit/placed_feedback_devices.rs");
+include!("vulkan_stream_circuit/runtime_physical_execution_plan.rs");
 include!("vulkan_stream_circuit/runtime_execution_identity.rs");
 include!("vulkan_stream_circuit/runtime_implementation_selection.rs");
 include!("vulkan_stream_circuit/runtime_resident_derivations.rs");

@@ -265,8 +265,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 ),
             ));
         }
+        let physical_execution_plan = VulkanRuntimePhysicalExecutionPlan::uniform(&runtime_model);
+        physical_execution_plan
+            .validate(&runtime_model)
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(error.to_string()),
+                )
+            })?;
         let runtime_execution_identity = canonical_runtime_execution_identity(
             &runtime_model,
+            &physical_execution_plan,
             capacity,
             mount_speculative_decoders,
             resource_residency_policy,
@@ -401,9 +410,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
         )?;
         let sampler_kernels =
             load_resident_sampler_kernels(manifest_dir, &runtime_model.package.sampler)?;
-        let signal_processor_placement = runtime_model
-            .circuit_graph
-            .signal_processor_placement(&runtime_model.placement);
         let device_ids = runtime_model
             .circuit_graph
             .signal_processor_device_ids(&runtime_model.placement);
@@ -479,9 +485,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 &prepared_plans,
                 &tensor_index,
                 &distributed_artifact_manifest,
-                &VulkanDistributedPhaseComponentDevicePools::uniform(
-                    &signal_processor_placement.component_shard_devices,
-                ),
+                &physical_execution_plan.component_device_pools,
                 &placement_plan.edges,
                 storage_buffer_offset_alignment,
                 &execution_scope,
