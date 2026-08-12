@@ -149,10 +149,13 @@ component signatures, distributed contracts, boundary sizes, and lazy-resource
 classes. Pass the same `--context-size`, `--speculative-draft-tokens`, and
 `--residency-policy` used by chat when they differ from package defaults. This
 prevents measurements for a baseline kernel from being consumed as evidence
-for a hardware-selected FP8, INT4, MXFP4, or other implementation. The suite
-builds a separate selected runtime model for each possible owner profile, so a
-heterogeneous target set does not reuse one GPU's representation decision on a
-different GPU.
+for a hardware-selected FP8, INT4, MXFP4, or other implementation. For each
+possible owner profile, the suite builds the exact baseline, every independently
+applicable verified replacement region, and the globally selected winning set.
+Identical execution signatures are measured once per owner. This covers a
+representation that can become preferable beside a mixed-owner boundary without
+enumerating an exponential power set, and prevents a heterogeneous target set
+from reusing one GPU's decision on a different GPU.
 
 The suite discovers one representative for every exact compiler-emitted
 component signature in decode and each requested prefill width. It measures all

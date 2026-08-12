@@ -161,10 +161,6 @@ For every numbered item below:
   validate every final group the planner may select.
 - Record only canonically output-valid observations. Missing or stale
   observations make that candidate unavailable rather than free or assumed.
-- Cover every compiler-declared runtime representation that can remain selected
-  for the requested execution envelope and physical owner. Measuring only the
-  baseline or only the winner for an all-local graph is insufficient when a
-  mixed-owner boundary can change the representation-selection result.
 - Prove the resulting catalog against a concretely mounted runtime model before
   chat: every automatically selectable TP case must match that model's exact
   implementation signatures, artifacts, shapes, and owner profiles.
