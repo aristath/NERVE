@@ -642,6 +642,161 @@ def test_independent_experts_compile_selector_partition_contracts(
         for contract in distributed_batches
     )
 
+
+def test_physical_expert_implementation_preserves_selected_parameter_partitions(
+    tmp_path: Path,
+) -> None:
+    shader_dir = tmp_path / "shaders"
+    shader_dir.mkdir()
+    (shader_dir / "canonical.spv").write_bytes(b"canonical")
+    (shader_dir / "tensor_parallel_expert.spv").write_bytes(b"physical")
+    mapping = [
+        {
+            "selector": expert,
+            "parameter_ids": [f"expert_{expert}_weight", f"expert_{expert}_scale"],
+        }
+        for expert in range(4)
+    ]
+    node = {
+        "id": "expert_down",
+        "op": "independent_sparse_moe_down",
+        "inputs": ["expert_intermediates", "routes"],
+        "outputs": ["expert_outputs"],
+        "params": [parameter for entry in mapping for parameter in entry["parameter_ids"]],
+        "attrs": {
+            "selected_parameter_accesses": [
+                {"selection_signal": "routes", "mapping": mapping}
+            ]
+        },
+    }
+    refs = {
+        parameter: {"tensor": f"tensor.{parameter}"}
+        for parameter in node["params"]
+    }
+    tensor_index = {
+        "tensors": {
+            ref["tensor"]: {
+                "dtype": "F8_E8M0" if parameter.endswith("scale") else "I8",
+                "shape": [128, 4] if parameter.endswith("scale") else [128, 64],
+                "layout": "row_major",
+            }
+            for parameter, ref in refs.items()
+        }
+    }
+    selected_resource_partition = {
+        "selection_signal": "routes",
+        "address_table_binding": 3,
+        "parameter_slots_binding": 4,
+        "kind": "expert_range",
+        "resource_count": 4,
+        "parameters_per_resource": 2,
+        "alignment_elements": 32,
+        "parameter_partitions": [
+            {
+                "parameter_slot": slot,
+                "dimension": 0,
+                "kind": "contiguous",
+                "alignment_elements": 32,
+                "logical_elements_per_index": 1,
+            }
+            for slot in range(2)
+        ],
+    }
+    implementation = {
+        "shader_path": "shaders/tensor_parallel_expert.spv",
+        "local_size_x": 64,
+        "workgroup_count_x": 2,
+        "phases": ["decode", "prefill"],
+        "execution_shape": "single_and_multi_lane",
+        "formats": {
+            "storage": "mxfp4_e2m1",
+            "compute": "mxfp4_e2m1",
+            "accumulation": "f32",
+        },
+        "geometry_dimensions": {"hidden_size": 128, "intermediate_size": 128},
+        "strategy": "tensor_parallel_expert",
+        "execution_form": "partitioned_input_partial_output",
+        "partition_extent": {
+            "dimension_name": "intermediate_size",
+            "elements": 128,
+            "alignment_elements": 32,
+        },
+        "partition_launch": {
+            "workgroup_x": "repeated",
+            "origin": "push_constant_u32",
+            "origin_push_constant": "input_start",
+            "count_push_constant": "input_count",
+        },
+        "parameter_partitions": [],
+        "selected_resource_partitions": [selected_resource_partition],
+        "inputs": [
+            {
+                "binding": 0,
+                "distribution": "sharded",
+                "dimension": 0,
+                "alignment_elements": 32,
+            },
+            {
+                "binding": 1,
+                "distribution": "routed",
+                "dimension": 0,
+                "alignment_elements": 1,
+            },
+        ],
+        "outputs": [
+            {
+                "binding": 2,
+                "collection": "reduced",
+                "reduction": {
+                    "operation": "sum_f32",
+                    "dimension_name": "hidden_size",
+                    "finalization": {"kind": "store_f32"},
+                },
+            }
+        ],
+        "local_intermediates": [],
+        "resources": [
+            {
+                "resource": ref["tensor"],
+                "kind": "lazy_resource",
+                "residency": "demand",
+                "access": "read",
+            }
+            for ref in refs.values()
+        ],
+        "equivalence": {
+            "output": "absolute_relative_tolerance",
+            "state": "bit_exact",
+            "absolute_tolerance": 0.01,
+            "relative_tolerance": 0.01,
+        },
+    }
+
+    contracts = build_kernel_physical_execution_contracts(
+        node=node,
+        circuit={"nodes": [node], "parameters": {"refs": refs}},
+        tensor_index=tensor_index,
+        kernel={
+            "source_node_ids": [node["id"]],
+            "semantic_module_ids": ["layer.feed_forward.routed_experts"],
+            "shader_path": "shaders/canonical.spv",
+            "local_size_x": 64,
+            "workgroup_count_x": 2,
+            "batch_implementations": [],
+            "physical_implementations": [implementation],
+        },
+        package_dir=tmp_path,
+    )
+
+    physical = next(
+        contract
+        for contract in contracts
+        if contract["strategy"] == "tensor_parallel_expert"
+    )
+    assert physical["selected_resource_partitions"] == [
+        selected_resource_partition
+    ]
+
 def test_input_column_physical_shaders_render_and_compile(tmp_path: Path) -> None:
     source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {

@@ -598,6 +598,9 @@ def _physical_implementation_contract(
         partition_extent=deepcopy(implementation.get("partition_extent")),
         partition_launch=deepcopy(implementation.get("partition_launch")),
         parameter_partitions=deepcopy(implementation["parameter_partitions"]),
+        selected_resource_partitions=deepcopy(
+            implementation.get("selected_resource_partitions", [])
+        ),
         inputs=deepcopy(implementation["inputs"]),
         outputs=deepcopy(implementation["outputs"]),
         local_intermediates=deepcopy(implementation.get("local_intermediates", [])),
