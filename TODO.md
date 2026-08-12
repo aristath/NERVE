@@ -95,6 +95,15 @@ the local placement calibration, and the mounted graph.
   target's pre-run reservation, stop on the first kernel or driver anomaly, and
   prove exact release of NERVE-owned capacity without disturbing pre-existing
   allocations.
+- The normal production mount now derives exact selected-resource execution
+  classes from the lowered decode plan, consumes only identity-matching suite
+  calibration, and rebuilds activation, parameter, ownership, and physical
+  residency plans as one coherent fixed point. Missing, ambiguous,
+  phase-incompatible, or capacity-infeasible evidence preserves the compiled
+  baseline. Normal chat reports the mounted physical-execution summary, and the
+  conversation gate can require a nonzero TP-island proof. This path is covered
+  hardware-neutrally; its first real-model proof remains blocked by the live
+  inference quarantine above.
 - All tests and model gates run sequentially. Every Rust test command uses
   `-- --test-threads=1`; Vulkan tests are selected and executed individually.
 
@@ -183,19 +192,11 @@ For every numbered item below:
 - Use marginal expert frequency and joint co-selection telemetry to place and
   replicate hot experts. Optimize concurrent per-device expert makespan, not
   the sum of six independent expected costs.
-- At production mount, derive every selected-resource execution-class
-  requirement from the exact lowered physical plan, artifact set,
-  representation, phase, geometry, and runtime fingerprint. Resolve it only
-  from the suite-produced matching execution plus singleton load-wave pair on
-  each candidate device. Missing or ambiguous coverage makes that placement
-  unavailable; never substitute an average, advertised compute, a neighboring
-  representation, or a divided multi-route wave.
-- Apply the telemetry-aware whole-expert placement plan in the production mount
-  and execution-plan path. A planner exercised only by unit tests is not an
-  implemented runtime feature.
-- Replan expert ownership, replicas, and cache quotas from warm telemetry
-  without replacing the stable layer coordinators or dense/attention execution
-  islands. Hybrid physical execution must not disable working-set adaptation.
+- Feed warm session selection and co-selection telemetry back into expert
+  ownership, replication, and cache-quota planning. The initial production
+  mount now consumes exact calibration but uses a uniform prior; warm
+  adaptation must not replace the stable layer coordinators or dense/attention
+  execution islands, remount the model, or disable hybrid physical execution.
 - Allow a compiler-declared predictable router dependency to trigger safe
   prefetch or preselection without a DeepSeek-specific runtime branch.
 
