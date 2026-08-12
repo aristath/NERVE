@@ -332,6 +332,66 @@ fn fixture_tick_dispatch_stage(stage_index: usize) -> VulkanMountedPlacedStreamT
 }
 
 #[test]
+fn mounted_tick_dispatch_preserves_resident_activation_dependencies() {
+    let activation = |binding, usage, signal: &str, slot| VulkanMountedPlacedBoundDescriptor {
+        binding,
+        usage,
+        name: signal.to_string(),
+        target: VulkanMountedPlacedBoundDescriptorTarget::Resident {
+            target: VulkanBoundDescriptorTarget::ActivationSlot {
+                buffer_index: slot,
+                component_id: "component".to_string(),
+                signal_id: signal.to_string(),
+                circuit_id: "circuit".to_string(),
+                slot,
+                byte_capacity: 16,
+                signal_byte_capacity: 16,
+            },
+        },
+    };
+    let dispatch = VulkanMountedPlacedStreamTickDispatch::from_bound_dispatch(
+        &VulkanMountedPlacedBoundDispatch {
+            dispatch_index: 3,
+            kernel_id: "kernel".to_string(),
+            component_id: "component".to_string(),
+            circuit_id: "circuit".to_string(),
+            node_index: 3,
+            node_id: "consumer".to_string(),
+            op: "fixture".to_string(),
+            reusable_family_id: "family".to_string(),
+            artifact_path: "kernel.spv".to_string(),
+            entry_point: "main".to_string(),
+            local_size_x: 64,
+            descriptors: vec![
+                activation(0, VulkanKernelDescriptorUsage::InputSignal, "input", 1),
+                activation(1, VulkanKernelDescriptorUsage::OutputSignal, "output", 2),
+                activation(2, VulkanKernelDescriptorUsage::Parameter, "scratch", 3),
+            ],
+            push_constants: Vec::new(),
+            stream_control_binding: None,
+        },
+    );
+
+    assert_eq!(
+        dispatch.reads,
+        [VulkanMountedPlacedStreamTickIo::ActivationSlot {
+            component_id: "component".to_string(),
+            signal_id: "input".to_string(),
+            slot: 1,
+        }]
+    );
+    assert_eq!(
+        dispatch.writes,
+        [VulkanMountedPlacedStreamTickIo::ActivationSlot {
+            component_id: "component".to_string(),
+            signal_id: "output".to_string(),
+            slot: 2,
+        }]
+    );
+    assert_eq!(dispatch.resident_descriptor_count, 3);
+}
+
+#[test]
 fn resident_dispatch_segments_stop_at_transport_boundaries() {
     let stages = vec![
         fixture_tick_dispatch_stage(0),

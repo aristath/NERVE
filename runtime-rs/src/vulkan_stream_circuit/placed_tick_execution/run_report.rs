@@ -70,8 +70,26 @@ impl VulkanMountedPlacedStreamTickDispatch {
 
         for descriptor in &dispatch.descriptors {
             match &descriptor.target {
-                VulkanMountedPlacedBoundDescriptorTarget::Resident { .. } => {
+                VulkanMountedPlacedBoundDescriptorTarget::Resident { target } => {
                     resident_descriptor_count += 1;
+                    if let VulkanBoundDescriptorTarget::ActivationSlot {
+                        component_id,
+                        signal_id,
+                        slot,
+                        ..
+                    } = target
+                    {
+                        let io = VulkanMountedPlacedStreamTickIo::ActivationSlot {
+                            component_id: component_id.clone(),
+                            signal_id: signal_id.clone(),
+                            slot: *slot,
+                        };
+                        match &descriptor.usage {
+                            VulkanKernelDescriptorUsage::InputSignal => reads.push(io),
+                            VulkanKernelDescriptorUsage::OutputSignal => writes.push(io),
+                            _ => {}
+                        }
+                    }
                 }
                 VulkanMountedPlacedBoundDescriptorTarget::ModelInput { signal_id } => {
                     reads.push(VulkanMountedPlacedStreamTickIo::ModelSignal {
@@ -132,6 +150,11 @@ impl VulkanMountedPlacedStreamTickDispatch {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VulkanMountedPlacedStreamTickIo {
+    ActivationSlot {
+        component_id: String,
+        signal_id: String,
+        slot: usize,
+    },
     ModelSignal {
         signal_id: String,
     },

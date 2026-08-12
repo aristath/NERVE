@@ -939,17 +939,21 @@ fn distributed_calibration_update_io_topology_digest(
     io: &VulkanMountedPlacedStreamTickIo,
 ) {
     match io {
-        VulkanMountedPlacedStreamTickIo::ModelSignal { .. } => digest.update([0]),
-        VulkanMountedPlacedStreamTickIo::LocalEdgeBuffer { byte_capacity, .. } => {
-            digest.update([1]);
-            digest.update(byte_capacity.to_le_bytes());
+        VulkanMountedPlacedStreamTickIo::ActivationSlot { slot, .. } => {
+            digest.update([0]);
+            digest.update(slot.to_le_bytes());
         }
-        VulkanMountedPlacedStreamTickIo::IncomingEdgeBuffer { byte_capacity, .. } => {
+        VulkanMountedPlacedStreamTickIo::ModelSignal { .. } => digest.update([1]),
+        VulkanMountedPlacedStreamTickIo::LocalEdgeBuffer { byte_capacity, .. } => {
             digest.update([2]);
             digest.update(byte_capacity.to_le_bytes());
         }
-        VulkanMountedPlacedStreamTickIo::OutgoingEdgeBuffer { byte_capacity, .. } => {
+        VulkanMountedPlacedStreamTickIo::IncomingEdgeBuffer { byte_capacity, .. } => {
             digest.update([3]);
+            digest.update(byte_capacity.to_le_bytes());
+        }
+        VulkanMountedPlacedStreamTickIo::OutgoingEdgeBuffer { byte_capacity, .. } => {
+            digest.update([4]);
             digest.update(byte_capacity.to_le_bytes());
         }
     }
