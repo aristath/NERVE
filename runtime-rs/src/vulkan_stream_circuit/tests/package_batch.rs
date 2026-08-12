@@ -2018,6 +2018,12 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
         physical_artifact_id: node_id.to_string(),
         physical_execution_contract_id: format!("sha256:{}", "a".repeat(64)),
         implementation_digest: format!("sha256:{}", "b".repeat(64)),
+        equivalence: crate::VulkanDistributedEquivalencePlan {
+            output: crate::VulkanDistributedEquivalenceKind::BitExact,
+            state: crate::VulkanDistributedEquivalenceKind::BitExact,
+            absolute_tolerance_bits: None,
+            relative_tolerance_bits: None,
+        },
         contract_member_node_ids: vec![node_id.to_string()],
         local_intermediates: Vec::new(),
         has_lazy_resource_requirements: false,

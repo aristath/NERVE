@@ -1549,6 +1549,7 @@ pub struct VulkanDistributedDispatchPlan {
     pub physical_artifact_id: String,
     pub physical_execution_contract_id: String,
     pub implementation_digest: String,
+    pub equivalence: VulkanDistributedEquivalencePlan,
     pub contract_member_node_ids: Vec<String>,
     pub local_intermediates: Vec<nerve_execution_contracts::LocalIntermediateContract>,
     pub has_lazy_resource_requirements: bool,
@@ -1569,6 +1570,49 @@ pub struct VulkanDistributedDispatchPlan {
     pub distribution: VulkanDistributedDispatchDistribution,
     pub distributed_parameter_byte_count: usize,
     pub shards: Vec<VulkanDistributedDispatchShard>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum VulkanDistributedEquivalenceKind {
+    BitExact,
+    AbsoluteRelativeTolerance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedEquivalencePlan {
+    pub output: VulkanDistributedEquivalenceKind,
+    pub state: VulkanDistributedEquivalenceKind,
+    pub absolute_tolerance_bits: Option<u64>,
+    pub relative_tolerance_bits: Option<u64>,
+}
+
+impl VulkanDistributedEquivalencePlan {
+    fn from_contract(
+        equivalence: &nerve_execution_contracts::EquivalenceRequirement,
+    ) -> Self {
+        let kind = |value| match value {
+            nerve_execution_contracts::EquivalenceKind::BitExact => {
+                VulkanDistributedEquivalenceKind::BitExact
+            }
+            nerve_execution_contracts::EquivalenceKind::AbsoluteRelativeTolerance => {
+                VulkanDistributedEquivalenceKind::AbsoluteRelativeTolerance
+            }
+        };
+        Self {
+            output: kind(equivalence.output),
+            state: kind(equivalence.state),
+            absolute_tolerance_bits: equivalence.absolute_tolerance.map(f64::to_bits),
+            relative_tolerance_bits: equivalence.relative_tolerance.map(f64::to_bits),
+        }
+    }
+
+    pub fn absolute_tolerance(&self) -> Option<f64> {
+        self.absolute_tolerance_bits.map(f64::from_bits)
+    }
+
+    pub fn relative_tolerance(&self) -> Option<f64> {
+        self.relative_tolerance_bits.map(f64::from_bits)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

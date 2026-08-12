@@ -1007,6 +1007,12 @@ mod tests {
             .finalization = ReductionFinalization::AddBf16ResidualToBf16 {
             residual_binding: 3,
         };
+        residual_contract.equivalence = EquivalenceRequirement {
+            output: EquivalenceKind::AbsoluteRelativeTolerance,
+            state: EquivalenceKind::BitExact,
+            absolute_tolerance: Some(0.01),
+            relative_tolerance: Some(0.02),
+        };
         let VulkanDescriptorResourceAddress::ActivationSlot {
             byte_capacity,
             signal_byte_capacity,
@@ -1048,6 +1054,22 @@ mod tests {
         assert_eq!(
             residual_plan.dispatches[0].auxiliary_input_activations[0].signal_id,
             "residual"
+        );
+        assert_eq!(
+            residual_plan.dispatches[0].equivalence.output,
+            VulkanDistributedEquivalenceKind::AbsoluteRelativeTolerance,
+        );
+        assert_eq!(
+            residual_plan.dispatches[0]
+                .equivalence
+                .absolute_tolerance(),
+            Some(0.01),
+        );
+        assert_eq!(
+            residual_plan.dispatches[0]
+                .equivalence
+                .relative_tolerance(),
+            Some(0.02),
         );
 
         let mut odd_residual = residual_finalized.clone();
