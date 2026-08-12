@@ -187,7 +187,10 @@ fn create_distributed_resident_dispatch(
     private_output: Option<&Arc<VulkanResidentBuffer>>,
 ) -> Result<VulkanResidentKernelDispatch, VulkanDistributedDispatchRunnerError> {
     let (input, input_byte_offset) = if let Some(input) = private_input {
-        (input, 0)
+        (
+            input,
+            distributed_primary_input_binding_offset(planned_shard, true),
+        )
     } else {
         let input = activation_buffers
             .activation_buffer(
@@ -203,7 +206,10 @@ fn create_distributed_resident_dispatch(
                     planned_shard.device_id
                 ))
             })?;
-        (input, planned_shard.input_range.byte_offset)
+        (
+            input,
+            distributed_primary_input_binding_offset(planned_shard, false),
+        )
     };
     let (output, output_byte_offset, output_byte_count) =
         if let Some(reduction) = &planned_dispatch.reduction {
@@ -461,6 +467,24 @@ fn create_distributed_resident_dispatch(
                 planned_dispatch.component_id, planned_dispatch.node_id, planned_shard.device_id
             ))
         })
+}
+
+/// Resolves a logical shard range to the offset exposed to its shader.
+///
+/// Shared activation buffers retain the global byte offset described by the
+/// distributed plan. A private island intermediate is a shard-local allocation:
+/// the producer writes its local layout at byte zero and the adjacent consumer
+/// must read that same allocation at byte zero, even when the shard represents a
+/// nonzero range of the logical activation.
+fn distributed_primary_input_binding_offset(
+    planned_shard: &VulkanDistributedDispatchShard,
+    uses_private_intermediate: bool,
+) -> usize {
+    if uses_private_intermediate {
+        0
+    } else {
+        planned_shard.input_range.byte_offset
+    }
 }
 
 impl VulkanDistributedDispatchRunners {

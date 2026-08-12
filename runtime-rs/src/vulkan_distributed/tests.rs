@@ -2757,7 +2757,7 @@ mod tests {
             signal: gate_up.output_activation.signal_id.clone(),
             producer_binding: u32::try_from(gate_up.output_activation.binding).unwrap(),
             consumer_binding: 0,
-            format: "bf16".to_string(),
+            format: "bf16:route_major_local_rows".to_string(),
         }];
         let mut routes = gate_up.input_activation.clone();
         routes.binding = 8;
@@ -2807,6 +2807,18 @@ mod tests {
         plan.dispatches = vec![gate_up, down];
         let ownership =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&plan).unwrap();
+
+        let second_down_shard = &plan.dispatches[1].shards[1];
+        assert!(second_down_shard.input_range.byte_offset > 0);
+        assert_eq!(
+            distributed_primary_input_binding_offset(second_down_shard, false),
+            second_down_shard.input_range.byte_offset,
+        );
+        assert_eq!(
+            distributed_primary_input_binding_offset(second_down_shard, true),
+            0,
+            "a shard-local route-major intermediate must be read from its local origin",
+        );
 
         assert_eq!(
             resolved_physical_execution_islands(
