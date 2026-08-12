@@ -198,13 +198,24 @@ For every numbered item below:
   buffer sizing, and invalid participant geometry are covered
   hardware-neutrally. Live equivalence and the measured selection decision
   remain part of the authorized mounted proof below.
-- Execute the router once on the layer coordinator and keep routing metadata on
-  the device.
-- Dispatch the six selected routed experts concurrently to their owners. Run
-  each expert's gate/up, activation, weighting, and down projection on the same
-  device so its intermediate never crosses a device boundary.
-- Execute the shared expert concurrently when dependencies allow, then reduce
-  routed and shared expert results exactly once on the selected coordinator.
+- Hardware-neutral execution acceptance now validates the complete sparse
+  chain at normal package startup: exactly one structural router feeds each
+  gate/up, the matching gate/up and down form one distributed island, the
+  always-selected shared expert occupies the same independently addressable
+  selection domain, and exactly one coordinator-local reduction consumes the
+  island output. The scheduler keeps router stages before the island and the
+  reduction after it, while distributed submission launches every owner shard
+  before waiting or running its coordinator. The remaining acceptance is the
+  explicitly authorized mounted proof below.
+- Prove on the mounted real-model transaction that the router executes once on
+  the layer coordinator and routing metadata stays on the device.
+- Prove that the six selected routed experts dispatch concurrently to their
+  owners. Each expert's gate/up, activation, weighting, and down projection
+  must remain on the same device so its intermediate never crosses a device
+  boundary.
+- Prove that the shared expert executes concurrently when dependencies allow,
+  then routed and shared expert results reduce exactly once on the selected
+  coordinator.
 - Prove on mounted decode and multi-lane prefill that each expert remains
   independently demand-resident: an unavailable expert publishes an immutable
   fault at the exact causal checkpoint, only affected shards resume, and

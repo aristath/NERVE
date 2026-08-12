@@ -554,6 +554,87 @@ fn distributed_dependency_topology_uses_composed_group_boundaries() {
 }
 
 #[test]
+fn sparse_expert_island_keeps_one_router_and_one_reduction_on_the_coordinator() {
+    let activation = |signal: &str, slot| VulkanMountedPlacedStreamTickIo::ActivationSlot {
+        component_id: "sparse-layer".to_string(),
+        signal_id: signal.to_string(),
+        slot,
+    };
+    let mut stages = (0..5).map(fixture_tick_dispatch_stage).collect::<Vec<_>>();
+    let io = [
+        (vec![activation("hidden", 0)], vec![activation("router_logits", 1)]),
+        (vec![activation("router_logits", 1)], vec![activation("routes", 2)]),
+        (
+            vec![activation("hidden", 0), activation("routes", 2)],
+            vec![activation("expert_intermediates", 3)],
+        ),
+        (
+            vec![activation("expert_intermediates", 3), activation("routes", 2)],
+            vec![activation("expert_outputs", 4)],
+        ),
+        (
+            vec![activation("expert_outputs", 4)],
+            vec![activation("ffn_output", 5)],
+        ),
+    ];
+    for (stage, (reads, writes)) in stages.iter_mut().zip(io) {
+        let VulkanMountedPlacedStreamTickStage::Dispatch { dispatch, .. } = stage else {
+            unreachable!();
+        };
+        dispatch.reads = reads;
+        dispatch.writes = writes;
+    }
+    let tick_plan = VulkanMountedPlacedStreamTickPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "gpu0".to_string(),
+        stage_count: stages.len(),
+        dispatch_stage_count: stages.len(),
+        stages: stages.clone(),
+        receive_stage_count: 0,
+        publish_stage_count: 0,
+        local_edge_read_count: 0,
+        local_edge_write_count: 0,
+        incoming_edge_read_count: 0,
+        outgoing_edge_write_count: 0,
+        model_input_read_count: 0,
+        model_output_write_count: 0,
+        can_execute: false,
+    };
+    let distributed_indices = BTreeSet::from([2, 3]);
+    let distributed_stages = distributed_dispatch_stages(&tick_plan, &distributed_indices).unwrap();
+    let islands =
+        physical_execution_island_stage_groups(&distributed_stages, &[vec![2, 3]]).unwrap();
+    let ranges = resident_dispatch_segment_stage_ranges_for_physical_islands(
+        &stages,
+        &distributed_indices,
+        &islands,
+    );
+    let dependencies =
+        distributed_dispatch_dependency_topologies(&islands, &ranges, &stages);
+
+    assert_eq!(ranges, vec![(0, 2), (4, 5)]);
+    assert_eq!(islands.len(), 1);
+    assert_eq!(islands[&2].end_stage_index, 4);
+    assert_eq!(
+        islands[&2]
+            .dispatches
+            .iter()
+            .map(|dispatch| dispatch.dispatch_index)
+            .collect::<Vec<_>>(),
+        [2, 3],
+    );
+    assert_eq!(
+        dependencies[&2],
+        VulkanMountedPlacedDistributedDispatchDependencies {
+            dispatch_index: 2,
+            has_owner_producer: true,
+            has_owner_continuation: true,
+            completion_consumer_stage_index: Some(4),
+        }
+    );
+}
+
+#[test]
 fn distributed_completion_wait_moves_to_the_first_true_activation_consumer() {
     let activation = |signal: &str, slot| VulkanMountedPlacedStreamTickIo::ActivationSlot {
         component_id: "component".to_string(),
