@@ -137,52 +137,29 @@ For every numbered item below:
 
 ### 3. Make placement calibration safe for runtime consumption
 
-- Keep the existing placement artifact as evidence only until its schema
-  preserves exact execution-case identity. Do not consume its current
-  format-only ranking directly in automatic placement.
-- Make benchmark cases execute the same artifacts and partition contracts that
-  inference can select. Synthetic data may surround the real contract, but the
-  benchmark must not contain an approximate second implementation of TP.
-- Preserve every valid non-dominated candidate rather than only the locally
-  fastest owner or transport. A slightly slower local owner may remove the next
-  graph boundary and produce the fastest complete plan.
-- Key observations by contract, phase, shape class, device group, split,
-  input target, output target, owner, transport, and relevant driver/artifact
-  identity.
-- Measure representative compiler-emitted geometries rather than one arbitrary
-  payload or an expensive size sweep. One warmup and one or two timed calls are
-  sufficient to decide whether a candidate is faster.
-- Measure complete single-device, serialized, TP, expert-parallel, hybrid,
-  directed-boundary, reduction, and lazy-load-wave transactions. Include all
-  computation, synchronization, transport, and collection needed before the
-  output is usable.
-- Do not hardcode a four-device architectural limit. Use staged candidate
-  expansion: measure singles and pairs, expand promising groups, and directly
-  validate every final group the planner may select.
-- Record only canonically output-valid observations. Missing or stale
-  observations make that candidate unavailable rather than free or assumed.
+- Add complete serialized multi-component-region and mixed hybrid transaction
+  calibration. The current exact runtime adapter deliberately rejects a
+  serialized observation because it can lower only one exact case per logical
+  component; do not approximate a region by summing independent component and
+  boundary measurements.
 - Prove the resulting catalog against a concretely mounted runtime model before
   chat: every automatically selectable TP case must match that model's exact
-  implementation signatures, artifacts, shapes, and owner profiles.
+  runtime fingerprint, implementation signatures, artifacts, shapes, device
+  identities, owner profiles, and transport routes.
 
-### 4. Complete the dense FFN tensor-parallel substrate
+### 4. Prove dense FFN tensor parallelism on mounted execution
 
-- Implement and validate the complete gate/up-to-down island:
-  1. Publish or distribute the normalized hidden input.
-  2. Compute aligned gate/up output-row shards.
-  3. Keep every activated intermediate shard local.
-  4. Consume the matching down-projection input-column shard locally.
-  5. Produce full-width F32 partial outputs.
-  6. Reduce once on the selected coordinator.
-  7. Convert and add the residual exactly once.
-- Ensure every participant stores only its assigned permanent tensor ranges;
-  the owner must not retain a redundant full tensor.
-- Support decode and prefill through artifact-declared BF16, FP8, MXFP4, INT4,
-  and other valid representations. A format without a correct distributed
-  contract remains single-device or serialized.
-- Validate immediate component output, persistent state, parameter residency,
-  transient peak, transport, cancellation, and teardown against the canonical
-  single-device execution.
+- On an explicitly selected real transformer component, compare immediate
+  decode and package-supported prefill output plus persistent state against the
+  canonical single-device execution. Exercise the compiler-declared BF16 and
+  FP8 gate/up output-row to local input-column down-projection island; formats
+  without a correct distributed contract must remain unavailable rather than
+  being relabelled as TP.
+- Prove from live allocations that each participant retains only its assigned
+  permanent parameter ranges, the owner has no redundant canonical full
+  tensors, private intermediates and F32 partials match their declared transient
+  accounting, cancellation quiesces every participant, and teardown restores
+  each target's exact pre-run reservation.
 
 ### 5. Implement lazy whole-expert parallelism
 
