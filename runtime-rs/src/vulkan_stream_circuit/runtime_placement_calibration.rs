@@ -117,6 +117,7 @@ pub struct VulkanRuntimePlacementCalibrationReport {
     pub measured_windows: Vec<VulkanTargetedComponentThroughputWindow>,
     pub physical_dispatch_count: usize,
     pub output_digest: String,
+    pub captured_outputs: Vec<VulkanTargetedCapturedOutput>,
     pub state_digest: String,
     pub resident_parameter_bytes: usize,
     pub resident_transient_bytes: usize,
@@ -149,10 +150,37 @@ impl VulkanRuntimePlacementCalibrationSuite {
         runtime_model: &VulkanResidentRuntimeModel,
         context_capacity_activations: usize,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
-        let started = Instant::now();
-        let manifest_dir = manifest_dir.as_ref();
-        let mut targets = vulkan_runtime_placement_calibration_targets(runtime_model)
+        let targets = vulkan_runtime_placement_calibration_targets(runtime_model)
             .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+        Self::prepare_targets(
+            manifest_dir.as_ref(),
+            runtime_model,
+            context_capacity_activations,
+            targets,
+        )
+    }
+
+    fn prepare_target(
+        manifest_dir: &Path,
+        runtime_model: &VulkanResidentRuntimeModel,
+        context_capacity_activations: usize,
+        target: VulkanRuntimePlacementCalibrationTarget,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        Self::prepare_targets(
+            manifest_dir,
+            runtime_model,
+            context_capacity_activations,
+            vec![target],
+        )
+    }
+
+    fn prepare_targets(
+        manifest_dir: &Path,
+        runtime_model: &VulkanResidentRuntimeModel,
+        context_capacity_activations: usize,
+        mut targets: Vec<VulkanRuntimePlacementCalibrationTarget>,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        let started = Instant::now();
         let tensor_index = Arc::new(runtime_model.load_runtime_tensor_index(manifest_dir)?);
         let contract = Arc::new(
             instantiate_runtime_resource_contract(runtime_model).map_err(|error| {
@@ -587,7 +615,7 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
                 &target.terminal_node_id,
                 phase,
                 scope,
-                false,
+                true,
             )?;
             let session_mount_ns =
                 u64::try_from(session_mount_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -655,6 +683,11 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
                 measured_windows: measured.throughput_windows,
                 physical_dispatch_count: measured.physical_dispatch_count,
                 output_digest: measured.output_digest,
+                captured_outputs: measured.captured_outputs.ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(
+                        "runtime placement calibration did not capture canonical outputs",
+                    )
+                })?,
                 state_digest: measured.state_digest,
                 resident_parameter_bytes: measured.resident_parameter_bytes,
                 resident_transient_bytes: measured.resident_transient_bytes,

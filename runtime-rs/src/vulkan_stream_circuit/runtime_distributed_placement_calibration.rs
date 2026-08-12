@@ -26,23 +26,6 @@ pub struct VulkanRuntimeDistributedPlacementCalibrationReport {
 }
 
 impl VulkanRuntimeDistributedPlacementCalibrationReport {
-    pub fn canonical_reference(
-        &self,
-    ) -> Result<VulkanPlacementCanonicalReference, VulkanPlacementCalibrationCatalogError> {
-        if self.execution_case.strategy != VulkanPlacementExecutionStrategy::SingleDevice {
-            return Err(VulkanPlacementCalibrationCatalogError(
-                "only a single-device execution of the exact sampled contract may establish its canonical placement reference"
-                    .to_string(),
-            ));
-        }
-        Ok(VulkanPlacementCanonicalReference {
-            behavior: self.execution_case.behavior.clone(),
-            output_digest: self.output_digest.clone(),
-            output_artifact: self.output_artifact.clone(),
-            state_digest: self.state_digest.clone(),
-        })
-    }
-
     pub fn calibration_observation(
         &self,
         output_equivalence: VulkanPlacementOutputEquivalenceEvidence,
@@ -72,12 +55,10 @@ pub fn record_vulkan_runtime_distributed_calibration_report(
     catalog: &mut VulkanPlacementCalibrationCatalog,
     report: &VulkanRuntimeDistributedPlacementCalibrationReport,
 ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
-    if report.execution_case.strategy == VulkanPlacementExecutionStrategy::SingleDevice
-        && catalog
-            .canonical_reference(&report.execution_case.behavior)
-            .is_none()
-    {
-        catalog.record_reference(report.canonical_reference()?)?;
+    if report.sampled_workload || report.sample_fraction_millionths != 1_000_000 {
+        return Err(VulkanPlacementCalibrationCatalogError(
+            "distributed placement observation does not execute complete model work".to_string(),
+        ));
     }
     let reference = catalog
         .canonical_reference(&report.execution_case.behavior)
@@ -2481,6 +2462,128 @@ fn distributed_calibration_error_value(
 #[cfg(test)]
 mod runtime_distributed_placement_calibration_strategy_tests {
     use super::*;
+
+    fn recording_report() -> VulkanRuntimeDistributedPlacementCalibrationReport {
+        let digest = |byte: char| format!("sha256:{}", byte.to_string().repeat(64));
+        let physical_device_id = "gpu0".to_string();
+        VulkanRuntimeDistributedPlacementCalibrationReport {
+            physical_device_ids: vec![physical_device_id.clone()],
+            target: digest_target("component", "terminal"),
+            phase: "decode".to_string(),
+            activation_batch_width: 1,
+            sampled_workload: false,
+            sample_fraction_millionths: 1_000_000,
+            measured_execution_ns: 10,
+            measured_ns_per_activation: 10,
+            measured_windows: Vec::new(),
+            physical_dispatch_count: 1,
+            shard_count: 1,
+            output_digest: "output".to_string(),
+            output_artifact: None,
+            state_digest: "state".to_string(),
+            resident_parameter_bytes_by_device: BTreeMap::from([(
+                physical_device_id.clone(),
+                16,
+            )]),
+            resident_transient_bytes_by_device: BTreeMap::from([(
+                physical_device_id.clone(),
+                8,
+            )]),
+            resident_host_transient_bytes: 0,
+            activation_routes: Vec::new(),
+            dispatch_work: Vec::new(),
+            execution_case: VulkanPlacementExecutionCaseIdentity {
+                behavior: VulkanPlacementBehaviorIdentity {
+                    compiled_execution_signature: digest('a'),
+                    runtime_implementation_fingerprint: "runtime".to_string(),
+                    phase: nerve_execution_contracts::ExecutionPhase::Decode,
+                    shape: VulkanPlacementShapeClass {
+                        activation_batch_width: 1,
+                        input_byte_capacity: 16,
+                        output_byte_capacity: 16,
+                    },
+                    input_fixture_digest: digest('b'),
+                },
+                contract_ids: vec!["contract".to_string()],
+                implementation_digests: vec![digest('c')],
+                artifact_digest: digest('d'),
+                execution_graph_digest: digest('e'),
+                operations: vec![VulkanPlacementOperationGeometry::Dispatch {
+                    geometry: VulkanPlacementDispatchGeometry {
+                        contract_id: "contract".to_string(),
+                        logical_extent: 8,
+                        sampled_extent: 8,
+                        input_width: 8,
+                        workgroup_count_x: 1,
+                        local_size_x: 64,
+                    },
+                }],
+                equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
+                strategy: VulkanPlacementExecutionStrategy::SingleDevice,
+                devices: vec![VulkanPlacementDeviceExecutionIdentity {
+                    physical_device_id: physical_device_id.clone(),
+                    api_version: 1,
+                    driver_version: 2,
+                }],
+                shards: Vec::new(),
+                input_physical_device_id: physical_device_id.clone(),
+                output_physical_device_id: physical_device_id.clone(),
+                owner_physical_device_id: physical_device_id,
+                transports: Vec::new(),
+            },
+            warmup_call_count: 1,
+            measured_call_count: 1,
+            useful_activation_count: 1,
+        }
+    }
+
+    #[test]
+    fn a_physical_single_device_case_cannot_reference_itself() {
+        let report = recording_report();
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        assert!(
+            record_vulkan_runtime_distributed_calibration_report(&mut catalog, &report)
+                .unwrap_err()
+                .to_string()
+                .contains("no measured single-device reference")
+        );
+        assert_eq!(catalog.observation_count(), 0);
+
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: report.execution_case.behavior.clone(),
+                output_digest: report.output_digest.clone(),
+                output_artifact: None,
+                state_digest: report.state_digest.clone(),
+            })
+            .unwrap();
+        record_vulkan_runtime_distributed_calibration_report(&mut catalog, &report).unwrap();
+        assert_eq!(catalog.observation_count(), 1);
+    }
+
+    #[test]
+    fn sampled_physical_work_cannot_enter_the_runtime_catalog() {
+        let mut report = recording_report();
+        report.sampled_workload = true;
+        report.sample_fraction_millionths = 500_000;
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: report.execution_case.behavior.clone(),
+                output_digest: report.output_digest.clone(),
+                output_artifact: None,
+                state_digest: report.state_digest.clone(),
+            })
+            .unwrap();
+
+        assert!(
+            record_vulkan_runtime_distributed_calibration_report(&mut catalog, &report)
+                .unwrap_err()
+                .to_string()
+                .contains("does not execute complete model work")
+        );
+        assert_eq!(catalog.observation_count(), 0);
+    }
 
     fn digest_target(component_id: &str, node_id: &str) -> VulkanRuntimePlacementCalibrationTarget {
         VulkanRuntimePlacementCalibrationTarget {

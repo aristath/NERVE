@@ -1,8 +1,9 @@
 /// Measures one planner-requested physical candidate through its exact
-/// prefixes. Every participant first establishes a canonical single-device
-/// reference. The requested owner/worker order is then measured as a pair and
-/// expanded one participant at a time. An unavailable or invalid prefix makes
-/// the larger candidate unavailable; it is never assigned an inferred cost.
+/// prefixes. Every participant's physical single-device case is validated
+/// against one normal component-execution reference. The requested
+/// owner/worker order is then measured as a pair and expanded one participant
+/// at a time. An unavailable or invalid prefix makes the larger candidate
+/// unavailable; it is never assigned an inferred cost.
 pub fn calibrate_vulkan_runtime_staged_placement_candidate_with_policy(
     devices: &[(String, Rc<VulkanComputeDevice>)],
     manifest_dir: impl AsRef<Path>,
@@ -109,6 +110,12 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
     let mut final_report = None;
     let mut sample_fraction_millionths = None;
     for stage in stages {
+        let canonical_participant = match stage.as_slice() {
+            [(physical_device_id, device)] => {
+                Some((physical_device_id.clone(), Rc::clone(device)))
+            }
+            _ => None,
+        };
         let remaining = policy
             .maximum_duration
             .checked_sub(started.elapsed())
@@ -154,11 +161,171 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
             ));
         }
         sample_fraction_millionths = Some(report.sample_fraction_millionths);
+        if catalog
+            .canonical_reference(&report.execution_case.behavior)
+            .is_none()
+        {
+            let Some((physical_device_id, device)) = canonical_participant else {
+                return Err(VulkanResidentTokenModelPackageError::new(
+                    "a physical placement cannot establish behavior before its canonical single-device component reference",
+                ));
+            };
+            let remaining = policy
+                .maximum_duration
+                .checked_sub(started.elapsed())
+                .ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(
+                        "staged runtime placement calibration exhausted its duration before canonical validation",
+                    )
+                })?;
+            let reference = calibrate_vulkan_runtime_canonical_component_reference(
+                &physical_device_id,
+                device,
+                manifest_dir,
+                runtime_model,
+                target,
+                phase,
+                &report.execution_case.behavior,
+                report.execution_case.equivalence.output_scalar_format,
+                VulkanRuntimePlacementCalibrationPolicy {
+                    maximum_duration: remaining,
+                    maximum_total_resident_parameter_bytes: common_parameter_budget,
+                    ..policy.clone()
+                },
+            )?;
+            catalog
+                .record_reference(reference)
+                .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+        }
         record_vulkan_runtime_distributed_calibration_report(catalog, &report)
             .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
         final_report = Some(report);
     }
     Ok(final_report)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn calibrate_vulkan_runtime_canonical_component_reference(
+    physical_device_id: &str,
+    device: Rc<VulkanComputeDevice>,
+    manifest_dir: &Path,
+    runtime_model: &VulkanResidentRuntimeModel,
+    target: &VulkanRuntimePlacementCalibrationTarget,
+    phase: VulkanTargetedComponentExecutionPhase,
+    behavior: &VulkanPlacementBehaviorIdentity,
+    output_scalar_format: Option<VulkanPlacementScalarFormat>,
+    policy: VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<VulkanPlacementCanonicalReference, VulkanResidentTokenModelPackageError> {
+    let capacity = runtime_model
+        .package
+        .max_context_activations
+        .max(1)
+        .min(VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_STATE_ACTIVATIONS);
+    let mut suite = VulkanRuntimePlacementCalibrationSuite::prepare_target(
+        manifest_dir,
+        runtime_model,
+        capacity,
+        target.clone(),
+    )?;
+    let scope = match phase {
+        VulkanTargetedComponentExecutionPhase::Decode => {
+            VulkanTargetedComponentExecutionScope::DecodeComponentPrefix
+        }
+        VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+            VulkanTargetedComponentExecutionScope::Component
+        }
+    };
+    let reports = calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
+        device,
+        manifest_dir,
+        physical_device_id,
+        &mut suite,
+        phase,
+        scope,
+        policy,
+    )?;
+    let [report] = reports.as_slice() else {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "canonical component calibration produced {} reports for {:?}",
+            reports.len(), target.component_id,
+        )));
+    };
+    if report.target.signature_id != target.signature_id
+        || report.target.component_id != target.component_id
+        || report.activation_batch_width != phase.activation_batch_width()
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "canonical component calibration changed its requested transaction identity",
+        ));
+    }
+    let scalar_format = output_scalar_format.unwrap_or(VulkanPlacementScalarFormat::Bf16);
+    let mut segments = report
+        .captured_outputs
+        .iter()
+        .map(|output| {
+            let bytes = decode_calibration_hex(&output.bytes_le_hex)?;
+            if bytes.len() != output.byte_count {
+                return Err(VulkanResidentTokenModelPackageError::new(format!(
+                    "canonical output {:?} captured {} bytes but declared {}",
+                    output.name,
+                    bytes.len(),
+                    output.byte_count,
+                )));
+            }
+            Ok(VulkanPlacementOutputSegment {
+                binding: output.binding,
+                name: output.name.clone(),
+                bytes,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    segments.sort_by(|left, right| {
+        (left.binding, left.name.as_str()).cmp(&(right.binding, right.name.as_str()))
+    });
+    if segments.is_empty() {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "canonical component calibration captured no output signals",
+        ));
+    }
+    let output_artifact = VulkanPlacementOutputArtifact {
+        scalar_format,
+        segments,
+    };
+    let digest = vulkan_placement_output_artifact_digest(&output_artifact)
+        .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+    if digest != report.output_digest {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "canonical component output capture disagrees with its measured digest",
+        ));
+    }
+    Ok(VulkanPlacementCanonicalReference {
+        behavior: behavior.clone(),
+        output_digest: report.output_digest.clone(),
+        output_artifact: Some(output_artifact),
+        state_digest: report.state_digest.clone(),
+    })
+}
+
+fn decode_calibration_hex(value: &str) -> Result<Vec<u8>, VulkanResidentTokenModelPackageError> {
+    if !value.len().is_multiple_of(2) {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "canonical output contains odd-length hexadecimal data",
+        ));
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|encoded| u8::from_str_radix(encoded, 16).ok())
+                .ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(
+                        "canonical output contains invalid hexadecimal data",
+                    )
+                })
+        })
+        .collect()
 }
 
 fn vulkan_runtime_staged_common_parameter_budget<'a>(
@@ -329,5 +496,12 @@ mod runtime_staged_placement_calibration_tests {
                 .to_string()
                 .contains("no positive parameter capacity")
         );
+    }
+
+    #[test]
+    fn canonical_output_hex_is_decoded_strictly() {
+        assert_eq!(decode_calibration_hex("00a5ff").unwrap(), [0, 0xa5, 0xff]);
+        assert!(decode_calibration_hex("0").is_err());
+        assert!(decode_calibration_hex("0x").is_err());
     }
 }
