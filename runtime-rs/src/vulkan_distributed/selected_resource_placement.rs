@@ -601,6 +601,7 @@ mod selected_resource_placement_tests {
             parameter_slots_binding: 4,
             resource_count,
             parameters_per_resource: 2,
+            parameter_partitions: Vec::new(),
             selection_count_per_activation: selected,
             atomic_group_ids: (0..resource_count)
                 .map(|index| format!("expert_{index}"))

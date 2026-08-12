@@ -589,6 +589,7 @@ def test_independent_experts_compile_selector_partition_contracts(
             "resource_count": 4,
             "parameters_per_resource": 2,
             "alignment_elements": 1,
+            "parameter_partitions": [],
         }
     ]
     assert distributed["inputs"] == [

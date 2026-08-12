@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub const PHYSICAL_EXECUTION_CONTRACT_SCHEMA: &str = "nerve.physical_execution_contract.v3";
+pub const PHYSICAL_EXECUTION_CONTRACT_SCHEMA: &str = "nerve.physical_execution_contract.v4";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContractError(pub String);
@@ -213,6 +213,17 @@ pub struct SelectedResourcePartition {
     pub resource_count: u64,
     pub parameters_per_resource: u64,
     pub alignment_elements: u64,
+    pub parameter_partitions: Vec<SelectedResourceParameterPartition>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedResourceParameterPartition {
+    pub parameter_slot: u64,
+    pub dimension: u32,
+    pub kind: ParameterPartitionKind,
+    pub alignment_elements: u64,
+    pub logical_elements_per_index: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -521,10 +532,43 @@ fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), Contrac
         let Some(extent) = &contract.partition_extent else {
             return invalid("selected resource partitions require a partition extent");
         };
-        if extent.elements != partition.resource_count
-            || extent.alignment_elements % partition.alignment_elements != 0
-        {
+        if extent.alignment_elements % partition.alignment_elements != 0 {
             return invalid("selected resource partitions must match the logical partition extent");
+        }
+        let mut parameter_slots = BTreeSet::new();
+        for parameter in &partition.parameter_partitions {
+            if parameter.parameter_slot >= partition.parameters_per_resource
+                || !parameter_slots.insert(parameter.parameter_slot)
+                || parameter.kind == ParameterPartitionKind::ExpertRange
+                || parameter.alignment_elements == 0
+                || parameter.logical_elements_per_index == 0
+            {
+                return invalid(
+                    "selected resource parameter partitions must name unique valid parameter slots",
+                );
+            }
+            let Some(logical_alignment) = parameter
+                .alignment_elements
+                .checked_mul(parameter.logical_elements_per_index)
+            else {
+                return invalid("selected resource parameter partition alignment overflowed");
+            };
+            if extent.elements % parameter.logical_elements_per_index != 0
+                || extent.alignment_elements % logical_alignment != 0
+            {
+                return invalid(
+                    "selected resource parameter partitions must divide the logical extent and its alignment",
+                );
+            }
+        }
+        if partition
+            .parameter_partitions
+            .windows(2)
+            .any(|pair| pair[0].parameter_slot >= pair[1].parameter_slot)
+        {
+            return invalid(
+                "selected resource parameter partitions must be ordered by parameter slot",
+            );
         }
     }
     if !contract.selected_resource_partitions.is_empty()
@@ -702,6 +746,39 @@ fn validate_strategy(contract: &PhysicalExecutionContract) -> Result<(), Contrac
     };
     if !strategy_matches_form {
         return invalid("distributed execution strategy disagrees with its execution form");
+    }
+    match contract.strategy {
+        ExecutionStrategy::TensorParallel if !contract.selected_resource_partitions.is_empty() => {
+            return invalid("ordinary tensor parallelism cannot declare selected resources");
+        }
+        ExecutionStrategy::ExpertParallel
+            if contract
+                .selected_resource_partitions
+                .iter()
+                .any(|partition| {
+                    !partition.parameter_partitions.is_empty()
+                        || contract
+                            .partition_extent
+                            .as_ref()
+                            .is_none_or(|extent| extent.elements != partition.resource_count)
+                }) =>
+        {
+            return invalid(
+                "whole-expert parallelism requires unfragmented selected resources matching the expert extent",
+            );
+        }
+        ExecutionStrategy::TensorParallelExpert
+            if contract.selected_resource_partitions.is_empty()
+                || contract
+                    .selected_resource_partitions
+                    .iter()
+                    .any(|partition| partition.parameter_partitions.is_empty()) =>
+        {
+            return invalid(
+                "intra-resource tensor parallelism requires explicit selected parameter partitions",
+            );
+        }
+        _ => {}
     }
     match contract.execution_form {
         ExecutionForm::ReplicatedInputPartitionedOutput
@@ -1010,6 +1087,7 @@ mod tests {
             resource_count: 4,
             parameters_per_resource: 2,
             alignment_elements: 1,
+            parameter_partitions: Vec::new(),
         }];
         contract.inputs = vec![
             InputContract {
@@ -1048,7 +1126,143 @@ mod tests {
                 .validate()
                 .unwrap_err()
                 .to_string()
-                .contains("logical partition extent")
+                .contains("matching the expert extent")
+        );
+    }
+
+    #[test]
+    fn intra_resource_tensor_parallelism_separates_selection_from_fragmentation() {
+        let mut contract = valid_contract();
+        contract.strategy = ExecutionStrategy::TensorParallelExpert;
+        contract.execution_form = ExecutionForm::ReplicatedInputPartitionedOutput;
+        contract
+            .geometry
+            .dimensions
+            .insert("intermediate".to_string(), 128);
+        contract.partition_extent = Some(PartitionExtent {
+            dimension_name: "intermediate".to_string(),
+            elements: 128,
+            alignment_elements: 16,
+        });
+        contract.partition_launch = Some(PartitionLaunch {
+            workgroup_x: WorkgroupXMapping::Proportional,
+            origin: PartitionOrigin::LocalZero,
+            origin_push_constant: None,
+            count_push_constant: None,
+        });
+        contract.parameter_partitions.clear();
+        contract.selected_resource_partitions = vec![SelectedResourcePartition {
+            selection_signal: "routes".to_string(),
+            address_table_binding: 2,
+            parameter_slots_binding: 3,
+            kind: ParameterPartitionKind::ExpertRange,
+            resource_count: 4,
+            parameters_per_resource: 2,
+            alignment_elements: 1,
+            parameter_partitions: vec![
+                SelectedResourceParameterPartition {
+                    parameter_slot: 0,
+                    dimension: 0,
+                    kind: ParameterPartitionKind::Contiguous,
+                    alignment_elements: 16,
+                    logical_elements_per_index: 1,
+                },
+                SelectedResourceParameterPartition {
+                    parameter_slot: 1,
+                    dimension: 0,
+                    kind: ParameterPartitionKind::Contiguous,
+                    alignment_elements: 16,
+                    logical_elements_per_index: 1,
+                },
+            ],
+        }];
+        contract.inputs = vec![InputContract {
+            binding: 0,
+            distribution: InputDistribution::Replicated,
+            dimension: None,
+            alignment_elements: None,
+        }];
+        contract.outputs = vec![OutputContract {
+            binding: 1,
+            collection: OutputCollection::Concatenated,
+            dimension: Some(0),
+            alignment_elements: Some(16),
+            reduction: None,
+        }];
+        contract.resources = vec![ResourceRequirement {
+            resource: "expert-bank".to_string(),
+            kind: ResourceKind::LazyResource,
+            residency: ResidencyRequirement::Demand,
+            access: ResourceAccess::Read,
+            binding: None,
+            atomic_group: Some("selector-owned".to_string()),
+        }];
+        contract.validate().unwrap();
+
+        let mut missing_fragments = contract.clone();
+        missing_fragments.selected_resource_partitions[0]
+            .parameter_partitions
+            .clear();
+        assert!(
+            missing_fragments
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("explicit selected parameter partitions")
+        );
+
+        let mut repeated_slot = contract.clone();
+        repeated_slot.selected_resource_partitions[0].parameter_partitions[1].parameter_slot = 0;
+        assert!(
+            repeated_slot
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unique valid parameter slots")
+        );
+
+        let mut relabelled_whole_expert = contract.clone();
+        relabelled_whole_expert.strategy = ExecutionStrategy::ExpertParallel;
+        relabelled_whole_expert.execution_form = ExecutionForm::WholeExpertOwnership;
+        relabelled_whole_expert
+            .geometry
+            .dimensions
+            .insert("experts".to_string(), 4);
+        relabelled_whole_expert.partition_extent = Some(PartitionExtent {
+            dimension_name: "experts".to_string(),
+            elements: 4,
+            alignment_elements: 1,
+        });
+        relabelled_whole_expert.partition_launch = Some(PartitionLaunch {
+            workgroup_x: WorkgroupXMapping::Repeated,
+            origin: PartitionOrigin::PushConstantU32,
+            origin_push_constant: Some("expert_start".to_string()),
+            count_push_constant: Some("expert_count".to_string()),
+        });
+        relabelled_whole_expert.inputs[0] = InputContract {
+            binding: 0,
+            distribution: InputDistribution::Routed,
+            dimension: Some(0),
+            alignment_elements: Some(1),
+        };
+        relabelled_whole_expert.outputs[0] = OutputContract {
+            binding: 1,
+            collection: OutputCollection::Routed,
+            dimension: Some(0),
+            alignment_elements: Some(1),
+            reduction: None,
+        };
+        for fragment in
+            &mut relabelled_whole_expert.selected_resource_partitions[0].parameter_partitions
+        {
+            fragment.alignment_elements = 1;
+        }
+        assert!(
+            relabelled_whole_expert
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("unfragmented selected resources")
         );
     }
 

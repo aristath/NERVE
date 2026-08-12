@@ -28,6 +28,7 @@ pub struct VulkanDistributedSelectedResourceOwnership {
     pub selection_signal: String,
     pub resource_count: usize,
     pub selection_count_per_activation: usize,
+    pub parameter_partitions: Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
     pub owned_resource_indices: Vec<usize>,
     pub atomic_group_ids: Vec<String>,
     pub atomic_group_byte_counts: Vec<usize>,
@@ -42,6 +43,7 @@ struct VulkanDistributedSelectedResourceSelectorIdentity {
     selection_signal: String,
     resource_count: usize,
     selection_count_per_activation: usize,
+    parameter_partitions: Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
     atomic_group_ids: Vec<String>,
     atomic_group_byte_counts: Vec<usize>,
 }
@@ -61,8 +63,19 @@ impl VulkanDistributedSelectedResourceStorePlan {
     fn merged_for_alternatives(
         plans: &[VulkanDistributedSelectedResourceStorePlan],
     ) -> Result<Self, VulkanDistributedPlanError> {
-        let mut selector_identities =
-            BTreeMap::<String, (String, String, String, String, String, usize, usize)>::new();
+        let mut selector_identities = BTreeMap::<
+            String,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                usize,
+                usize,
+                Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
+            ),
+        >::new();
         let mut canonical_resources = BTreeMap::<(String, usize), (String, usize)>::new();
         let mut resources_by_device_selector =
             BTreeMap::<(String, String), BTreeMap<usize, (String, usize)>>::new();
@@ -93,6 +106,7 @@ impl VulkanDistributedSelectedResourceStorePlan {
                         selector.selection_signal.clone(),
                         selector.resource_count,
                         selector.selection_count_per_activation,
+                        selector.parameter_partitions.clone(),
                     );
                     if let Some(existing) =
                         selector_identities.insert(selector.selector_id.clone(), identity.clone())
@@ -161,6 +175,7 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     selection_signal: identity.4.clone(),
                     resource_count: identity.5,
                     selection_count_per_activation: identity.6,
+                    parameter_partitions: identity.7.clone(),
                     owned_resource_indices,
                     atomic_group_ids,
                     atomic_group_byte_counts,
@@ -197,6 +212,7 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     selection_signal: partition.selection_signal.clone(),
                     resource_count: partition.resource_count,
                     selection_count_per_activation: partition.selection_count_per_activation,
+                    parameter_partitions: partition.parameter_partitions.clone(),
                     atomic_group_ids: partition.atomic_group_ids.clone(),
                     atomic_group_byte_counts: partition.atomic_group_byte_counts.clone(),
                 };
@@ -296,6 +312,7 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     selection_signal: identity.selection_signal.clone(),
                     resource_count: identity.resource_count,
                     selection_count_per_activation: identity.selection_count_per_activation,
+                    parameter_partitions: identity.parameter_partitions.clone(),
                     owned_resource_indices,
                     atomic_group_ids,
                     atomic_group_byte_counts,
@@ -401,6 +418,14 @@ fn validate_selected_resource_partition(
         || partition.selection_signal.trim().is_empty()
         || partition.resource_count == 0
         || partition.parameters_per_resource == 0
+        || partition.parameter_partitions.windows(2).any(|pair| {
+            pair[0].parameter_slot >= pair[1].parameter_slot
+        })
+        || partition.parameter_partitions.iter().any(|parameter| {
+            parameter.parameter_slot >= partition.parameters_per_resource
+                || parameter.alignment_elements == 0
+                || parameter.logical_elements_per_index == 0
+        })
         || partition.selection_count_per_activation == 0
         || partition.selection_count_per_activation > partition.resource_count
         || partition.atomic_group_ids.len() != partition.resource_count

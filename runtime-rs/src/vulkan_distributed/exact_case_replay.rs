@@ -489,6 +489,7 @@ mod exact_case_replay_tests {
                 parameter_slots_binding: 4,
                 resource_count: 4,
                 parameters_per_resource: 2,
+                parameter_partitions: Vec::new(),
                 selection_count_per_activation: 2,
                 atomic_group_ids: (0..4).map(|index| format!("expert-{index}")).collect(),
                 atomic_group_byte_counts: vec![8; 4],

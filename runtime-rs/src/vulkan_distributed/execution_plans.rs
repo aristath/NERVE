@@ -1523,6 +1523,8 @@ fn selected_resource_expert_handoff(
                 && producer_partition.resource_count == consumer_partition.resource_count
                 && producer_partition.selection_count_per_activation
                     == consumer_partition.selection_count_per_activation
+                && producer_partition.parameter_partitions
+                    == consumer_partition.parameter_partitions
                 && producer_partition.atomic_group_ids == consumer_partition.atomic_group_ids
                 && producer_partition.atomic_group_byte_counts
                     == consumer_partition.atomic_group_byte_counts;
@@ -1798,9 +1800,19 @@ pub struct VulkanDistributedSelectedResourcePartitionPlan {
     pub parameter_slots_binding: usize,
     pub resource_count: usize,
     pub parameters_per_resource: usize,
+    pub parameter_partitions: Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
     pub selection_count_per_activation: usize,
     pub atomic_group_ids: Vec<String>,
     pub atomic_group_byte_counts: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedSelectedResourceParameterPartitionPlan {
+    pub parameter_slot: usize,
+    pub dimension: usize,
+    pub kind: nerve_execution_contracts::ParameterPartitionKind,
+    pub alignment_elements: usize,
+    pub logical_elements_per_index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

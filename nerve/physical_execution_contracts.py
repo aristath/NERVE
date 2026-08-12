@@ -13,7 +13,7 @@ from nerve.model_package_physical_kernels import (
 
 Json = dict[str, Any]
 
-PHYSICAL_EXECUTION_CONTRACT_SCHEMA = "nerve.physical_execution_contract.v3"
+PHYSICAL_EXECUTION_CONTRACT_SCHEMA = "nerve.physical_execution_contract.v4"
 
 ExecutionPhase = Literal["decode", "prefill"]
 ExecutionShape = Literal["single_lane", "multi_lane", "single_and_multi_lane"]
@@ -87,6 +87,15 @@ class SelectedResourcePartition(TypedDict):
     resource_count: int
     parameters_per_resource: int
     alignment_elements: int
+    parameter_partitions: list[SelectedResourceParameterPartition]
+
+
+class SelectedResourceParameterPartition(TypedDict):
+    parameter_slot: int
+    dimension: int
+    kind: ParameterPartitionKind
+    alignment_elements: int
+    logical_elements_per_index: int
 
 
 class PartitionExtent(TypedDict):
@@ -691,6 +700,7 @@ def _distributed_kernel_contract(
                     "resource_count": resource_count,
                     "parameters_per_resource": parameters_per_resource,
                     "alignment_elements": 1,
+                    "parameter_partitions": [],
                 }
             ],
             inputs=[
@@ -1419,6 +1429,7 @@ def _validate_selected_resource_partitions(
             "resource_count",
             "parameters_per_resource",
             "alignment_elements",
+            "parameter_partitions",
         }
         _keys(item, fields, fields, path)
         selection_signal = _non_empty_string(
@@ -1444,18 +1455,72 @@ def _validate_selected_resource_partitions(
         resource_count = _positive_int(
             item["resource_count"], f"{path}.resource_count"
         )
-        _positive_int(
+        parameters_per_resource = _positive_int(
             item["parameters_per_resource"], f"{path}.parameters_per_resource"
         )
         alignment = _positive_int(
             item["alignment_elements"], f"{path}.alignment_elements"
         )
-        if extent is None or (
-            extent["elements"] != resource_count
-            or extent["alignment_elements"] % alignment
-        ):
+        if extent is None or extent["alignment_elements"] % alignment:
             _invalid(
                 "selected resource partitions must match the logical partition extent"
+            )
+        parameter_slots: set[int] = set()
+        parameter_partitions = _list(
+            item["parameter_partitions"], f"{path}.parameter_partitions"
+        )
+        fragment_fields = {
+            "parameter_slot",
+            "dimension",
+            "kind",
+            "alignment_elements",
+            "logical_elements_per_index",
+        }
+        for fragment_index, fragment_value in enumerate(parameter_partitions):
+            fragment_path = f"{path}.parameter_partitions[{fragment_index}]"
+            fragment = _mapping(fragment_value, fragment_path)
+            _keys(fragment, fragment_fields, fragment_fields, fragment_path)
+            parameter_slot = _non_negative_int(
+                fragment["parameter_slot"], f"{fragment_path}.parameter_slot"
+            )
+            if (
+                parameter_slot >= parameters_per_resource
+                or parameter_slot in parameter_slots
+            ):
+                _invalid(
+                    "selected resource parameter partitions must name unique valid parameter slots"
+                )
+            parameter_slots.add(parameter_slot)
+            _non_negative_int(fragment["dimension"], f"{fragment_path}.dimension")
+            if (
+                _enum(fragment["kind"], _PARTITION_KINDS, f"{fragment_path}.kind")
+                == "expert_range"
+            ):
+                _invalid(
+                    "selected resource parameter partitions must name unique valid parameter slots"
+                )
+            fragment_alignment = _positive_int(
+                fragment["alignment_elements"],
+                f"{fragment_path}.alignment_elements",
+            )
+            logical_elements_per_index = _positive_int(
+                fragment["logical_elements_per_index"],
+                f"{fragment_path}.logical_elements_per_index",
+            )
+            logical_alignment = fragment_alignment * logical_elements_per_index
+            if (
+                extent["elements"] % logical_elements_per_index
+                or extent["alignment_elements"] % logical_alignment
+            ):
+                _invalid(
+                    "selected resource parameter partitions must divide the logical extent and its alignment"
+                )
+        if [
+            _mapping(value, f"{path}.parameter_partitions")["parameter_slot"]
+            for value in parameter_partitions
+        ] != sorted(parameter_slots):
+            _invalid(
+                "selected resource parameter partitions must be ordered by parameter slot"
             )
     if values and not any(
         _mapping(resource, "contract resource").get("kind") == "lazy_resource"
@@ -1680,6 +1745,29 @@ def _validate_strategy(
     )
     if not strategy_matches_form:
         _invalid("distributed execution strategy disagrees with its execution form")
+    if strategy == "tensor_parallel" and selected_partitions:
+        _invalid("ordinary tensor parallelism cannot declare selected resources")
+    if strategy == "expert_parallel" and any(
+        _mapping(item, "selected resource partition")["parameter_partitions"]
+        or _mapping(partition_extent, "contract.partition_extent")["elements"]
+        != _mapping(item, "selected resource partition")["resource_count"]
+        for item in selected_partitions
+    ):
+        _invalid(
+            "whole-expert parallelism requires unfragmented selected resources matching the expert extent"
+        )
+    if strategy == "tensor_parallel_expert" and (
+        not selected_partitions
+        or any(
+            not _mapping(item, "selected resource partition")[
+                "parameter_partitions"
+            ]
+            for item in selected_partitions
+        )
+    ):
+        _invalid(
+            "intra-resource tensor parallelism requires explicit selected parameter partitions"
+        )
     if execution_form == "replicated_input_partitioned_output" and not any(
         _mapping(item, "output")["collection"] == "concatenated"
         for item in outputs

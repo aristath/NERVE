@@ -741,6 +741,44 @@ fn resolve_selected_resource_partitions(
                         "selected parameter count exceeds usize".to_string(),
                     )
                 })?;
+            let parameter_partitions = partition
+                .parameter_partitions
+                .iter()
+                .map(|parameter| {
+                    Ok(VulkanDistributedSelectedResourceParameterPartitionPlan {
+                        parameter_slot: usize::try_from(parameter.parameter_slot).map_err(|_| {
+                            dispatch_error(
+                                dispatch,
+                                "selected parameter slot exceeds usize".to_string(),
+                            )
+                        })?,
+                        dimension: usize::try_from(parameter.dimension).map_err(|_| {
+                            dispatch_error(
+                                dispatch,
+                                "selected parameter dimension exceeds usize".to_string(),
+                            )
+                        })?,
+                        kind: parameter.kind,
+                        alignment_elements: usize::try_from(parameter.alignment_elements).map_err(
+                            |_| {
+                                dispatch_error(
+                                    dispatch,
+                                    "selected parameter alignment exceeds usize".to_string(),
+                                )
+                            },
+                        )?,
+                        logical_elements_per_index: usize::try_from(
+                            parameter.logical_elements_per_index,
+                        )
+                        .map_err(|_| {
+                            dispatch_error(
+                                dispatch,
+                                "selected parameter logical extent exceeds usize".to_string(),
+                            )
+                        })?,
+                    })
+                })
+                .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
             let mut bindings = BTreeMap::<(usize, usize), (&str, &str)>::new();
             for binding in &residency.bindings {
                 let CompiledResourceBindingMapping::SelectedAtomicGroup {
@@ -858,6 +896,7 @@ fn resolve_selected_resource_partitions(
                     .map_err(|_| dispatch_error(dispatch, "dynamic binding exceeds usize".to_string()))?,
                 resource_count: selector.resource_count,
                 parameters_per_resource,
+                parameter_partitions,
                 selection_count_per_activation: selector
                     .encoding
                     .selection_count_per_activation,

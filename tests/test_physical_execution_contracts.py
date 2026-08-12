@@ -254,6 +254,7 @@ def selected_resource_expert_contract() -> dict[str, object]:
             "resource_count": 4,
             "parameters_per_resource": 2,
             "alignment_elements": 1,
+            "parameter_partitions": [],
         }
     ]
     contract["inputs"] = [
@@ -289,7 +290,7 @@ def test_selected_resource_partition_is_typed_and_matches_atomic_extent() -> Non
     validate_physical_execution_contract(contract)
 
     contract["selected_resource_partitions"][0]["resource_count"] = 3
-    with pytest.raises(PhysicalExecutionContractError, match="logical partition extent"):
+    with pytest.raises(PhysicalExecutionContractError, match="matching the expert extent"):
         validate_physical_execution_contract(contract)
 
     contract = selected_resource_expert_contract()
@@ -301,6 +302,69 @@ def test_selected_resource_partition_is_typed_and_matches_atomic_extent() -> Non
     contract["resources"][0]["kind"] = "persistent_parameter"
     contract["resources"][0]["residency"] = "permanent"
     with pytest.raises(PhysicalExecutionContractError, match="demand-resident lazy"):
+        validate_physical_execution_contract(contract)
+
+
+def test_intra_resource_tp_separates_selection_from_parameter_fragments() -> None:
+    contract = selected_resource_expert_contract()
+    contract["strategy"] = "tensor_parallel_expert"
+    contract["execution_form"] = "replicated_input_partitioned_output"
+    contract["geometry"]["dimensions"]["intermediate"] = 128
+    contract["partition_extent"] = {
+        "dimension_name": "intermediate",
+        "elements": 128,
+        "alignment_elements": 16,
+    }
+    contract["partition_launch"] = {
+        "workgroup_x": "proportional",
+        "origin": "local_zero",
+    }
+    contract["selected_resource_partitions"][0]["parameter_partitions"] = [
+        {
+            "parameter_slot": slot,
+            "dimension": 0,
+            "kind": "contiguous",
+            "alignment_elements": 16,
+            "logical_elements_per_index": 1,
+        }
+        for slot in range(2)
+    ]
+    contract["inputs"] = [{"binding": 0, "distribution": "replicated"}]
+    contract["outputs"] = [
+        {
+            "binding": 1,
+            "collection": "concatenated",
+            "dimension": 0,
+            "alignment_elements": 16,
+        }
+    ]
+    validate_physical_execution_contract(contract)
+
+    contract["selected_resource_partitions"][0]["parameter_partitions"] = []
+    with pytest.raises(
+        PhysicalExecutionContractError, match="explicit selected parameter partitions"
+    ):
+        validate_physical_execution_contract(contract)
+
+    contract = selected_resource_expert_contract()
+    contract["strategy"] = "tensor_parallel"
+    contract["execution_form"] = "replicated_input_partitioned_output"
+    contract["partition_launch"] = {
+        "workgroup_x": "proportional",
+        "origin": "local_zero",
+    }
+    contract["outputs"] = [
+        {
+            "binding": 2,
+            "collection": "concatenated",
+            "dimension": 0,
+            "alignment_elements": 1,
+        }
+    ]
+    with pytest.raises(
+        PhysicalExecutionContractError,
+        match="ordinary tensor parallelism cannot declare selected resources",
+    ):
         validate_physical_execution_contract(contract)
 
 
