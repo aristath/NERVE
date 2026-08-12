@@ -86,6 +86,12 @@ def compile_model_package(
         tensor_index,
         target=target,
     )
+    derive_tensor_parallel_independent_expert_tensors(
+        lowered["index"],
+        lowered_dir,
+        tensor_index,
+        target=target,
+    )
     write_json(transpiled_dir / "tensors.json", tensor_index)
     tensor_index = referenced_tensor_index(
         tensor_index,

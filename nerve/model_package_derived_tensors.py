@@ -1,8 +1,60 @@
 from nerve.model_package_common import *
 from nerve.model_package_tensors import dtype_byte_count, tensor_dtype, tensor_shape
+from nerve.model_package_independent_experts import independent_sparse_moe_shader_file
 from nerve.compiler_target import CompilerTarget
 
 TP_INPUT_BLOCK_COLUMNS = 128
+
+
+def derive_tensor_parallel_independent_expert_tensors(
+    lowered_index: Json,
+    lowered_dir: Path,
+    tensor_index: Json,
+    *,
+    target: CompilerTarget,
+) -> None:
+    """Compile selected expert down projections into shard-contiguous storage."""
+
+    if not target.supports_native_dtype("F8_E4M3"):
+        return
+    for circuit_ref in lowered_circuit_refs(lowered_index):
+        circuit_path = lowered_dir / circuit_ref["circuit"]
+        circuit = read_json(circuit_path)
+        refs = circuit.get("parameters", {}).get("refs", {})
+        changed = False
+        for node in circuit.get("nodes", []):
+            if node.get("op") != "independent_sparse_moe_down":
+                continue
+            independent_sparse_moe_shader_file(circuit, node, tensor_index)
+            intermediate_size = int(node["attrs"]["intermediate_size"])
+            partition_count = intermediate_size // TP_INPUT_BLOCK_COLUMNS
+            accesses = node["attrs"]["selected_parameter_accesses"]
+            for mapping in accesses[0]["mapping"]:
+                weight_id, scale_id = mapping["parameter_ids"]
+                source_weight = refs[weight_id]["tensor"]
+                source_scale = refs[scale_id]["tensor"]
+                weight = ensure_input_block_major_tensor(
+                    tensor_index,
+                    source_tensor=source_weight,
+                    block_columns=TP_INPUT_BLOCK_COLUMNS // 2,
+                    source_integrity_partition_count=partition_count,
+                    physical_execution_only=False,
+                )
+                scale = ensure_input_block_major_tensor(
+                    tensor_index,
+                    source_tensor=source_scale,
+                    block_columns=TP_INPUT_BLOCK_COLUMNS // 32,
+                    source_integrity_partition_count=partition_count,
+                    physical_execution_only=False,
+                )
+                quantization = tensor_index["tensors"][weight].get("quantization")
+                if isinstance(quantization, dict):
+                    quantization["scales"] = scale
+                refs[weight_id]["tensor"] = weight
+                refs[scale_id]["tensor"] = scale
+                changed = True
+        if changed:
+            write_json(circuit_path, circuit)
 
 
 def derive_tensor_parallel_linear_tensors(
@@ -100,24 +152,57 @@ def ensure_input_block_major_tensor(
     *,
     source_tensor: str,
     block_columns: int,
+    source_integrity_partition_count: int | None = None,
+    physical_execution_only: bool = True,
 ) -> str:
     derived_tensor = input_block_major_tensor_name(source_tensor, block_columns)
     source_info = tensor_index["tensors"][source_tensor]
-    shape = tensor_shape(tensor_index, source_tensor)
+    shape = [int(value) for value in source_info["shape"]]
     if len(shape) != 2 or shape[1] % block_columns:
         raise ModelCompileError(
             f"tensor {source_tensor!r} cannot use {block_columns}-column input blocks"
         )
     output_rows, input_columns = shape
     byte_count = int(source_info["byte_count"])
+    if source_integrity_partition_count is not None and (
+        source_integrity_partition_count <= 0
+        or input_columns // block_columns != source_integrity_partition_count
+    ):
+        raise ModelCompileError(
+            f"tensor {source_tensor!r} cannot expose "
+            f"{source_integrity_partition_count!r} input-block partitions"
+        )
+    logical_shape = list(source_info.get("logical_shape", shape))
     derived_info = {
         "dtype": source_info["dtype"],
         "shape": [input_columns // block_columns, output_rows, block_columns],
-        "logical_shape": shape,
-        "parameter_count": output_rows * input_columns,
+        "logical_shape": logical_shape,
+        "parameter_count": int(source_info["parameter_count"]),
         "byte_count": byte_count,
         "layout": ROW_MAJOR_LAYOUT,
-        "physical_execution_only": True,
+        "physical_layout": {
+            "kind": "input_block_major",
+            "block_columns": block_columns,
+        },
+        **(
+            {"physical_execution_only": True}
+            if physical_execution_only
+            else {}
+        ),
+        **(
+            {"quantization": deepcopy(source_info["quantization"])}
+            if isinstance(source_info.get("quantization"), dict)
+            else {}
+        ),
+        **(
+            {
+                "source_integrity_partition_count": (
+                    source_integrity_partition_count
+                )
+            }
+            if source_integrity_partition_count is not None
+            else {}
+        ),
         "derived": {
             "kind": "matrix_to_input_block_major",
             "source_tensor": source_tensor,

@@ -65,6 +65,7 @@ def independent_sparse_moe_shader_file(
     num_experts = len(mapping)
     parameters_per_expert = 4 if stage == "gate_up" else 2
     expected_parameters: list[str] = []
+    input_block_major_layout: bool | None = None
     for expert, entry in enumerate(mapping):
         parameter_ids = entry.get("parameter_ids") if isinstance(entry, dict) else None
         if (
@@ -87,7 +88,7 @@ def independent_sparse_moe_shader_file(
         rows = intermediate_size if stage == "gate_up" else hidden_size
         columns = hidden_size if stage == "gate_up" else intermediate_size
         for weight_id, scale_id in matrix_pairs:
-            _validate_mxfp4_matrix(
+            matrix_is_input_block_major = _validate_mxfp4_matrix(
                 circuit,
                 tensor_index,
                 weight_id,
@@ -96,6 +97,13 @@ def independent_sparse_moe_shader_file(
                 columns=columns,
                 node_id=str(node["id"]),
             )
+            if input_block_major_layout is None:
+                input_block_major_layout = matrix_is_input_block_major
+            elif input_block_major_layout != matrix_is_input_block_major:
+                raise ModelCompileError(
+                    f"independent sparse expert node {node['id']!r} mixes "
+                    "incompatible physical matrix layouts"
+                )
     if node.get("params") != expected_parameters:
         raise ModelCompileError(
             f"independent sparse expert node {node['id']!r} does not preserve its "
@@ -116,6 +124,13 @@ def independent_sparse_moe_shader_file(
             )
         suffix += f"_limit{shader_float_token(limit)}"
     representation = "_prequant" if prequantized_input else ""
+    if input_block_major_layout:
+        if stage != "down":
+            raise ModelCompileError(
+                f"independent sparse expert node {node['id']!r} cannot use "
+                "input-block-major gate/up parameters"
+            )
+        representation += "_input_block_major_b128"
     return (
         f"independent_sparse_moe_{stage}{representation}_"
         f"mxfp4_e2m1_g32_{suffix}.comp"
@@ -131,7 +146,7 @@ def _validate_mxfp4_matrix(
     rows: int,
     columns: int,
     node_id: str,
-) -> None:
+) -> bool:
     refs = circuit.get("parameters", {}).get("refs", {})
     weight_ref = refs.get(weight_id)
     scale_ref = refs.get(scale_id)
@@ -146,6 +161,11 @@ def _validate_mxfp4_matrix(
     expected_scale_tensor = (
         scale_ref.get("tensor") if isinstance(scale_ref, dict) else None
     )
+    if not isinstance(weight, dict) or not isinstance(scale, dict):
+        raise ModelCompileError(
+            f"independent sparse expert node {node_id!r} has missing MXFP4 "
+            f"parameters {weight_id!r} and {scale_id!r}"
+        )
     valid_quantization = {
         "format": "mxfp4_e2m1",
         "bits": 4,
@@ -160,16 +180,33 @@ def _validate_mxfp4_matrix(
     }
     expected_weight_bytes = rows * columns // 2
     expected_scale_bytes = rows * columns // 32
+    weight_layout = (
+        weight.get("physical_layout") if isinstance(weight, dict) else None
+    )
+    scale_layout = (
+        scale.get("physical_layout") if isinstance(scale, dict) else None
+    )
+    input_block_major = (
+        weight_layout == {"kind": "input_block_major", "block_columns": 64}
+        and scale_layout == {"kind": "input_block_major", "block_columns": 4}
+        and weight.get("shape") == [columns // 128, rows, 64]
+        and weight.get("logical_shape") == [rows, columns]
+        and scale.get("shape") == [columns // 128, rows, 4]
+        and scale.get("logical_shape") == [rows, columns // 32]
+    )
+    row_major = (
+        weight_layout is None
+        and scale_layout is None
+        and weight.get("shape") == [rows, columns // 2]
+        and weight.get("logical_shape") == [rows, columns]
+        and scale.get("shape") == [rows, columns // 32]
+    )
     if (
-        not isinstance(weight, dict)
-        or not isinstance(scale, dict)
-        or weight.get("dtype") != "I8"
-        or weight.get("shape") != [rows, columns // 2]
-        or weight.get("logical_shape") != [rows, columns]
+        weight.get("dtype") != "I8"
+        or not (row_major or input_block_major)
         or weight.get("layout", ROW_MAJOR_LAYOUT) != ROW_MAJOR_LAYOUT
         or quantization != valid_quantization
         or scale.get("dtype") != "F8_E8M0"
-        or scale.get("shape") != [rows, columns // 32]
         or scale.get("layout", ROW_MAJOR_LAYOUT) != ROW_MAJOR_LAYOUT
         or weight.get("byte_count") != expected_weight_bytes
         or scale.get("byte_count") != expected_scale_bytes
@@ -178,3 +215,4 @@ def _validate_mxfp4_matrix(
             f"independent sparse expert node {node_id!r} has incompatible MXFP4 "
             f"parameters {weight_id!r} and {scale_id!r}"
         )
+    return input_block_major

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import struct
 
@@ -8,9 +9,11 @@ import numpy as np
 import pytest
 
 from nerve.model_package_assets import copy_tensor_package
+from nerve.model_package_batching import frame_parallel_batch_shader_file
 from nerve.model_package_common import ModelCompileError
 from nerve.model_package_derived_tensors import (
     TP_INPUT_BLOCK_COLUMNS,
+    derive_tensor_parallel_independent_expert_tensors,
     derive_tensor_parallel_linear_tensors,
     ensure_input_block_major_tensor,
     input_block_major_tensor_name,
@@ -19,6 +22,9 @@ from nerve.model_package_derived_tensors import (
 from nerve.model_package_physical_kernels import (
     local_shard_intermediates_for_node,
     physical_kernel_implementations_for_node,
+)
+from nerve.model_package_independent_experts import (
+    independent_sparse_moe_shader_file,
 )
 from nerve.model_package_shader_compiler import compile_shader_artifacts
 from nerve.model_package_shader_templates import copy_shader_templates
@@ -464,6 +470,140 @@ def test_partitioned_byte_matrix_reorders_preserve_exact_physical_ranges(
     expected = values.reshape(3, 4, 2).transpose(1, 0, 2)
     np.testing.assert_array_equal(actual, expected)
     assert len(partition_digests) == 4
+
+
+def test_compiler_derives_fragmentable_independent_expert_down_resources(
+    tmp_path: Path,
+) -> None:
+    weight_name = "expert.0.down.weight"
+    scale_name = "expert.0.down.scale"
+    tensor_index = {"tensors": {}}
+    for name, dtype, shape in (
+        (weight_name, "I8", [128, 128]),
+        (scale_name, "F8_E8M0", [128, 8]),
+    ):
+        numpy_dtype = "i1" if dtype == "I8" else "u1"
+        values = np.arange(math.prod(shape), dtype=numpy_dtype).reshape(shape)
+        payload = values.tobytes(order="C")
+        source = tmp_path / f"{name}.safetensors"
+        header = compiled_safetensors_header(
+            name,
+            dtype=dtype,
+            shape=shape,
+            byte_count=len(payload),
+            layout="row_major",
+        )
+        source.write_bytes(struct.pack("<Q", len(header)) + header + payload)
+        tensor_index["tensors"][name] = {
+            "dtype": dtype,
+            "shape": shape,
+            "logical_shape": [128, 256] if dtype == "I8" else shape,
+            "parameter_count": 128 * 256 if dtype == "I8" else 128 * 8,
+            "byte_count": len(payload),
+            "layout": "row_major",
+            "source_file": str(source),
+            "source_header_bytes": len(header),
+            "data_offsets": [0, len(payload)],
+        }
+    tensor_index["tensors"][weight_name]["quantization"] = {
+        "format": "mxfp4_e2m1",
+        "bits": 4,
+        "element_type": "float",
+        "values_per_byte": 2,
+        "packing_axis": 1,
+        "packing_order": "low_nibble_then_high_nibble_along_k",
+        "group_size": 32,
+        "scales": scale_name,
+        "scale_dtype": "F8_E8M0",
+        "scale_mode": "power_of_two_per_output_row_k_group",
+    }
+    node = {
+        "id": "expert_down",
+        "op": "independent_sparse_moe_down",
+        "inputs": ["expert_intermediates", "routes"],
+        "outputs": ["expert_outputs"],
+        "params": ["down_weight", "down_scale"],
+        "attrs": {
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "experts_per_token": 1,
+            "selected_parameter_accesses": [
+                {
+                    "selection_signal": "routes",
+                    "mapping": [
+                        {
+                            "selector": 0,
+                            "parameter_ids": ["down_weight", "down_scale"],
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    circuit = {
+        "nodes": [node],
+        "parameters": {
+            "refs": {
+                "down_weight": {"tensor": weight_name},
+                "down_scale": {"tensor": scale_name},
+            }
+        },
+    }
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    circuit_path = lowered_dir / "circuit.json"
+    circuit_path.write_text(json.dumps(circuit))
+
+    derive_tensor_parallel_independent_expert_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered_dir,
+        tensor_index,
+        target=NativeTarget(),  # type: ignore[arg-type]
+    )
+
+    weight = input_block_major_tensor_name(weight_name, 64)
+    scale = input_block_major_tensor_name(scale_name, 4)
+    rewritten = json.loads(circuit_path.read_text())
+    assert rewritten["parameters"]["refs"] == {
+        "down_weight": {"tensor": weight},
+        "down_scale": {"tensor": scale},
+    }
+    assert tensor_index["tensors"][weight]["shape"] == [2, 128, 64]
+    assert tensor_index["tensors"][weight]["logical_shape"] == [128, 256]
+    assert tensor_index["tensors"][scale]["shape"] == [2, 128, 4]
+    assert tensor_index["tensors"][weight]["source_integrity_partition_count"] == 2
+    assert tensor_index["tensors"][scale]["source_integrity_partition_count"] == 2
+    assert tensor_index["tensors"][weight]["quantization"]["scales"] == scale
+    assert "physical_execution_only" not in tensor_index["tensors"][weight]
+
+    shader_file = independent_sparse_moe_shader_file(
+        rewritten,
+        rewritten["nodes"][0],
+        tensor_index,
+    )
+    assert "down_input_block_major_b128_mxfp4" in shader_file
+    batch_shader_file = frame_parallel_batch_shader_file(shader_file)
+    assert batch_shader_file is not None
+    rendered_dir = tmp_path / "rendered"
+    copy_shader_templates(
+        Path(__file__).parents[1] / "runtime-rs" / "shaders",
+        rendered_dir,
+        {shader_file, batch_shader_file},
+    )
+    for rendered_shader in rendered_dir.glob("*.comp"):
+        source = rendered_shader.read_text()
+        assert "#define INPUT_BLOCK_MAJOR 1" in source
+        assert "block * HIDDEN_SIZE + row" in source
+        assert "{{" not in source
+    compile_shader_artifacts(rendered_dir)
+
+    packaged = copy_tensor_package(
+        tensor_index,
+        tmp_path / "package",
+        partition_counts={weight: 2, scale: 2},
+    )
+    assert packaged["tensors"][weight]["partition_integrity"]["partition_count"] == 2
+    assert packaged["tensors"][scale]["partition_integrity"]["partition_count"] == 2
 
 
 def test_compiler_skips_a_linear_without_legal_physical_geometry(

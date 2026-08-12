@@ -4752,6 +4752,7 @@ if (
     independent_mxfp4_expert_shape = re.fullmatch(
         r"independent_sparse_moe_(gate_up|down)(?:_(batch1))?"
         r"(?:_(prequant))?_"
+        r"(?:(input_block_major_b128)_)?"
         r"mxfp4_e2m1(?:_(resident_fp8_e4m3|adaptive_fp8_e4m3))?_g32_"
         r"h(\d+)_i(\d+)_e(\d+)_k(\d+)"
         r"(?:_limit([0-9eE+.-]+))?\.comp",
@@ -4762,6 +4763,7 @@ if (
             stage,
             batch_mode,
             prequant,
+            input_block_major,
             weight_representation,
             hidden_size,
             intermediate_size,
@@ -4802,6 +4804,7 @@ if (
                 "DYNAMIC_WEIGHT_REPRESENTATION": (
                     "1" if weight_representation == "adaptive_fp8_e4m3" else "0"
                 ),
+                "INPUT_BLOCK_MAJOR": "1" if input_block_major is not None else "0",
             },
         )
 

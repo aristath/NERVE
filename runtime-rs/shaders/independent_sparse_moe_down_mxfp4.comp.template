@@ -20,6 +20,7 @@ layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
 
 #define PREEXPANDED_FP8 {{PREEXPANDED_FP8}}
 #define DYNAMIC_WEIGHT_REPRESENTATION {{DYNAMIC_WEIGHT_REPRESENTATION}}
+#define INPUT_BLOCK_MAJOR {{INPUT_BLOCK_MAJOR}}
 
 layout(set = 0, binding = 0) readonly buffer ExpertIntermediates { uint words[]; } expert_intermediates;
 layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
@@ -167,7 +168,14 @@ fe4m3vec4 read_expanded_fp8x4(
     uint row,
     uint column
 ) {
+#if INPUT_BLOCK_MAJOR
+    uint block = column / 128u;
+    uint block_column = column % 128u;
+    uint byte_index = (block * HIDDEN_SIZE + row) * 128u + block_column;
+    uint packed = weight.words[byte_index >> 2u];
+#else
     uint packed = weight.words[(row * EXPANDED_WEIGHT_ROW_BYTES + column) >> 2u];
+#endif
     return uintBitsToFloate4m3EXT(u8vec4(
         uint8_t(packed),
         uint8_t(packed >> 8u),
@@ -181,7 +189,13 @@ fe4m3vec4 read_compact_mxfp4x4(
     uint row,
     uint column
 ) {
+#if INPUT_BLOCK_MAJOR
+    uint block = column / 128u;
+    uint block_column = column % 128u;
+    uint byte_index = (block * HIDDEN_SIZE + row) * 64u + block_column / 2u;
+#else
     uint byte_index = row * COMPACT_WEIGHT_ROW_BYTES + column / 2u;
+#endif
     uint lo = read_u8(weight, byte_index);
     uint hi = read_u8(weight, byte_index + 1u);
     return uintBitsToFloate4m3EXT(u8vec4(
@@ -206,7 +220,14 @@ fe4m3vec4 read_mxfp4x4(
 }
 
 float read_e8m0_scale(DynamicU32Buffer scale, uint row, uint block) {
+#if INPUT_BLOCK_MAJOR
+    uint scale_byte = read_u8(
+        scale,
+        (block / 4u * HIDDEN_SIZE + row) * 4u + block % 4u
+    );
+#else
     uint scale_byte = read_u8(scale, row * SCALE_ROW_BYTES + block);
+#endif
     if (scale_byte == 0u) return uintBitsToFloat(0x00400000u);
     return uintBitsToFloat(scale_byte << 23u);
 }
