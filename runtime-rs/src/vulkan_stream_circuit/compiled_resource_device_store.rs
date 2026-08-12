@@ -570,7 +570,7 @@ pub struct VulkanCompiledResourceDeviceStore {
     group_selector_ids: BTreeMap<String, String>,
     group_selections: BTreeMap<String, (String, usize)>,
     group_payload_bytes: BTreeMap<String, usize>,
-    selector_payload_budgets: BTreeMap<String, usize>,
+    selector_payload_budgets: std::sync::RwLock<BTreeMap<String, usize>>,
     retiering_last_selection_counts: std::sync::Mutex<BTreeMap<String, u64>>,
     representation_history:
         std::sync::Mutex<VulkanCompiledResourceRepresentationHistory>,
@@ -1038,7 +1038,9 @@ impl VulkanCompiledResourceDeviceStore {
             group_selector_ids: selector_cache_policy.group_selector_ids,
             group_selections: selector_cache_policy.group_selections,
             group_payload_bytes: selector_cache_policy.group_payload_bytes,
-            selector_payload_budgets: selector_cache_policy.selector_payload_budgets,
+            selector_payload_budgets: std::sync::RwLock::new(
+                selector_cache_policy.selector_payload_budgets,
+            ),
             retiering_last_selection_counts: std::sync::Mutex::new(BTreeMap::new()),
             representation_history: std::sync::Mutex::new(
                 VulkanCompiledResourceRepresentationHistory::default(),
@@ -1264,6 +1266,101 @@ impl VulkanCompiledResourceDeviceStore {
 
     pub(crate) fn dynamic_device_payload_capacity_bytes(&self) -> usize {
         self.maximum_dynamic_device_payload_bytes
+    }
+
+    pub(crate) fn selector_cache_resource_payload_bytes(
+        &self,
+        selector_ids: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, Vec<usize>>, VulkanCompiledResourceDeviceStoreError> {
+        let cache_selectors = self.selector_payload_budget_snapshot()?;
+        if selector_ids.is_empty()
+            || selector_ids
+                .iter()
+                .any(|selector_id| !cache_selectors.contains_key(selector_id))
+        {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource cache payload request is empty or references an unknown selector",
+            ));
+        }
+        selector_ids
+            .iter()
+            .cloned()
+            .map(|selector_id| {
+                let selector = self
+                    .contract_index
+                    .selector(&self.contract, &selector_id)
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "compiled resource cache selector {selector_id:?} is absent from its contract",
+                        ))
+                    })?;
+                let payloads = (0..selector.resource_count)
+                    .map(|resource_index| {
+                        let resolved = self.resolve_selector_resource(
+                            &selector_id,
+                            resource_index,
+                        )?;
+                        let descriptor = DeviceResourceGroupDescriptor::from_resolved(&resolved)
+                            .map_err(|error| {
+                                VulkanCompiledResourceDeviceStoreError::new(format!(
+                                    "compiled resource cache descriptor is invalid: {error}",
+                                ))
+                            })?;
+                        Ok(if self.group_selector_ids.get(&descriptor.id)
+                            == Some(&selector_id)
+                        {
+                            descriptor.byte_count
+                        } else {
+                            0
+                        })
+                    })
+                    .collect::<Result<Vec<_>, VulkanCompiledResourceDeviceStoreError>>()?;
+                Ok((selector_id, payloads))
+            })
+            .collect()
+    }
+
+    pub(crate) fn selector_payload_budget_snapshot(
+        &self,
+    ) -> Result<BTreeMap<String, usize>, VulkanCompiledResourceDeviceStoreError> {
+        self.selector_payload_budgets
+            .read()
+            .map(|budgets| budgets.clone())
+            .map_err(|_| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource selector cache budgets were poisoned",
+                )
+            })
+    }
+
+    pub(crate) fn replace_selector_payload_budgets(
+        &self,
+        replacement: BTreeMap<String, usize>,
+    ) -> Result<BTreeMap<String, usize>, VulkanCompiledResourceDeviceStoreError> {
+        let mut budgets = self.selector_payload_budgets.write().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource selector cache budgets were poisoned",
+            )
+        })?;
+        if replacement.keys().ne(budgets.keys()) {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource selector cache budget replacement changes its selector domain",
+            ));
+        }
+        let total = replacement.values().try_fold(0usize, |total, budget| {
+            total.checked_add(*budget).ok_or_else(|| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource selector cache budget total overflowed",
+                )
+            })
+        })?;
+        if total > self.maximum_dynamic_payload_bytes {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource selector cache budgets require {total} bytes, exceeding the {}-byte store capacity",
+                self.maximum_dynamic_payload_bytes,
+            )));
+        }
+        Ok(std::mem::replace(&mut *budgets, replacement))
     }
 
     pub fn load_selector_resource(

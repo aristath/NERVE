@@ -260,9 +260,14 @@ For every numbered item below:
   tables and residency-gate ownership without remounting the backbone, keeps
   addressable replicas from executing duplicate arithmetic, and lets cloned
   streams inherit adapted ownership without leaking changes into sibling
-  streams. The remaining work is package-wide cache-quota arbitration that
-  aggregates all active streams before changing shared-store eviction budgets,
-  plus measured replication and the explicitly authorized mounted proof.
+  streams. Package-wide cache-quota arbitration is now complete as well: each
+  stream publishes a recent telemetry window, the package aggregates weighted
+  demand and the union of hot resources across every live stream, unrelated
+  selector shares remain fixed, and complete per-store eviction policies swap
+  transactionally. A failed quota publication restores both the previous
+  shared policy and any ownership change from the same prompt boundary. The
+  remaining work is measured replication and the explicitly authorized mounted
+  proof.
 - Allow a compiler-declared predictable router dependency to trigger safe
   prefetch or preselection without a DeepSeek-specific runtime branch.
 

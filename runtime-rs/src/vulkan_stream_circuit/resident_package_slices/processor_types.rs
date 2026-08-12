@@ -4,6 +4,8 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
         BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
     selected_resource_adaptation:
         Option<VulkanRuntimeSelectedResourceAdaptationState>,
+    selected_resource_cache_registration:
+        Option<VulkanSelectedResourceCacheRegistration>,
     _distributed_activation_buffers: VulkanDistributedActivationBuffers,
     edge_synchronizations: VulkanPlacedEdgeTimelineSynchronizations,
     model: Arc<VulkanResidentInProcessPlacedModelPackage>,

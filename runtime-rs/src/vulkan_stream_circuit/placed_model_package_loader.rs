@@ -1363,6 +1363,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     source.and_then(|source| source.selected_resource_adaptation.as_ref()),
                 )
             });
+        let selected_resource_cache_registration = selected_resource_adaptation
+            .as_ref()
+            .map(|state| state.context.cache_arbiter.register())
+            .transpose()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
         let stream_distributed_execution_plans = selected_resource_adaptation
             .as_ref()
             .map(|state| &state.execution_plans)
@@ -1910,6 +1915,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             distributed_dispatch_runners,
             distributed_dynamic_resource_buffers,
             selected_resource_adaptation,
+            selected_resource_cache_registration,
             _distributed_activation_buffers: distributed_activation_buffers,
             edge_synchronizations,
             input_transducer,

@@ -224,6 +224,7 @@ include!("vulkan_stream_circuit/hybrid_placement_optimizer.rs");
 include!("vulkan_stream_circuit/runtime_hybrid_placement.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_planning.rs");
 include!("vulkan_stream_circuit/runtime_selected_resource_mount_planning.rs");
+include!("vulkan_stream_circuit/runtime_selected_resource_cache_arbiter.rs");
 include!("vulkan_stream_circuit/runtime_selected_resource_reconfiguration.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_calibration.rs");
 include!("vulkan_stream_circuit/runtime_distributed_contract_candidates.rs");

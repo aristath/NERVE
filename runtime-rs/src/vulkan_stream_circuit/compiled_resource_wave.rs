@@ -403,11 +403,12 @@ impl VulkanCompiledResourceDeviceStore {
             .manager
             .eviction_candidates(protected_group_ids)
             .map_err(compiled_device_store_residency_error)?;
+        let selector_payload_budgets = self.selector_payload_budget_snapshot()?;
         let candidates = compiled_resource_selector_fair_eviction_candidates(
             &candidates,
             &snapshot.directory,
             &self.group_selector_ids,
-            &self.selector_payload_budgets,
+            &selector_payload_budgets,
             selector_id,
             new_payload_bytes,
         )?;
@@ -429,6 +430,7 @@ impl VulkanCompiledResourceDeviceStore {
             .manager
             .eviction_candidates(protected_group_ids)
             .map_err(compiled_device_store_residency_error)?;
+        let selector_payload_budgets = self.selector_payload_budget_snapshot()?;
         let candidates = compiled_resource_selector_fair_eviction_candidates(
             &candidates,
             &self
@@ -437,7 +439,7 @@ impl VulkanCompiledResourceDeviceStore {
                 .map_err(compiled_device_store_residency_error)?
                 .directory,
             &self.group_selector_ids,
-            &self.selector_payload_budgets,
+            &selector_payload_budgets,
             selector_id,
             new_payload_bytes,
         )?;
@@ -989,11 +991,12 @@ impl VulkanCompiledResourceDeviceStore {
             .manager
             .eviction_candidates(protected_group_ids)
             .map_err(compiled_device_store_residency_error)?;
+        let selector_payload_budgets = self.selector_payload_budget_snapshot()?;
         let candidates = compiled_resource_selector_fair_eviction_candidates(
             &candidates,
             &snapshot.directory,
             &self.group_selector_ids,
-            &self.selector_payload_budgets,
+            &selector_payload_budgets,
             selector_id,
             new_payload_bytes,
         )?;
@@ -1026,11 +1029,12 @@ impl VulkanCompiledResourceDeviceStore {
             .manager
             .eviction_candidates(protected_group_ids)
             .map_err(compiled_device_store_residency_error)?;
+        let selector_payload_budgets = self.selector_payload_budget_snapshot()?;
         let candidates = compiled_resource_selector_fair_eviction_candidates(
             &candidates,
             &snapshot.directory,
             &self.group_selector_ids,
-            &self.selector_payload_budgets,
+            &selector_payload_budgets,
             selector_id,
             new_payload_bytes,
         )?;

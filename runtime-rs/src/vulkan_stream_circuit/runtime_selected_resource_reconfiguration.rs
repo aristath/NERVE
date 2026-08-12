@@ -3,12 +3,14 @@ struct VulkanRuntimeSelectedResourceReconfigurationContext {
     catalog: Arc<VulkanPlacementCalibrationCatalog>,
     requirements: Vec<VulkanRuntimeSelectedResourceExecutionRequirementPlan>,
     capacities: Vec<VulkanPlacementSelectedResourceDeviceCapacity>,
+    cache_arbiter: Arc<VulkanSelectedResourceCacheArbiter>,
 }
 
 struct VulkanRuntimeSelectedResourceAdaptationState {
     context: Arc<VulkanRuntimeSelectedResourceReconfigurationContext>,
     execution_plans: VulkanDistributedExecutionPlanSet,
     telemetry_baseline: Option<VulkanSelectionTelemetrySnapshot>,
+    cache_telemetry_baseline: Option<VulkanSelectionTelemetrySnapshot>,
     generation: u64,
 }
 
@@ -28,6 +30,7 @@ fn initial_vulkan_runtime_selected_resource_adaptation_state(
         // physical ownership that makes its state executable, but establishes
         // its own observation window before proposing another move.
         telemetry_baseline: None,
+        cache_telemetry_baseline: None,
         generation,
     }
 }
@@ -186,11 +189,18 @@ fn build_vulkan_runtime_selected_resource_reconfiguration_context(
     if capacities.len() < 2 {
         return Ok(None);
     }
+    let adaptive_selector_ids = requirements
+        .iter()
+        .map(|requirement| requirement.selector_id.clone())
+        .collect::<BTreeSet<_>>();
+    let cache_arbiter =
+        VulkanSelectedResourceCacheArbiter::new(stores, &adaptive_selector_ids)?;
     Ok(Some(Arc::new(
         VulkanRuntimeSelectedResourceReconfigurationContext {
             catalog: Arc::new(catalog.clone()),
             requirements,
             capacities,
+            cache_arbiter,
         },
     )))
 }
@@ -247,6 +257,12 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .map(|baseline| telemetry.delta_since(baseline))
             .transpose()?
             .unwrap_or_else(|| telemetry.clone());
+        let cache_window = state
+            .cache_telemetry_baseline
+            .as_ref()
+            .map(|baseline| telemetry.delta_since(baseline))
+            .transpose()?
+            .unwrap_or_else(|| telemetry.clone());
         let reconfigurations =
             try_plan_vulkan_runtime_warm_selected_resource_reconfigurations(
                 &state.execution_plans.decode,
@@ -262,38 +278,125 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     "warm selected-resource planning failed: {error}"
                 ))
             })?;
-        if reconfigurations.is_empty() {
-            return Ok(0);
-        }
-        let next_generation = state.generation.checked_add(1).ok_or_else(|| {
-            selection_telemetry_error(
-                "selected-resource adaptation generation overflowed".to_string(),
+        let previous_execution_plans = state.execution_plans.clone();
+        let next_generation = (!reconfigurations.is_empty())
+            .then(|| {
+                state.generation.checked_add(1).ok_or_else(|| {
+                    selection_telemetry_error(
+                        "selected-resource adaptation generation overflowed".to_string(),
+                    )
+                })
+            })
+            .transpose()?;
+        let applied_count = if reconfigurations.is_empty() {
+            0
+        } else {
+            apply_vulkan_selected_resource_reconfigurations_transactionally(
+                &reconfigurations,
+                |selector_id, proposed| {
+                    self.apply_selected_resource_placement_at_quiescent_boundary(
+                        state,
+                        selector_id,
+                        proposed,
+                    )
+                },
             )
-        })?;
-        let applied_count = apply_vulkan_selected_resource_reconfigurations_transactionally(
-            &reconfigurations,
-            |selector_id, proposed| {
-                self.apply_selected_resource_placement_at_quiescent_boundary(
+            .map_err(|(error, rollback_error)| match rollback_error {
+                Some(rollback_error) => selection_telemetry_error(format!(
+                    "warm selected-resource transaction failed: {error}; rollback also failed: {rollback_error}",
+                )),
+                None => error,
+            })?
+        };
+        let cache_demand = state
+            .context
+            .cache_arbiter
+            .stream_demand(&state.execution_plans.decode, &cache_window)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package);
+        let cache_update = cache_demand.and_then(|cache_demand| {
+            self.selected_resource_cache_registration
+                .as_ref()
+                .ok_or_else(|| {
+                    selection_telemetry_error(
+                        "selected-resource adaptation has no cache registration".to_string(),
+                    )
+                })?
+                .replace_demand(cache_demand)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)
+        });
+        if let Err(error) = cache_update {
+            let rollback_error = if applied_count == 0 {
+                None
+            } else {
+                self.rollback_selected_resource_placements_at_quiescent_boundary(
                     state,
-                    selector_id,
-                    proposed,
+                    &previous_execution_plans,
+                    &reconfigurations,
                 )
-            },
-        )
-        .map_err(|(error, rollback_error)| match rollback_error {
-            Some(rollback_error) => selection_telemetry_error(format!(
-                "warm selected-resource transaction failed: {error}; rollback also failed: {rollback_error}",
-            )),
-            None => error,
-        })?;
-        state.generation = next_generation;
-        state.telemetry_baseline = Some(telemetry.clone());
+            };
+            return Err(match rollback_error {
+                Some(rollback_error) => selection_telemetry_error(format!(
+                    "selected-resource cache adaptation failed: {error}; ownership rollback also failed: {rollback_error}",
+                )),
+                None => error,
+            });
+        }
+        state.cache_telemetry_baseline = Some(telemetry.clone());
+        if applied_count > 0 {
+            state.generation = next_generation
+                .expect("a nonempty accepted reconfiguration reserves a generation");
+            state.telemetry_baseline = Some(telemetry.clone());
+        }
         // Batch runners retain dispatch-local gate masks and parameter-slot
         // descriptors. Dropping them here is safe because prompt completion is
         // quiescent; the next prefill remounts only stream-local execution
         // resources from the updated plan, never the package backbone.
-        self.temporal_block_executions.borrow_mut().clear();
+        if applied_count > 0 {
+            self.temporal_block_executions.borrow_mut().clear();
+        }
         Ok(applied_count)
+    }
+
+    fn rollback_selected_resource_placements_at_quiescent_boundary(
+        &mut self,
+        state: &mut VulkanRuntimeSelectedResourceAdaptationState,
+        previous_execution_plans: &VulkanDistributedExecutionPlanSet,
+        reconfigurations: &[VulkanSelectedResourceReconfigurationPlan],
+    ) -> Option<VulkanResidentInProcessPlacedRuntimeError> {
+        let previous = match selected_resource_placements_from_execution_plan(
+            &previous_execution_plans.decode,
+        ) {
+            Ok(previous) => previous
+                .into_iter()
+                .map(|placement| (placement.selector_id.clone(), placement))
+                .collect::<BTreeMap<_, _>>(),
+            Err(error) => return Some(selection_telemetry_error(error.to_string())),
+        };
+        let mut first_error = None;
+        for reconfiguration in reconfigurations.iter().rev() {
+            let result = previous
+                .get(&reconfiguration.selector_id)
+                .ok_or_else(|| {
+                    selection_telemetry_error(format!(
+                        "selected-resource rollback omits selector {:?}",
+                        reconfiguration.selector_id,
+                    ))
+                })
+                .and_then(|placement| {
+                    self.apply_selected_resource_placement_at_quiescent_boundary(
+                        state,
+                        &reconfiguration.selector_id,
+                        placement,
+                    )
+                    .map(|_| ())
+                });
+            if let Err(error) = result
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error
     }
 
     fn apply_selected_resource_placement_at_quiescent_boundary(
