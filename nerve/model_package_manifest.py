@@ -31,6 +31,7 @@ from nerve.model_package_physical_kernels import (
 from nerve.resource_residency_planning import (
     build_planned_resource_residency_contract,
 )
+from nerve.circuit_lowering_operators import build_params_artifact
 
 
 def can_emit_physical_representation_from_producer(
@@ -154,8 +155,7 @@ def can_fuse_hyper_connection_rms_norm(
         and int(representations[0].get("block_columns", 0)) == 128
         and bool(compiler_target.get("devices"))
         and all(
-            {"shader_float8", "shader_int8"}
-            <= set(device.get("shader_features", []))
+            {"shader_float8", "shader_int8"} <= set(device.get("shader_features", []))
             and int(device.get("max_compute_work_group_invocations", 0)) >= 1024
             and int(device.get("max_compute_work_group_size_x", 0)) >= 1024
             and "arithmetic" in set(device.get("subgroup_operations", []))
@@ -301,8 +301,7 @@ def build_vulkan_resident_package_manifest(
         sampler_min_p = float(sampling["min_p"])
         if not 0.0 < sampler_top_p <= 1.0 or sampler_min_p != 0.0:
             raise ModelCompileError(
-                "exact full-distribution sampling requires top_p in (0, 1] "
-                "and min_p=0"
+                "exact full-distribution sampling requires top_p in (0, 1] and min_p=0"
             )
         if sampler_uses_token_state:
             raise ModelCompileError(
@@ -954,6 +953,7 @@ def package_circuit_graph(
     graph = lowered_index["graph"]
     components = []
     for circuit_ref in graph["circuits"]:
+        compiled_circuit = compiled_circuits[circuit_ref["id"]]
         components.append(
             {
                 "component_id": circuit_ref["id"],
@@ -961,8 +961,8 @@ def package_circuit_graph(
                 "runtime_role": circuit_ref["runtime_role"],
                 "implementation": circuit_ref["implementation"],
                 "behavioral_role": circuit_ref["behavioral_role"],
-                "circuit": deepcopy(compiled_circuits[circuit_ref["id"]]),
-                "params": read_json(lowered_dir / circuit_ref["params"]),
+                "circuit": deepcopy(compiled_circuit),
+                "params": build_params_artifact(compiled_circuit),
                 "state": read_json(lowered_dir / circuit_ref["state"]),
             }
         )
@@ -1597,6 +1597,7 @@ def package_auxiliary_circuit_graph(
 ) -> Json:
     components = []
     for circuit_ref in draft["circuits"]:
+        compiled_circuit = compiled_circuits[circuit_ref["id"]]
         components.append(
             {
                 "component_id": circuit_ref["id"],
@@ -1604,8 +1605,8 @@ def package_auxiliary_circuit_graph(
                 "runtime_role": circuit_ref["runtime_role"],
                 "implementation": circuit_ref["implementation"],
                 "behavioral_role": circuit_ref["behavioral_role"],
-                "circuit": deepcopy(compiled_circuits[circuit_ref["id"]]),
-                "params": read_json(lowered_dir / circuit_ref["params"]),
+                "circuit": deepcopy(compiled_circuit),
+                "params": build_params_artifact(compiled_circuit),
                 "state": read_json(lowered_dir / circuit_ref["state"]),
             }
         )
