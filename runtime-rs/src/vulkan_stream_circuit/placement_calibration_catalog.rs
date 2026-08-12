@@ -1,15 +1,17 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v11";
+    "nerve.vulkan_placement_calibration_catalog.v12";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VulkanPlacementExecutionStrategy {
     SingleDevice,
     Serialized,
+    SerializedRegion,
     TensorParallel,
     WholeExpertParallel,
     IntraExpertTensorParallel,
     Hybrid,
+    HybridRegion,
     DirectedBoundary,
     Reduction,
     LazyLoadWave,
@@ -244,6 +246,26 @@ pub struct VulkanPlacementCalibrationObservation {
     pub host_transient_peak_bytes: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VulkanPlacementRegionBoundaryExecutionCase {
+    pub boundary_ordinal: usize,
+    pub execution_case: VulkanPlacementExecutionCaseIdentity,
+}
+
+/// Exact physical realization of one measured contiguous graph region.
+///
+/// The outer observation carries complete transaction timing, output, state,
+/// and aggregate residency. This record preserves the executable cases that
+/// must be replayed for each ordered component and each physical boundary;
+/// runtime code must never reconstruct a region by summing independent costs.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VulkanPlacementRegionExecutionCalibration {
+    pub execution_case: VulkanPlacementExecutionCaseIdentity,
+    pub boundary_byte_counts: Vec<usize>,
+    pub component_cases: Vec<VulkanPlacementExecutionCaseIdentity>,
+    pub boundary_cases: Vec<VulkanPlacementRegionBoundaryExecutionCase>,
+}
+
 /// Capacity available to a runtime placement decision after preserving every
 /// pre-existing reservation. Calibration evidence is usable only when the
 /// complete measured transaction fits this exact envelope on the same Vulkan
@@ -273,6 +295,7 @@ pub struct VulkanPlacementCalibrationCatalog {
     observations: Vec<VulkanPlacementCalibrationObservation>,
     selected_resource_execution_classes:
         Vec<VulkanPlacementSelectedResourceExecutionClassCalibration>,
+    region_executions: Vec<VulkanPlacementRegionExecutionCalibration>,
 }
 
 impl Default for VulkanPlacementCalibrationCatalog {
@@ -282,6 +305,7 @@ impl Default for VulkanPlacementCalibrationCatalog {
             references: Vec::new(),
             observations: Vec::new(),
             selected_resource_execution_classes: Vec::new(),
+            region_executions: Vec::new(),
         }
     }
 }
@@ -297,6 +321,10 @@ impl VulkanPlacementCalibrationCatalog {
 
     pub fn selected_resource_execution_class_count(&self) -> usize {
         self.selected_resource_execution_classes.len()
+    }
+
+    pub fn region_execution_count(&self) -> usize {
+        self.region_executions.len()
     }
 
     /// Transactionally unions independently produced exact catalogs. An exact
@@ -332,6 +360,9 @@ impl VulkanPlacementCalibrationCatalog {
         }
         for calibration in &other.selected_resource_execution_classes {
             merged.record_selected_resource_execution_class(calibration.clone())?;
+        }
+        for calibration in &other.region_executions {
+            merged.record_region_execution(calibration.clone())?;
         }
         merged.validate()?;
         *self = merged;
@@ -373,6 +404,9 @@ impl VulkanPlacementCalibrationCatalog {
         }
         for calibration in &self.selected_resource_execution_classes {
             rebuilt.record_selected_resource_execution_class(calibration.clone())?;
+        }
+        for calibration in &self.region_executions {
+            rebuilt.record_region_execution(calibration.clone())?;
         }
         if &rebuilt != self {
             return Err(VulkanPlacementCalibrationCatalogError(
@@ -519,10 +553,12 @@ impl VulkanPlacementCalibrationCatalog {
                     observation.execution_case.strategy,
                     VulkanPlacementExecutionStrategy::SingleDevice
                         | VulkanPlacementExecutionStrategy::Serialized
+                        | VulkanPlacementExecutionStrategy::SerializedRegion
                         | VulkanPlacementExecutionStrategy::TensorParallel
                         | VulkanPlacementExecutionStrategy::WholeExpertParallel
                         | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
                         | VulkanPlacementExecutionStrategy::Hybrid
+                        | VulkanPlacementExecutionStrategy::HybridRegion
                 ) && observation.execution_case.behavior.compiled_execution_signature
                     == compiled_execution_signature
                     && observation
@@ -744,10 +780,12 @@ fn validate_observation(
                 && case.output_physical_device_id == case.owner_physical_device_id
         }
         VulkanPlacementExecutionStrategy::Serialized
+        | VulkanPlacementExecutionStrategy::SerializedRegion
         | VulkanPlacementExecutionStrategy::TensorParallel
         | VulkanPlacementExecutionStrategy::WholeExpertParallel
         | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
         | VulkanPlacementExecutionStrategy::Hybrid
+        | VulkanPlacementExecutionStrategy::HybridRegion
         | VulkanPlacementExecutionStrategy::DirectedBoundary
         | VulkanPlacementExecutionStrategy::Reduction => case.devices.len() >= 2,
         VulkanPlacementExecutionStrategy::LazyLoadWave => true,
