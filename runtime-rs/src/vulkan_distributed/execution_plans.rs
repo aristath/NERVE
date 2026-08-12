@@ -1583,6 +1583,12 @@ fn resolved_physical_execution_island(
         .expect("physical execution island was checked above");
     let exit_device_id =
         distributed_activation_owner_device_id(&owner_device_id, &tail.output_activation);
+    let collection_byte_capacity = tail
+        .reduction
+        .as_ref()
+        .map_or(tail.output_byte_capacity, |reduction| {
+            reduction.partial_byte_capacity
+        });
     if let Some(collect) = schedule
         .iter_mut()
         .rev()
@@ -1603,7 +1609,7 @@ fn resolved_physical_execution_island(
             transport_routes.insert(VulkanPhysicalExecutionTransportRoute {
                 source_device_id: participant.device_id.clone(),
                 destination_device_id: exit_device_id.clone(),
-                byte_capacity: tail.output_byte_capacity,
+                byte_capacity: collection_byte_capacity,
                 kind: physical_execution_transport_kind(shared_activation_route),
             });
         }

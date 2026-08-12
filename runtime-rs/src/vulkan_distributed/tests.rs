@@ -3052,6 +3052,62 @@ mod tests {
     }
 
     #[test]
+    fn dense_tensor_parallel_island_accounts_for_f32_partial_collection() {
+        let mut producer = fixture_plan("row_major").dispatches.remove(0);
+        producer.dispatch_index = 7;
+        producer.output_activation.signal_id = "activated".to_string();
+        producer.local_intermediates = vec![nerve_execution_contracts::LocalIntermediateContract {
+            signal: producer.output_activation.signal_id.clone(),
+            producer_binding: u32::try_from(producer.output_activation.binding).unwrap(),
+            consumer_binding: 0,
+            format: "bf16".to_string(),
+        }];
+        let mut consumer = producer.clone();
+        consumer.dispatch_index = 8;
+        consumer.node_id = "down".to_string();
+        consumer.distribution = VulkanDistributedDispatchDistribution::InputColumns;
+        consumer.input_distribution = InputDistribution::Sharded;
+        consumer.input_activation = producer.output_activation.clone();
+        consumer.input_activation.binding = 0;
+        consumer.output_activation.signal_id = "hidden".to_string();
+        consumer.output_activation.slot += 1;
+        consumer.reduction = Some(VulkanDistributedReductionPlan {
+            operation: ReductionOperation::SumF32,
+            element_count: 12,
+            partial_byte_capacity: 48,
+            finalization: VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16,
+        });
+        for (producer_shard, consumer_shard) in producer.shards.iter().zip(&mut consumer.shards) {
+            consumer_shard.input_range.byte_offset = producer_shard.output_byte_offset;
+            consumer_shard.input_range.byte_count = producer_shard.output_byte_count;
+            consumer_shard.output_byte_offset = 0;
+            consumer_shard.output_byte_count = 48;
+            consumer_shard.base_workgroup_z = u32::try_from(consumer_shard.row_start).unwrap();
+        }
+
+        let [island] = resolved_physical_execution_islands(
+            &[producer, consumer],
+            VulkanSharedResidentBufferRoute::SharedHost,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let collection_routes = island
+            .transport_routes
+            .iter()
+            .filter(|route| route.destination_device_id == island.exit_device_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(collection_routes.len(), island.participants.len() - 1);
+        assert!(
+            collection_routes
+                .iter()
+                .all(|route| route.byte_capacity == 48),
+            "F32 shard partials, not the smaller BF16 final output, cross the collection boundary"
+        );
+    }
+
+    #[test]
     fn distributed_shards_always_start_with_the_dispatch_owner() {
         let tensor_index = fixture_tensor_index("row_major");
         let prepared_plan = fixture_prepared_plan();
