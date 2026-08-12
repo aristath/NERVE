@@ -29,6 +29,10 @@ fn read_vulkan_host_memory_capacity()
     })
 }
 
+pub fn vulkan_safe_host_available_bytes() -> Result<usize, VulkanResidentTokenModelPackageError> {
+    read_vulkan_host_memory_capacity().map(VulkanHostMemoryCapacity::safe_tiered_payload_bytes)
+}
+
 fn parse_vulkan_host_memory_capacity(contents: &str) -> Result<VulkanHostMemoryCapacity, String> {
     let mut total_kib = None;
     let mut available_kib = None;

@@ -225,7 +225,9 @@ fn runtime_capacity_packed_model(
     );
     let mut calibration_evidence = BTreeMap::<String, (String, String)>::new();
     let mut placement_costs = VulkanRuntimePlacementCostModel::default();
-    let mut exact_calibration_catalog = VulkanPlacementCalibrationCatalog::default();
+    let mut exact_calibration_catalog =
+        load_vulkan_package_placement_calibration_catalog(manifest_dir)?.unwrap_or_default();
+    let mut runtime_transfer_calibration_catalog = VulkanPlacementCalibrationCatalog::default();
     let mut measured_candidates = Vec::with_capacity(eligible_devices.len());
     let mut opened_devices = BTreeMap::new();
     for (device_info, profile) in eligible_devices {
@@ -372,7 +374,7 @@ fn runtime_capacity_packed_model(
                 )?;
                 for report in reports {
                     record_vulkan_runtime_transfer_calibration_report(
-                        &mut exact_calibration_catalog,
+                        &mut runtime_transfer_calibration_catalog,
                         &report,
                     )?;
                     placement_costs.record_boundary_transfer_cost(
@@ -396,6 +398,7 @@ fn runtime_capacity_packed_model(
             }
         }
     }
+    exact_calibration_catalog.merge(&runtime_transfer_calibration_catalog)?;
     if calibration_started.elapsed() > VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -456,27 +459,11 @@ fn runtime_capacity_packed_model(
         selected.selected_device_ids,
         admitted_bytes,
     );
-    let selected_candidates = selected
-        .selected_device_ids
-        .iter()
-        .map(|device_id| {
-            candidates
-                .iter()
-                .find(|candidate| &candidate.device_id == device_id)
-                .cloned()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("selected placement device {device_id:?} is absent from its calibrated candidates"),
-                    )
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     drop(opened_devices);
     Ok(RuntimeCapacityPackedModel {
         runtime_model: selected.runtime_model,
         auto_placement: Some(RuntimeAutoPlacementContext {
-            candidates: selected_candidates,
+            candidates,
             costs: placement_costs,
             calibration_catalog: exact_calibration_catalog,
         }),
