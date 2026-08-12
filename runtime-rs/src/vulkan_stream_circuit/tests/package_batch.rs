@@ -2048,18 +2048,44 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
         distributed_parameter_byte_count: 0,
         shards: shards(),
     };
-    let gate = dispatch(
+    let mut gate = dispatch(
         9,
         "sparse_moe_gate_up",
         activation(0, "normalized", 0),
         activation(3, "expert_intermediates", 1),
     );
-    let down = dispatch(
+    let mut down = dispatch(
         10,
         "sparse_moe_down",
         activation(0, "expert_intermediates", 1),
         activation(2, "expert_outputs", 2),
     );
+
+    let undeclared_islands = resolved_physical_execution_islands(
+        &[gate.clone(), down.clone()],
+        VulkanSharedResidentBufferRoute::SharedHost,
+    )
+    .unwrap();
+    let undeclared_plan = VulkanDistributedExecutionPlan {
+        device_ids: vec!["gpu0".to_string(), "gpu1".to_string()],
+        storage_buffer_offset_alignment: 256,
+        dispatches: vec![gate.clone(), down.clone()],
+        execution_islands: undeclared_islands,
+        shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+        shared_input_byte_capacity: 8_224,
+        shared_output_byte_capacity: 8_224,
+        distributed_parameter_byte_count: 0,
+    };
+    assert!(distributed_component_batch_private_activation_specs(&undeclared_plan).is_empty());
+
+    let local_intermediate = nerve_execution_contracts::LocalIntermediateContract {
+        signal: "expert_intermediates".to_string(),
+        producer_binding: 3,
+        consumer_binding: 0,
+        format: "bf16:route_major_local_rows".to_string(),
+    };
+    gate.local_intermediates = vec![local_intermediate.clone()];
+    down.local_intermediates = vec![local_intermediate];
     let execution_islands =
         resolved_physical_execution_islands(
             &[gate.clone(), down.clone()],
