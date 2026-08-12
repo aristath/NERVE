@@ -179,6 +179,16 @@ pub struct VulkanPlacementCalibrationObservation {
     pub host_transient_peak_bytes: usize,
 }
 
+/// Capacity available to a runtime placement decision after preserving every
+/// pre-existing reservation. Calibration evidence is usable only when the
+/// complete measured transaction fits this exact envelope; absent devices are
+/// unavailable, not zero-cost spill targets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanPlacementCapacityEnvelope {
+    pub available_bytes_by_physical_device: BTreeMap<String, usize>,
+    pub host_available_bytes: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanPlacementCalibrationCatalogError(pub String);
 
@@ -408,6 +418,53 @@ impl VulkanPlacementCalibrationCatalog {
             })
             .collect()
     }
+
+    /// Returns the non-dominated, exact candidates that fit the current
+    /// reservation-aware capacity envelope. Resident bytes and transient peak
+    /// bytes coexist during the measured transaction and are therefore added,
+    /// with overflow making the candidate unavailable.
+    pub fn pareto_candidates_for_capacity(
+        &self,
+        behavior: &VulkanPlacementBehaviorIdentity,
+        capacity: &VulkanPlacementCapacityEnvelope,
+    ) -> Vec<&VulkanPlacementCalibrationObservation> {
+        self.pareto_candidates(behavior)
+            .into_iter()
+            .filter(|candidate| observation_fits_capacity(candidate, capacity))
+            .collect()
+    }
+}
+
+fn observation_fits_capacity(
+    observation: &VulkanPlacementCalibrationObservation,
+    capacity: &VulkanPlacementCapacityEnvelope,
+) -> bool {
+    let host_required = observation
+        .host_resident_bytes
+        .checked_add(observation.host_transient_peak_bytes);
+    if !host_required.is_some_and(|required| required <= capacity.host_available_bytes) {
+        return false;
+    }
+    observation.execution_case.devices.iter().all(|device| {
+        let physical_id = &device.physical_device_id;
+        let required = observation
+            .resident_bytes_by_physical_device
+            .get(physical_id)
+            .copied()
+            .and_then(|resident| {
+                observation
+                    .transient_peak_bytes_by_physical_device
+                    .get(physical_id)
+                    .copied()
+                    .and_then(|transient| resident.checked_add(transient))
+            });
+        required.is_some_and(|required| {
+            capacity
+                .available_bytes_by_physical_device
+                .get(physical_id)
+                .is_some_and(|available| required <= *available)
+        })
+    })
 }
 
 fn compatible_remeasurement(
@@ -908,6 +965,83 @@ mod placement_calibration_catalog_tests {
         catalog.record_observation(slower_device_local).unwrap();
 
         assert_eq!(catalog.pareto_candidates(&behavior).len(), 2);
+    }
+
+    #[test]
+    fn capacity_filter_requires_the_complete_transaction_on_every_participant() {
+        let behavior = behavior();
+        let mut catalog = catalog_with_reference();
+        let mut candidate = observation(behavior.clone(), "gpu0", "gpu0", 10, 80);
+        candidate.transient_peak_bytes_by_physical_device =
+            BTreeMap::from([("gpu0".to_string(), 20), ("gpu1".to_string(), 20)]);
+        candidate.host_resident_bytes = 30;
+        candidate.host_transient_peak_bytes = 10;
+        catalog.record_observation(candidate).unwrap();
+
+        let exact_fit = VulkanPlacementCapacityEnvelope {
+            available_bytes_by_physical_device: BTreeMap::from([
+                ("gpu0".to_string(), 100),
+                ("gpu1".to_string(), 100),
+            ]),
+            host_available_bytes: 40,
+        };
+        assert_eq!(
+            catalog
+                .pareto_candidates_for_capacity(&behavior, &exact_fit)
+                .len(),
+            1,
+        );
+
+        let mut missing_participant = exact_fit.clone();
+        missing_participant
+            .available_bytes_by_physical_device
+            .remove("gpu1");
+        assert!(
+            catalog
+                .pareto_candidates_for_capacity(&behavior, &missing_participant)
+                .is_empty()
+        );
+
+        let mut transient_does_not_fit = exact_fit.clone();
+        transient_does_not_fit
+            .available_bytes_by_physical_device
+            .insert("gpu0".to_string(), 99);
+        assert!(
+            catalog
+                .pareto_candidates_for_capacity(&behavior, &transient_does_not_fit)
+                .is_empty()
+        );
+
+        let mut host_does_not_fit = exact_fit;
+        host_does_not_fit.host_available_bytes = 39;
+        assert!(
+            catalog
+                .pareto_candidates_for_capacity(&behavior, &host_does_not_fit)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn capacity_filter_rejects_overflow_instead_of_wrapping_to_a_false_fit() {
+        let behavior = behavior();
+        let mut catalog = catalog_with_reference();
+        let mut candidate = observation(behavior.clone(), "gpu0", "gpu0", 10, usize::MAX);
+        candidate.transient_peak_bytes_by_physical_device =
+            BTreeMap::from([("gpu0".to_string(), 1), ("gpu1".to_string(), 1)]);
+        catalog.record_observation(candidate).unwrap();
+        let capacity = VulkanPlacementCapacityEnvelope {
+            available_bytes_by_physical_device: BTreeMap::from([
+                ("gpu0".to_string(), usize::MAX),
+                ("gpu1".to_string(), usize::MAX),
+            ]),
+            host_available_bytes: usize::MAX,
+        };
+
+        assert!(
+            catalog
+                .pareto_candidates_for_capacity(&behavior, &capacity)
+                .is_empty()
+        );
     }
 
     #[test]
