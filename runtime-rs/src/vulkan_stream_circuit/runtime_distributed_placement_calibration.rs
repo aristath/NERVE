@@ -1243,13 +1243,6 @@ impl VulkanRuntimeDistributedPlacementSession {
             .iter()
             .any(|dispatch| !dispatch.selected_resource_partitions.is_empty());
         if has_distributed_selected_resources {
-            if phase != VulkanTargetedComponentExecutionPhase::Decode {
-                // Distributed component-batch execution binds dynamic tables,
-                // but it does not yet publish and resume exact per-lane misses.
-                // Treat that physical candidate as unavailable rather than
-                // measuring zero-address expert skips as valid prefill.
-                return Ok(None);
-            }
             let target_selector_ids = targeted_demand_selector_ids(
                 &contract.selectors,
                 &placed_model.execution_scope,
@@ -1666,6 +1659,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                         &distributed_execution_plan,
                         &distributed_parameter_buffers,
                         &selected_resource_mount.dynamic_buffers,
+                        &selected_resource_mount.stores,
                     )
                     .map_err(|error| distributed_calibration_error_value(error.to_string()))?,
                 )

@@ -5,6 +5,7 @@ fn create_distributed_input_column_component_batch_dispatch(
     batch_slices: &[VulkanResidentComponentBatchSliceRunner],
     planned: &VulkanDistributedDispatchPlan,
     parameter_buffers: &VulkanDistributedParameterBuffers,
+    dynamic_resource_buffers: &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
     reduction_buffers: &[VulkanDistributedReductionBuffer],
     private_activation_buffers: &BTreeMap<
         VulkanDistributedComponentBatchPrivateActivationBufferKey,
@@ -205,7 +206,9 @@ fn create_distributed_input_column_component_batch_dispatch(
                 shard_index,
             )?;
         let mut bindings = Vec::with_capacity(
-            2 + planned.auxiliary_input_activations.len() + shard.parameters.len(),
+            2 + planned.auxiliary_input_activations.len()
+                + shard.parameters.len()
+                + 2 * planned.selected_resource_partitions.len(),
         );
         bindings.push(
             VulkanResidentKernelBufferBinding::new(
@@ -300,6 +303,57 @@ fn create_distributed_input_column_component_batch_dispatch(
                     .with_access(VulkanResidentKernelBufferAccess::Read),
             );
         }
+        for partition in &planned.selected_resource_partitions {
+            let resources = dynamic_resource_buffers
+                .get(&shard.device_id)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "distributed input-column batch {}.{} has no dynamic resource buffers on {:?}",
+                        planned.component_id, planned.node_id, shard.device_id,
+                    )))
+                })?;
+            let parameter_slots = resources
+                .parameter_slots(
+                    &planned.component_id,
+                    &planned.node_id,
+                    &partition.selection_signal,
+                )
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "distributed input-column batch {}.{} has no parameter slots for selector {:?} on {:?}",
+                        planned.component_id,
+                        planned.node_id,
+                        partition.selector_id,
+                        shard.device_id,
+                    )))
+                })?;
+            bindings.push(
+                VulkanResidentKernelBufferBinding::new(
+                    u32::try_from(partition.address_table_binding).map_err(|_| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "distributed input-column address-table binding exceeds u32"
+                                .to_string(),
+                        ))
+                    })?,
+                    resources.address_table(),
+                    resources.address_table().byte_capacity(),
+                )
+                .with_access(VulkanResidentKernelBufferAccess::Read),
+            );
+            bindings.push(
+                VulkanResidentKernelBufferBinding::new(
+                    u32::try_from(partition.parameter_slots_binding).map_err(|_| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "distributed input-column parameter-slot binding exceeds u32"
+                                .to_string(),
+                        ))
+                    })?,
+                    parameter_slots,
+                    parameter_slots.byte_capacity(),
+                )
+                .with_access(VulkanResidentKernelBufferAccess::Read),
+            );
+        }
         let push_constants = distributed_shard_push_constants(planned, shard).map_err(|error| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(error.to_string()))
         })?;
@@ -344,6 +398,7 @@ fn create_distributed_input_column_component_batch_dispatch(
                 indirect_dispatch: None,
                 dispatch_y_from_batch_width: true,
             }],
+            selected_resource_gates: Vec::new(),
             batch_control_buffer_sets: Vec::new(),
             sequence_catalog: RefCell::new(BTreeMap::new()),
         });

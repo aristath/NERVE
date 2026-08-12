@@ -1,6 +1,8 @@
 pub(crate) struct VulkanDistributedSelectedResourceGate {
     selector_id: String,
     checkpoint_tag: u32,
+    resource_count: usize,
+    selection_count_per_lane: usize,
     gate: VulkanGpuResidencyGate,
     pipeline_predicate: Arc<VulkanResidentBuffer>,
     gate_push_constants: Vec<u8>,
@@ -143,6 +145,8 @@ impl VulkanDistributedSelectedResourceGate {
         Ok(Self {
             selector_id: selector.id.clone(),
             checkpoint_tag,
+            resource_count: selector.resource_count,
+            selection_count_per_lane: selector.encoding.selection_count_per_activation,
             gate,
             pipeline_predicate: transaction_predicate,
             gate_push_constants,
@@ -163,6 +167,52 @@ impl VulkanDistributedSelectedResourceGate {
         VulkanResidentKernelSequenceStep::new(self.gate.dispatch(), &self.gate_push_constants)
             .with_condition(&self.pipeline_predicate, 0, false, self.checkpoint_tag)
             .map_err(VulkanDistributedDispatchRunnerError::from)
+    }
+
+    pub(crate) fn gate_push_constants_for_lane_count(
+        &self,
+        lane_count: usize,
+    ) -> Result<Vec<u8>, VulkanDistributedDispatchRunnerError> {
+        let selection_count = self
+            .selection_count_per_lane
+            .checked_mul(lane_count)
+            .ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(
+                    "distributed selected-resource active selection count overflowed"
+                        .to_string(),
+                )
+            })?;
+        self.gate
+            .push_constants(selection_count, self.checkpoint_tag, false, false)
+            .map(|bytes| bytes.to_vec())
+            .map_err(VulkanDistributedDispatchRunnerError::from)
+    }
+
+    pub(crate) fn gate_step_with_push_constants<'a>(
+        &'a self,
+        push_constants: &'a [u8],
+    ) -> Result<VulkanResidentKernelSequenceStep<'a>, VulkanDistributedDispatchRunnerError> {
+        VulkanResidentKernelSequenceStep::new(self.gate.dispatch(), push_constants)
+            .with_condition(&self.pipeline_predicate, 0, false, self.checkpoint_tag)
+            .map_err(VulkanDistributedDispatchRunnerError::from)
+    }
+
+    pub(crate) fn resource_count(&self) -> usize {
+        self.resource_count
+    }
+
+    pub(crate) fn ensure_execution_headroom(
+        &self,
+        device: &VulkanComputeDevice,
+    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
+        self.context
+            .store
+            .ensure_execution_headroom(device)
+            .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))
+    }
+
+    pub(crate) fn store_identity(&self) -> usize {
+        Arc::as_ptr(&self.context.store) as usize
     }
 
     pub(crate) fn dispatch(&self) -> &VulkanResidentKernelDispatch {

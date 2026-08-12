@@ -111,7 +111,8 @@ use crate::vulkan_distributed::{
     VulkanDistributedSelectedResourceStorePlan, VulkanPhysicalExecutionIslandPlan,
     VulkanPhysicalExecutionTransportKind, allocate_distributed_shared_buffer,
     create_distributed_reduction_runner_for_buffers, distributed_shard_push_constants,
-    resolved_physical_execution_islands, vulkan_distributed_placement_strategy,
+    resolved_physical_execution_islands, selected_resource_activation,
+    vulkan_distributed_placement_strategy,
 };
 
 mod package;

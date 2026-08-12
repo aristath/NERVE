@@ -21,7 +21,7 @@ pub(crate) struct VulkanDistributedResolvedResidencyFault {
     pub misses: Vec<VulkanDistributedResolvedResidencyMiss>,
 }
 
-fn selected_resource_activation<'a>(
+pub(crate) fn selected_resource_activation<'a>(
     dispatch: &'a VulkanDistributedDispatchPlan,
     selection_signal: &str,
 ) -> Result<&'a VulkanDistributedActivationSlot, VulkanDistributedDispatchRunnerError> {

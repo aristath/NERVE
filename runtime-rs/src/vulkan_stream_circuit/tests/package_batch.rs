@@ -1941,6 +1941,7 @@ fn distributed_batch_island_retains_every_members_control_buffer_set() {
     let shard = |expert_start| VulkanDistributedComponentBatchShardRunner {
         device_id: "gpu0".to_string(),
         dispatches: Vec::new(),
+        selected_resource_gates: Vec::new(),
         expert_start,
         expert_count: 128,
         batch_control_buffer_sets: vec![BTreeMap::new()],
@@ -1953,6 +1954,64 @@ fn distributed_batch_island_retains_every_members_control_buffer_set() {
     assert_eq!(grouped.batch_control_buffer_sets.len(), 2);
     let error = grouped.append_group_member(shard(0)).unwrap_err();
     assert!(error.to_string().contains("changes expert start"));
+}
+
+#[test]
+fn distributed_component_batch_demand_resolution_is_bounded_by_exact_domains() {
+    assert_eq!(
+        distributed_component_batch_demand_resolution_bound([256, 256]).unwrap(),
+        513,
+    );
+    assert!(
+        distributed_component_batch_demand_resolution_bound(std::iter::empty()).is_err(),
+        "a demand loop without a compiler-declared resource domain must not run",
+    );
+    assert!(
+        distributed_component_batch_demand_resolution_bound([8, 0]).is_err(),
+        "an empty selector domain cannot provide a convergence proof",
+    );
+    assert!(
+        distributed_component_batch_demand_resolution_bound([usize::MAX]).is_err(),
+        "overflow must fail closed rather than weaken the retry bound",
+    );
+}
+
+#[test]
+fn distributed_component_batch_demand_resolution_rejects_repeated_and_empty_misses() {
+    let mut resolved = BTreeMap::new();
+    record_distributed_component_batch_demand_resolution(
+        &mut resolved,
+        (1, 2),
+        "gpu-a",
+        &[3, 7],
+    )
+    .unwrap();
+    record_distributed_component_batch_demand_resolution(
+        &mut resolved,
+        (1, 2),
+        "gpu-a",
+        &[9],
+    )
+    .unwrap();
+    let repeated = record_distributed_component_batch_demand_resolution(
+        &mut resolved,
+        (1, 2),
+        "gpu-a",
+        &[7, 11],
+    )
+    .unwrap_err();
+    assert!(repeated.to_string().contains("repeated loaded resources [7]"));
+    assert!(
+        record_distributed_component_batch_demand_resolution(
+            &mut resolved,
+            (2, 0),
+            "gpu-b",
+            &[],
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("resolved no resources"),
+    );
 }
 
 #[test]

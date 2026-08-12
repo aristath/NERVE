@@ -170,14 +170,16 @@ For every numbered item below:
   device so its intermediate never crosses a device boundary.
 - Execute the shared expert concurrently when dependencies allow, then reduce
   routed and shared expert results exactly once on the selected coordinator.
-- Keep each expert independently demand-resident. An unavailable expert may
-  publish an immutable fault at the exact causal checkpoint; resident experts
-  and already committed graph progress must not be replayed.
+- Prove on mounted decode and multi-lane prefill that each expert remains
+  independently demand-resident: an unavailable expert publishes an immutable
+  fault at the exact causal checkpoint, only affected shards resume, and
+  resident experts plus already committed graph progress are not replayed.
 - Use atomic residency groups for a tensor-sharded expert. It is runnable only
   when all required fragments are resident, and eviction must never leave a
   partially resident unusable expert.
-- Add optional intra-expert TP as a separately measured candidate. Do not shard
-  every expert merely because the mechanism exists.
+- Prove and separately measure the compiler-declared intra-expert TP candidate,
+  including its dynamic output-row gate/up to local input-column down-projection
+  batch path. Do not shard every expert merely because the mechanism exists.
 - Use marginal expert frequency and joint co-selection telemetry to place and
   replicate hot experts. Optimize concurrent per-device expert makespan, not
   the sum of six independent expected costs.

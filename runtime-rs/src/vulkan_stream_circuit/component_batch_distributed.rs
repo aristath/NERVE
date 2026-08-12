@@ -149,6 +149,7 @@ struct VulkanDistributedComponentBatchDispatchRunner {
 struct VulkanDistributedComponentBatchShardRunner {
     device_id: String,
     dispatches: Vec<VulkanDistributedComponentBatchShardDispatch>,
+    selected_resource_gates: Vec<VulkanDistributedSelectedResourceGate>,
     expert_start: u32,
     expert_count: u32,
     batch_control_buffer_sets:
@@ -201,6 +202,12 @@ impl VulkanDistributedComponentBatchShardRunner {
                 })?;
         }
         self.dispatches.extend(member.dispatches);
+        if !member.selected_resource_gates.is_empty() {
+            return Err(VulkanError(
+                "distributed component batch group contains a non-leading residency gate"
+                    .to_string(),
+            ));
+        }
         // Every resident dispatch keeps descriptor references to the control
         // buffers with which it was created. Preserve each member's backing
         // buffers for exactly as long as the grouped sequence.
@@ -257,6 +264,7 @@ impl VulkanDistributedComponentBatchRunners {
         execution_plan: &VulkanDistributedExecutionPlan,
         parameter_buffers: &VulkanDistributedParameterBuffers,
         dynamic_resource_buffers: &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
+        resource_stores: &BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
         lane_capacity: usize,
         execution_mode: VulkanComponentBatchExecutionMode,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
@@ -355,6 +363,7 @@ impl VulkanDistributedComponentBatchRunners {
                     batch_slices,
                     planned,
                     parameter_buffers,
+                    dynamic_resource_buffers,
                     &reduction_buffers,
                     &private_activation_buffers,
                     lane_capacity,
@@ -836,6 +845,7 @@ impl VulkanDistributedComponentBatchRunners {
                         ))
                     })?,
                     dispatches: resident_dispatches,
+                    selected_resource_gates: Vec::new(),
                     batch_control_buffer_sets: vec![batch_control_buffers],
                     sequence_catalog: RefCell::new(BTreeMap::new()),
                 });
@@ -949,6 +959,16 @@ impl VulkanDistributedComponentBatchRunners {
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            mount_distributed_component_batch_selected_resource_gates(
+                devices,
+                placed_slices,
+                batch_slices,
+                dynamic_resource_buffers,
+                resource_stores,
+                lane_capacity,
+                planned_island,
+                &mut leader_runner,
+            )?;
             island_dispatches.push(leader_runner);
         }
         if !dispatches_by_key.is_empty() {
@@ -1086,7 +1106,30 @@ impl VulkanDistributedComponentBatchRunners {
                     .borrow_mut()
                     .insert(batch_width, sequence);
             }
-            let steps = shard
+            let gate_push_constants = shard
+                .selected_resource_gates
+                .iter()
+                .map(|gate| gate.gate_push_constants_for_lane_count(batch_width))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        error.to_string(),
+                    ))
+                })?;
+            let mut steps = shard
+                .selected_resource_gates
+                .iter()
+                .zip(&gate_push_constants)
+                .map(|(gate, push_constants)| {
+                    gate.gate_step_with_push_constants(push_constants)
+                        .map_err(|error| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                error.to_string(),
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let resident_steps = shard
                 .dispatches
                 .iter()
                 .map(|resident| {
@@ -1134,6 +1177,20 @@ impl VulkanDistributedComponentBatchRunners {
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            if let Some(gate) = shard.selected_resource_gates.first() {
+                for (region_index, step) in resident_steps.into_iter().enumerate() {
+                    steps.push(gate.guard_step(
+                        step,
+                        u32::try_from(region_index + 1).unwrap_or(u32::MAX),
+                    ).map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            error.to_string(),
+                        ))
+                    })?);
+                }
+            } else {
+                steps.extend(resident_steps);
+            }
             let catalog = shard.sequence_catalog.borrow();
             let sequence = catalog.get(&batch_width).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
@@ -1146,6 +1203,20 @@ impl VulkanDistributedComponentBatchRunners {
                     .record_resident_kernel_sequence(sequence, &steps)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             }
+        }
+        let has_demand_gates = dispatch
+            .shards
+            .iter()
+            .any(|shard| !shard.selected_resource_gates.is_empty());
+        if has_demand_gates {
+            return self.run_demand_gated_dispatch(
+                devices,
+                dispatch,
+                batch_width,
+                dependency_value,
+                consume_owner_ready_signal,
+                prepare_owner_continuation,
+            );
         }
         let mut submitted =
             Vec::<(&VulkanComputeDevice, &VulkanResidentKernelSequence)>::with_capacity(
@@ -1255,6 +1326,327 @@ impl VulkanDistributedComponentBatchRunners {
         }
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_demand_gated_dispatch(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        dispatch: &VulkanDistributedComponentBatchDispatchRunner,
+        batch_width: usize,
+        dependency_value: u64,
+        consume_owner_ready_signal: bool,
+        prepare_owner_continuation: bool,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let resolution_bound = distributed_component_batch_demand_resolution_bound(
+            dispatch
+                .shards
+                .iter()
+                .flat_map(|shard| &shard.selected_resource_gates)
+                .map(VulkanDistributedSelectedResourceGate::resource_count),
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let sequence_catalogs = dispatch
+            .shards
+            .iter()
+            .map(|shard| shard.sequence_catalog.borrow())
+            .collect::<Vec<_>>();
+        let mut submitted = Vec::<(&VulkanComputeDevice, &VulkanResidentKernelSequence)>::new();
+        for (shard, sequence_catalog) in dispatch.shards.iter().zip(&sequence_catalogs) {
+            let device = devices.get(&shard.device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: shard.device_id.clone(),
+                }
+            })?;
+            let sequence = sequence_catalog.get(&batch_width).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "distributed demand-gated component batch sequence for width {batch_width} is missing on {:?}",
+                    shard.device_id,
+                )))
+            })?;
+            let synchronization = dispatch
+                .helper_synchronization
+                .iter()
+                .find(|synchronization| synchronization.device_id == shard.device_id);
+            let wait_points = synchronization
+                .filter(|_| consume_owner_ready_signal)
+                .map(|synchronization| vec![synchronization.helper_ready(dependency_value)])
+                .unwrap_or_default();
+            let signal_points = synchronization
+                .filter(|_| prepare_owner_continuation || dispatch.reduction.is_some())
+                .map(|synchronization| vec![synchronization.helper_done(dependency_value)])
+                .unwrap_or_default();
+            if let Err(error) = device
+                .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+                    sequence,
+                    &wait_points,
+                    &signal_points,
+                )
+            {
+                for (submitted_device, submitted_sequence) in &submitted {
+                    let _ = submitted_device.wait_resident_kernel_sequence(submitted_sequence);
+                }
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(error));
+            }
+            submitted.push((device.as_ref(), sequence));
+        }
+        let mut first_error = None;
+        for (device, sequence) in submitted {
+            if let Err(error) = device.wait_resident_kernel_sequence(sequence)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(error));
+        }
+
+        let mut resolved = BTreeMap::<(usize, usize), BTreeSet<usize>>::new();
+        let mut entered_stores = BTreeSet::new();
+        for _ in 0..resolution_bound {
+            let mut affected_shards = BTreeSet::new();
+            for (shard_index, shard) in dispatch.shards.iter().enumerate() {
+                let device = devices.get(&shard.device_id).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                        device_id: shard.device_id.clone(),
+                    }
+                })?;
+                for (gate_index, gate) in shard.selected_resource_gates.iter().enumerate() {
+                    if gate.notification_epoch().map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            error.to_string(),
+                        ))
+                    })? == gate.observed_notification_epoch()
+                    {
+                        continue;
+                    }
+                    if entered_stores.insert(gate.store_identity()) {
+                        gate.ensure_execution_headroom(device).map_err(|error| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                error.to_string(),
+                            ))
+                        })?;
+                    }
+                    let Some(miss) = gate.resolve_completed_miss(device).map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            error.to_string(),
+                        ))
+                    })? else {
+                        continue;
+                    };
+                    record_distributed_component_batch_demand_resolution(
+                        &mut resolved,
+                        (shard_index, gate_index),
+                        &shard.device_id,
+                        &miss.resource_indices,
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                    affected_shards.insert(shard_index);
+                }
+            }
+            if affected_shards.is_empty() {
+                if let Some(reduction) = &dispatch.reduction {
+                    let owner = devices.get(&dispatch.planned.owner_device_id).ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                            device_id: dispatch.planned.owner_device_id.clone(),
+                        }
+                    })?;
+                    owner
+                        .run_recorded_resident_kernel_sequence(&reduction.sequence)
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                }
+                return Ok(());
+            }
+            for shard_index in affected_shards {
+                let shard = &dispatch.shards[shard_index];
+                let device = devices.get(&shard.device_id).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                        device_id: shard.device_id.clone(),
+                    }
+                })?;
+                let sequence = sequence_catalogs[shard_index]
+                    .get(&batch_width)
+                    .expect("demand-gated sequence was retained through resolution");
+                device
+                    .run_recorded_resident_kernel_sequence(sequence)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            }
+        }
+        Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!(
+                "distributed component batch residency did not converge within {resolution_bound} attempts"
+            )),
+        ))
+    }
+}
+
+fn distributed_component_batch_demand_resolution_bound(
+    resource_domain_counts: impl IntoIterator<Item = usize>,
+) -> Result<usize, VulkanError> {
+    let mut saw_domain = false;
+    let mut bound = 1usize;
+    for count in resource_domain_counts {
+        if count == 0 {
+            return Err(VulkanError(
+                "distributed component batch residency has an empty resource domain"
+                    .to_string(),
+            ));
+        }
+        saw_domain = true;
+        bound = bound.checked_add(count).ok_or_else(|| {
+            VulkanError("distributed component batch residency bound overflowed".to_string())
+        })?;
+    }
+    if !saw_domain {
+        return Err(VulkanError(
+            "distributed component batch residency has no resource domains".to_string(),
+        ));
+    }
+    Ok(bound)
+}
+
+fn record_distributed_component_batch_demand_resolution(
+    resolved: &mut BTreeMap<(usize, usize), BTreeSet<usize>>,
+    checkpoint: (usize, usize),
+    device_id: &str,
+    resource_indices: &[usize],
+) -> Result<(), VulkanError> {
+    if resource_indices.is_empty() {
+        return Err(VulkanError(format!(
+            "distributed component batch residency checkpoint {checkpoint:?} on {device_id:?} resolved no resources"
+        )));
+    }
+    let prior = resolved.entry(checkpoint).or_default();
+    let repeated = resource_indices
+        .iter()
+        .copied()
+        .filter(|resource_index| prior.contains(resource_index))
+        .collect::<Vec<_>>();
+    if !repeated.is_empty() {
+        return Err(VulkanError(format!(
+            "distributed component batch residency checkpoint {checkpoint:?} on {device_id:?} repeated loaded resources {repeated:?}"
+        )));
+    }
+    prior.extend(resource_indices.iter().copied());
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mount_distributed_component_batch_selected_resource_gates(
+    devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+    placed_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
+    batch_slices: &[VulkanResidentComponentBatchSliceRunner],
+    dynamic_resource_buffers: &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
+    resource_stores: &BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
+    lane_capacity: usize,
+    planned_island: &VulkanPhysicalExecutionIslandPlan,
+    runner: &mut VulkanDistributedComponentBatchDispatchRunner,
+) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+    let leader = planned_island.leader();
+    if leader.selected_resource_partitions.is_empty() {
+        return Ok(());
+    }
+    let owner_index = placed_slices
+        .iter()
+        .position(|slice| slice.device_id == planned_island.owner_device_id)
+        .ok_or_else(|| VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+            device_id: planned_island.owner_device_id.clone(),
+        })?;
+    let batch_slice = batch_slices.get(owner_index).ok_or_else(|| {
+        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+            "distributed component batch selected-resource owner has no batch slice"
+                .to_string(),
+        ))
+    })?;
+    for (shard_index, (planned_shard, shard)) in
+        leader.shards.iter().zip(&mut runner.shards).enumerate()
+    {
+        let store = resource_stores.get(&planned_shard.device_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "distributed component batch selected-resource island has no resource store on {:?}",
+                planned_shard.device_id,
+            )))
+        })?;
+        if !store.residency_policy().is_demand_loaded() {
+            continue;
+        }
+        let device = devices.get(&planned_shard.device_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                device_id: planned_shard.device_id.clone(),
+            }
+        })?;
+        let dynamic_resources = dynamic_resource_buffers
+            .get(&planned_shard.device_id)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "distributed component batch selected-resource island has no dynamic buffers on {:?}",
+                    planned_shard.device_id,
+                )))
+            })?;
+        let predicate = Arc::new(
+            device
+                .create_conditional_resident_buffer(size_of::<u32>())
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+        );
+        predicate
+            .write_bytes(&1u32.to_le_bytes())
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let gates = leader
+            .selected_resource_partitions
+            .iter()
+            .enumerate()
+            .map(|(partition_index, partition)| {
+                let selection_activation = selected_resource_activation(
+                    leader,
+                    &partition.selection_signal,
+                )
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        error.to_string(),
+                    ))
+                })?;
+                let selection_key = distributed_component_batch_signal_key(
+                    selection_activation,
+                    &batch_slice.signal_buffer_indices,
+                )?;
+                let selection_buffer = batch_slice
+                    .distributed_signal_buffer(&selection_key, &planned_shard.device_id)?
+                    .clone();
+                VulkanDistributedSelectedResourceGate::new(
+                    device,
+                    &partition.execution_scope,
+                    leader,
+                    partition,
+                    selection_buffer,
+                    selection_activation.signal_byte_capacity,
+                    lane_capacity,
+                    dynamic_resources,
+                    Arc::clone(store),
+                    Arc::clone(&predicate),
+                    Arc::clone(&predicate),
+                    u32::try_from(partition_index + 1).map_err(|_| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "distributed component batch checkpoint tag exceeds u32".to_string(),
+                        ))
+                    })?,
+                )
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        error.to_string(),
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if gates.is_empty() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "distributed component batch demand shard {shard_index} has no residency gates"
+                )),
+            ));
+        }
+        shard.selected_resource_gates = gates;
+    }
+    Ok(())
 }
 
 fn checked_add_device_bytes(
