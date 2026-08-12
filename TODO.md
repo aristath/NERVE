@@ -183,15 +183,13 @@ For every numbered item below:
 - Use marginal expert frequency and joint co-selection telemetry to place and
   replicate hot experts. Optimize concurrent per-device expert makespan, not
   the sum of six independent expected costs.
-- Calibrate exact execution and lazy-load-wave costs for every compiler-declared
-  expert resource class on each eligible target. Bind that evidence to the
-  artifact, representation, phase, geometry, device, and driver; a missing
-  class measurement makes that placement unavailable. Never substitute an
-  average component duration or derive a resource cost from advertised compute.
-  An execution-class timing must cover one genuine local route occurrence while
-  preserving the compiler-declared selector width. If an artifact cannot skip
-  valid non-local routes, calibrate and consume its exact selected cohort; never
-  divide a multi-route wave and call the quotient a per-resource measurement.
+- At production mount, derive every selected-resource execution-class
+  requirement from the exact lowered physical plan, artifact set,
+  representation, phase, geometry, and runtime fingerprint. Resolve it only
+  from the suite-produced matching execution plus singleton load-wave pair on
+  each candidate device. Missing or ambiguous coverage makes that placement
+  unavailable; never substitute an average, advertised compute, a neighboring
+  representation, or a divided multi-route wave.
 - Apply the telemetry-aware whole-expert placement plan in the production mount
   and execution-plan path. A planner exercised only by unit tests is not an
   implemented runtime feature.
