@@ -21,6 +21,52 @@ pub(crate) struct VulkanDistributedResolvedResidencyFault {
     pub misses: Vec<VulkanDistributedResolvedResidencyMiss>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VulkanDistributedResidencyReplaySchedule {
+    pub affected_shard_indices: Vec<usize>,
+    pub affected_helper_device_ids: Vec<String>,
+}
+
+pub(crate) fn distributed_residency_replay_schedule(
+    owner_device_id: &str,
+    shard_device_ids: &[String],
+    affected_shard_indices: impl IntoIterator<Item = usize>,
+) -> Result<VulkanDistributedResidencyReplaySchedule, VulkanDistributedDispatchRunnerError> {
+    if owner_device_id.is_empty()
+        || shard_device_ids.is_empty()
+        || shard_device_ids.iter().any(String::is_empty)
+        || shard_device_ids.iter().collect::<BTreeSet<_>>().len() != shard_device_ids.len()
+        || !shard_device_ids.iter().any(|device| device == owner_device_id)
+    {
+        return Err(VulkanDistributedDispatchRunnerError(
+            "distributed residency replay requires one unique shard per device including its owner"
+                .to_string(),
+        ));
+    }
+    let affected_shard_indices = affected_shard_indices.into_iter().collect::<Vec<_>>();
+    if affected_shard_indices.is_empty()
+        || affected_shard_indices.windows(2).any(|pair| pair[0] >= pair[1])
+        || affected_shard_indices
+            .iter()
+            .any(|index| *index >= shard_device_ids.len())
+    {
+        return Err(VulkanDistributedDispatchRunnerError(
+            "distributed residency replay requires sorted unique in-range affected shards"
+                .to_string(),
+        ));
+    }
+    let affected_helper_device_ids = affected_shard_indices
+        .iter()
+        .map(|index| shard_device_ids[*index].as_str())
+        .filter(|device_id| *device_id != owner_device_id)
+        .map(str::to_string)
+        .collect();
+    Ok(VulkanDistributedResidencyReplaySchedule {
+        affected_shard_indices,
+        affected_helper_device_ids,
+    })
+}
+
 pub(crate) fn selected_resource_activation<'a>(
     dispatch: &'a VulkanDistributedDispatchPlan,
     selection_signal: &str,
@@ -1451,7 +1497,7 @@ impl VulkanDistributedDispatchRunners {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut affected_shards = Vec::new();
+        let mut affected_shard_indices = BTreeSet::new();
         let mut misses = Vec::new();
         for (shard_index, (shard, device)) in resolved_shards.iter().enumerate() {
             let mut affected = false;
@@ -1468,12 +1514,21 @@ impl VulkanDistributedDispatchRunners {
                 }
             }
             if affected {
-                affected_shards.push((*shard, *device));
+                affected_shard_indices.insert(shard_index);
             }
         }
-        if affected_shards.is_empty() {
+        if affected_shard_indices.is_empty() {
             return Ok(None);
         }
+        let schedule = distributed_residency_replay_schedule(
+            &dispatch.planned.owner_device_id,
+            &dispatch
+                .shards
+                .iter()
+                .map(|shard| shard.device_id.clone())
+                .collect::<Vec<_>>(),
+            affected_shard_indices,
+        )?;
         let mut restored = BTreeSet::new();
         for predicate in self.transaction_predicates.values() {
             if restored.insert(Arc::as_ptr(predicate) as usize) {
@@ -1482,16 +1537,118 @@ impl VulkanDistributedDispatchRunners {
                     .map_err(VulkanDistributedDispatchRunnerError::from)?;
             }
         }
-        for (shard, device) in affected_shards {
-            let sequence = distributed_sequence_for_kind(
-                &shard.sequence,
-                shard.feedback_sequence.as_ref(),
-                sequence_kind,
-                &shard.device_id,
-            )?;
-            device
-                .run_recorded_resident_kernel_sequence(sequence)
-                .map_err(VulkanDistributedDispatchRunnerError::from)?;
+        let dependency_value = dispatch.dependency_clock.reserve(
+            &dispatch.planned.owner_device_id,
+            dispatch.planned.leader().dispatch_index,
+        )?;
+        let replay_shards = schedule
+            .affected_shard_indices
+            .iter()
+            .map(|shard_index| {
+                let (shard, device) = resolved_shards[*shard_index];
+                distributed_sequence_for_kind(
+                    &shard.sequence,
+                    shard.feedback_sequence.as_ref(),
+                    sequence_kind,
+                    &shard.device_id,
+                )
+                .map(|sequence| (shard, device, sequence))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let coordinator = if let Some(sequence) = dispatch.coordinator_sequence() {
+            let device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "failed to resolve distributed coordinator owner {:?}: {error}",
+                    dispatch.planned.owner_device_id
+                ))
+            })?;
+            let wait_points = schedule
+                .affected_helper_device_ids
+                .iter()
+                .map(|device_id| {
+                    dispatch
+                        .helper_synchronization
+                        .iter()
+                        .find(|synchronization| synchronization.device_id == *device_id)
+                        .map(|synchronization| synchronization.owner_done(dependency_value))
+                        .ok_or_else(|| {
+                            VulkanDistributedDispatchRunnerError(format!(
+                                "distributed residency replay has no synchronization for affected helper {device_id:?}",
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some((device, sequence, wait_points))
+        } else {
+            None
+        };
+        let mut submitted: Vec<(&VulkanComputeDevice, &VulkanResidentKernelSequence)> =
+            Vec::with_capacity(replay_shards.len());
+        for (shard, device, sequence) in replay_shards {
+            let signal_points = dispatch
+                .helper_synchronization
+                .iter()
+                .find(|synchronization| synchronization.device_id == shard.device_id)
+                .map(|synchronization| vec![synchronization.helper_done(dependency_value)])
+                .unwrap_or_default();
+            if let Err(error) = device
+                .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+                    sequence,
+                    &[],
+                    &signal_points,
+                )
+            {
+                for (submitted_device, submitted_sequence) in &submitted {
+                    let _ = submitted_device.wait_resident_kernel_sequence(submitted_sequence);
+                }
+                return Err(VulkanDistributedDispatchRunnerError(format!(
+                    "failed to resubmit distributed residency shard on {:?}: {error}",
+                    shard.device_id,
+                )));
+            }
+            submitted.push((device, sequence));
+        }
+        let submitted_coordinator = if let Some((device, sequence, wait_points)) = coordinator {
+            if let Err(error) = device
+                .submit_recorded_resident_kernel_sequence_with_timeline_semaphores(
+                    sequence,
+                    &wait_points,
+                    &[],
+                )
+            {
+                for (submitted_device, submitted_sequence) in &submitted {
+                    let _ = submitted_device.wait_resident_kernel_sequence(submitted_sequence);
+                }
+                return Err(VulkanDistributedDispatchRunnerError(format!(
+                    "failed to submit distributed residency coordinator on {:?}: {error}",
+                    dispatch.planned.owner_device_id,
+                )));
+            }
+            Some((device, sequence))
+        } else {
+            None
+        };
+        let mut first_error = None;
+        for (device, sequence) in submitted {
+            if let Err(error) = device.wait_resident_kernel_sequence(sequence)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        if let Some((owner_device, coordinator_sequence)) = submitted_coordinator
+            && let Err(error) = owner_device.wait_resident_kernel_sequence(coordinator_sequence)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        if let Some(error) = first_error {
+            return Err(VulkanDistributedDispatchRunnerError(format!(
+                "failed waiting for distributed residency replay: {error}",
+            )));
+        }
+        for shard_index in &schedule.affected_shard_indices {
+            let (shard, _) = resolved_shards[*shard_index];
             for gate in shard.selected_resource_gates.iter().flatten() {
                 if gate.notification_epoch()? != gate.observed_notification_epoch() {
                     return Err(VulkanDistributedDispatchRunnerError(format!(
@@ -1500,17 +1657,6 @@ impl VulkanDistributedDispatchRunners {
                     )));
                 }
             }
-        }
-        if let Some(coordinator_sequence) = dispatch.coordinator_sequence() {
-            let owner_device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
-                VulkanDistributedDispatchRunnerError(format!(
-                    "failed to resolve distributed coordinator owner {:?}: {error}",
-                    dispatch.planned.owner_device_id
-                ))
-            })?;
-            owner_device
-                .run_recorded_resident_kernel_sequence(coordinator_sequence)
-                .map_err(VulkanDistributedDispatchRunnerError::from)?;
         }
         Ok(Some(VulkanDistributedResolvedResidencyFault {
             owner_device_id: owner_device_id.to_string(),

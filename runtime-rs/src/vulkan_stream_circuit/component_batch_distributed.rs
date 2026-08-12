@@ -1457,19 +1457,79 @@ impl VulkanDistributedComponentBatchRunners {
                 }
                 return Ok(());
             }
-            for shard_index in affected_shards {
-                let shard = &dispatch.shards[shard_index];
-                let device = devices.get(&shard.device_id).ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                        device_id: shard.device_id.clone(),
+            let schedule = distributed_residency_replay_schedule(
+                &dispatch.planned.owner_device_id,
+                &dispatch
+                    .shards
+                    .iter()
+                    .map(|shard| shard.device_id.clone())
+                    .collect::<Vec<_>>(),
+                affected_shards,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                    error.to_string(),
+                ))
+            })?;
+            let replay_shards = schedule
+                .affected_shard_indices
+                .iter()
+                .map(|shard_index| {
+                    let shard = &dispatch.shards[*shard_index];
+                    let device = devices.get(&shard.device_id).ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                            device_id: shard.device_id.clone(),
+                        }
+                    })?;
+                    let sequence = sequence_catalogs[*shard_index]
+                        .get(&batch_width)
+                        .ok_or_else(|| {
+                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                                format!(
+                                    "distributed batch residency replay lost width {batch_width} sequence on {:?}",
+                                    shard.device_id,
+                                ),
+                            ))
+                        })?;
+                    Ok::<_, VulkanResidentInProcessPlacedRuntimeError>((
+                        shard.device_id.as_str(),
+                        device.as_ref(),
+                        sequence,
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut submitted: Vec<(
+                &VulkanComputeDevice,
+                &VulkanResidentKernelSequence,
+            )> = Vec::with_capacity(replay_shards.len());
+            for (device_id, device, sequence) in replay_shards {
+                if let Err(error) = device.submit_recorded_resident_kernel_sequence(sequence) {
+                    for (submitted_device, submitted_sequence) in &submitted {
+                        let _ = submitted_device.wait_resident_kernel_sequence(submitted_sequence);
                     }
-                })?;
-                let sequence = sequence_catalogs[shard_index]
-                    .get(&batch_width)
-                    .expect("demand-gated sequence was retained through resolution");
-                device
-                    .run_recorded_resident_kernel_sequence(sequence)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "failed to resubmit distributed batch residency shard on {:?}: {error}",
+                            device_id,
+                        )),
+                    ));
+                }
+                submitted.push((device, sequence));
+            }
+            let mut first_error = None;
+            for (device, sequence) in submitted {
+                if let Err(error) = device.wait_resident_kernel_sequence(sequence)
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "failed waiting for distributed batch residency replay: {error}",
+                    )),
+                ));
             }
         }
         Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(

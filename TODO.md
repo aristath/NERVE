@@ -179,6 +179,15 @@ For every numbered item below:
 
 ### 5. Implement lazy whole-expert parallelism
 
+- Cold miss recovery now preserves expert-owner parallelism in both immediate
+  decode and multi-lane batch execution. It builds a validated replay schedule
+  from the exact faulting shards, prepares every participant before submission,
+  submits only affected owners before waiting, uses a fresh timeline value for
+  affected helper completion in immediate execution, and runs the coordinator
+  exactly once after those helpers. Unaffected resident owners and committed
+  graph progress are not replayed. The remaining bullets cover the complete
+  mounted transaction, atomic cross-device sharded residency, measured
+  intra-expert selection, and online ownership/cache adaptation.
 - Execute the router once on the layer coordinator and keep routing metadata on
   the device.
 - Dispatch the six selected routed experts concurrently to their owners. Run

@@ -3309,6 +3309,58 @@ mod tests {
     }
 
     #[test]
+    fn residency_replay_schedules_only_faulting_shards_and_affected_helpers() {
+        let devices = ["owner", "helper-a", "helper-b"]
+            .map(str::to_string)
+            .to_vec();
+
+        let schedule = distributed_residency_replay_schedule(
+            "owner",
+            &devices,
+            [0, 2],
+        )
+        .unwrap();
+
+        assert_eq!(schedule.affected_shard_indices, vec![0, 2]);
+        assert_eq!(schedule.affected_helper_device_ids, vec!["helper-b"]);
+    }
+
+    #[test]
+    fn residency_replay_rejects_ambiguous_or_invalid_participants() {
+        let devices = ["owner", "helper-a", "helper-b"]
+            .map(str::to_string)
+            .to_vec();
+        for affected in [Vec::new(), vec![1, 1], vec![2, 1], vec![3]] {
+            assert!(
+                distributed_residency_replay_schedule("owner", &devices, affected)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("sorted unique in-range")
+            );
+        }
+        assert!(
+            distributed_residency_replay_schedule(
+                "owner",
+                &["owner".to_string(), "owner".to_string()],
+                [0],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("one unique shard per device")
+        );
+        assert!(
+            distributed_residency_replay_schedule(
+                "absent",
+                &devices,
+                [0],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("including its owner")
+        );
+    }
+
+    #[test]
     fn distributed_shards_always_start_with_the_dispatch_owner() {
         let tensor_index = fixture_tensor_index("row_major");
         let prepared_plan = fixture_prepared_plan();

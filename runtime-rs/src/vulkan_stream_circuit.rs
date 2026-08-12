@@ -111,9 +111,10 @@ use crate::vulkan_distributed::{
     VulkanDistributedSelectedResourceStorePlan, VulkanPhysicalExecutionIslandPlan,
     VulkanPhysicalExecutionTransportKind, VulkanSelectedResourcePlacementPlan,
     allocate_distributed_shared_buffer, create_distributed_reduction_runner_for_buffers,
-    distributed_shard_push_constants, resolved_physical_execution_islands,
-    selected_resource_activation, selected_resource_placements_fit_phase_participants,
-    try_plan_selected_resource_placement, vulkan_distributed_placement_strategy,
+    distributed_residency_replay_schedule, distributed_shard_push_constants,
+    resolved_physical_execution_islands, selected_resource_activation,
+    selected_resource_placements_fit_phase_participants, try_plan_selected_resource_placement,
+    vulkan_distributed_placement_strategy,
 };
 
 mod package;
