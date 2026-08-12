@@ -512,6 +512,7 @@ fn distributed_calibration_execution_case(
                     dispatch
                         .selected_resource_partitions
                         .iter()
+                        .filter(|partition| partition.parameter_partitions.is_empty())
                         .map(|partition| partition.selector_id.as_str()),
                     &shard.selected_resource_indices,
                     &shard.device_id,
@@ -521,6 +522,7 @@ fn distributed_calibration_execution_case(
                     dispatch
                         .selected_resource_partitions
                         .iter()
+                        .filter(|partition| !partition.parameter_partitions.is_empty())
                         .map(|partition| partition.selector_id.as_str()),
                     &shard.selected_resource_fragments,
                     &shard.device_id,

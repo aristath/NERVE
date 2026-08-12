@@ -219,6 +219,14 @@ impl VulkanDistributedSelectedResourceGate {
         self.gate.dispatch()
     }
 
+    pub(crate) fn auxiliary_transient_device_bytes(
+        &self,
+    ) -> Result<usize, VulkanDistributedDispatchRunnerError> {
+        self.gate
+            .auxiliary_transient_device_bytes()
+            .map_err(VulkanDistributedDispatchRunnerError::from)
+    }
+
     pub(crate) fn indirect_gate_step<'a>(
         &'a self,
         indirect: &'a VulkanResidentBuffer,

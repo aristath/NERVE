@@ -1001,6 +1001,37 @@ impl VulkanDistributedDispatchRunners {
             })
     }
 
+    pub fn selected_resource_transient_device_bytes_by_device(
+        &self,
+    ) -> Result<BTreeMap<String, usize>, VulkanDistributedDispatchRunnerError> {
+        let mut bytes_by_device = BTreeMap::new();
+        for shard in self.dispatches.iter().flat_map(|dispatch| &dispatch.shards) {
+            let bytes = shard
+                .selected_resource_gates
+                .iter()
+                .flatten()
+                .try_fold(0usize, |total, gate| {
+                    total
+                        .checked_add(gate.auxiliary_transient_device_bytes()?)
+                        .ok_or_else(|| {
+                            VulkanDistributedDispatchRunnerError(
+                                "distributed residency-gate transient bytes overflowed"
+                                    .to_string(),
+                            )
+                        })
+                })?;
+            let total = bytes_by_device
+                .entry(shard.device_id.clone())
+                .or_insert(0usize);
+            *total = total.checked_add(bytes).ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(
+                    "distributed selected-resource transient bytes overflowed".to_string(),
+                )
+            })?;
+        }
+        Ok(bytes_by_device)
+    }
+
     pub fn reserve_dependency_value(
         &self,
         owner_device_id: &str,

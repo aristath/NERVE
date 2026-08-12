@@ -585,6 +585,26 @@ impl VulkanGpuResidencyGate {
         &self.dispatch
     }
 
+    /// Device memory owned only by this gate. Shared selection/address-table
+    /// inputs and the caller-owned transaction predicate are deliberately
+    /// excluded so higher-level accounting can add them exactly once.
+    pub fn auxiliary_transient_device_bytes(&self) -> Result<usize, VulkanError> {
+        [
+            self._configuration.byte_capacity(),
+            self._resource_group_records.byte_capacity(),
+            self._resource_address_slots.byte_capacity(),
+            self.resolved_addresses.byte_capacity(),
+            self.missing_queue.buffer().byte_capacity(),
+            self.continuation_predicate.byte_capacity(),
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, bytes| {
+            total.checked_add(bytes).ok_or_else(|| {
+                VulkanError("GPU residency gate transient bytes overflowed".to_string())
+            })
+        })
+    }
+
     pub fn selected_resource_indices(
         &self,
         active_selection_count: usize,
