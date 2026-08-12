@@ -92,7 +92,7 @@ fn rank_runtime_auto_placement_candidates_across_capability_classes(
         .collect()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RuntimeAutoPlacementContext {
     candidates: Vec<VulkanRuntimePlacementCandidate>,
     costs: VulkanRuntimePlacementCostModel,

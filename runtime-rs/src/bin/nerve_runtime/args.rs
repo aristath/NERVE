@@ -38,7 +38,6 @@ use nerve_runtime::{
     VulkanReusableKernelArtifactManifest, VulkanRuntimePhysicalExecutionPlan,
     VulkanRuntimePlacementCalibrationSuite, VulkanRuntimePlacementCandidate,
     VulkanRuntimePlacementCostModel, VulkanSpeculativeCycleTrace, VulkanSpeculativeWindowStats,
-    VulkanTargetedComponentExecutionPhase,
     calibrate_vulkan_runtime_placement_candidate_components,
     calibrate_vulkan_runtime_placement_transfers, capacity_pack_and_select_vulkan_runtime_model,
     chat_stop_token_ids_from_manifest, chat_transcript_codec, discover_cpu_hardware_profile,
