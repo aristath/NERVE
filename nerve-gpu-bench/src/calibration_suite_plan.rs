@@ -57,12 +57,17 @@ pub fn plan_calibration_suite(
         ));
     }
     let phases = calibration_phases(prefill_widths)?;
+    let mut supported_phases = Vec::new();
     let mut component_cases = Vec::new();
     for phase in &phases {
         let runtime_phase = targeted_phase(*phase);
         let targets =
             vulkan_runtime_placement_calibration_targets_for_phase(runtime_model, runtime_phase)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        if targets.is_empty() {
+            continue;
+        }
+        supported_phases.push(*phase);
         component_cases.extend(targets.into_iter().map(|target| ComponentCalibrationCase {
             phase: *phase,
             target,
@@ -75,7 +80,7 @@ pub fn plan_calibration_suite(
     {
         Vec::new()
     } else {
-        phases
+        supported_phases
             .iter()
             .flat_map(|phase| {
                 ordered_target_pairs(target_ids)
@@ -92,7 +97,7 @@ pub fn plan_calibration_suite(
     let contract = instantiate_runtime_resource_contract(runtime_model)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     let mut load_wave_cases = Vec::new();
-    for phase in &phases {
+    for phase in &supported_phases {
         for selector in &contract.selectors {
             for resource_indices in representative_load_wave_resource_sets(&contract, selector)? {
                 load_wave_cases.push(LoadWaveCalibrationCase {

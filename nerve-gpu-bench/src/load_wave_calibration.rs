@@ -3,14 +3,14 @@ use std::io;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::calibration_package::CalibrationPackage;
+use crate::calibration_package::{CalibrationPackage, CalibrationRuntimeConfig};
 use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, VulkanRuntimeLoadWaveCalibrationTarget,
     calibrate_vulkan_runtime_load_wave, record_vulkan_runtime_load_wave_calibration_report,
 };
 
 use crate::calibration_device_state::{
-    capture_device_snapshots, open_calibration_devices, print_device_snapshots,
+    capture_device_snapshots, open_calibration_targets, print_device_snapshots,
     quiesce_and_verify_device_snapshots,
 };
 use crate::cli::PackageCalibrationPhase;
@@ -24,6 +24,7 @@ pub fn run_load_wave_calibration(
     phase: PackageCalibrationPhase,
     resource_indices: &[usize],
     target_id: &str,
+    runtime: CalibrationRuntimeConfig,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let package = CalibrationPackage::load(package)?;
@@ -35,6 +36,7 @@ pub fn run_load_wave_calibration(
         phase,
         resource_indices,
         target_id,
+        runtime,
     )?;
     let payload = measurement.catalog.to_json_bytes()?;
     write_atomic(output, &payload)?;
@@ -69,17 +71,26 @@ pub fn measure_load_wave_candidate(
     phase: PackageCalibrationPhase,
     resource_indices: &[usize],
     target_id: &str,
+    runtime: CalibrationRuntimeConfig,
 ) -> Result<LoadWaveCalibrationMeasurement, Box<dyn Error>> {
     let execution_phase = phase.execution_phase();
     let activation_batch_width = phase.activation_batch_width();
-    let devices = open_calibration_devices(&[target_id.to_string()])?;
+    let opened = open_calibration_targets(&[target_id.to_string()])?;
+    let owner_profile = opened.hardware_profiles.get(target_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "load-wave calibration target has no hardware-process profile",
+        )
+    })?;
+    let runtime_model = package.runtime_model_for_owner(target_id, owner_profile, runtime)?;
+    let devices = opened.devices;
     let before = capture_device_snapshots(&devices)?;
     print_device_snapshots("before", &before);
     let calibration_result = calibrate_vulkan_runtime_load_wave(
         target_id,
         Rc::clone(&devices[0].1),
         package.manifest_dir(),
-        package.runtime_model(),
+        &runtime_model,
         &VulkanRuntimeLoadWaveCalibrationTarget {
             component_id: component.to_string(),
             selector_id: selector.to_string(),

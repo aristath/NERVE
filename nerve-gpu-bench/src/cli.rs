@@ -2,6 +2,10 @@ use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
 
+use nerve_runtime::ResourceResidencyPolicy;
+
+use crate::calibration_package::CalibrationRuntimeConfig;
+
 const DEFAULT_PAYLOAD_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_SAMPLES: usize = 1;
 const DEFAULT_BENCHMARK_FORMATS: &[&str] = &[
@@ -29,6 +33,7 @@ pub enum Command {
         target_ids: Vec<String>,
         prefill_widths: Vec<usize>,
         maximum_group_size: Option<usize>,
+        runtime: CalibrationRuntimeConfig,
         output: PathBuf,
     },
     CalibratePackage {
@@ -36,6 +41,7 @@ pub enum Command {
         component: String,
         phase: PackageCalibrationPhase,
         target_ids: Vec<String>,
+        runtime: CalibrationRuntimeConfig,
         output: PathBuf,
     },
     CalibrateBoundaries {
@@ -43,6 +49,7 @@ pub enum Command {
         phase: PackageCalibrationPhase,
         source_id: String,
         target_id: String,
+        runtime: CalibrationRuntimeConfig,
         output: PathBuf,
     },
     CalibrateLoadWave {
@@ -52,6 +59,7 @@ pub enum Command {
         phase: PackageCalibrationPhase,
         resource_indices: Vec<usize>,
         target_id: String,
+        runtime: CalibrationRuntimeConfig,
         output: PathBuf,
     },
     MergeCatalogs {
@@ -102,6 +110,84 @@ impl PackageCalibrationPhase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError(String);
 
+#[derive(Default)]
+struct CalibrationRuntimeArguments {
+    context_size: Option<usize>,
+    speculative_draft_tokens: Option<usize>,
+    residency_policy: Option<ResourceResidencyPolicy>,
+}
+
+impl CalibrationRuntimeArguments {
+    fn parse_option(
+        &mut self,
+        option: &str,
+        arguments: &[String],
+        index: &mut usize,
+    ) -> Result<bool, CliError> {
+        match option {
+            "--context-size" => {
+                let value = parse_usize(
+                    &required_value(arguments, index, "--context-size")?,
+                    "--context-size",
+                )?;
+                if value == 0 {
+                    return Err(CliError(
+                        "--context-size must be greater than zero".to_string(),
+                    ));
+                }
+                if self.context_size.replace(value).is_some() {
+                    return Err(CliError(
+                        "--context-size may only be specified once".to_string(),
+                    ));
+                }
+                Ok(true)
+            }
+            "--speculative-draft-tokens" => {
+                let value = parse_usize_allow_zero(
+                    &required_value(arguments, index, "--speculative-draft-tokens")?,
+                    "--speculative-draft-tokens",
+                )?;
+                if self.speculative_draft_tokens.replace(value).is_some() {
+                    return Err(CliError(
+                        "--speculative-draft-tokens may only be specified once".to_string(),
+                    ));
+                }
+                Ok(true)
+            }
+            "--residency-policy" => {
+                let value = required_value(arguments, index, "--residency-policy")?;
+                let policy = match value.as_str() {
+                    "eager" => ResourceResidencyPolicy::Eager,
+                    "demand-retained" => ResourceResidencyPolicy::DemandRetained,
+                    "demand-paged" => ResourceResidencyPolicy::DemandPaged,
+                    _ => {
+                        return Err(CliError(format!(
+                            "invalid --residency-policy {value:?}; expected eager, demand-retained, or demand-paged"
+                        )));
+                    }
+                };
+                if self.residency_policy.replace(policy).is_some() {
+                    return Err(CliError(
+                        "--residency-policy may only be specified once".to_string(),
+                    ));
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn finish(self) -> CalibrationRuntimeConfig {
+        CalibrationRuntimeConfig {
+            context_size: self.context_size,
+            speculative_draft_tokens: self.speculative_draft_tokens,
+            residency_policy: self
+                .residency_policy
+                .unwrap_or(ResourceResidencyPolicy::Eager),
+        }
+    }
+}
+
 impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
@@ -141,6 +227,7 @@ fn parse_calibrate_suite(arguments: Vec<String>) -> Result<Command, CliError> {
     let mut target_ids = Vec::new();
     let mut prefill_widths = Vec::new();
     let mut maximum_group_size = None;
+    let mut runtime = CalibrationRuntimeArguments::default();
     let mut output = None;
     let mut index = 0;
     while index < arguments.len() {
@@ -178,10 +265,12 @@ fn parse_calibrate_suite(arguments: Vec<String>) -> Result<Command, CliError> {
             }
             "--output" => set_once_path(&mut output, &arguments, &mut index, "--output")?,
             other => {
-                return Err(CliError(format!(
-                    "unknown calibrate-suite argument {other:?}\n\n{}",
-                    usage()
-                )));
+                if !runtime.parse_option(other, &arguments, &mut index)? {
+                    return Err(CliError(format!(
+                        "unknown calibrate-suite argument {other:?}\n\n{}",
+                        usage()
+                    )));
+                }
             }
         }
         index += 1;
@@ -213,6 +302,7 @@ fn parse_calibrate_suite(arguments: Vec<String>) -> Result<Command, CliError> {
         target_ids,
         prefill_widths,
         maximum_group_size,
+        runtime: runtime.finish(),
         output,
     })
 }
@@ -225,6 +315,7 @@ fn parse_calibrate_load_wave(arguments: Vec<String>) -> Result<Command, CliError
     let mut activation_batch_width = None;
     let mut resource_indices = Vec::new();
     let mut target_id = None;
+    let mut runtime = CalibrationRuntimeArguments::default();
     let mut output = None;
     let mut index = 0;
     while index < arguments.len() {
@@ -254,10 +345,12 @@ fn parse_calibrate_load_wave(arguments: Vec<String>) -> Result<Command, CliError
             "--target" => set_once_string(&mut target_id, &arguments, &mut index, "--target")?,
             "--output" => set_once_path(&mut output, &arguments, &mut index, "--output")?,
             other => {
-                return Err(CliError(format!(
-                    "unknown calibrate-load-wave argument {other:?}\n\n{}",
-                    usage()
-                )));
+                if !runtime.parse_option(other, &arguments, &mut index)? {
+                    return Err(CliError(format!(
+                        "unknown calibrate-load-wave argument {other:?}\n\n{}",
+                        usage()
+                    )));
+                }
             }
         }
         index += 1;
@@ -297,6 +390,7 @@ fn parse_calibrate_load_wave(arguments: Vec<String>) -> Result<Command, CliError
         phase,
         resource_indices,
         target_id,
+        runtime: runtime.finish(),
         output,
     })
 }
@@ -307,6 +401,7 @@ fn parse_calibrate_boundaries(arguments: Vec<String>) -> Result<Command, CliErro
     let mut activation_batch_width = None;
     let mut source_id = None;
     let mut target_id = None;
+    let mut runtime = CalibrationRuntimeArguments::default();
     let mut output = None;
     let mut index = 0;
     while index < arguments.len() {
@@ -329,10 +424,12 @@ fn parse_calibrate_boundaries(arguments: Vec<String>) -> Result<Command, CliErro
             "--target" => set_once_string(&mut target_id, &arguments, &mut index, "--target")?,
             "--output" => set_once_path(&mut output, &arguments, &mut index, "--output")?,
             other => {
-                return Err(CliError(format!(
-                    "unknown calibrate-boundaries argument {other:?}\n\n{}",
-                    usage()
-                )));
+                if !runtime.parse_option(other, &arguments, &mut index)? {
+                    return Err(CliError(format!(
+                        "unknown calibrate-boundaries argument {other:?}\n\n{}",
+                        usage()
+                    )));
+                }
             }
         }
         index += 1;
@@ -363,6 +460,7 @@ fn parse_calibrate_boundaries(arguments: Vec<String>) -> Result<Command, CliErro
         phase,
         source_id,
         target_id,
+        runtime: runtime.finish(),
         output,
     })
 }
@@ -442,6 +540,7 @@ fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> 
     let mut phase = None;
     let mut activation_batch_width = None;
     let mut target_ids = Vec::new();
+    let mut runtime = CalibrationRuntimeArguments::default();
     let mut output = None;
     let mut index = 0;
     while index < arguments.len() {
@@ -488,10 +587,12 @@ fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> 
                 }
             }
             other => {
-                return Err(CliError(format!(
-                    "unknown calibrate-package argument {other:?}\n\n{}",
-                    usage()
-                )));
+                if !runtime.parse_option(other, &arguments, &mut index)? {
+                    return Err(CliError(format!(
+                        "unknown calibrate-package argument {other:?}\n\n{}",
+                        usage()
+                    )));
+                }
             }
         }
         index += 1;
@@ -531,6 +632,7 @@ fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> 
         component,
         phase,
         target_ids,
+        runtime: runtime.finish(),
         output,
     })
 }
@@ -769,7 +871,7 @@ fn parse_usize_allow_zero(value: &str, option: &str) -> Result<usize, CliError> 
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-suite --package PACKAGE.json [--target VULKAN_UUID ...] [--prefill-width N ...] [--max-group-size N] --output CATALOG.json\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench calibrate-load-wave --package PACKAGE.json --component ID --selector ID --phase decode|prefill [--batch-width N] --resource-index N ... --target VULKAN_UUID --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-suite --package PACKAGE.json [--target VULKAN_UUID ...] [--prefill-width N ...] [--max-group-size N] [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-load-wave --package PACKAGE.json --component ID --selector ID --phase decode|prefill [--batch-width N] --resource-index N ... --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -996,6 +1098,7 @@ mod tests {
                 target_ids: vec![first.to_string(), second.to_string()],
                 prefill_widths: vec![8, 64],
                 maximum_group_size: Some(2),
+                runtime: CalibrationRuntimeConfig::default(),
                 output: PathBuf::from("optimization/placement-calibration-catalog.json"),
             },
         );
@@ -1020,9 +1123,72 @@ mod tests {
                 target_ids: Vec::new(),
                 prefill_widths: Vec::new(),
                 maximum_group_size: None,
+                runtime: CalibrationRuntimeConfig::default(),
                 output: PathBuf::from("catalog.json"),
             },
         );
+    }
+
+    #[test]
+    fn calibration_uses_the_same_explicit_runtime_envelope_as_chat() {
+        let command = parse_args(
+            [
+                "calibrate-suite",
+                "--package",
+                "package.json",
+                "--context-size",
+                "131072",
+                "--speculative-draft-tokens",
+                "7",
+                "--residency-policy",
+                "demand-paged",
+                "--output",
+                "catalog.json",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap();
+        let Command::CalibrateSuite { runtime, .. } = command else {
+            panic!("expected calibration suite")
+        };
+        assert_eq!(
+            runtime,
+            CalibrationRuntimeConfig {
+                context_size: Some(131_072),
+                speculative_draft_tokens: Some(7),
+                residency_policy: ResourceResidencyPolicy::DemandPaged,
+            }
+        );
+    }
+
+    #[test]
+    fn calibration_rejects_ambiguous_or_invalid_runtime_envelopes() {
+        let base = [
+            "calibrate-suite",
+            "--package",
+            "package.json",
+            "--output",
+            "catalog.json",
+        ];
+        for suffix in [
+            vec!["--context-size", "0"],
+            vec!["--context-size", "8", "--context-size", "16"],
+            vec![
+                "--speculative-draft-tokens",
+                "1",
+                "--speculative-draft-tokens",
+                "2",
+            ],
+            vec!["--residency-policy", "guess"],
+        ] {
+            let error =
+                parse_args(base.iter().copied().chain(suffix).map(str::to_string)).unwrap_err();
+            assert!(
+                error.to_string().contains("context-size")
+                    || error.to_string().contains("speculative-draft-tokens")
+                    || error.to_string().contains("residency-policy")
+            );
+        }
     }
 
     #[test]
@@ -1107,6 +1273,7 @@ mod tests {
                 component: "transformer.block.7".to_string(),
                 phase: PackageCalibrationPhase::Decode,
                 target_ids: vec![owner.to_string(), worker.to_string()],
+                runtime: CalibrationRuntimeConfig::default(),
                 output: PathBuf::from("placement.json"),
             },
         );
@@ -1176,6 +1343,7 @@ mod tests {
                 },
                 source_id: source.to_string(),
                 target_id: target.to_string(),
+                runtime: CalibrationRuntimeConfig::default(),
                 output: PathBuf::from("boundaries.json"),
             },
         );
@@ -1309,6 +1477,7 @@ mod tests {
                 phase: PackageCalibrationPhase::Decode,
                 resource_indices: vec![0, 3, 5],
                 target_id: target.to_string(),
+                runtime: CalibrationRuntimeConfig::default(),
                 output: PathBuf::from("wave.json"),
             }
         );

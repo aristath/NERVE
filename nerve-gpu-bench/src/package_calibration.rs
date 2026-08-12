@@ -15,10 +15,10 @@ use nerve_runtime::{
 };
 
 use crate::calibration_device_state::{
-    capture_device_snapshots, open_calibration_devices, print_device_snapshots,
-    quiesce_and_verify_device_snapshots,
+    capture_device_snapshots, discover_calibration_hardware_profiles, open_calibration_targets,
+    print_device_snapshots, quiesce_and_verify_device_snapshots,
 };
-use crate::calibration_package::CalibrationPackage;
+use crate::calibration_package::{CalibrationPackage, CalibrationRuntimeConfig};
 use crate::cli::PackageCalibrationPhase;
 use crate::output::write_atomic;
 
@@ -27,25 +27,13 @@ pub fn run_package_calibration(
     component: &str,
     phase: PackageCalibrationPhase,
     ordered_target_ids: &[String],
+    runtime: CalibrationRuntimeConfig,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let package = CalibrationPackage::load(package)?;
     package.reject_output_collision(output)?;
-    let execution_phase = match phase {
-        PackageCalibrationPhase::Decode => VulkanTargetedComponentExecutionPhase::Decode,
-        PackageCalibrationPhase::Prefill {
-            activation_batch_width,
-        } => VulkanTargetedComponentExecutionPhase::Prefill {
-            activation_batch_width,
-        },
-    };
-    let target = vulkan_runtime_placement_calibration_target_for_component(
-        package.runtime_model(),
-        component,
-        execution_phase,
-    )?;
-
-    let measurement = measure_package_candidates(&package, &target, phase, ordered_target_ids)?;
+    let measurement =
+        measure_package_candidates(&package, component, phase, ordered_target_ids, runtime)?;
     if measurement.catalog.observation_count() == 0 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -58,8 +46,8 @@ pub fn run_package_calibration(
     println!(
         "calibrated package={} signature={} representative={} requested_component={} phase={} batch_width={} targets={:?} observations={} contract_candidates={} sampled={} best_measured_ns={} output={}",
         package.source_path().display(),
-        target.signature_id,
-        target.component_id,
+        measurement.target.signature_id,
+        measurement.target.component_id,
         component,
         match phase {
             PackageCalibrationPhase::Decode => "decode",
@@ -85,17 +73,71 @@ pub fn run_package_calibration(
 }
 
 pub struct PackageCalibrationMeasurement {
+    pub target: VulkanRuntimePlacementCalibrationTarget,
     pub catalog: VulkanPlacementCalibrationCatalog,
     pub reports: Vec<VulkanRuntimeDistributedPlacementCalibrationReport>,
 }
 
 pub fn measure_package_candidates(
     package: &CalibrationPackage,
+    component: &str,
+    phase: PackageCalibrationPhase,
+    ordered_target_ids: &[String],
+    runtime: CalibrationRuntimeConfig,
+) -> Result<PackageCalibrationMeasurement, Box<dyn Error>> {
+    let owner_id = ordered_target_ids.first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "package calibration requires at least one ordered target",
+        )
+    })?;
+    let profiles = discover_calibration_hardware_profiles(ordered_target_ids)?;
+    let owner_profile = profiles.get(owner_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "package calibration owner has no hardware-process profile",
+        )
+    })?;
+    let runtime_model = package.runtime_model_for_owner(owner_id, owner_profile, runtime)?;
+    let execution_phase = match phase {
+        PackageCalibrationPhase::Decode => VulkanTargetedComponentExecutionPhase::Decode,
+        PackageCalibrationPhase::Prefill {
+            activation_batch_width,
+        } => VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width,
+        },
+    };
+    let target = vulkan_runtime_placement_calibration_target_for_component(
+        &runtime_model,
+        component,
+        execution_phase,
+    )?;
+    measure_package_candidates_for_runtime_model(
+        package,
+        &runtime_model,
+        &target,
+        phase,
+        ordered_target_ids,
+    )
+}
+
+pub fn measure_package_candidates_for_runtime_model(
+    package: &CalibrationPackage,
+    runtime_model: &nerve_runtime::VulkanResidentRuntimeModel,
     target: &VulkanRuntimePlacementCalibrationTarget,
     phase: PackageCalibrationPhase,
     ordered_target_ids: &[String],
 ) -> Result<PackageCalibrationMeasurement, Box<dyn Error>> {
-    let devices = open_calibration_devices(ordered_target_ids)?;
+    let execution_phase = match phase {
+        PackageCalibrationPhase::Decode => VulkanTargetedComponentExecutionPhase::Decode,
+        PackageCalibrationPhase::Prefill {
+            activation_batch_width,
+        } => VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width,
+        },
+    };
+    let opened = open_calibration_targets(ordered_target_ids)?;
+    let devices = opened.devices;
 
     let before = capture_device_snapshots(&devices)?;
     print_device_snapshots("before", &before);
@@ -132,19 +174,8 @@ pub fn measure_package_candidates(
         maximum_resident_parameter_bytes_by_physical_device,
         ..VulkanRuntimePlacementCalibrationPolicy::default()
     };
-    let execution_phase = match phase {
-        PackageCalibrationPhase::Decode => VulkanTargetedComponentExecutionPhase::Decode,
-        PackageCalibrationPhase::Prefill {
-            activation_batch_width,
-        } => VulkanTargetedComponentExecutionPhase::Prefill {
-            activation_batch_width,
-        },
-    };
-    let candidates = vulkan_runtime_distributed_contract_candidates(
-        package.runtime_model(),
-        target,
-        execution_phase,
-    )?;
+    let candidates =
+        vulkan_runtime_distributed_contract_candidates(runtime_model, target, execution_phase)?;
     let calibration_result = (|| {
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
         let mut reports = Vec::new();
@@ -152,7 +183,7 @@ pub fn measure_package_candidates(
             let report = calibrate_vulkan_runtime_staged_contract_candidate_with_policy(
                 &devices,
                 package.manifest_dir(),
-                package.runtime_model(),
+                runtime_model,
                 target,
                 execution_phase,
                 &candidate.contract_ids,
@@ -166,14 +197,14 @@ pub fn measure_package_candidates(
                 break;
             }
         }
-        if catalog.observation_count() == 0 {
+        if ordered_target_ids.len() == 1 && catalog.observation_count() == 0 {
             for (physical_device_id, device) in &devices {
                 if let Some(canonical) =
                     calibrate_vulkan_runtime_canonical_placement_candidate_with_policy(
                         physical_device_id,
                         device.clone(),
                         package.manifest_dir(),
-                        package.runtime_model(),
+                        runtime_model,
                         target,
                         execution_phase,
                         policy.clone(),
@@ -206,5 +237,9 @@ pub fn measure_package_candidates(
             .into());
         }
     };
-    Ok(PackageCalibrationMeasurement { catalog, reports })
+    Ok(PackageCalibrationMeasurement {
+        target: target.clone(),
+        catalog,
+        reports,
+    })
 }

@@ -2,7 +2,7 @@ use std::error::Error;
 use std::io;
 use std::path::Path;
 
-use crate::calibration_package::CalibrationPackage;
+use crate::calibration_package::{CalibrationPackage, CalibrationRuntimeConfig};
 use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, calibrate_vulkan_runtime_placement_phase_transfers,
     record_vulkan_runtime_transfer_calibration_report,
@@ -10,7 +10,7 @@ use nerve_runtime::{
 };
 
 use crate::calibration_device_state::{
-    capture_device_snapshots, open_calibration_devices, print_device_snapshots,
+    capture_device_snapshots, open_calibration_targets, print_device_snapshots,
     quiesce_and_verify_device_snapshots,
 };
 use crate::cli::PackageCalibrationPhase;
@@ -21,11 +21,12 @@ pub fn run_boundary_calibration(
     phase: PackageCalibrationPhase,
     source_id: &str,
     target_id: &str,
+    runtime: CalibrationRuntimeConfig,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let package = CalibrationPackage::load(package)?;
     package.reject_output_collision(output)?;
-    let catalog = measure_boundary_candidate(&package, phase, source_id, target_id)?;
+    let catalog = measure_boundary_candidate(&package, phase, source_id, target_id, runtime)?;
     let payload = catalog.to_json_bytes()?;
     write_atomic(output, &payload)?;
     println!(
@@ -46,8 +47,17 @@ pub fn measure_boundary_candidate(
     phase: PackageCalibrationPhase,
     source_id: &str,
     target_id: &str,
+    runtime: CalibrationRuntimeConfig,
 ) -> Result<VulkanPlacementCalibrationCatalog, Box<dyn Error>> {
-    let frame_byte_counts = vulkan_runtime_placement_transfer_byte_counts(package.runtime_model())?;
+    let opened = open_calibration_targets(&[source_id.to_string(), target_id.to_string()])?;
+    let source_profile = opened.hardware_profiles.get(source_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "boundary calibration source has no hardware-process profile",
+        )
+    })?;
+    let runtime_model = package.runtime_model_for_owner(source_id, source_profile, runtime)?;
+    let frame_byte_counts = vulkan_runtime_placement_transfer_byte_counts(&runtime_model)?;
     if frame_byte_counts.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -57,7 +67,7 @@ pub fn measure_boundary_candidate(
     }
     let execution_phase = phase.execution_phase();
     let activation_batch_width = phase.activation_batch_width();
-    let devices = open_calibration_devices(&[source_id.to_string(), target_id.to_string()])?;
+    let devices = opened.devices;
     let before = capture_device_snapshots(&devices)?;
     print_device_snapshots("before", &before);
     let source = &devices[0].1;

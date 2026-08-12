@@ -6,9 +6,25 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use nerve_runtime::{
-    VulkanComputeDevice, VulkanComputeDeviceCatalog, VulkanDeviceLocalMemoryAccounting,
-    VulkanDeviceLocalMemoryBudget, VulkanDeviceLocalMemoryPressure,
+    HardwareProcessProfile, VulkanComputeDevice, VulkanComputeDeviceCatalog,
+    VulkanDeviceLocalMemoryAccounting, VulkanDeviceLocalMemoryBudget,
+    VulkanDeviceLocalMemoryPressure,
 };
+
+pub struct OpenCalibrationTargets {
+    pub devices: Vec<(String, Rc<VulkanComputeDevice>)>,
+    pub hardware_profiles: BTreeMap<String, HardwareProcessProfile>,
+}
+
+pub fn discover_calibration_hardware_profiles(
+    ordered_target_ids: &[String],
+) -> Result<BTreeMap<String, HardwareProcessProfile>, Box<dyn Error>> {
+    let allowed_target_ids = validate_calibration_target_ids(ordered_target_ids)?;
+    let device_catalog =
+        VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(&allowed_target_ids)?;
+    let profiles = device_catalog.available_hardware_profiles()?;
+    hardware_profiles_for_target_ids(ordered_target_ids, &profiles)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceCalibrationSnapshot {
@@ -27,25 +43,19 @@ struct DeviceActivityObservation {
     runtime_power_status: Option<String>,
 }
 
-pub fn open_calibration_devices(
+pub fn open_calibration_targets(
     ordered_target_ids: &[String],
-) -> Result<Vec<(String, Rc<VulkanComputeDevice>)>, Box<dyn Error>> {
-    let allowed_target_ids = ordered_target_ids.iter().cloned().collect::<BTreeSet<_>>();
-    if allowed_target_ids.len() != ordered_target_ids.len() || allowed_target_ids.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "calibration requires distinct ordered target identities",
-        )
-        .into());
-    }
+) -> Result<OpenCalibrationTargets, Box<dyn Error>> {
+    let allowed_target_ids = validate_calibration_target_ids(ordered_target_ids)?;
     let device_catalog =
         VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(&allowed_target_ids)?;
+    let profiles = device_catalog.available_hardware_profiles()?;
     let available_by_id = device_catalog
         .available_compute_devices()
         .iter()
         .map(|device| (device.physical_device_id.clone(), device.clone()))
         .collect::<BTreeMap<_, _>>();
-    ordered_target_ids
+    let devices = ordered_target_ids
         .iter()
         .map(|physical_device_id| {
             let info = available_by_id.get(physical_device_id).ok_or_else(|| {
@@ -66,6 +76,50 @@ pub fn open_calibration_devices(
                 .into());
             }
             Ok((physical_device_id.clone(), device))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    let hardware_profiles = hardware_profiles_for_target_ids(ordered_target_ids, &profiles)?;
+    Ok(OpenCalibrationTargets {
+        devices,
+        hardware_profiles,
+    })
+}
+
+fn validate_calibration_target_ids(
+    ordered_target_ids: &[String],
+) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let allowed_target_ids = ordered_target_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if allowed_target_ids.len() != ordered_target_ids.len() || allowed_target_ids.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "calibration requires distinct ordered target identities",
+        )
+        .into());
+    }
+    Ok(allowed_target_ids)
+}
+
+fn hardware_profiles_for_target_ids(
+    ordered_target_ids: &[String],
+    profiles: &[HardwareProcessProfile],
+) -> Result<BTreeMap<String, HardwareProcessProfile>, Box<dyn Error>> {
+    ordered_target_ids
+        .iter()
+        .map(|physical_device_id| {
+            profiles
+                .iter()
+                .find(|profile| profile.hardware_identity.stable_device_id == *physical_device_id)
+                .cloned()
+                .map(|profile| (physical_device_id.clone(), profile))
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "selected target {physical_device_id:?} has no hardware-process profile"
+                        ),
+                    )
+                    .into()
+                })
         })
         .collect()
 }

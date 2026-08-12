@@ -65,6 +65,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             mut target_ids,
             prefill_widths,
             maximum_group_size,
+            runtime,
             output,
         } => {
             if target_ids.is_empty() {
@@ -75,6 +76,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 &target_ids,
                 &prefill_widths,
                 maximum_group_size,
+                runtime,
                 &output,
             )?;
         }
@@ -83,6 +85,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             component,
             phase,
             target_ids,
+            runtime,
             output,
         } => {
             package_calibration::run_package_calibration(
@@ -90,6 +93,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 &component,
                 phase,
                 &target_ids,
+                runtime,
                 &output,
             )?;
         }
@@ -98,10 +102,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             phase,
             source_id,
             target_id,
+            runtime,
             output,
         } => {
             boundary_calibration::run_boundary_calibration(
-                &package, phase, &source_id, &target_id, &output,
+                &package, phase, &source_id, &target_id, runtime, &output,
             )?;
         }
         Command::CalibrateLoadWave {
@@ -111,6 +116,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             phase,
             resource_indices,
             target_id,
+            runtime,
             output,
         } => {
             load_wave_calibration::run_load_wave_calibration(
@@ -120,6 +126,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 phase,
                 &resource_indices,
                 &target_id,
+                runtime,
                 &output,
             )?;
         }

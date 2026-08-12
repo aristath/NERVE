@@ -1,19 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::io;
 use std::path::Path;
 
 use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, VulkanPlacementExecutionStrategy,
-    VulkanRuntimeDistributedPlacementCalibrationReport,
-    vulkan_runtime_distributed_contract_candidates,
+    VulkanRuntimeDistributedPlacementCalibrationReport, VulkanRuntimePlacementCalibrationTarget,
 };
 
 use crate::boundary_calibration::measure_boundary_candidate;
+use crate::calibration_device_state::discover_calibration_hardware_profiles;
 use crate::calibration_package::CalibrationPackage;
+use crate::calibration_package::CalibrationRuntimeConfig;
 use crate::calibration_suite_plan::{expand_target_orders, plan_calibration_suite};
 use crate::load_wave_calibration::measure_load_wave_candidate;
 use crate::output::write_atomic;
-use crate::package_calibration::measure_package_candidates;
+use crate::package_calibration::measure_package_candidates_for_runtime_model;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MeasuredTargetOrder {
@@ -28,48 +30,82 @@ struct MeasuredTargetOrder {
     strategy: VulkanPlacementExecutionStrategy,
 }
 
+#[derive(Clone, Debug)]
+struct SelectedComponentCalibrationCase {
+    phase: crate::cli::PackageCalibrationPhase,
+    owner_target_id: String,
+    target: VulkanRuntimePlacementCalibrationTarget,
+}
+
+#[derive(Clone, Debug)]
+struct SelectedLoadWaveCalibrationCase {
+    phase: crate::cli::PackageCalibrationPhase,
+    owner_target_id: String,
+    component_id: String,
+    selector_id: String,
+    resource_indices: Vec<usize>,
+}
+
 pub fn run_calibration_suite(
     package_path: &Path,
     target_ids: &[String],
     prefill_widths: &[usize],
     maximum_group_size: Option<usize>,
+    runtime: CalibrationRuntimeConfig,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let package = CalibrationPackage::load(package_path)?;
     package.reject_output_collision(output)?;
-    let plan = plan_calibration_suite(
-        package.runtime_model(),
-        target_ids,
-        prefill_widths,
-        maximum_group_size,
-    )?;
+    let hardware_profiles = discover_calibration_hardware_profiles(target_ids)?;
+    let runtime_models = target_ids
+        .iter()
+        .map(|owner_target_id| {
+            let profile = hardware_profiles
+                .get(owner_target_id)
+                .expect("every requested calibration target has a profile");
+            package
+                .runtime_model_for_owner(owner_target_id, profile, runtime)
+                .map(|model| (owner_target_id.clone(), model))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let plans = runtime_models
+        .iter()
+        .map(|(owner_target_id, runtime_model)| {
+            plan_calibration_suite(
+                runtime_model,
+                target_ids,
+                prefill_widths,
+                maximum_group_size,
+            )
+            .map(|plan| (owner_target_id.clone(), plan))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let reference_plan = plans.values().next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "calibration suite has no target plan",
+        )
+    })?;
+    let component_cases = selected_component_calibration_cases(&plans);
+    let load_wave_cases = selected_load_wave_calibration_cases(&plans);
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     let mut measured_component_candidates = 0usize;
     let mut unavailable_component_candidates = 0usize;
 
-    for case in &plan.component_cases {
-        let has_distributed_candidates = !vulkan_runtime_distributed_contract_candidates(
-            package.runtime_model(),
-            &case.target,
-            match case.phase {
-                crate::cli::PackageCalibrationPhase::Decode => {
-                    nerve_runtime::VulkanTargetedComponentExecutionPhase::Decode
-                }
-                crate::cli::PackageCalibrationPhase::Prefill {
-                    activation_batch_width,
-                } => nerve_runtime::VulkanTargetedComponentExecutionPhase::Prefill {
-                    activation_batch_width,
-                },
-            },
-        )?
-        .is_empty();
+    for case in &component_cases {
         let mut current_width_measurements = Vec::new();
-        for order in component_calibration_target_orders(
-            &plan.initial_target_orders,
-            has_distributed_candidates,
-        ) {
-            let measurement =
-                measure_package_candidates(&package, &case.target, case.phase, order)?;
+        for order in reference_plan
+            .initial_target_orders
+            .iter()
+            .filter(|order| order.first() == Some(&case.owner_target_id))
+        {
+            let measurement = measure_package_candidates_for_runtime_model(
+                &package,
+                &runtime_models[&case.owner_target_id],
+                &case.target,
+                case.phase,
+                order,
+            )?;
             if measurement.catalog.observation_count() == 0 {
                 unavailable_component_candidates += 1;
                 continue;
@@ -83,13 +119,19 @@ pub fn run_calibration_suite(
         }
 
         let mut width = 2usize;
-        while width < plan.maximum_group_size && !current_width_measurements.is_empty() {
+        while width < reference_plan.maximum_group_size && !current_width_measurements.is_empty() {
             let promising = non_dominated_target_orders(&current_width_measurements);
-            let expanded = expand_target_orders(&promising, target_ids, plan.maximum_group_size)?;
+            let expanded =
+                expand_target_orders(&promising, target_ids, reference_plan.maximum_group_size)?;
             let mut next_width_measurements = Vec::new();
             for order in expanded {
-                let measurement =
-                    measure_package_candidates(&package, &case.target, case.phase, &order)?;
+                let measurement = measure_package_candidates_for_runtime_model(
+                    &package,
+                    &runtime_models[&case.owner_target_id],
+                    &case.target,
+                    case.phase,
+                    &order,
+                )?;
                 if measurement.catalog.observation_count() == 0 {
                     unavailable_component_candidates += 1;
                     continue;
@@ -104,28 +146,28 @@ pub fn run_calibration_suite(
         }
     }
 
-    for case in &plan.boundary_cases {
+    for case in &reference_plan.boundary_cases {
         let measured = measure_boundary_candidate(
             &package,
             case.phase,
             &case.source_target_id,
             &case.destination_target_id,
+            runtime,
         )?;
         catalog.merge(&measured)?;
     }
 
-    for case in &plan.load_wave_cases {
-        for target_id in target_ids {
-            let measured = measure_load_wave_candidate(
-                &package,
-                &case.component_id,
-                &case.selector_id,
-                case.phase,
-                &case.resource_indices,
-                target_id,
-            )?;
-            catalog.merge(&measured.catalog)?;
-        }
+    for case in &load_wave_cases {
+        let measured = measure_load_wave_candidate(
+            &package,
+            &case.component_id,
+            &case.selector_id,
+            case.phase,
+            &case.resource_indices,
+            &case.owner_target_id,
+            runtime,
+        )?;
+        catalog.merge(&measured.catalog)?;
     }
 
     catalog.validate()?;
@@ -135,16 +177,73 @@ pub fn run_calibration_suite(
         "calibrated package suite: package={}, targets={}, component_cases={}, measured_component_candidates={}, unavailable_component_candidates={}, boundary_cases={}, load_wave_cases={}, references={}, observations={}, output={}",
         package.source_path().display(),
         target_ids.len(),
-        plan.component_cases.len(),
+        component_cases.len(),
         measured_component_candidates,
         unavailable_component_candidates,
-        plan.boundary_cases.len(),
-        plan.load_wave_cases.len().saturating_mul(target_ids.len()),
+        reference_plan.boundary_cases.len(),
+        load_wave_cases.len(),
         catalog.reference_count(),
         catalog.observation_count(),
         output.display(),
     );
     Ok(())
+}
+
+fn selected_component_calibration_cases(
+    plans: &BTreeMap<String, crate::calibration_suite_plan::CalibrationSuitePlan>,
+) -> Vec<SelectedComponentCalibrationCase> {
+    let mut selected = BTreeMap::new();
+    for (owner_target_id, plan) in plans {
+        for case in &plan.component_cases {
+            selected
+                .entry((
+                    phase_key(case.phase),
+                    owner_target_id.clone(),
+                    case.target.signature_id.clone(),
+                ))
+                .or_insert_with(|| SelectedComponentCalibrationCase {
+                    phase: case.phase,
+                    owner_target_id: owner_target_id.clone(),
+                    target: case.target.clone(),
+                });
+        }
+    }
+    selected.into_values().collect()
+}
+
+fn selected_load_wave_calibration_cases(
+    plans: &BTreeMap<String, crate::calibration_suite_plan::CalibrationSuitePlan>,
+) -> Vec<SelectedLoadWaveCalibrationCase> {
+    let mut selected = BTreeMap::new();
+    for (owner_target_id, plan) in plans {
+        for case in &plan.load_wave_cases {
+            selected
+                .entry((
+                    phase_key(case.phase),
+                    owner_target_id.clone(),
+                    case.component_id.clone(),
+                    case.selector_id.clone(),
+                    case.resource_indices.clone(),
+                ))
+                .or_insert_with(|| SelectedLoadWaveCalibrationCase {
+                    phase: case.phase,
+                    owner_target_id: owner_target_id.clone(),
+                    component_id: case.component_id.clone(),
+                    selector_id: case.selector_id.clone(),
+                    resource_indices: case.resource_indices.clone(),
+                });
+        }
+    }
+    selected.into_values().collect()
+}
+
+fn phase_key(phase: crate::cli::PackageCalibrationPhase) -> (&'static str, usize) {
+    match phase {
+        crate::cli::PackageCalibrationPhase::Decode => ("decode", 1),
+        crate::cli::PackageCalibrationPhase::Prefill {
+            activation_batch_width,
+        } => ("prefill", activation_batch_width),
+    }
 }
 
 fn measured_target_order(
@@ -161,16 +260,6 @@ fn measured_target_order(
         contract_ids: report.execution_case.contract_ids.clone(),
         strategy: report.execution_case.strategy,
     }
-}
-
-fn component_calibration_target_orders<'a>(
-    initial_target_orders: &'a [Vec<String>],
-    has_distributed_candidates: bool,
-) -> impl Iterator<Item = &'a [String]> + 'a {
-    initial_target_orders
-        .iter()
-        .filter(move |order| has_distributed_candidates || order.len() == 1)
-        .map(Vec::as_slice)
 }
 
 fn non_dominated_target_orders(measurements: &[MeasuredTargetOrder]) -> Vec<Vec<String>> {
@@ -229,6 +318,15 @@ fn byte_vector_is_no_larger(
 mod tests {
     use super::*;
 
+    fn tiny_runtime_model() -> nerve_runtime::VulkanResidentRuntimeModel {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../runtime-rs/test-fixtures/tiny_model/vulkan_resident_package.json");
+        nerve_runtime::VulkanResidentModelPackageManifest::from_json_file(&path)
+            .unwrap()
+            .mount_runtime_graph_controls(None, &BTreeMap::new(), &[], None)
+            .unwrap()
+    }
+
     fn measured(
         order: &[&str],
         duration_ns: u64,
@@ -255,6 +353,40 @@ mod tests {
     }
 
     #[test]
+    fn selected_component_cases_remain_owner_and_representation_specific() {
+        let model = tiny_runtime_model();
+        let targets = ["owner-a".to_string(), "owner-b".to_string()];
+        let plan = plan_calibration_suite(&model, &targets, &[4], Some(2)).unwrap();
+        assert!(
+            plan.component_cases
+                .iter()
+                .all(|case| case.phase == crate::cli::PackageCalibrationPhase::Decode)
+        );
+        assert!(
+            plan.boundary_cases
+                .iter()
+                .all(|case| case.phase == crate::cli::PackageCalibrationPhase::Decode)
+        );
+        let plans = BTreeMap::from([
+            (targets[0].clone(), plan.clone()),
+            (targets[1].clone(), plan.clone()),
+        ]);
+        let cases = selected_component_calibration_cases(&plans);
+        let owners = cases
+            .iter()
+            .map(|case| case.owner_target_id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(owners, BTreeSet::from(["owner-a", "owner-b"]));
+        assert_eq!(cases.len(), plan.component_cases.len() * owners.len());
+        assert!(
+            cases
+                .iter()
+                .all(|case| !case.target.signature_id.is_empty())
+        );
+    }
+
+    #[test]
     fn pruning_preserves_distinct_participant_orders() {
         let measurements = vec![
             measured(&["a", "b", "c"], 10, &[("a", 5)], &[("a", 2)]),
@@ -273,24 +405,6 @@ mod tests {
             .into_iter()
             .map(|order| order.into_iter().map(str::to_string).collect())
             .collect::<Vec<Vec<String>>>(),
-        );
-    }
-
-    #[test]
-    fn canonical_only_components_measure_each_target_once() {
-        let orders = vec![
-            vec!["a".to_string()],
-            vec!["b".to_string()],
-            vec!["a".to_string(), "b".to_string()],
-            vec!["b".to_string(), "a".to_string()],
-        ];
-        assert_eq!(
-            component_calibration_target_orders(&orders, false).collect::<Vec<_>>(),
-            vec![orders[0].as_slice(), orders[1].as_slice()],
-        );
-        assert_eq!(
-            component_calibration_target_orders(&orders, true).count(),
-            orders.len(),
         );
     }
 
