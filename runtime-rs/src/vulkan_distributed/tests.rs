@@ -3136,7 +3136,49 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("ambiguous decode distribution contracts")
+                .contains("ambiguous Decode distribution contracts"),
+            "{error}",
+        );
+
+        let selected_contract_id = format!("sha256:{}", "d".repeat(64));
+        let selected = BTreeSet::from([selected_contract_id.clone()]);
+        let exact = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &artifact_manifest,
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+            ExecutionPhase::Decode,
+            ExecutionShape::SingleLane,
+            None,
+            Some(&selected),
+        )
+        .unwrap();
+        assert_eq!(exact.dispatches.len(), 1);
+        assert_eq!(
+            exact.dispatches[0].physical_execution_contract_id,
+            selected_contract_id,
+        );
+
+        let unavailable = BTreeSet::from([format!("sha256:{}", "e".repeat(64))]);
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &artifact_manifest,
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+            ExecutionPhase::Decode,
+            ExecutionShape::SingleLane,
+            None,
+            Some(&unavailable),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no compatible distributable dispatch")
         );
     }
 

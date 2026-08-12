@@ -483,7 +483,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             })
             .collect::<Result<BTreeMap<_, _>, VulkanResidentInProcessPlacedRuntimeError>>()?;
         let mut distributed_execution_plans =
-            VulkanDistributedExecutionPlanSet::from_prepared_plans_with_resource_contract(
+            VulkanDistributedExecutionPlanSet::from_prepared_plans_with_resource_contract_and_execution_cases(
                 &prepared_plans,
                 &tensor_index,
                 &distributed_artifact_manifest,
@@ -492,6 +492,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 storage_buffer_offset_alignment,
                 &execution_scope,
                 &compiled_resource_contract,
+                &physical_execution_plan.decode_execution_cases_by_component,
+                &physical_execution_plan.decode_batch_execution_cases_by_component,
+                &physical_execution_plan.prefill_execution_cases_by_component,
             )
             .map_err(|error| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(

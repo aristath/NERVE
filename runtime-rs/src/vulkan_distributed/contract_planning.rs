@@ -96,6 +96,7 @@ fn select_distributed_contract<'a, 'b>(
     artifact_manifest: &'b VulkanPhysicalKernelArtifactManifest,
     phase: ExecutionPhase,
     execution_shape: ExecutionShape,
+    selected_contract_ids: Option<&BTreeSet<String>>,
 ) -> Result<
     Option<(
         &'a PhysicalExecutionContract,
@@ -110,6 +111,8 @@ fn select_distributed_contract<'a, 'b>(
             && contract.execution_shape.supports(execution_shape)
             && contract.operation_family == dispatch.op
             && contract.member_node_ids.contains(&dispatch.node_id)
+            && selected_contract_ids
+                .is_none_or(|selected| selected.contains(&contract.contract_id))
     }) {
         contract
             .validate()

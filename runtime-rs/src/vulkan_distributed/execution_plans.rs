@@ -127,6 +127,7 @@ impl VulkanDistributedExecutionPlan {
             phase,
             execution_shape,
             None,
+            None,
         )
     }
 
@@ -153,6 +154,40 @@ impl VulkanDistributedExecutionPlan {
             phase,
             execution_shape,
             Some((execution_scope, resource_contract)),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_prepared_plans_for_phase_with_resource_contract_and_contracts(
+        prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
+        tensor_index: &TensorIndex,
+        artifact_manifest: &VulkanPhysicalKernelArtifactManifest,
+        component_device_pools: &BTreeMap<String, Vec<String>>,
+        edge_placements: &[ComponentEdgePlacement],
+        storage_buffer_offset_alignment: usize,
+        phase: ExecutionPhase,
+        execution_shape: ExecutionShape,
+        execution_scope: &str,
+        resource_contract: &CompiledResourceResidencyContract,
+        selected_contract_ids: &BTreeSet<String>,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        if selected_contract_ids.is_empty() {
+            return Err(VulkanDistributedPlanError(
+                "exact distributed planning requires selected contract IDs".to_string(),
+            ));
+        }
+        Self::from_prepared_plans_for_phase_and_resources(
+            prepared_plans,
+            tensor_index,
+            artifact_manifest,
+            component_device_pools,
+            edge_placements,
+            storage_buffer_offset_alignment,
+            phase,
+            execution_shape,
+            Some((execution_scope, resource_contract)),
+            Some(selected_contract_ids),
         )
     }
 
@@ -167,6 +202,7 @@ impl VulkanDistributedExecutionPlan {
         phase: ExecutionPhase,
         execution_shape: ExecutionShape,
         resource_context: Option<(&str, &CompiledResourceResidencyContract)>,
+        selected_contract_ids: Option<&BTreeSet<String>>,
     ) -> Result<Self, VulkanDistributedPlanError> {
         if storage_buffer_offset_alignment == 0
             || !storage_buffer_offset_alignment.is_power_of_two()
@@ -216,6 +252,7 @@ impl VulkanDistributedExecutionPlan {
                     artifact_manifest,
                     phase,
                     execution_shape,
+                    selected_contract_ids,
                 )?
                 else {
                     continue;
@@ -475,6 +512,7 @@ impl VulkanDistributedExecutionPlanSet {
             ExecutionPhase::Decode,
             ExecutionShape::SingleLane,
             resource_context,
+            None,
         )?;
         let decode_batch =
             VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
@@ -487,6 +525,7 @@ impl VulkanDistributedExecutionPlanSet {
                 ExecutionPhase::Decode,
                 ExecutionShape::MultiLane,
                 resource_context,
+                None,
             )?;
         let prefill = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
             prepared_plans,
@@ -498,11 +537,87 @@ impl VulkanDistributedExecutionPlanSet {
             ExecutionPhase::Prefill,
             ExecutionShape::MultiLane,
             resource_context,
+            None,
         )?;
         Ok(Self {
             decode,
             decode_batch,
             prefill,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_prepared_plans_with_resource_contract_and_execution_cases(
+        prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
+        tensor_index: &TensorIndex,
+        artifact_manifest: &VulkanPhysicalKernelArtifactManifest,
+        component_device_pools: &VulkanDistributedPhaseComponentDevicePools,
+        edge_placements: &[ComponentEdgePlacement],
+        storage_buffer_offset_alignment: usize,
+        execution_scope: &str,
+        resource_contract: &CompiledResourceResidencyContract,
+        decode_cases: &BTreeMap<
+            String,
+            crate::vulkan_stream_circuit::VulkanPlacementExecutionCaseIdentity,
+        >,
+        decode_batch_cases: &BTreeMap<
+            String,
+            crate::vulkan_stream_circuit::VulkanPlacementExecutionCaseIdentity,
+        >,
+        prefill_cases: &BTreeMap<
+            String,
+            crate::vulkan_stream_circuit::VulkanPlacementExecutionCaseIdentity,
+        >,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        let selected_contracts = |cases: &BTreeMap<
+            String,
+            crate::vulkan_stream_circuit::VulkanPlacementExecutionCaseIdentity,
+        >| {
+            cases
+                .values()
+                .flat_map(|case| case.behavior.contract_ids.iter().cloned())
+                .collect::<BTreeSet<_>>()
+        };
+        let decode_contracts = selected_contracts(decode_cases);
+        let decode_batch_contracts = selected_contracts(decode_batch_cases);
+        let prefill_contracts = selected_contracts(prefill_cases);
+        let resource_context = Some((execution_scope, resource_contract));
+        let build = |pools: &BTreeMap<String, Vec<String>>,
+                     phase,
+                     shape,
+                     contracts: &BTreeSet<String>| {
+            VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
+                prepared_plans,
+                tensor_index,
+                artifact_manifest,
+                pools,
+                edge_placements,
+                storage_buffer_offset_alignment,
+                phase,
+                shape,
+                resource_context,
+                (!pools.is_empty() && !contracts.is_empty()).then_some(contracts),
+            )
+        };
+        Ok(Self {
+            decode: build(
+                &component_device_pools.decode,
+                ExecutionPhase::Decode,
+                ExecutionShape::SingleLane,
+                &decode_contracts,
+            )?,
+            decode_batch: build(
+                &component_device_pools.decode_batch,
+                ExecutionPhase::Decode,
+                ExecutionShape::MultiLane,
+                &decode_batch_contracts,
+            )?,
+            prefill: build(
+                &component_device_pools.prefill,
+                ExecutionPhase::Prefill,
+                ExecutionShape::MultiLane,
+                &prefill_contracts,
+            )?,
         })
     }
 
