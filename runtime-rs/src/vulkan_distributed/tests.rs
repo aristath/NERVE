@@ -4049,7 +4049,7 @@ mod tests {
     }
 
     #[test]
-    fn excludes_canonical_and_distinct_physical_layouts_for_replaced_dispatches() {
+    fn excludes_canonical_source_when_the_physical_layout_is_distinct() {
         let mut execution_plan = fixture_plan("row_major");
         for dispatch in &mut execution_plan.dispatches {
             for shard in &mut dispatch.shards {
@@ -4074,17 +4074,12 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(exclusions.unique_tensor_count, 4);
-        assert_eq!(exclusions.excluded_full_allocation_count, 4);
-        assert_eq!(exclusions.excluded_full_byte_capacity, 384);
+        assert_eq!(exclusions.unique_tensor_count, 2);
+        assert_eq!(exclusions.excluded_full_allocation_count, 2);
+        assert_eq!(exclusions.excluded_full_byte_capacity, 192);
         assert_eq!(
             exclusions.tensors_for_device("owner"),
-            BTreeSet::from([
-                "gate".to_string(),
-                "gate.physical".to_string(),
-                "up".to_string(),
-                "up.physical".to_string(),
-            ])
+            BTreeSet::from(["gate".to_string(), "up".to_string()])
         );
     }
 

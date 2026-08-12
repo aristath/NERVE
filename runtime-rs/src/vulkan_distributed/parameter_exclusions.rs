@@ -137,11 +137,6 @@ impl VulkanDistributedParameterExclusionPlan {
                     dispatch.owner_device_id
                 )));
             }
-            target_tensors.extend(
-                tensors
-                    .into_iter()
-                    .map(|tensor| (dispatch.owner_device_id.clone(), tensor)),
-            );
         }
 
         let mut prepared_device_ids = BTreeSet::new();
@@ -166,10 +161,11 @@ impl VulkanDistributedParameterExclusionPlan {
                     })
                     .collect::<BTreeSet<_>>();
                 if distributed_dispatch_tensors.contains_key(&key) {
-                    // Replacing this dispatch makes both its canonical source
-                    // layout and every distinct physical shard layout
-                    // redundant in the ordinary owner allocation. Physical
-                    // layouts are loaded through the shard allocator instead.
+                    // Replacing this dispatch makes its canonical source
+                    // layout redundant in the ordinary owner allocation.
+                    // A distinct physical layout is never charged here: it is
+                    // loaded only through the distributed shard allocator and
+                    // therefore has no full owner allocation to subtract.
                     target_tensors.extend(
                         parameter_tensors
                             .into_iter()
