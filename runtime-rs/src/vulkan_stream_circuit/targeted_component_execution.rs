@@ -1147,73 +1147,82 @@ impl VulkanResidentTargetedComponentSession {
         dispatches: &[VulkanMountedPlacedBoundDispatch],
         seed: u32,
     ) -> Result<(), VulkanResidentTokenModelPackageError> {
-        let state_buffer_indices = dispatches
-            .iter()
-            .flat_map(|dispatch| dispatch.descriptors.iter())
-            .filter_map(|descriptor| match &descriptor.target {
-                VulkanMountedPlacedBoundDescriptorTarget::Resident {
-                    target:
-                        VulkanBoundDescriptorTarget::StreamStateBuffer { buffer_index, .. }
-                        | VulkanBoundDescriptorTarget::StreamStateView { buffer_index, .. },
-                } => Some(*buffer_index),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        for state_buffer_index in state_buffer_indices {
-            let state = self
-                .mounted
-                .buffers
-                .state_buffers
-                .get(state_buffer_index)
-                .ok_or_else(|| targeted_component_error_value(format!(
-                    "targeted state fixture references absent buffer {state_buffer_index}"
-                )))?;
-            let dtype = state.dtype.as_deref().ok_or_else(|| {
-                targeted_component_error_value(format!(
-                    "targeted state fixture {}.{} has no declared dtype",
-                    state.component_id, state.state_id,
-                ))
-            })?;
-            if state.layout.static_byte_capacity > 0 {
-                let bytes = targeted_state_fixture_bytes(
-                    state.layout.static_byte_capacity,
-                    seed,
-                    state_buffer_index.saturating_mul(2),
-                    dtype,
-                )?;
-                state
-                    .buffer
-                    .write_bytes_at(state.layout.static_data_offset, &bytes)
-                    .map_err(|error| targeted_component_error_value(format!(
-                        "failed to write targeted static state {}.{}: {error}",
-                        state.component_id, state.state_id,
-                    )))?;
-            }
-            let dynamic_byte_capacity = state
-                .byte_capacity
-                .checked_sub(state.layout.dynamic_data_offset)
-                .ok_or_else(|| targeted_component_error_value(
-                    "targeted dynamic state layout exceeds its allocation",
-                ))?;
-            if dynamic_byte_capacity > 0 {
-                let bytes = targeted_state_fixture_bytes(
-                    dynamic_byte_capacity,
-                    seed,
-                    state_buffer_index.saturating_mul(2).saturating_add(1),
-                    dtype,
-                )?;
-                state
-                    .buffer
-                    .write_bytes_at(state.layout.dynamic_data_offset, &bytes)
-                    .map_err(|error| targeted_component_error_value(format!(
-                        "failed to write targeted dynamic state {}.{}: {error}",
-                        state.component_id, state.state_id,
-                    )))?;
-            }
-        }
-        Ok(())
+        targeted_write_prefill_state_fixture(&self.mounted, dispatches, seed)
     }
+}
 
+fn targeted_write_prefill_state_fixture(
+    mounted: &VulkanMountedPlacedStreamCircuit,
+    dispatches: &[VulkanMountedPlacedBoundDispatch],
+    seed: u32,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    let state_buffer_indices = dispatches
+        .iter()
+        .flat_map(|dispatch| dispatch.descriptors.iter())
+        .filter_map(|descriptor| match &descriptor.target {
+            VulkanMountedPlacedBoundDescriptorTarget::Resident {
+                target:
+                    VulkanBoundDescriptorTarget::StreamStateBuffer { buffer_index, .. }
+                    | VulkanBoundDescriptorTarget::StreamStateView { buffer_index, .. },
+            } => Some(*buffer_index),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for state_buffer_index in state_buffer_indices {
+        let state = mounted
+            .buffers
+            .state_buffers
+            .get(state_buffer_index)
+            .ok_or_else(|| targeted_component_error_value(format!(
+                "targeted state fixture references absent buffer {state_buffer_index}"
+            )))?;
+        let dtype = state.dtype.as_deref().ok_or_else(|| {
+            targeted_component_error_value(format!(
+                "targeted state fixture {}.{} has no declared dtype",
+                state.component_id, state.state_id,
+            ))
+        })?;
+        if state.layout.static_byte_capacity > 0 {
+            let bytes = targeted_state_fixture_bytes(
+                state.layout.static_byte_capacity,
+                seed,
+                state_buffer_index.saturating_mul(2),
+                dtype,
+            )?;
+            state
+                .buffer
+                .write_bytes_at(state.layout.static_data_offset, &bytes)
+                .map_err(|error| targeted_component_error_value(format!(
+                    "failed to write targeted static state {}.{}: {error}",
+                    state.component_id, state.state_id,
+                )))?;
+        }
+        let dynamic_byte_capacity = state
+            .byte_capacity
+            .checked_sub(state.layout.dynamic_data_offset)
+            .ok_or_else(|| targeted_component_error_value(
+                "targeted dynamic state layout exceeds its allocation",
+            ))?;
+        if dynamic_byte_capacity > 0 {
+            let bytes = targeted_state_fixture_bytes(
+                dynamic_byte_capacity,
+                seed,
+                state_buffer_index.saturating_mul(2).saturating_add(1),
+                dtype,
+            )?;
+            state
+                .buffer
+                .write_bytes_at(state.layout.dynamic_data_offset, &bytes)
+                .map_err(|error| targeted_component_error_value(format!(
+                    "failed to write targeted dynamic state {}.{}: {error}",
+                    state.component_id, state.state_id,
+                )))?;
+        }
+    }
+    Ok(())
+}
+
+impl VulkanResidentTargetedComponentSession {
     fn write_decode_fixture(
         &self,
         seed: u32,
@@ -2562,6 +2571,21 @@ fn targeted_fixture_next(state: &mut u64) -> u64 {
 
 fn targeted_fixture_signed(sample: u64) -> f32 {
     ((sample >> 32) as i32) as f32 / i32::MAX as f32
+}
+
+#[cfg(test)]
+mod targeted_component_fixture_tests {
+    use super::*;
+
+    #[test]
+    fn typed_state_fixture_is_deterministic_nonzero_and_shape_checked() {
+        let first = targeted_state_fixture_bytes(16, 7, 3, "BF16").unwrap();
+        let second = targeted_state_fixture_bytes(16, 7, 3, "BF16").unwrap();
+        assert_eq!(first, second);
+        assert!(first.iter().any(|byte| *byte != 0));
+        assert!(targeted_state_fixture_bytes(3, 7, 3, "F32").is_err());
+        assert!(targeted_state_fixture_bytes(16, 7, 3, "unsupported").is_err());
+    }
 }
 
 fn targeted_finalized_artifact_digest(payload: &[u8]) -> String {

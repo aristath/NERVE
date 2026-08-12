@@ -2264,6 +2264,11 @@ fn distributed_calibration_write_prefill_fixture(
         .zero_state_buffers()
         .and_then(|_| placed_slice.mounted.buffers.apply_clone_state_policies())
         .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+    targeted_write_prefill_state_fixture(
+        &placed_slice.mounted,
+        &placed_slice.mounted_bound.dispatches,
+        seed,
+    )?;
     let batch_slice = runner
         .slice(0)
         .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
