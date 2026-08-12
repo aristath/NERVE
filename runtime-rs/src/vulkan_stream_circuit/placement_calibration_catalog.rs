@@ -651,18 +651,27 @@ fn observation_dominates(
         &left.transient_peak_bytes_by_physical_device,
         &right.transient_peak_bytes_by_physical_device,
     );
-    let strict = left.duration_ns < right.duration_ns
+    let duration_order = normalized_duration_order(left, right);
+    let strict = duration_order.is_lt()
         || left.resident_bytes_by_physical_device != right.resident_bytes_by_physical_device
         || left.transient_peak_bytes_by_physical_device
             != right.transient_peak_bytes_by_physical_device
         || left.host_resident_bytes != right.host_resident_bytes
         || left.host_transient_peak_bytes != right.host_transient_peak_bytes;
-    left.duration_ns <= right.duration_ns
+    !duration_order.is_gt()
         && resident_no_worse
         && transient_no_worse
         && left.host_resident_bytes <= right.host_resident_bytes
         && left.host_transient_peak_bytes <= right.host_transient_peak_bytes
         && strict
+}
+
+fn normalized_duration_order(
+    left: &VulkanPlacementCalibrationObservation,
+    right: &VulkanPlacementCalibrationObservation,
+) -> std::cmp::Ordering {
+    (u128::from(left.duration_ns) * right.useful_activation_count as u128)
+        .cmp(&(u128::from(right.duration_ns) * left.useful_activation_count as u128))
 }
 
 fn resource_vector_no_worse(
@@ -946,6 +955,24 @@ mod placement_calibration_catalog_tests {
         let frontier = catalog.pareto_candidates(&behavior());
         assert_eq!(frontier.len(), 1);
         assert_eq!(frontier[0].duration_ns, 10);
+    }
+
+    #[test]
+    fn pareto_frontier_compares_duration_per_useful_activation() {
+        let behavior = behavior();
+        let mut catalog = catalog_with_reference();
+        let mut two_calls = observation(behavior.clone(), "gpu0", "gpu0", 18, 16);
+        two_calls.execution_case.strategy = VulkanPlacementExecutionStrategy::Hybrid;
+        two_calls.measured_call_count = 2;
+        two_calls.useful_activation_count = 2;
+        let one_call = observation(behavior.clone(), "gpu1", "gpu0", 10, 16);
+        catalog.record_observation(two_calls).unwrap();
+        catalog.record_observation(one_call).unwrap();
+
+        let frontier = catalog.pareto_candidates(&behavior);
+        assert_eq!(frontier.len(), 1);
+        assert_eq!(frontier[0].duration_ns, 18);
+        assert_eq!(frontier[0].useful_activation_count, 2);
     }
 
     #[test]
