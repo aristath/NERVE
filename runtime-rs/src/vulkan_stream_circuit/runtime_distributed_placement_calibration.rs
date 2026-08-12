@@ -758,7 +758,10 @@ fn distributed_calibration_equivalence_from_contracts(
             Some(VulkanDistributedReductionFinalizationPlan::StoreF32) => {
                 Some(VulkanPlacementScalarFormat::F32)
             }
-            Some(VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. }) => {
+            Some(
+                VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16
+                | VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. }
+            ) => {
                 Some(VulkanPlacementScalarFormat::Bf16)
             }
             None => {

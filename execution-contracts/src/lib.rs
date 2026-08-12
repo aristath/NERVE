@@ -112,6 +112,7 @@ pub enum ReductionOperation {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReductionFinalization {
     StoreF32,
+    StoreF32ToBf16,
     AddBf16ResidualToBf16 { residual_binding: u32 },
 }
 
@@ -634,13 +635,19 @@ fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), Contrac
             {
                 return invalid("sum_f32 reduction requires f32 accumulation");
             }
+            if matches!(
+                reduction.finalization,
+                ReductionFinalization::StoreF32ToBf16
+                    | ReductionFinalization::AddBf16ResidualToBf16 { .. }
+            ) && !contract.geometry.dimensions[&reduction.dimension_name].is_multiple_of(2)
+            {
+                return invalid("BF16 finalization requires an even element count");
+            }
             if let ReductionFinalization::AddBf16ResidualToBf16 { residual_binding } =
                 &reduction.finalization
             {
                 let elements = contract.geometry.dimensions[&reduction.dimension_name];
-                if !elements.is_multiple_of(2) {
-                    return invalid("BF16 residual finalization requires an even element count");
-                }
+                debug_assert!(elements.is_multiple_of(2));
                 let residual = contract
                     .inputs
                     .iter()
@@ -1321,6 +1328,10 @@ mod tests {
             origin_push_constant: Some("input_start".to_string()),
             count_push_constant: Some("input_count".to_string()),
         });
+        contract.validate().unwrap();
+
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::StoreF32ToBf16;
         contract.validate().unwrap();
 
         contract.inputs.push(InputContract {

@@ -1,0 +1,45 @@
+#version 460
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer PartialPlanes {
+    float values[];
+} partials;
+
+layout(set = 0, binding = 1, std430) writeonly buffer OutputFrames {
+    uint words[];
+} output_values;
+
+layout(push_constant) uniform ReductionControl {
+    uint element_count;
+    uint participant_count;
+    uint lane_count;
+} control;
+
+uint f32_to_bf16(float value) {
+    const uint bits = floatBitsToUint(value);
+    const uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+void main() {
+    const uint word = gl_GlobalInvocationID.x;
+    const uint lane = gl_GlobalInvocationID.y;
+    const uint element = word * 2u;
+    if (element >= control.element_count || lane >= control.lane_count) {
+        return;
+    }
+
+    float lo_sum = 0.0;
+    float hi_sum = 0.0;
+    for (uint participant = 0; participant < control.participant_count; ++participant) {
+        const uint partial_base =
+            (participant * control.lane_count + lane) * control.element_count;
+        lo_sum += partials.values[partial_base + element];
+        hi_sum += partials.values[partial_base + element + 1u];
+    }
+
+    const uint frame_word = lane * (control.element_count / 2u) + word;
+    output_values.words[frame_word] =
+        (f32_to_bf16(hi_sum) << 16u) | f32_to_bf16(lo_sum);
+}

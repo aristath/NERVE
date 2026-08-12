@@ -1033,6 +1033,8 @@ mod tests {
         assert_eq!(words.first().copied(), Some(0x0723_0203));
         let bf16_words = distributed_sum_f32_add_bf16_residual_spirv_words().unwrap();
         assert_eq!(bf16_words.first().copied(), Some(0x0723_0203));
+        let store_bf16_words = distributed_sum_f32_to_bf16_spirv_words().unwrap();
+        assert_eq!(store_bf16_words.first().copied(), Some(0x0723_0203));
         let predicate_words = distributed_clear_predicate_spirv_words().unwrap();
         assert_eq!(predicate_words.first().copied(), Some(0x0723_0203));
         let reduction = VulkanDistributedReductionPlan {
@@ -1071,6 +1073,14 @@ mod tests {
             distributed_reduction_buffer_capacities(&add_bf16, 5, 3).unwrap(),
             (4_096 * 4 * 5 * 3, 4_096 * 2 * 3)
         );
+        let store_bf16 = VulkanDistributedReductionPlan {
+            finalization: VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16,
+            ..store_f32
+        };
+        assert_eq!(
+            distributed_reduction_buffer_capacities(&store_bf16, 5, 3).unwrap(),
+            (4_096 * 4 * 5 * 3, 4_096 * 2 * 3)
+        );
     }
 
     #[test]
@@ -1094,6 +1104,11 @@ mod tests {
             },
         };
         assert!(distributed_reduction_buffer_capacities(&odd_bf16, 2, 1).is_err());
+        let odd_store_bf16 = VulkanDistributedReductionPlan {
+            finalization: VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16,
+            ..odd_bf16
+        };
+        assert!(distributed_reduction_buffer_capacities(&odd_store_bf16, 2, 1).is_err());
     }
 
     #[test]
@@ -1266,6 +1281,36 @@ mod tests {
                 partial_byte_capacity: 16,
                 finalization: VulkanDistributedReductionFinalizationPlan::StoreF32,
             })
+        );
+
+        let mut bf16_finalized = prepared.clone();
+        bf16_finalized.dispatches[0].physical_execution_contracts[0].outputs[0]
+            .reduction
+            .as_mut()
+            .unwrap()
+            .finalization = ReductionFinalization::StoreF32ToBf16;
+        let VulkanDescriptorResourceAddress::ActivationSlot {
+            byte_capacity,
+            signal_byte_capacity,
+            ..
+        } = &mut bf16_finalized.dispatches[0].descriptors[1].resource
+        else {
+            panic!("fixture output is an activation slot");
+        };
+        *byte_capacity = 8;
+        *signal_byte_capacity = 8;
+        let bf16_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &bf16_finalized)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a", "helper-b"]),
+            &[],
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            bf16_plan.dispatches[0].reduction.as_ref().unwrap().finalization,
+            VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16,
         );
 
         let mut residual_finalized = prepared.clone();

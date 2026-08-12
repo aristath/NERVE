@@ -30,6 +30,17 @@ fn distributed_sum_f32_spirv_words(
     )
 }
 
+fn distributed_sum_f32_to_bf16_spirv_words(
+) -> Result<Vec<u32>, VulkanDistributedDispatchRunnerError> {
+    embedded_distributed_reduction_spirv_words(
+        include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/distributed_sum_f32_to_bf16.spv"
+        )),
+        "sum_f32_to_bf16",
+    )
+}
+
 fn distributed_sum_f32_add_bf16_residual_spirv_words(
 ) -> Result<Vec<u32>, VulkanDistributedDispatchRunnerError> {
     embedded_distributed_reduction_spirv_words(
@@ -91,11 +102,12 @@ fn distributed_reduction_buffer_capacities(
     }
     if matches!(
         reduction.finalization,
-        VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. }
+        VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16
+            | VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. }
     ) && !reduction.element_count.is_multiple_of(2)
     {
         return Err(VulkanDistributedDispatchRunnerError(
-            "distributed BF16 residual reduction requires an even element count".to_string(),
+            "distributed BF16 reduction requires an even element count".to_string(),
         ));
     }
     let partial_byte_capacity = reduction
@@ -111,7 +123,8 @@ fn distributed_reduction_buffer_capacities(
         VulkanDistributedReductionFinalizationPlan::StoreF32 => {
             reduction.partial_byte_capacity
         }
-        VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. } => {
+        VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16
+        | VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. } => {
             reduction.element_count.checked_mul(2).ok_or_else(|| {
                 VulkanDistributedDispatchRunnerError(
                     "distributed BF16 reduction capacity overflowed".to_string(),
@@ -162,7 +175,10 @@ fn create_distributed_reduction_runner(
             ))
         })?;
     let residual = match planned_dispatch.reduction.as_ref().map(|plan| &plan.finalization) {
-        Some(VulkanDistributedReductionFinalizationPlan::StoreF32) => None,
+        Some(
+            VulkanDistributedReductionFinalizationPlan::StoreF32
+            | VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16
+        ) => None,
         Some(VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
             residual_input_index,
         }) => {
@@ -241,6 +257,20 @@ pub(crate) fn create_distributed_reduction_runner_for_buffers(
         VulkanDistributedReductionFinalizationPlan::StoreF32 => (
             distributed_sum_f32_spirv_words()?,
             reduction.element_count,
+            vec![
+                VulkanResidentKernelBufferBinding::new(0, partials, partial_byte_capacity)
+                    .with_access(VulkanResidentKernelBufferAccess::Read),
+                VulkanResidentKernelBufferBinding::new(
+                    1,
+                    output,
+                    output_byte_capacity,
+                )
+                .with_access(VulkanResidentKernelBufferAccess::Write),
+            ],
+        ),
+        VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16 => (
+            distributed_sum_f32_to_bf16_spirv_words()?,
+            reduction.element_count / 2,
             vec![
                 VulkanResidentKernelBufferBinding::new(0, partials, partial_byte_capacity)
                     .with_access(VulkanResidentKernelBufferAccess::Read),

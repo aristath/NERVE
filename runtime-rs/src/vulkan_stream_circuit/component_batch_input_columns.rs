@@ -108,7 +108,8 @@ fn create_distributed_input_column_component_batch_dispatch(
         })?;
     let output = &batch_slice.signal_buffer(&output_key)?.buffer;
     let residual = match &reduction.finalization {
-        VulkanDistributedReductionFinalizationPlan::StoreF32 => None,
+        VulkanDistributedReductionFinalizationPlan::StoreF32
+        | VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16 => None,
         VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
             residual_input_index,
         } => {

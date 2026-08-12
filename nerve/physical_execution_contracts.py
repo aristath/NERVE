@@ -133,7 +133,11 @@ class ReductionContract(TypedDict):
 
 
 class ReductionFinalization(TypedDict, total=False):
-    kind: Literal["store_f32", "add_bf16_residual_to_bf16"]
+    kind: Literal[
+        "store_f32",
+        "store_f32_to_bf16",
+        "add_bf16_residual_to_bf16",
+    ]
     residual_binding: int
 
 
@@ -1620,7 +1624,11 @@ def _validate_outputs(
             )
             kind = _enum(
                 finalization.get("kind"),
-                {"store_f32", "add_bf16_residual_to_bf16"},
+                {
+                    "store_f32",
+                    "store_f32_to_bf16",
+                    "add_bf16_residual_to_bf16",
+                },
                 f"{path}.reduction.finalization.kind",
             )
             required = (
@@ -1629,11 +1637,12 @@ def _validate_outputs(
                 else {"kind"}
             )
             _keys(finalization, required, required, f"{path}.reduction.finalization")
+            if kind in {
+                "store_f32_to_bf16",
+                "add_bf16_residual_to_bf16",
+            } and int(dimensions[dimension_name]) % 2:
+                _invalid("BF16 finalization requires an even element count")
             if kind == "add_bf16_residual_to_bf16":
-                if int(dimensions[dimension_name]) % 2:
-                    _invalid(
-                        "BF16 residual finalization requires an even element count"
-                    )
                 residual_binding = _non_negative_int(
                     finalization["residual_binding"],
                     f"{path}.reduction.finalization.residual_binding",

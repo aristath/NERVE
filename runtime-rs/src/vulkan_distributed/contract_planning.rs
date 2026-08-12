@@ -362,6 +362,31 @@ fn plan_contract_dispatch(
                     }
                     VulkanDistributedReductionFinalizationPlan::StoreF32
                 }
+                ReductionFinalization::StoreF32ToBf16 => {
+                    if !element_count.is_multiple_of(2) {
+                        return Err(dispatch_error(
+                            dispatch,
+                            "BF16 reduction finalization requires an even element count"
+                                .to_string(),
+                        ));
+                    }
+                    let bf16_byte_capacity = element_count.checked_mul(2).ok_or_else(|| {
+                        dispatch_error(
+                            dispatch,
+                            "BF16 reduction output capacity overflowed".to_string(),
+                        )
+                    })?;
+                    if output_activation.signal_byte_capacity != bf16_byte_capacity {
+                        return Err(dispatch_error(
+                            dispatch,
+                            format!(
+                                "BF16 reduction finalization requires {bf16_byte_capacity} output bytes, found {}",
+                                output_activation.signal_byte_capacity,
+                            ),
+                        ));
+                    }
+                    VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16
+                }
                 ReductionFinalization::AddBf16ResidualToBf16 { residual_binding } => {
                     if !element_count.is_multiple_of(2) {
                         return Err(dispatch_error(
