@@ -1479,7 +1479,8 @@ fn distributed_dispatches_can_share_sequence(
     if producer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
         && consumer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
     {
-        return producer
+        return selected_resource_expert_handoff(producer, consumer)
+            && producer
             .shards
             .iter()
             .zip(&consumer.shards)
@@ -1488,6 +1489,100 @@ fn distributed_dispatches_can_share_sequence(
             });
     }
     dense_local_shard_handoff(producer, consumer)
+}
+
+/// Proves that two adjacent expert kernels consume the same atomic expert
+/// selection on the same devices. Parameters-per-resource and descriptor
+/// bindings are intentionally allowed to differ: gate/up and down projections
+/// are separate kernels, while one selector-owned atomic group contains every
+/// tensor required by both. If any selector, route, group, or ownership fact
+/// differs, the operations remain separate execution islands and therefore
+/// separate residency transactions.
+fn selected_resource_expert_handoff(
+    producer: &VulkanDistributedDispatchPlan,
+    consumer: &VulkanDistributedDispatchPlan,
+) -> bool {
+    if producer.selected_resource_partitions.is_empty()
+        || consumer.selected_resource_partitions.is_empty()
+    {
+        return producer.selected_resource_partitions.is_empty()
+            && consumer.selected_resource_partitions.is_empty();
+    }
+    if producer.selected_resource_partitions.len()
+        != consumer.selected_resource_partitions.len()
+    {
+        return false;
+    }
+
+    producer.selected_resource_partitions.iter().all(|producer_partition| {
+        let matching = consumer
+            .selected_resource_partitions
+            .iter()
+            .filter(|partition| partition.selector_id == producer_partition.selector_id)
+            .collect::<Vec<_>>();
+        let [consumer_partition] = matching.as_slice() else {
+            return false;
+        };
+        let selector_identity_matches = producer_partition.execution_scope
+            == consumer_partition.execution_scope
+            && producer_partition.node_id == consumer_partition.node_id
+            && producer_partition.domain_id == consumer_partition.domain_id
+            && producer_partition.selection_signal == consumer_partition.selection_signal
+            && producer_partition.resource_count == consumer_partition.resource_count
+            && producer_partition.selection_count_per_activation
+                == consumer_partition.selection_count_per_activation
+            && producer_partition.atomic_group_ids == consumer_partition.atomic_group_ids
+            && producer_partition.atomic_group_byte_counts
+                == consumer_partition.atomic_group_byte_counts;
+        if !selector_identity_matches {
+            return false;
+        }
+
+        let producer_activation = distributed_selected_resource_activation(
+            producer,
+            &producer_partition.selection_signal,
+        );
+        let consumer_activation = distributed_selected_resource_activation(
+            consumer,
+            &consumer_partition.selection_signal,
+        );
+        if !producer_activation
+            .zip(consumer_activation)
+            .is_some_and(|(producer, consumer)| {
+                same_distributed_activation(producer, consumer)
+            })
+        {
+            return false;
+        }
+
+        producer.shards.iter().zip(&consumer.shards).all(
+            |(producer_shard, consumer_shard)| {
+                producer_shard
+                    .selected_resource_indices
+                    .get(&producer_partition.selector_id)
+                    .zip(
+                        consumer_shard
+                            .selected_resource_indices
+                            .get(&consumer_partition.selector_id),
+                    )
+                    .is_some_and(|(producer, consumer)| producer == consumer)
+            },
+        )
+    })
+}
+
+fn distributed_selected_resource_activation<'a>(
+    dispatch: &'a VulkanDistributedDispatchPlan,
+    selection_signal: &str,
+) -> Option<&'a VulkanDistributedActivationSlot> {
+    let mut matching = std::iter::once(&dispatch.input_activation)
+        .chain(dispatch.auxiliary_input_activations.iter())
+        .filter(|activation| {
+            activation.component_id == dispatch.component_id
+                && activation.signal_id == selection_signal
+        });
+    let activation = matching.next()?;
+    matching.next().is_none().then_some(activation)
 }
 
 fn dense_local_shard_handoff(

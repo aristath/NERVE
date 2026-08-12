@@ -710,14 +710,6 @@ impl VulkanDistributedDispatchRunners {
                     selected_resource_gates.push(gates);
                     planned_shards.push(planned_shard.clone());
                 }
-                if selected_resource_gates.iter().any(|gates| !gates.is_empty())
-                    && planned_island.dispatches.len() != 1
-                {
-                    return Err(VulkanDistributedDispatchRunnerError(format!(
-                        "selected-resource checkpoint {}..{} is grouped with unrelated physical dispatches",
-                        leader.dispatch_index, tail.dispatch_index
-                    )));
-                }
                 let sequence = device.create_resident_kernel_sequence().map_err(|error| {
                     VulkanDistributedDispatchRunnerError(format!(
                         "failed to create distributed sequence {}..{} shard on {:?}: {error}",

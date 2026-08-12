@@ -2030,6 +2030,115 @@ mod tests {
     }
 
     #[test]
+    fn selected_resource_expert_islands_require_one_atomic_ownership_contract() {
+        let mut producer = fixture_plan("row_major").dispatches.remove(0);
+        producer.dispatch_index = 7;
+        producer.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
+        producer.output_activation = producer.input_activation.clone();
+        producer.output_activation.binding = 1;
+        let mut route = producer.input_activation.clone();
+        route.binding = 8;
+        route.signal_id = "expert-routes".to_string();
+        route.slot = 3;
+        producer.auxiliary_input_activations = vec![route.clone()];
+        producer.auxiliary_input_distributions = vec![InputDistribution::Replicated];
+        producer.selected_resource_partitions = vec![
+            VulkanDistributedSelectedResourcePartitionPlan {
+                execution_scope: "model".to_string(),
+                selector_id: "routed-experts".to_string(),
+                node_id: "router".to_string(),
+                domain_id: "experts".to_string(),
+                selection_signal: route.signal_id.clone(),
+                address_table_binding: 4,
+                parameter_slots_binding: 5,
+                resource_count: 4,
+                parameters_per_resource: 2,
+                selection_count_per_activation: 2,
+                atomic_group_ids: (0..4)
+                    .map(|index| format!("expert-{index}"))
+                    .collect(),
+                atomic_group_byte_counts: vec![1024; 4],
+            },
+        ];
+        let shard_count = producer.shards.len();
+        for (shard_index, shard) in producer.shards.iter_mut().enumerate() {
+            shard.selected_resource_indices.insert(
+                "routed-experts".to_string(),
+                (shard_index..4).step_by(shard_count).collect(),
+            );
+        }
+
+        let mut consumer = producer.clone();
+        consumer.dispatch_index = 8;
+        consumer.node_id = "expert-down".to_string();
+        consumer.input_activation = producer.output_activation.clone();
+        consumer.input_activation.binding = 0;
+        consumer.selected_resource_partitions[0].parameters_per_resource = 1;
+        consumer.selected_resource_partitions[0].address_table_binding = 6;
+        consumer.selected_resource_partitions[0].parameter_slots_binding = 7;
+
+        let grouped = resolved_physical_execution_islands(
+            &[producer.clone(), consumer.clone()],
+            VulkanSharedResidentBufferRoute::SharedHost,
+        )
+        .unwrap();
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].dispatch_indices(), [7, 8]);
+
+        let mut missing_checkpoint = consumer.clone();
+        missing_checkpoint.selected_resource_partitions.clear();
+        assert_eq!(
+            resolved_physical_execution_islands(
+                &[producer.clone(), missing_checkpoint],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+
+        let mut different_groups = consumer.clone();
+        different_groups.selected_resource_partitions[0].atomic_group_ids[0] =
+            "another-expert".to_string();
+        assert_eq!(
+            resolved_physical_execution_islands(
+                &[producer.clone(), different_groups],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+
+        let mut different_route = consumer.clone();
+        different_route.auxiliary_input_activations[0].slot += 1;
+        assert_eq!(
+            resolved_physical_execution_islands(
+                &[producer.clone(), different_route],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+
+        let mut different_ownership = consumer;
+        different_ownership.shards[0]
+            .selected_resource_indices
+            .get_mut("routed-experts")
+            .unwrap()[0] = 1;
+        assert_eq!(
+            resolved_physical_execution_islands(
+                &[producer, different_ownership],
+                VulkanSharedResidentBufferRoute::SharedHost,
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+    }
+
+    #[test]
     fn contract_declared_output_rows_flow_into_local_input_column_shards() {
         let mut producer = fixture_plan("row_major").dispatches.remove(0);
         producer.dispatch_index = 7;
