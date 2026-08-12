@@ -691,6 +691,93 @@ mod exact_case_replay_tests {
         }
     }
 
+    fn tensor_parallel_dispatch() -> VulkanDistributedDispatchPlan {
+        let mut dispatch = dispatch();
+        dispatch.execution_strategy = nerve_execution_contracts::ExecutionStrategy::TensorParallel;
+        dispatch.has_lazy_resource_requirements = false;
+        dispatch.selected_resource_partitions.clear();
+        dispatch.input_distribution = InputDistribution::Replicated;
+        dispatch.output_collection = OutputCollection::Concatenated;
+        dispatch.distribution = VulkanDistributedDispatchDistribution::OutputRows;
+        for shard in &mut dispatch.shards {
+            shard.selected_resource_indices.clear();
+        }
+        dispatch
+    }
+
+    fn tensor_parallel_exact_case() -> VulkanPlacementExecutionCaseIdentity {
+        let mut execution_case = exact_case(&[], &[]);
+        execution_case.strategy = VulkanPlacementExecutionStrategy::TensorParallel;
+        for shard in &mut execution_case.shards {
+            shard.distribution = "output_rows".to_string();
+            shard.selected_resource_indices_by_partition.clear();
+        }
+        execution_case
+    }
+
+    fn device_execution_identities() -> BTreeMap<String, VulkanPlacementDeviceExecutionIdentity> {
+        BTreeMap::from([
+            (
+                "owner".to_string(),
+                VulkanPlacementDeviceExecutionIdentity {
+                    physical_device_id: "physical-owner".to_string(),
+                    api_version: 1,
+                    driver_version: 2,
+                },
+            ),
+            (
+                "helper".to_string(),
+                VulkanPlacementDeviceExecutionIdentity {
+                    physical_device_id: "physical-helper".to_string(),
+                    api_version: 1,
+                    driver_version: 2,
+                },
+            ),
+        ])
+    }
+
+    #[test]
+    fn exact_plan_set_replay_applies_measured_tp_to_mount_input() {
+        let empty = || VulkanDistributedExecutionPlan {
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            storage_buffer_offset_alignment: 4,
+            dispatches: Vec::new(),
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 16,
+            shared_output_byte_capacity: 16,
+            distributed_parameter_byte_count: 0,
+        };
+        let mut plans = VulkanDistributedExecutionPlanSet {
+            decode: VulkanDistributedExecutionPlan {
+                dispatches: vec![tensor_parallel_dispatch()],
+                ..empty()
+            },
+            decode_batch: empty(),
+            prefill: empty(),
+        };
+
+        plans
+            .apply_exact_execution_cases(
+                &BTreeMap::from([("moe".to_string(), tensor_parallel_exact_case())]),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &device_execution_identities(),
+            )
+            .unwrap();
+
+        assert_eq!(plans.decode.execution_islands.len(), 1);
+        assert_eq!(plans.decode.execution_islands[0].dispatch_indices(), vec![7]);
+        assert_eq!(
+            plans.decode.dispatches[0]
+                .shards
+                .iter()
+                .map(|shard| (shard.device_id.as_str(), shard.row_start, shard.row_count))
+                .collect::<Vec<_>>(),
+            [("owner", 0, 2), ("helper", 2, 2)],
+        );
+    }
+
     #[test]
     fn exact_replay_applies_partition_ordinal_expert_ownership() {
         let mut plan = VulkanDistributedExecutionPlan {
