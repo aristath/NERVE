@@ -15,12 +15,13 @@ pub struct VulkanRuntimePlacementCalibrationTarget {
     pub planned_resident_parameter_bytes: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanRuntimePlacementCalibrationPolicy {
     pub warmup_units: usize,
     pub measured_units: usize,
     pub maximum_duration: Duration,
-    pub maximum_resident_parameter_bytes: usize,
+    pub maximum_total_resident_parameter_bytes: usize,
+    pub maximum_resident_parameter_bytes_by_physical_device: BTreeMap<String, usize>,
 }
 
 impl Default for VulkanRuntimePlacementCalibrationPolicy {
@@ -29,8 +30,29 @@ impl Default for VulkanRuntimePlacementCalibrationPolicy {
             warmup_units: VULKAN_RUNTIME_PLACEMENT_CALIBRATION_WARMUP_UNITS,
             measured_units: VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MEASURED_UNITS,
             maximum_duration: VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION,
-            maximum_resident_parameter_bytes: usize::MAX,
+            maximum_total_resident_parameter_bytes: usize::MAX,
+            maximum_resident_parameter_bytes_by_physical_device: BTreeMap::new(),
         }
+    }
+}
+
+impl VulkanRuntimePlacementCalibrationPolicy {
+    fn parameter_capacity_for_physical_device(
+        &self,
+        physical_device_id: &str,
+    ) -> Result<usize, VulkanResidentTokenModelPackageError> {
+        if self.maximum_resident_parameter_bytes_by_physical_device.is_empty() {
+            return Ok(self.maximum_total_resident_parameter_bytes);
+        }
+        self.maximum_resident_parameter_bytes_by_physical_device
+            .get(physical_device_id)
+            .copied()
+            .filter(|capacity| *capacity > 0)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "runtime placement calibration has no positive parameter capacity for physical device {physical_device_id:?}",
+                ))
+            })
     }
 }
 
@@ -44,6 +66,38 @@ mod runtime_placement_calibration_policy_tests {
         assert_eq!(policy.warmup_units, 1);
         assert_eq!(policy.measured_units, 1);
         assert!(policy.maximum_duration <= Duration::from_secs(60));
+        assert_eq!(policy.maximum_total_resident_parameter_bytes, usize::MAX);
+        assert!(
+            policy
+                .maximum_resident_parameter_bytes_by_physical_device
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn calibration_capacity_is_bound_to_exact_physical_devices() {
+        let policy = VulkanRuntimePlacementCalibrationPolicy {
+            maximum_total_resident_parameter_bytes: 300,
+            maximum_resident_parameter_bytes_by_physical_device: BTreeMap::from([
+                ("gpu-a".to_string(), 100),
+                ("gpu-b".to_string(), 200),
+            ]),
+            ..VulkanRuntimePlacementCalibrationPolicy::default()
+        };
+
+        assert_eq!(
+            policy
+                .parameter_capacity_for_physical_device("gpu-a")
+                .unwrap(),
+            100,
+        );
+        assert!(
+            policy
+                .parameter_capacity_for_physical_device("gpu-c")
+                .unwrap_err()
+                .to_string()
+                .contains("no positive parameter capacity")
+        );
     }
 }
 
@@ -462,7 +516,7 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
     if policy.warmup_units == 0
         || policy.measured_units == 0
         || policy.maximum_duration.is_zero()
-        || policy.maximum_resident_parameter_bytes == 0
+        || policy.maximum_total_resident_parameter_bytes == 0
     {
         return Err(VulkanResidentTokenModelPackageError::new(
             "runtime placement calibration policy has invalid zero bounds",
@@ -486,8 +540,11 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
     let execution_result = (|| {
         let mut reports = Vec::with_capacity(targets.len());
         for (target_index, (target, cached_plan)) in targets.iter().zip(&plans).enumerate() {
+            let physical_parameter_capacity = policy
+                .parameter_capacity_for_physical_device(&physical_device_id)?
+                .min(policy.maximum_total_resident_parameter_bytes);
             if target.planned_resident_parameter_bytes
-                > policy.maximum_resident_parameter_bytes
+                > physical_parameter_capacity
             {
                 continue;
             }

@@ -81,7 +81,7 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
             })?;
         let stage_policy = VulkanRuntimePlacementCalibrationPolicy {
             maximum_duration: remaining,
-            ..policy
+            ..policy.clone()
         };
         let expected_ids = stage
             .iter()

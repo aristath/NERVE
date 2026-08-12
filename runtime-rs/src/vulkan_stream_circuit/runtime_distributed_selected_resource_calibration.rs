@@ -26,6 +26,7 @@ fn mount_distributed_calibration_selected_resources(
     execution_plan: &VulkanDistributedExecutionPlan,
     logical_devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
     maximum_total_payload_bytes: usize,
+    maximum_payload_bytes_by_device: &BTreeMap<String, usize>,
 ) -> Result<Option<VulkanCalibrationSelectedResourceMount>, VulkanResidentTokenModelPackageError> {
     let has_selected_resources = execution_plan
         .dispatches
@@ -37,10 +38,14 @@ fn mount_distributed_calibration_selected_resources(
     let store_plan = VulkanDistributedSelectedResourceStorePlan::from_execution_plan(execution_plan)
         .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
     if store_plan.devices.len() != logical_devices.len()
+        || maximum_payload_bytes_by_device.len() != logical_devices.len()
         || store_plan
             .devices
             .iter()
-            .any(|plan| !logical_devices.contains_key(&plan.device_id))
+            .any(|plan| {
+                !logical_devices.contains_key(&plan.device_id)
+                    || !maximum_payload_bytes_by_device.contains_key(&plan.device_id)
+            })
     {
         return distributed_calibration_error(
             "distributed selected-resource calibration does not cover every participant",
@@ -143,10 +148,12 @@ fn mount_distributed_calibration_selected_resources(
         let payload_budget_for_device = remaining_payload_budget
             .checked_sub(remaining_minimum_wave_bytes)
             .expect("minimum wave budget was validated above");
+        let device_payload_budget = maximum_payload_bytes_by_device[&device_plan.device_id];
         let resident_payload_capacity = device_plan
             .total_addressable_bytes
             .min(safe_dynamic_bytes.saturating_sub(maximum_alignment_padding))
             .min(payload_budget_for_device);
+        let resident_payload_capacity = resident_payload_capacity.min(device_payload_budget);
         if resident_payload_capacity < device_plan.maximum_load_wave_bytes {
             return Ok(None);
         }

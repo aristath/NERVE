@@ -57,20 +57,37 @@ pub fn run_package_calibration(
 
     let before = capture_device_snapshots(&devices)?;
     print_device_snapshots("before", &before);
-    let maximum_resident_parameter_bytes = before
+    let maximum_resident_parameter_bytes_by_physical_device = before
         .iter()
-        .map(|snapshot| snapshot.memory_accounting.remaining_bytes)
-        .min()
-        .and_then(|bytes| usize::try_from(bytes).ok())
-        .filter(|bytes| *bytes > 0)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                "selected targets have no common safe remaining parameter capacity",
-            )
-        })?;
+        .map(|snapshot| {
+            usize::try_from(snapshot.memory_accounting.admissible_remaining_bytes)
+                .ok()
+                .filter(|bytes| *bytes > 0)
+                .map(|bytes| (snapshot.physical_device_id.clone(), bytes))
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::OutOfMemory,
+                        format!(
+                            "selected target {:?} has no safe remaining parameter capacity",
+                            snapshot.physical_device_id,
+                        ),
+                    )
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let maximum_total_resident_parameter_bytes =
+        maximum_resident_parameter_bytes_by_physical_device
+            .values()
+            .try_fold(0usize, |total, bytes| total.checked_add(*bytes))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "selected target parameter capacities overflow usize",
+                )
+            })?;
     let policy = VulkanRuntimePlacementCalibrationPolicy {
-        maximum_resident_parameter_bytes,
+        maximum_total_resident_parameter_bytes,
+        maximum_resident_parameter_bytes_by_physical_device,
         ..VulkanRuntimePlacementCalibrationPolicy::default()
     };
     let mut catalog = VulkanPlacementCalibrationCatalog::default();

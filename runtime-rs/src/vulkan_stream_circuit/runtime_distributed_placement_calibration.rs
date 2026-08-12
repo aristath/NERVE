@@ -171,7 +171,11 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
     if policy.warmup_units == 0
         || policy.measured_units == 0
         || policy.maximum_duration.is_zero()
-        || policy.maximum_resident_parameter_bytes == 0
+        || policy.maximum_total_resident_parameter_bytes == 0
+        || policy
+            .maximum_resident_parameter_bytes_by_physical_device
+            .iter()
+            .any(|(physical_id, capacity)| physical_id.is_empty() || *capacity == 0)
     {
         return distributed_calibration_error(
             "distributed runtime placement calibration policy has invalid zero bounds",
@@ -187,6 +191,22 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
         ));
     }
 
+    let logical_parameter_capacities = devices
+        .iter()
+        .enumerate()
+        .map(|(index, (physical_id, _))| {
+            policy
+                .parameter_capacity_for_physical_device(physical_id)
+                .map(|capacity| (format!("calibration:shard:{index}"), capacity))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let aggregate_physical_capacity = logical_parameter_capacities
+        .values()
+        .try_fold(0usize, |total, capacity| total.checked_add(*capacity))
+        .unwrap_or(usize::MAX);
+    let maximum_total_resident_parameter_bytes = policy
+        .maximum_total_resident_parameter_bytes
+        .min(aggregate_physical_capacity);
     let started = Instant::now();
     let Some(mut session) = VulkanRuntimeDistributedPlacementSession::prepare(
         devices,
@@ -194,7 +214,8 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
         runtime_model,
         target,
         phase,
-        policy.maximum_resident_parameter_bytes,
+        maximum_total_resident_parameter_bytes,
+        &logical_parameter_capacities,
     )?
     else {
         return Ok(None);
@@ -754,7 +775,8 @@ impl VulkanRuntimeDistributedPlacementSession {
         runtime_model: &VulkanResidentRuntimeModel,
         target: &VulkanRuntimePlacementCalibrationTarget,
         phase: VulkanTargetedComponentExecutionPhase,
-        maximum_resident_parameter_bytes: usize,
+        maximum_total_resident_parameter_bytes: usize,
+        maximum_resident_parameter_bytes_by_logical_device: &BTreeMap<String, usize>,
     ) -> Result<Option<Self>, VulkanResidentTokenModelPackageError> {
         let logical_device_ids = (0..devices.len())
             .map(|index| format!("calibration:shard:{index}"))
@@ -892,7 +914,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             )
         })?;
         let Some(distributed_parameter_budget) =
-            maximum_resident_parameter_bytes.checked_sub(owner_static_bytes)
+            maximum_total_resident_parameter_bytes.checked_sub(owner_static_bytes)
         else {
             return Ok(None);
         };
@@ -1032,7 +1054,13 @@ impl VulkanRuntimeDistributedPlacementSession {
             .ok_or_else(|| distributed_calibration_error_value(
                 "distributed calibration total parameter bytes overflowed",
             ))?;
-        if total_resident_parameter_bytes > maximum_resident_parameter_bytes {
+        if total_resident_parameter_bytes > maximum_total_resident_parameter_bytes
+            || resident_parameter_bytes_by_device.iter().any(|(device_id, bytes)| {
+                maximum_resident_parameter_bytes_by_logical_device
+                    .get(device_id)
+                    .is_none_or(|capacity| bytes > capacity)
+            })
+        {
             return Ok(None);
         }
 
@@ -1063,9 +1091,27 @@ impl VulkanRuntimeDistributedPlacementSession {
                 &owner_exclusions,
             )?
         };
-        let remaining_dynamic_parameter_budget = maximum_resident_parameter_bytes
+        let remaining_dynamic_parameter_budget = maximum_total_resident_parameter_bytes
             .checked_sub(total_resident_parameter_bytes)
             .expect("total static parameter bytes were bounded above");
+        let remaining_dynamic_parameter_bytes_by_device =
+            maximum_resident_parameter_bytes_by_logical_device
+                .iter()
+                .map(|(device_id, capacity)| {
+                    let static_bytes = resident_parameter_bytes_by_device
+                        .get(device_id)
+                        .copied()
+                        .unwrap_or(0);
+                    capacity
+                        .checked_sub(static_bytes)
+                        .map(|remaining| (device_id.clone(), remaining))
+                        .ok_or_else(|| {
+                            distributed_calibration_error_value(format!(
+                                "distributed calibration static parameters exceed capacity on {device_id:?}",
+                            ))
+                        })
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
         let Some(selected_resource_mount) =
             mount_distributed_calibration_selected_resources(
                 manifest_dir,
@@ -1074,6 +1120,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                 &distributed_execution_plan,
                 &logical_devices,
                 remaining_dynamic_parameter_budget,
+                &remaining_dynamic_parameter_bytes_by_device,
             )?
         else {
             return Ok(None);
