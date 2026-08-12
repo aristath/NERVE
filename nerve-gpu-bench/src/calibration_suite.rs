@@ -6,6 +6,8 @@ use std::path::Path;
 use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, VulkanPlacementExecutionStrategy,
     VulkanRuntimeDistributedPlacementCalibrationReport, VulkanRuntimePlacementCalibrationTarget,
+    VulkanTargetedComponentExecutionPhase,
+    vulkan_runtime_placement_calibration_target_for_component,
     vulkan_runtime_placement_transfer_byte_counts,
 };
 
@@ -17,6 +19,7 @@ use crate::calibration_suite_plan::{expand_target_orders, plan_calibration_suite
 use crate::load_wave_calibration::measure_load_wave_candidate_for_runtime_model;
 use crate::output::write_atomic;
 use crate::package_calibration::measure_package_candidates_for_runtime_model;
+use crate::region_calibration::measure_region_candidates_for_runtime_model;
 use crate::selected_resource_calibration::measure_selected_resource_classes_for_runtime_model;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +51,13 @@ struct SelectedLoadWaveCalibrationCase {
     component_id: String,
     selector_id: String,
     resource_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct SelectedRegionCalibrationCase {
+    phase: crate::cli::PackageCalibrationPhase,
+    owner_target_id: String,
+    runtime_variant_index: usize,
 }
 
 pub fn run_calibration_suite(
@@ -97,6 +107,7 @@ pub fn run_calibration_suite(
     })?;
     let component_cases = selected_component_calibration_cases(&plans);
     let load_wave_cases = selected_load_wave_calibration_cases(&plans);
+    let region_cases = selected_region_calibration_cases(&runtime_models, &plans)?;
     let boundary_frame_byte_counts = runtime_models
         .values()
         .flatten()
@@ -113,6 +124,9 @@ pub fn run_calibration_suite(
     let mut selected_resource_cases = 0usize;
     let mut measured_selected_resource_cases = 0usize;
     let mut unavailable_selected_resource_cases = 0usize;
+    let mut planned_region_cases = 0usize;
+    let mut measured_region_cases = 0usize;
+    let mut unavailable_region_cases = 0usize;
 
     for case in &component_cases {
         let mut current_width_measurements = Vec::new();
@@ -192,6 +206,21 @@ pub fn run_calibration_suite(
         catalog.merge(&measured)?;
     }
 
+    for case in &region_cases {
+        let measured = measure_region_candidates_for_runtime_model(
+            &package,
+            &runtime_models[&case.owner_target_id][case.runtime_variant_index],
+            case.phase,
+            target_ids,
+            &catalog,
+            runtime.residency_policy,
+        )?;
+        planned_region_cases += measured.planned_case_count;
+        measured_region_cases += measured.measured_case_count;
+        unavailable_region_cases += measured.unavailable_case_count;
+        catalog.merge(&measured.catalog)?;
+    }
+
     for case in &load_wave_cases {
         let measured = measure_load_wave_candidate_for_runtime_model(
             &package,
@@ -209,7 +238,7 @@ pub fn run_calibration_suite(
     let payload = catalog.to_json_bytes()?;
     write_atomic(output, &payload)?;
     println!(
-        "calibrated package suite: package={}, targets={}, component_cases={}, measured_component_candidates={}, unavailable_component_candidates={}, selected_resource_cases={}, measured_selected_resource_cases={}, unavailable_selected_resource_cases={}, boundary_cases={}, load_wave_cases={}, references={}, observations={}, selected_resource_classes={}, output={}",
+        "calibrated package suite: package={}, targets={}, component_cases={}, measured_component_candidates={}, unavailable_component_candidates={}, selected_resource_cases={}, measured_selected_resource_cases={}, unavailable_selected_resource_cases={}, boundary_cases={}, region_plans={}, measured_regions={}, unavailable_regions={}, load_wave_cases={}, references={}, observations={}, selected_resource_classes={}, region_executions={}, output={}",
         package.source_path().display(),
         target_ids.len(),
         component_cases.len(),
@@ -219,10 +248,14 @@ pub fn run_calibration_suite(
         measured_selected_resource_cases,
         unavailable_selected_resource_cases,
         reference_plan.boundary_cases.len(),
+        planned_region_cases,
+        measured_region_cases,
+        unavailable_region_cases,
         load_wave_cases.len(),
         catalog.reference_count(),
         catalog.observation_count(),
         catalog.selected_resource_execution_class_count(),
+        catalog.region_execution_count(),
         output.display(),
     );
     Ok(())
@@ -276,6 +309,67 @@ fn selected_load_wave_calibration_cases(
         }
     }
     selected.into_values().collect()
+}
+
+fn selected_region_calibration_cases(
+    runtime_models: &BTreeMap<String, Vec<nerve_runtime::VulkanResidentRuntimeModel>>,
+    plans: &BTreeMap<(String, usize), crate::calibration_suite_plan::CalibrationSuitePlan>,
+) -> Result<Vec<SelectedRegionCalibrationCase>, Box<dyn Error>> {
+    let mut selected = BTreeMap::new();
+    for ((owner_target_id, runtime_variant_index), plan) in plans {
+        let runtime_model = runtime_models
+            .get(owner_target_id)
+            .and_then(|variants| variants.get(*runtime_variant_index))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "region calibration plan references absent runtime variant {} for owner {:?}",
+                        runtime_variant_index, owner_target_id,
+                    ),
+                )
+            })?;
+        let phases = plan
+            .component_cases
+            .iter()
+            .map(|case| (phase_key(case.phase), case.phase))
+            .collect::<BTreeMap<_, _>>();
+        for phase in phases.into_values() {
+            let runtime_phase = match phase {
+                crate::cli::PackageCalibrationPhase::Decode => {
+                    VulkanTargetedComponentExecutionPhase::Decode
+                }
+                crate::cli::PackageCalibrationPhase::Prefill {
+                    activation_batch_width,
+                } => VulkanTargetedComponentExecutionPhase::Prefill {
+                    activation_batch_width,
+                },
+            };
+            let ordered_signatures = runtime_model
+                .circuit_graph
+                .components
+                .iter()
+                .filter(|component| component.runtime_role.is_signal_processor())
+                .map(|component| {
+                    vulkan_runtime_placement_calibration_target_for_component(
+                        runtime_model,
+                        &component.component_id,
+                        runtime_phase,
+                    )
+                    .map(|target| target.signature_id)
+                    .map_err(|error| -> Box<dyn Error> { Box::new(error) })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            selected
+                .entry((phase_key(phase), ordered_signatures))
+                .or_insert_with(|| SelectedRegionCalibrationCase {
+                    phase,
+                    owner_target_id: owner_target_id.clone(),
+                    runtime_variant_index: *runtime_variant_index,
+                });
+        }
+    }
+    Ok(selected.into_values().collect())
 }
 
 fn phase_key(phase: crate::cli::PackageCalibrationPhase) -> (&'static str, usize) {
@@ -430,6 +524,31 @@ mod tests {
                 .iter()
                 .all(|case| !case.target.signature_id.is_empty())
         );
+
+        let runtime_models = BTreeMap::from([
+            (targets[0].clone(), vec![model.clone(), model.clone()]),
+            (targets[1].clone(), vec![model]),
+        ]);
+        let region_cases = selected_region_calibration_cases(&runtime_models, &plans).unwrap();
+        assert_eq!(region_cases.len(), 1);
+        assert_eq!(
+            region_cases[0].phase,
+            crate::cli::PackageCalibrationPhase::Decode
+        );
+    }
+
+    #[test]
+    fn region_case_selection_rejects_a_plan_without_its_runtime_variant() {
+        let model = tiny_runtime_model();
+        let target = "owner-a".to_string();
+        let plan =
+            plan_calibration_suite(&model, std::slice::from_ref(&target), &[4], Some(1)).unwrap();
+        let plans = BTreeMap::from([((target.clone(), 1), plan)]);
+        let runtime_models = BTreeMap::from([(target, vec![model])]);
+
+        let error = selected_region_calibration_cases(&runtime_models, &plans).unwrap_err();
+
+        assert!(error.to_string().contains("absent runtime variant 1"));
     }
 
     #[test]

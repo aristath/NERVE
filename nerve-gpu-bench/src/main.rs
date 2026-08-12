@@ -12,6 +12,7 @@ mod model;
 mod output;
 mod package_calibration;
 mod policy;
+mod region_calibration;
 mod selected_resource_calibration;
 mod vulkan_exec;
 mod vulkan_features;

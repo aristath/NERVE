@@ -108,6 +108,12 @@ the local placement calibration, and the mounted graph.
   physical-execution summary, and the conversation gate can require a nonzero
   TP-island proof. This path is covered hardware-neutrally; its first real-model
   proof remains blocked by the live inference quarantine above.
+- The calibration suite now produces canonical serialized and predicted
+  mixed-hybrid region evidence from bounded, complete mounted transactions.
+  It measures compute, synchronization, transfers, collectives, output, state,
+  participant-only memory, and exact teardown together; it never synthesizes
+  an outer result by summing component timings. Fully reserved selected targets
+  remain in reservation-restoration checks while receiving no placement work.
 - All tests and model gates run sequentially. Every Rust test command uses
   `-- --test-threads=1`; Vulkan tests are selected and executed individually.
 
@@ -147,15 +153,6 @@ For every numbered item below:
    acceptance criterion is satisfied.
 
 ## Work queue
-
-### 3. Make placement calibration safe for runtime consumption
-
-- Produce complete serialized multi-component-region and mixed-hybrid
-  calibration directly from one bounded mounted transaction. The catalog,
-  graph gate, optimizer, phase selection, and physical lowering now preserve
-  and replay exact region evidence, including internal boundaries; the missing
-  producer must measure that outer transaction rather than synthesize it by
-  summing independent component and boundary measurements.
 
 ### 4. Prove dense FFN tensor parallelism on mounted execution
 
