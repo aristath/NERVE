@@ -426,43 +426,29 @@ impl VulkanPlacementCalibrationCatalog {
             .collect()
     }
 
-    /// Returns candidates which are not dominated for the same physical graph
-    /// interface. Entry, exit, and coordinator placement remain in the
-    /// partition key, so a locally slower owner that removes a neighboring
-    /// boundary or keeps owner state local is preserved.
-    pub fn pareto_candidates(
+    /// Returns every exact, output-valid candidate for this behavior. Local
+    /// duration and memory are insufficient to prune alternatives with
+    /// different shards, queues, strategies, owners, or transport routes: the
+    /// globally faster choice depends on neighboring islands and legal
+    /// overlap. Dominance therefore belongs to the graph scheduler, which has
+    /// that complete context.
+    pub fn candidates_for_behavior(
         &self,
         behavior: &VulkanPlacementBehaviorIdentity,
     ) -> Vec<&VulkanPlacementCalibrationObservation> {
-        let candidates = self.observations_for_behavior(behavior);
-        candidates
-            .iter()
-            .copied()
-            .filter(|candidate| {
-                !candidates.iter().copied().any(|other| {
-                    other.execution_case.input_physical_device_id
-                        == candidate.execution_case.input_physical_device_id
-                        && other.execution_case.output_physical_device_id
-                            == candidate.execution_case.output_physical_device_id
-                        && other.execution_case.owner_physical_device_id
-                            == candidate.execution_case.owner_physical_device_id
-                        && other.execution_case.devices == candidate.execution_case.devices
-                        && observation_dominates(other, candidate)
-                })
-            })
-            .collect()
+        self.observations_for_behavior(behavior)
     }
 
-    /// Returns the non-dominated, exact candidates that fit the current
-    /// reservation-aware capacity envelope. Resident bytes and transient peak
-    /// bytes coexist during the measured transaction and are therefore added,
-    /// with overflow making the candidate unavailable.
-    pub fn pareto_candidates_for_capacity(
+    /// Returns every exact candidate that fits the current reservation-aware
+    /// capacity envelope. Resident bytes and transient peak bytes coexist
+    /// during the measured transaction and are therefore added, with overflow
+    /// making the candidate unavailable.
+    pub fn candidates_for_capacity(
         &self,
         behavior: &VulkanPlacementBehaviorIdentity,
         capacity: &VulkanPlacementCapacityEnvelope,
     ) -> Vec<&VulkanPlacementCalibrationObservation> {
-        self.pareto_candidates(behavior)
+        self.candidates_for_behavior(behavior)
             .into_iter()
             .filter(|candidate| observation_fits_capacity(candidate, capacity))
             .collect()
@@ -676,55 +662,6 @@ fn valid_sha256_digest(value: &str) -> bool {
         .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
-fn observation_dominates(
-    left: &VulkanPlacementCalibrationObservation,
-    right: &VulkanPlacementCalibrationObservation,
-) -> bool {
-    let resident_no_worse = resource_vector_no_worse(
-        &left.resident_bytes_by_physical_device,
-        &right.resident_bytes_by_physical_device,
-    );
-    let transient_no_worse = resource_vector_no_worse(
-        &left.transient_peak_bytes_by_physical_device,
-        &right.transient_peak_bytes_by_physical_device,
-    );
-    let duration_order = normalized_duration_order(left, right);
-    let strict = duration_order.is_lt()
-        || left.resident_bytes_by_physical_device != right.resident_bytes_by_physical_device
-        || left.transient_peak_bytes_by_physical_device
-            != right.transient_peak_bytes_by_physical_device
-        || left.host_resident_bytes != right.host_resident_bytes
-        || left.host_transient_peak_bytes != right.host_transient_peak_bytes;
-    !duration_order.is_gt()
-        && resident_no_worse
-        && transient_no_worse
-        && left.host_resident_bytes <= right.host_resident_bytes
-        && left.host_transient_peak_bytes <= right.host_transient_peak_bytes
-        && strict
-}
-
-fn normalized_duration_order(
-    left: &VulkanPlacementCalibrationObservation,
-    right: &VulkanPlacementCalibrationObservation,
-) -> std::cmp::Ordering {
-    (u128::from(left.duration_ns) * right.useful_activation_count as u128)
-        .cmp(&(u128::from(right.duration_ns) * left.useful_activation_count as u128))
-}
-
-fn resource_vector_no_worse(
-    left: &BTreeMap<String, usize>,
-    right: &BTreeMap<String, usize>,
-) -> bool {
-    left.keys()
-        .chain(right.keys())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .all(|device_id| {
-            left.get(device_id).copied().unwrap_or(0)
-                <= right.get(device_id).copied().unwrap_or(0)
-        })
-}
-
 #[cfg(test)]
 mod placement_calibration_catalog_tests {
     use super::*;
@@ -883,7 +820,7 @@ mod placement_calibration_catalog_tests {
 
         assert_eq!(left.reference_count(), 1);
         assert_eq!(left.observation_count(), 2);
-        assert_eq!(left.pareto_candidates(&behavior()).len(), 2);
+        assert_eq!(left.candidates_for_behavior(&behavior()).len(), 2);
     }
 
     #[test]
@@ -1043,7 +980,7 @@ mod placement_calibration_catalog_tests {
     }
 
     #[test]
-    fn pareto_frontier_keeps_a_slower_candidate_with_a_different_exit() {
+    fn candidate_set_keeps_a_slower_candidate_with_a_different_exit() {
         let mut catalog = catalog_with_reference();
         catalog
             .record_observation(observation(behavior(), "gpu0", "gpu0", 10, 16))
@@ -1052,12 +989,11 @@ mod placement_calibration_catalog_tests {
             .record_observation(observation(behavior(), "gpu1", "gpu1", 12, 16))
             .unwrap();
 
-        let frontier = catalog.pareto_candidates(&behavior());
-        assert_eq!(frontier.len(), 2);
+        assert_eq!(catalog.candidates_for_behavior(&behavior()).len(), 2);
     }
 
     #[test]
-    fn pareto_frontier_preserves_a_slower_candidate_with_a_different_owner() {
+    fn candidate_set_preserves_a_slower_candidate_with_a_different_owner() {
         let mut catalog = catalog_with_reference();
         catalog
             .record_observation(observation(behavior(), "gpu0", "gpu0", 10, 16))
@@ -1066,12 +1002,11 @@ mod placement_calibration_catalog_tests {
             .record_observation(observation(behavior(), "gpu1", "gpu0", 12, 32))
             .unwrap();
 
-        let frontier = catalog.pareto_candidates(&behavior());
-        assert_eq!(frontier.len(), 2);
+        assert_eq!(catalog.candidates_for_behavior(&behavior()).len(), 2);
     }
 
     #[test]
-    fn pareto_frontier_removes_only_same_interface_resource_dominance() {
+    fn candidate_set_does_not_locally_prune_a_different_execution_strategy() {
         let mut catalog = catalog_with_reference();
         catalog
             .record_observation(observation(behavior(), "gpu0", "gpu0", 10, 16))
@@ -1080,13 +1015,11 @@ mod placement_calibration_catalog_tests {
         slower.execution_case.strategy = VulkanPlacementExecutionStrategy::Hybrid;
         catalog.record_observation(slower).unwrap();
 
-        let frontier = catalog.pareto_candidates(&behavior());
-        assert_eq!(frontier.len(), 1);
-        assert_eq!(frontier[0].duration_ns, 10);
+        assert_eq!(catalog.candidates_for_behavior(&behavior()).len(), 2);
     }
 
     #[test]
-    fn pareto_frontier_compares_duration_per_useful_activation() {
+    fn candidate_set_preserves_distinct_bounded_measurement_shapes() {
         let behavior = behavior();
         let mut catalog = catalog_with_reference();
         let mut two_calls = observation(behavior.clone(), "gpu0", "gpu0", 18, 16);
@@ -1097,14 +1030,15 @@ mod placement_calibration_catalog_tests {
         catalog.record_observation(two_calls).unwrap();
         catalog.record_observation(one_call).unwrap();
 
-        let frontier = catalog.pareto_candidates(&behavior);
-        assert_eq!(frontier.len(), 1);
-        assert_eq!(frontier[0].duration_ns, 18);
-        assert_eq!(frontier[0].useful_activation_count, 2);
+        let candidates = catalog.candidates_for_behavior(&behavior);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.duration_ns == 18 && candidate.useful_activation_count == 2
+        }));
     }
 
     #[test]
-    fn pareto_frontier_preserves_host_vs_device_resource_tradeoffs() {
+    fn candidate_set_preserves_host_vs_device_resource_tradeoffs() {
         let behavior = behavior();
         let mut catalog = catalog_with_reference();
         let mut faster_shared_host = observation(behavior.clone(), "gpu0", "gpu0", 8, 16);
@@ -1119,7 +1053,7 @@ mod placement_calibration_catalog_tests {
         catalog.record_observation(faster_shared_host).unwrap();
         catalog.record_observation(slower_device_local).unwrap();
 
-        assert_eq!(catalog.pareto_candidates(&behavior).len(), 2);
+        assert_eq!(catalog.candidates_for_behavior(&behavior).len(), 2);
     }
 
     #[test]
@@ -1142,7 +1076,7 @@ mod placement_calibration_catalog_tests {
         };
         assert_eq!(
             catalog
-                .pareto_candidates_for_capacity(&behavior, &exact_fit)
+                .candidates_for_capacity(&behavior, &exact_fit)
                 .len(),
             1,
         );
@@ -1153,7 +1087,7 @@ mod placement_calibration_catalog_tests {
             .remove(&device_identity("gpu1"));
         assert!(
             catalog
-                .pareto_candidates_for_capacity(&behavior, &missing_participant)
+                .candidates_for_capacity(&behavior, &missing_participant)
                 .is_empty()
         );
 
@@ -1163,7 +1097,7 @@ mod placement_calibration_catalog_tests {
             .insert(device_identity("gpu0"), 99);
         assert!(
             catalog
-                .pareto_candidates_for_capacity(&behavior, &transient_does_not_fit)
+                .candidates_for_capacity(&behavior, &transient_does_not_fit)
             .is_empty()
         );
 
@@ -1179,7 +1113,7 @@ mod placement_calibration_catalog_tests {
         );
         assert!(
             catalog
-                .pareto_candidates_for_capacity(&behavior, &stale_driver)
+                .candidates_for_capacity(&behavior, &stale_driver)
                 .is_empty()
         );
 
@@ -1187,7 +1121,7 @@ mod placement_calibration_catalog_tests {
         host_does_not_fit.host_available_bytes = 39;
         assert!(
             catalog
-                .pareto_candidates_for_capacity(&behavior, &host_does_not_fit)
+                .candidates_for_capacity(&behavior, &host_does_not_fit)
                 .is_empty()
         );
     }
@@ -1210,7 +1144,7 @@ mod placement_calibration_catalog_tests {
 
         assert!(
             catalog
-                .pareto_candidates_for_capacity(&behavior, &capacity)
+                .candidates_for_capacity(&behavior, &capacity)
                 .is_empty()
         );
     }
