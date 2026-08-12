@@ -200,10 +200,13 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
             .candidates_for_behavior(behavior)
             .into_iter()
             .filter(|observation| {
+                // Serialized evidence describes a multi-component region.
+                // This runtime adapter currently lowers one exact case per
+                // component, so admitting it here would let the optimizer
+                // select a case that exact replay must reject.
                 matches!(
                     observation.execution_case.strategy,
                     VulkanPlacementExecutionStrategy::SingleDevice
-                        | VulkanPlacementExecutionStrategy::Serialized
                         | VulkanPlacementExecutionStrategy::TensorParallel
                         | VulkanPlacementExecutionStrategy::WholeExpertParallel
                         | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel

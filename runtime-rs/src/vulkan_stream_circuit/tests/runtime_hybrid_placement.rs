@@ -218,6 +218,16 @@ fn hybrid_test_distributed_observation(
     }
 }
 
+fn hybrid_test_serialized_observation(
+    behavior: VulkanPlacementBehaviorIdentity,
+    duration_ns: u64,
+) -> VulkanPlacementCalibrationObservation {
+    let mut observation = hybrid_test_distributed_observation(behavior, duration_ns);
+    observation.execution_case.strategy = VulkanPlacementExecutionStrategy::Serialized;
+    observation.execution_case.shards.clear();
+    observation
+}
+
 fn hybrid_test_catalog(model: &VulkanResidentRuntimeModel) -> VulkanPlacementCalibrationCatalog {
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     let mut signatures = model
@@ -284,6 +294,52 @@ fn runtime_hybrid_planner_maps_compiler_signatures_to_every_component_instance()
         step,
         VulkanHybridScheduledStep::Region { execution_case, .. }
             if execution_case.owner_physical_device_id == "gpu0"
+    )));
+}
+
+#[test]
+fn runtime_hybrid_planner_ignores_unreplayable_serialized_regions() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let mut catalog = hybrid_test_catalog(&model);
+    let behaviors = catalog
+        .candidate_behaviors_for_compiled_execution(
+            &vulkan_runtime_placement_calibration_target_for_component(
+                &model,
+                &model.component_executions[0].component_id,
+                VulkanTargetedComponentExecutionPhase::Decode,
+            )
+            .unwrap()
+            .signature_id,
+            nerve_execution_contracts::ExecutionPhase::Decode,
+        )
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for behavior in behaviors {
+        catalog
+            .record_observation(hybrid_test_serialized_observation(behavior, 1))
+            .unwrap();
+    }
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+
+    let placement = plan_vulkan_runtime_hybrid_ordered_graph(
+        &model,
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+
+    assert!(placement.plan.steps.iter().all(|step| matches!(
+        step,
+        VulkanHybridScheduledStep::Region { execution_case, .. }
+            if execution_case.strategy != VulkanPlacementExecutionStrategy::Serialized
     )));
 }
 
