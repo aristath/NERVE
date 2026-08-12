@@ -140,7 +140,12 @@ fn plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         let behaviors = catalog
-            .candidate_behaviors_for_compiled_execution(&target.signature_id, execution_phase);
+            .candidate_behaviors_for_compiled_execution(&target.signature_id, execution_phase)
+            .into_iter()
+            .filter(|behavior| {
+                behavior.shape.activation_batch_width == phase.activation_batch_width()
+            })
+            .collect::<Vec<_>>();
         let [behavior] = behaviors.as_slice() else {
             return runtime_hybrid_error(format!(
                 "compiled component {component_id:?} has {} exact calibration behavior cohorts; expected one",
@@ -226,6 +231,95 @@ fn plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
         activation_batch_width,
         plan,
     })
+}
+
+pub fn vulkan_runtime_hybrid_phase_is_calibrated(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<bool, VulkanRuntimeHybridPlacementError> {
+    let execution_phase = runtime_hybrid_execution_phase(phase)?;
+    for component in runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+    {
+        let target = vulkan_runtime_placement_calibration_target_for_component(
+            runtime_model,
+            &component.component_id,
+            phase,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let behavior_count = catalog
+            .candidate_behaviors_for_compiled_execution(&target.signature_id, execution_phase)
+            .into_iter()
+            .filter(|behavior| {
+                behavior.shape.activation_batch_width == phase.activation_batch_width()
+            })
+            .count();
+        match behavior_count {
+            0 => return Ok(false),
+            1 => {}
+            count => {
+                return runtime_hybrid_error(format!(
+                    "compiled component {:?} has {count} exact calibration behavior cohorts for activation width {}",
+                    component.component_id,
+                    phase.activation_batch_width(),
+                ));
+            }
+        }
+    }
+    Ok(true)
+}
+
+pub fn vulkan_runtime_hybrid_calibrated_prefill_widths(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+) -> Result<Vec<usize>, VulkanRuntimeHybridPlacementError> {
+    let mut common_widths = None::<BTreeSet<usize>>;
+    for component in runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+    {
+        let target = vulkan_runtime_placement_calibration_target_for_component(
+            runtime_model,
+            &component.component_id,
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width: 2,
+            },
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let mut behavior_count_by_width = BTreeMap::<usize, usize>::new();
+        for behavior in catalog.candidate_behaviors_for_compiled_execution(
+            &target.signature_id,
+            nerve_execution_contracts::ExecutionPhase::Prefill,
+        ) {
+            *behavior_count_by_width
+                .entry(behavior.shape.activation_batch_width)
+                .or_default() += 1;
+        }
+        if let Some((width, count)) = behavior_count_by_width
+            .iter()
+            .find(|(_, count)| **count != 1)
+        {
+            return runtime_hybrid_error(format!(
+                "compiled component {:?} has {count} exact prefill behavior cohorts for activation width {width}",
+                component.component_id,
+            ));
+        }
+        let widths = behavior_count_by_width
+            .into_keys()
+            .filter(|width| *width >= 2)
+            .collect::<BTreeSet<_>>();
+        common_widths = Some(match common_widths {
+            None => widths,
+            Some(common) => common.intersection(&widths).copied().collect(),
+        });
+    }
+    Ok(common_widths.unwrap_or_default().into_iter().collect())
 }
 
 fn runtime_hybrid_physical_owners(

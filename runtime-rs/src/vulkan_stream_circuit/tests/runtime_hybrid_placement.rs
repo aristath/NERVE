@@ -557,3 +557,60 @@ fn runtime_hybrid_phase_set_keeps_decode_owners_while_optimizing_prefill() {
     assert!(physical_plan.component_device_pools.decode.is_empty());
     assert!(physical_plan.component_device_pools.prefill.is_empty());
 }
+
+#[test]
+fn runtime_hybrid_prefill_keeps_distinct_batch_width_cohorts() {
+    let mut model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    for execution in &mut model.component_executions {
+        let mut prefill_terminal = execution.kernels.last().unwrap().clone();
+        prefill_terminal.execution_index += 1;
+        prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
+        prefill_terminal.execution_domain =
+            VulkanResidentComponentKernelExecutionDomain::Prefill;
+        execution.kernels.push(prefill_terminal);
+    }
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    for width in [4, 8] {
+        record_hybrid_phase_candidates(
+            &model,
+            &mut catalog,
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width: width,
+            },
+            10,
+            20,
+        );
+    }
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+
+    assert_eq!(
+        vulkan_runtime_hybrid_calibrated_prefill_widths(&model, &catalog).unwrap(),
+        [4, 8]
+    );
+    assert!(
+        vulkan_runtime_hybrid_phase_is_calibrated(
+            &model,
+            &catalog,
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width: 4,
+            },
+        )
+        .unwrap()
+    );
+    let placement = plan_vulkan_runtime_hybrid_ordered_graph(
+        &model,
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 4,
+        },
+    )
+    .unwrap();
+    assert_eq!(placement.activation_batch_width, 4);
+}
