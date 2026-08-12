@@ -607,6 +607,13 @@ mod selected_resource_placement_tests {
                 .map(|index| format!("expert_{index}"))
                 .collect(),
             atomic_group_byte_counts: vec![10; resource_count],
+            atomic_group_resource_ids: (0..resource_count)
+                .map(|index| vec![format!("resource_{index}_0"), format!("resource_{index}_1")])
+                .collect(),
+            parameter_resource_ids: (0..resource_count)
+                .map(|index| vec![format!("resource_{index}_0"), format!("resource_{index}_1")])
+                .collect(),
+            parameter_resource_byte_counts: vec![vec![5, 5]; resource_count],
         }
     }
 

@@ -584,6 +584,14 @@ fn plan_contract_dispatch(
                 } else {
                     BTreeMap::new()
                 },
+                selected_resource_fragments: selected_resource_fragments_for_shard(
+                    dispatch,
+                    contract.strategy,
+                    &selected_resource_partitions,
+                    logical_extent,
+                    logical_start,
+                    logical_count,
+                )?,
                 row_start: logical_start,
                 row_count: logical_count,
                 workgroup_count_x,
@@ -831,6 +839,10 @@ fn resolve_selected_resource_partitions(
                 ));
             }
             let mut atomic_group_byte_counts = Vec::with_capacity(atomic_group_ids.len());
+            let mut atomic_group_resource_ids = Vec::with_capacity(atomic_group_ids.len());
+            let mut parameter_resource_ids = Vec::with_capacity(atomic_group_ids.len());
+            let mut parameter_resource_byte_counts =
+                Vec::with_capacity(atomic_group_ids.len());
             for (selector_index, group_id) in atomic_group_ids.iter().enumerate() {
                 let group = groups.get(group_id.as_str()).ok_or_else(|| {
                     dispatch_error(
@@ -845,6 +857,8 @@ fn resolve_selected_resource_partitions(
                     ));
                 }
                 let group_resources = group.resource_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+                let mut slot_resource_ids = Vec::with_capacity(parameters_per_resource);
+                let mut slot_resource_byte_counts = Vec::with_capacity(parameters_per_resource);
                 for parameter_slot in 0..parameters_per_resource {
                     let Some((binding_group_id, resource_id)) =
                         bindings.get(&(selector_index, parameter_slot))
@@ -864,6 +878,16 @@ fn resolve_selected_resource_partitions(
                             ),
                         ));
                     }
+                    let resource = resources.get(resource_id).ok_or_else(|| {
+                        dispatch_error(
+                            dispatch,
+                            format!("selected parameter slot references missing resource {resource_id:?}"),
+                        )
+                    })?;
+                    slot_resource_ids.push((*resource_id).to_string());
+                    slot_resource_byte_counts.push(resource.source_byte_count().map_err(|error| {
+                        dispatch_error(dispatch, error.to_string())
+                    })?);
                 }
                 let group_bytes = group.resource_ids.iter().try_fold(0usize, |total, resource_id| {
                     let resource = resources.get(resource_id.as_str()).ok_or_else(|| {
@@ -883,6 +907,9 @@ fn resolve_selected_resource_partitions(
                     })
                 })?;
                 atomic_group_byte_counts.push(group_bytes);
+                atomic_group_resource_ids.push(group.resource_ids.clone());
+                parameter_resource_ids.push(slot_resource_ids);
+                parameter_resource_byte_counts.push(slot_resource_byte_counts);
             }
             Ok(VulkanDistributedSelectedResourcePartitionPlan {
                 execution_scope: execution_scope.to_string(),
@@ -902,9 +929,155 @@ fn resolve_selected_resource_partitions(
                     .selection_count_per_activation,
                 atomic_group_ids: atomic_group_ids.clone(),
                 atomic_group_byte_counts,
+                atomic_group_resource_ids,
+                parameter_resource_ids,
+                parameter_resource_byte_counts,
             })
         })
         .collect()
+}
+
+fn selected_resource_fragments_for_shard(
+    dispatch: &VulkanPreparedDispatch,
+    strategy: nerve_execution_contracts::ExecutionStrategy,
+    partitions: &[VulkanDistributedSelectedResourcePartitionPlan],
+    logical_extent: usize,
+    logical_start: usize,
+    logical_count: usize,
+) -> Result<
+    BTreeMap<String, Vec<VulkanDistributedSelectedResourceFragmentPlan>>,
+    VulkanDistributedPlanError,
+> {
+    if strategy != nerve_execution_contracts::ExecutionStrategy::TensorParallelExpert {
+        return Ok(BTreeMap::new());
+    }
+    let mut result = BTreeMap::new();
+    for partition in partitions {
+        if partition.parameter_partitions.is_empty()
+            || partition.atomic_group_ids.len() != partition.resource_count
+            || partition.atomic_group_resource_ids.len() != partition.resource_count
+            || partition.parameter_resource_ids.len() != partition.resource_count
+            || partition.parameter_resource_byte_counts.len() != partition.resource_count
+        {
+            return Err(dispatch_error(
+                dispatch,
+                format!(
+                    "selector {:?} has no complete fragmentable resource layout",
+                    partition.selector_id
+                ),
+            ));
+        }
+        let parameter_partition_by_slot = partition
+            .parameter_partitions
+            .iter()
+            .map(|parameter| (parameter.parameter_slot, parameter))
+            .collect::<BTreeMap<_, _>>();
+        let mut fragments = Vec::with_capacity(partition.resource_count);
+        for resource_index in 0..partition.resource_count {
+            let resource_ids = &partition.parameter_resource_ids[resource_index];
+            let resource_byte_counts =
+                &partition.parameter_resource_byte_counts[resource_index];
+            if resource_ids.len() != partition.parameters_per_resource
+                || resource_byte_counts.len() != partition.parameters_per_resource
+            {
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "selector {:?} resource {resource_index} has an incomplete parameter layout",
+                        partition.selector_id
+                    ),
+                ));
+            }
+            let mut parameters = Vec::with_capacity(partition.parameters_per_resource);
+            for parameter_slot in 0..partition.parameters_per_resource {
+                let resource_byte_count = resource_byte_counts[parameter_slot];
+                let (byte_offset, byte_count) =
+                    if let Some(parameter) = parameter_partition_by_slot.get(&parameter_slot) {
+                        if parameter.kind != ParameterPartitionKind::Contiguous
+                            || parameter.logical_elements_per_index == 0
+                            || !logical_extent
+                                .is_multiple_of(parameter.logical_elements_per_index)
+                            || !logical_start
+                                .is_multiple_of(parameter.logical_elements_per_index)
+                            || !logical_count
+                                .is_multiple_of(parameter.logical_elements_per_index)
+                        {
+                            return Err(dispatch_error(
+                                dispatch,
+                                format!(
+                                    "selector {:?} parameter slot {parameter_slot} has unsupported fragment geometry",
+                                    partition.selector_id
+                                ),
+                            ));
+                        }
+                        let physical_extent =
+                            logical_extent / parameter.logical_elements_per_index;
+                        if physical_extent == 0
+                            || !resource_byte_count.is_multiple_of(physical_extent)
+                        {
+                            return Err(dispatch_error(
+                                dispatch,
+                                format!(
+                                    "selector {:?} parameter slot {parameter_slot} cannot be divided into its declared physical extent",
+                                    partition.selector_id
+                                ),
+                            ));
+                        }
+                        let bytes_per_physical_index = resource_byte_count / physical_extent;
+                        let physical_start =
+                            logical_start / parameter.logical_elements_per_index;
+                        let physical_count =
+                            logical_count / parameter.logical_elements_per_index;
+                        (
+                            physical_start.checked_mul(bytes_per_physical_index),
+                            physical_count.checked_mul(bytes_per_physical_index),
+                        )
+                    } else {
+                        (Some(0), Some(resource_byte_count))
+                    };
+                let (Some(byte_offset), Some(byte_count)) = (byte_offset, byte_count) else {
+                    return Err(dispatch_error(
+                        dispatch,
+                        "selected resource parameter fragment range overflowed".to_string(),
+                    ));
+                };
+                if byte_count == 0
+                    || byte_offset
+                        .checked_add(byte_count)
+                        .is_none_or(|end| end > resource_byte_count)
+                {
+                    return Err(dispatch_error(
+                        dispatch,
+                        "selected resource parameter fragment escapes its resource".to_string(),
+                    ));
+                }
+                parameters.push(VulkanDistributedSelectedResourceParameterFragmentPlan {
+                    parameter_slot,
+                    resource_id: resource_ids[parameter_slot].clone(),
+                    resource_byte_count,
+                    byte_offset,
+                    byte_count,
+                });
+            }
+            fragments.push(VulkanDistributedSelectedResourceFragmentPlan {
+                resource_index,
+                atomic_group_id: partition.atomic_group_ids[resource_index].clone(),
+                logical_start,
+                logical_count,
+                parameters,
+            });
+        }
+        if result
+            .insert(partition.selector_id.clone(), fragments)
+            .is_some()
+        {
+            return Err(dispatch_error(
+                dispatch,
+                "selected resource fragment selectors are not unique".to_string(),
+            ));
+        }
+    }
+    Ok(result)
 }
 
 fn validate_contract_descriptor_coverage(

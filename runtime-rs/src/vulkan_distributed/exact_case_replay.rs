@@ -231,6 +231,7 @@ fn replay_exact_distributed_component_case(
             ));
         }
         let distribution = exact_distribution_name(dispatch.distribution);
+        let selected_resource_partitions = dispatch.selected_resource_partitions.clone();
         for (runtime_shard, exact_shard) in dispatch.shards.iter_mut().zip(exact_shards) {
             let runtime_identity = device_execution_identity_by_logical_device
                 .get(&runtime_shard.device_id)
@@ -255,29 +256,38 @@ fn replay_exact_distributed_component_case(
                     "exact case for {component_id:?} dispatch {dispatch_ordinal} does not match its compiled shard geometry",
                 ));
             }
-            let expected_partition_ordinals =
-                0..dispatch.selected_resource_partitions.len();
-            if exact_shard
+            let runtime_fragments = exact_runtime_selected_resource_fragments(
+                &selected_resource_partitions,
+                runtime_shard,
+            )?;
+            let mut exact_partition_ordinals = exact_shard
                 .selected_resource_indices_by_partition
                 .keys()
+                .chain(exact_shard.selected_resource_fragments_by_partition.keys())
                 .copied()
-                .ne(expected_partition_ordinals)
+                .collect::<Vec<_>>();
+            exact_partition_ordinals.sort_unstable();
+            exact_partition_ordinals.dedup();
+            if exact_partition_ordinals
+                .into_iter()
+                .ne(0..selected_resource_partitions.len())
+                || exact_shard.selected_resource_fragments_by_partition != runtime_fragments
             {
                 return exact_case_error(format!(
-                    "exact case for {component_id:?} dispatch {dispatch_ordinal} does not identify every selected-resource partition ordinal",
+                    "exact case for {component_id:?} dispatch {dispatch_ordinal} does not match every selected-resource partition fragment",
                 ));
             }
-            runtime_shard.selected_resource_indices = dispatch
-                .selected_resource_partitions
+            runtime_shard.selected_resource_indices = selected_resource_partitions
                 .iter()
                 .enumerate()
-                .map(|(partition_ordinal, partition)| {
-                    (
+                .filter_map(|(partition_ordinal, partition)| {
+                    exact_shard
+                        .selected_resource_indices_by_partition
+                        .get(&partition_ordinal)
+                        .map(|indices| (
                         partition.selector_id.clone(),
-                        exact_shard.selected_resource_indices_by_partition
-                            [&partition_ordinal]
-                            .clone(),
-                    )
+                        indices.clone(),
+                    ))
                 })
                 .collect();
             consumed_exact_shards += 1;
@@ -303,6 +313,51 @@ fn validate_exact_selected_resource_coverage(
     dispatch_ordinal: usize,
 ) -> Result<(), VulkanDistributedPlanError> {
     for partition in &dispatch.selected_resource_partitions {
+        if !partition.parameter_partitions.is_empty() {
+            if dispatch.shards.iter().any(|shard| {
+                !shard.selected_resource_indices.is_empty()
+                    || !shard
+                        .selected_resource_fragments
+                        .contains_key(&partition.selector_id)
+            }) {
+                return exact_case_error(format!(
+                    "exact case for {component_id:?} dispatch {dispatch_ordinal} mixes whole-resource and fragment ownership for selector {:?}",
+                    partition.selector_id,
+                ));
+            }
+            for resource_index in 0..partition.resource_count {
+                let mut logical_ranges = dispatch
+                    .shards
+                    .iter()
+                    .filter_map(|shard| {
+                        shard.selected_resource_fragments[&partition.selector_id]
+                            .iter()
+                            .find(|fragment| fragment.resource_index == resource_index)
+                            .map(|fragment| (fragment.logical_start, fragment.logical_count))
+                    })
+                    .collect::<Vec<_>>();
+                logical_ranges.sort_unstable();
+                let mut frontier = 0usize;
+                for (start, count) in logical_ranges {
+                    if start != frontier {
+                        return exact_case_error(format!(
+                            "exact case for {component_id:?} dispatch {dispatch_ordinal} leaves a fragmented selector gap for resource {resource_index}",
+                        ));
+                    }
+                    frontier = frontier.checked_add(count).ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "exact selected-resource fragment coverage overflowed".to_string(),
+                        )
+                    })?;
+                }
+                if frontier != dispatch.output_rows {
+                    return exact_case_error(format!(
+                        "exact case for {component_id:?} dispatch {dispatch_ordinal} does not cover the full fragment extent for resource {resource_index}",
+                    ));
+                }
+            }
+            continue;
+        }
         let mut owners = vec![0usize; partition.resource_count];
         for shard in &dispatch.shards {
             let indices = shard
@@ -332,6 +387,60 @@ fn validate_exact_selected_resource_coverage(
         }
     }
     Ok(())
+}
+
+fn exact_runtime_selected_resource_fragments(
+    selected_resource_partitions: &[VulkanDistributedSelectedResourcePartitionPlan],
+    shard: &VulkanDistributedDispatchShard,
+) -> Result<
+    BTreeMap<usize, Vec<crate::vulkan_stream_circuit::VulkanPlacementSelectedResourceFragmentIdentity>>,
+    VulkanDistributedPlanError,
+> {
+    let known_selectors = selected_resource_partitions
+        .iter()
+        .map(|partition| partition.selector_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if shard
+        .selected_resource_fragments
+        .keys()
+        .any(|selector| !known_selectors.contains(selector.as_str()))
+    {
+        return exact_case_error("runtime shard references an unknown selected-resource fragment");
+    }
+    Ok(selected_resource_partitions
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, partition)| {
+            shard
+                .selected_resource_fragments
+                .get(&partition.selector_id)
+                .map(|fragments| {
+                    (
+                        ordinal,
+                        fragments
+                            .iter()
+                            .map(|fragment| {
+                                crate::vulkan_stream_circuit::VulkanPlacementSelectedResourceFragmentIdentity {
+                                    resource_index: fragment.resource_index,
+                                    atomic_group_id: fragment.atomic_group_id.clone(),
+                                    logical_start: fragment.logical_start,
+                                    logical_count: fragment.logical_count,
+                                    parameters: fragment.parameters.iter().map(|parameter| {
+                                        crate::vulkan_stream_circuit::VulkanPlacementSelectedResourceParameterFragmentIdentity {
+                                            parameter_slot: parameter.parameter_slot,
+                                            resource_id: parameter.resource_id.clone(),
+                                            resource_byte_count: parameter.resource_byte_count,
+                                            byte_offset: parameter.byte_offset,
+                                            byte_count: parameter.byte_count,
+                                        }
+                                    }).collect(),
+                                }
+                            })
+                            .collect(),
+                    )
+                })
+        })
+        .collect())
 }
 
 fn validate_exact_case_transport(
@@ -445,6 +554,7 @@ mod exact_case_replay_tests {
                 "selector".to_string(),
                 resources.to_vec(),
             )]),
+            selected_resource_fragments: BTreeMap::new(),
             row_start,
             row_count: 2,
             workgroup_count_x: 1,
@@ -493,6 +603,13 @@ mod exact_case_replay_tests {
                 selection_count_per_activation: 2,
                 atomic_group_ids: (0..4).map(|index| format!("expert-{index}")).collect(),
                 atomic_group_byte_counts: vec![8; 4],
+                atomic_group_resource_ids: (0..4)
+                    .map(|index| vec![format!("resource-{index}-0"), format!("resource-{index}-1")])
+                    .collect(),
+                parameter_resource_ids: (0..4)
+                    .map(|index| vec![format!("resource-{index}-0"), format!("resource-{index}-1")])
+                    .collect(),
+                parameter_resource_byte_counts: vec![vec![4, 4]; 4],
             }],
             owner_residency_requirements: Vec::new(),
             input_byte_capacity: 16,
@@ -527,6 +644,7 @@ mod exact_case_replay_tests {
             logical_start: row_start,
             logical_count: 2,
             selected_resource_indices_by_partition: BTreeMap::from([(0, resources.to_vec())]),
+            selected_resource_fragments_by_partition: BTreeMap::new(),
             parameter_bytes: 0,
         };
         VulkanPlacementExecutionCaseIdentity {
@@ -789,5 +907,57 @@ mod exact_case_replay_tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("different physical execution strategy"));
+    }
+
+    #[test]
+    fn exact_fragment_coverage_requires_every_resource_and_no_gaps() {
+        let mut dispatch = dispatch();
+        dispatch.execution_strategy = nerve_execution_contracts::ExecutionStrategy::TensorParallelExpert;
+        dispatch.selected_resource_partitions[0].parameter_partitions = vec![
+            VulkanDistributedSelectedResourceParameterPartitionPlan {
+                parameter_slot: 0,
+                dimension: 0,
+                kind: nerve_execution_contracts::ParameterPartitionKind::Contiguous,
+                alignment_elements: 1,
+                logical_elements_per_index: 1,
+            },
+        ];
+        dispatch.output_rows = 4;
+        for shard in &mut dispatch.shards {
+            shard.selected_resource_indices.clear();
+            shard.selected_resource_fragments = BTreeMap::from([(
+                "selector".to_string(),
+                (0..4)
+                    .map(|resource_index| VulkanDistributedSelectedResourceFragmentPlan {
+                        resource_index,
+                        atomic_group_id: format!("expert-{resource_index}"),
+                        logical_start: shard.row_start,
+                        logical_count: shard.row_count,
+                        parameters: vec![
+                            VulkanDistributedSelectedResourceParameterFragmentPlan {
+                                parameter_slot: 0,
+                                resource_id: format!("resource-{resource_index}-0"),
+                                resource_byte_count: 4,
+                                byte_offset: shard.row_start,
+                                byte_count: shard.row_count,
+                            },
+                        ],
+                    })
+                    .collect(),
+            )]);
+        }
+        validate_exact_selected_resource_coverage(&dispatch, "moe", 0).unwrap();
+
+        dispatch.shards[1]
+            .selected_resource_fragments
+            .get_mut("selector")
+            .unwrap()[0]
+            .logical_start = 3;
+        assert!(
+            validate_exact_selected_resource_coverage(&dispatch, "moe", 0)
+                .unwrap_err()
+                .to_string()
+                .contains("gap")
+        );
     }
 }

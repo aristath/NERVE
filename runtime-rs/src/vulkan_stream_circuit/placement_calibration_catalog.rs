@@ -1,5 +1,5 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v6";
+    "nerve.vulkan_placement_calibration_catalog.v7";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -124,7 +124,27 @@ pub struct VulkanPlacementShardIdentity {
     /// be used to replay one equivalent compiled transaction at another
     /// component instance.
     pub selected_resource_indices_by_partition: BTreeMap<usize, Vec<usize>>,
+    pub selected_resource_fragments_by_partition:
+        BTreeMap<usize, Vec<VulkanPlacementSelectedResourceFragmentIdentity>>,
     pub parameter_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VulkanPlacementSelectedResourceFragmentIdentity {
+    pub resource_index: usize,
+    pub atomic_group_id: String,
+    pub logical_start: usize,
+    pub logical_count: usize,
+    pub parameters: Vec<VulkanPlacementSelectedResourceParameterFragmentIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VulkanPlacementSelectedResourceParameterFragmentIdentity {
+    pub parameter_slot: usize,
+    pub resource_id: String,
+    pub resource_byte_count: usize,
+    pub byte_offset: usize,
+    pub byte_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -698,13 +718,10 @@ fn validate_observation(
                 || shard.participant_ordinal >= case.devices.len()
                 || shard.logical_count == 0
                 || (shard.parameter_bytes == 0
-                    && shard.selected_resource_indices_by_partition.is_empty())
+                    && shard.selected_resource_indices_by_partition.is_empty()
+                    && shard.selected_resource_fragments_by_partition.is_empty())
                 || shard.distribution.is_empty()
-                || !shard
-                    .selected_resource_indices_by_partition
-                    .keys()
-                    .copied()
-                    .eq(0..shard.selected_resource_indices_by_partition.len())
+                || !shard_selected_resource_partition_ordinals(shard)
                 || shard
                     .selected_resource_indices_by_partition
                     .iter()
@@ -712,6 +729,10 @@ fn validate_observation(
                         indices.is_empty()
                             || indices.windows(2).any(|pair| pair[0] >= pair[1])
                     })
+                || shard
+                    .selected_resource_fragments_by_partition
+                    .values()
+                    .any(|fragments| !valid_selected_resource_fragments(fragments))
         })
         || case.transports.iter().any(|route| {
             !devices.contains(route.source_physical_device_id.as_str())
@@ -726,6 +747,53 @@ fn validate_observation(
         ));
     }
     Ok(())
+}
+
+fn shard_selected_resource_partition_ordinals(shard: &VulkanPlacementShardIdentity) -> bool {
+    let mut ordinals = shard
+        .selected_resource_indices_by_partition
+        .keys()
+        .chain(shard.selected_resource_fragments_by_partition.keys())
+        .copied()
+        .collect::<Vec<_>>();
+    ordinals.sort_unstable();
+    ordinals.dedup();
+    ordinals.into_iter().eq(0..shard
+        .selected_resource_indices_by_partition
+        .len()
+        .checked_add(shard.selected_resource_fragments_by_partition.len())
+        .unwrap_or(usize::MAX))
+        && shard
+            .selected_resource_indices_by_partition
+            .keys()
+            .all(|ordinal| !shard.selected_resource_fragments_by_partition.contains_key(ordinal))
+}
+
+fn valid_selected_resource_fragments(
+    fragments: &[VulkanPlacementSelectedResourceFragmentIdentity],
+) -> bool {
+    !fragments.is_empty()
+        && fragments
+            .windows(2)
+            .all(|pair| pair[0].resource_index < pair[1].resource_index)
+        && fragments.iter().all(|fragment| {
+            !fragment.atomic_group_id.is_empty()
+                && fragment.logical_count > 0
+                && !fragment.parameters.is_empty()
+                && fragment
+                    .parameters
+                    .windows(2)
+                    .all(|pair| pair[0].parameter_slot < pair[1].parameter_slot)
+                && fragment.parameters.iter().all(|parameter| {
+                    !parameter.resource_id.is_empty()
+                        && parameter.resource_byte_count > 0
+                        && parameter.byte_count > 0
+                        && parameter
+                            .byte_offset
+                            .checked_add(parameter.byte_count)
+                            .is_some_and(|end| end <= parameter.resource_byte_count)
+                })
+        })
 }
 
 fn is_strictly_sorted<T: Ord>(items: &[T]) -> bool {
@@ -801,6 +869,7 @@ mod placement_calibration_catalog_tests {
                     logical_start: 0,
                     logical_count: 8,
                     selected_resource_indices_by_partition: BTreeMap::new(),
+                    selected_resource_fragments_by_partition: BTreeMap::new(),
                     parameter_bytes: 16,
                 }],
                 input_physical_device_id: "gpu0".to_string(),
@@ -893,6 +962,51 @@ mod placement_calibration_catalog_tests {
             .selected_resource_indices_by_partition
             .insert(1, indices);
         assert!(catalog.record_observation(skipped_partition).is_err());
+    }
+
+    #[test]
+    fn selected_resource_fragment_identity_is_exact_and_bounded() {
+        let mut selected = observation(behavior(), "gpu0", "gpu0", 100, 16);
+        selected.execution_case.strategy =
+            VulkanPlacementExecutionStrategy::IntraExpertTensorParallel;
+        selected.execution_case.shards[0].distribution = "output_rows".to_string();
+        selected.execution_case.shards[0].parameter_bytes = 0;
+        selected.execution_case.shards[0].selected_resource_fragments_by_partition =
+            BTreeMap::from([(
+                0,
+                vec![VulkanPlacementSelectedResourceFragmentIdentity {
+                    resource_index: 0,
+                    atomic_group_id: "expert-0".to_string(),
+                    logical_start: 0,
+                    logical_count: 4,
+                    parameters: vec![
+                        VulkanPlacementSelectedResourceParameterFragmentIdentity {
+                            parameter_slot: 0,
+                            resource_id: "weight-0".to_string(),
+                            resource_byte_count: 16,
+                            byte_offset: 0,
+                            byte_count: 8,
+                        },
+                    ],
+                }],
+            )]);
+        let mut catalog = catalog_with_reference();
+        catalog.record_observation(selected.clone()).unwrap();
+
+        let mut escaped = selected.clone();
+        escaped.execution_case.shards[0]
+            .selected_resource_fragments_by_partition
+            .get_mut(&0)
+            .unwrap()[0]
+            .parameters[0]
+            .byte_count = 17;
+        assert!(catalog.record_observation(escaped).is_err());
+
+        let mut mixed = selected;
+        mixed.execution_case.shards[0]
+            .selected_resource_indices_by_partition
+            .insert(0, vec![0]);
+        assert!(catalog.record_observation(mixed).is_err());
     }
 
     #[test]

@@ -161,6 +161,7 @@ fn hybrid_test_distributed_observation(
                     logical_start: 0,
                     logical_count: 4,
                     selected_resource_indices_by_partition: BTreeMap::new(),
+                    selected_resource_fragments_by_partition: BTreeMap::new(),
                     parameter_bytes: 5,
                 },
                 VulkanPlacementShardIdentity {
@@ -171,6 +172,7 @@ fn hybrid_test_distributed_observation(
                     logical_start: 4,
                     logical_count: 4,
                     selected_resource_indices_by_partition: BTreeMap::new(),
+                    selected_resource_fragments_by_partition: BTreeMap::new(),
                     parameter_bytes: 5,
                 },
             ],

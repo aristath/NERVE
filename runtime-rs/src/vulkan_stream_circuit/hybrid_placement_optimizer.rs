@@ -647,6 +647,7 @@ mod hybrid_placement_optimizer_tests {
                 logical_start: index,
                 logical_count: 1,
                 selected_resource_indices_by_partition: BTreeMap::new(),
+                selected_resource_fragments_by_partition: BTreeMap::new(),
                 parameter_bytes: (*bytes).max(1),
             })
             .collect::<Vec<_>>();

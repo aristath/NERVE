@@ -827,6 +827,105 @@ mod tests {
     }
 
     #[test]
+    fn fragment_calibration_merges_exact_ranges_and_never_scales_them() {
+        let mut dispatch = fixture_plan("row_major").dispatches.remove(0);
+        dispatch.selected_resource_partitions =
+            vec![VulkanDistributedSelectedResourcePartitionPlan {
+                execution_scope: "target".to_string(),
+                selector_id: "experts".to_string(),
+                node_id: "router".to_string(),
+                domain_id: "experts".to_string(),
+                selection_signal: "routes".to_string(),
+                address_table_binding: 3,
+                parameter_slots_binding: 4,
+                resource_count: 1,
+                parameters_per_resource: 2,
+                parameter_partitions: vec![
+                    VulkanDistributedSelectedResourceParameterPartitionPlan {
+                        parameter_slot: 0,
+                        dimension: 0,
+                        kind: ParameterPartitionKind::Contiguous,
+                        alignment_elements: 1,
+                        logical_elements_per_index: 1,
+                    },
+                ],
+                selection_count_per_activation: 1,
+                atomic_group_ids: vec!["expert-0".to_string()],
+                atomic_group_byte_counts: vec![128],
+                atomic_group_resource_ids: vec![vec![
+                    "expert-0-weight".to_string(),
+                    "expert-0-metadata".to_string(),
+                ]],
+                parameter_resource_ids: vec![vec![
+                    "expert-0-weight".to_string(),
+                    "expert-0-metadata".to_string(),
+                ]],
+                parameter_resource_byte_counts: vec![vec![120, 8]],
+            }];
+        for shard in &mut dispatch.shards {
+            let byte_offset = 120 * shard.row_start / dispatch.output_rows;
+            let byte_count = 120 * shard.row_count / dispatch.output_rows;
+            shard.selected_resource_fragments.insert(
+                "experts".to_string(),
+                vec![VulkanDistributedSelectedResourceFragmentPlan {
+                    resource_index: 0,
+                    atomic_group_id: "expert-0".to_string(),
+                    logical_start: shard.row_start,
+                    logical_count: shard.row_count,
+                    parameters: vec![
+                        VulkanDistributedSelectedResourceParameterFragmentPlan {
+                            parameter_slot: 0,
+                            resource_id: "expert-0-weight".to_string(),
+                            resource_byte_count: 120,
+                            byte_offset,
+                            byte_count,
+                        },
+                        VulkanDistributedSelectedResourceParameterFragmentPlan {
+                            parameter_slot: 1,
+                            resource_id: "expert-0-metadata".to_string(),
+                            resource_byte_count: 8,
+                            byte_offset: 0,
+                            byte_count: 8,
+                        },
+                    ],
+                }],
+            );
+        }
+
+        let merged = merged_distributed_dispatch_shard(&dispatch).unwrap();
+        assert!(merged.selected_resource_indices.is_empty());
+        let fragment = &merged.selected_resource_fragments["experts"][0];
+        assert_eq!(fragment.logical_start, 0);
+        assert_eq!(fragment.logical_count, dispatch.output_rows);
+        assert_eq!(fragment.parameters[0].byte_offset, 0);
+        assert_eq!(fragment.parameters[0].byte_count, 120);
+        assert_eq!(fragment.parameters[1].byte_count, 8);
+
+        let source = dispatch.shards[0].clone();
+        let sampled =
+            sampled_distributed_dispatch_shard(&dispatch, &source, "calibration", 1, 100)
+                .unwrap();
+        assert_eq!(sampled.row_start, source.row_start);
+        assert_eq!(sampled.row_count, source.row_count);
+        assert_eq!(
+            sampled.selected_resource_fragments,
+            source.selected_resource_fragments
+        );
+
+        dispatch.shards[1]
+            .selected_resource_fragments
+            .get_mut("experts")
+            .unwrap()[0]
+            .logical_start += 1;
+        assert!(
+            merged_distributed_dispatch_shard(&dispatch)
+                .unwrap_err()
+                .to_string()
+                .contains("non-contiguous logical fragments")
+        );
+    }
+
+    #[test]
     fn expert_range_push_constants_include_start_and_count() {
         let mut expert_dispatch = fixture_plan("row_major").dispatches.remove(0);
         expert_dispatch.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
@@ -2119,6 +2218,103 @@ mod tests {
     }
 
     #[test]
+    fn plans_exact_fragments_for_every_selected_resource_on_each_tp_shard() {
+        let prepared = fixture_prepared_plan();
+        let dispatch = &prepared.dispatches[0];
+        let partition = VulkanDistributedSelectedResourcePartitionPlan {
+            execution_scope: "target".to_string(),
+            selector_id: "experts".to_string(),
+            node_id: "router".to_string(),
+            domain_id: "experts".to_string(),
+            selection_signal: "routes".to_string(),
+            address_table_binding: 3,
+            parameter_slots_binding: 4,
+            resource_count: 2,
+            parameters_per_resource: 3,
+            parameter_partitions: vec![
+                VulkanDistributedSelectedResourceParameterPartitionPlan {
+                    parameter_slot: 0,
+                    dimension: 0,
+                    kind: ParameterPartitionKind::Contiguous,
+                    alignment_elements: 16,
+                    logical_elements_per_index: 1,
+                },
+                VulkanDistributedSelectedResourceParameterPartitionPlan {
+                    parameter_slot: 1,
+                    dimension: 0,
+                    kind: ParameterPartitionKind::Contiguous,
+                    alignment_elements: 16,
+                    logical_elements_per_index: 1,
+                },
+            ],
+            selection_count_per_activation: 1,
+            atomic_group_ids: vec!["expert-0".to_string(), "expert-1".to_string()],
+            atomic_group_byte_counts: vec![1568, 1568],
+            atomic_group_resource_ids: (0..2)
+                .map(|expert| {
+                    (0..3)
+                        .map(|slot| format!("resource-{expert}-{slot}"))
+                        .collect()
+                })
+                .collect(),
+            parameter_resource_ids: (0..2)
+                .map(|expert| {
+                    (0..3)
+                        .map(|slot| format!("resource-{expert}-{slot}"))
+                        .collect()
+                })
+                .collect(),
+            parameter_resource_byte_counts: vec![vec![1024, 512, 32]; 2],
+        };
+
+        let first = selected_resource_fragments_for_shard(
+            dispatch,
+            ExecutionStrategy::TensorParallelExpert,
+            std::slice::from_ref(&partition),
+            128,
+            0,
+            64,
+        )
+        .unwrap();
+        let second = selected_resource_fragments_for_shard(
+            dispatch,
+            ExecutionStrategy::TensorParallelExpert,
+            std::slice::from_ref(&partition),
+            128,
+            64,
+            64,
+        )
+        .unwrap();
+        assert_eq!(first["experts"].len(), 2);
+        assert_eq!(second["experts"].len(), 2);
+        assert_eq!(first["experts"][0].parameters[0].byte_offset, 0);
+        assert_eq!(first["experts"][0].parameters[0].byte_count, 512);
+        assert_eq!(second["experts"][0].parameters[0].byte_offset, 512);
+        assert_eq!(second["experts"][0].parameters[0].byte_count, 512);
+        assert_eq!(first["experts"][1].parameters[1].byte_count, 256);
+        assert_eq!(second["experts"][1].parameters[1].byte_offset, 256);
+        assert_eq!(first["experts"][0].parameters[2].byte_offset, 0);
+        assert_eq!(first["experts"][0].parameters[2].byte_count, 32);
+        assert_eq!(second["experts"][0].parameters[2].byte_count, 32);
+
+        let mut indivisible = partition;
+        indivisible.parameter_resource_byte_counts[0][0] = 1025;
+        assert!(
+            selected_resource_fragments_for_shard(
+                dispatch,
+                ExecutionStrategy::TensorParallelExpert,
+                &[indivisible],
+                128,
+                0,
+                64,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be divided")
+        );
+    }
+
+    #[test]
     fn islands_contain_only_adjacent_dataflow_compatible_expert_dispatches() {
         let mut producer = fixture_plan("row_major").dispatches.remove(0);
         producer.dispatch_index = 7;
@@ -2259,6 +2455,13 @@ mod tests {
                 selection_count_per_activation: 2,
                 atomic_group_ids: (0..4).map(|index| format!("expert-{index}")).collect(),
                 atomic_group_byte_counts: vec![1024; 4],
+                atomic_group_resource_ids: (0..4)
+                    .map(|index| vec![format!("resource-{index}-0"), format!("resource-{index}-1")])
+                    .collect(),
+                parameter_resource_ids: (0..4)
+                    .map(|index| vec![format!("resource-{index}-0"), format!("resource-{index}-1")])
+                    .collect(),
+                parameter_resource_byte_counts: vec![vec![512, 512]; 4],
             }];
         let shard_count = producer.shards.len();
         for (shard_index, shard) in producer.shards.iter_mut().enumerate() {

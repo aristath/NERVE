@@ -496,6 +496,15 @@ fn distributed_calibration_execution_case(
                     &shard.selected_resource_indices,
                     &shard.device_id,
                 )?;
+            let selected_resource_fragments_by_partition =
+                distributed_calibration_normalized_selected_resource_fragments(
+                    dispatch
+                        .selected_resource_partitions
+                        .iter()
+                        .map(|partition| partition.selector_id.as_str()),
+                    &shard.selected_resource_fragments,
+                    &shard.device_id,
+                )?;
             shards.push(VulkanPlacementShardIdentity {
                 dispatch_ordinal,
                 participant_ordinal,
@@ -505,6 +514,7 @@ fn distributed_calibration_execution_case(
                 logical_start: shard.row_start,
                 logical_count: shard.row_count,
                 selected_resource_indices_by_partition,
+                selected_resource_fragments_by_partition,
                 parameter_bytes,
             });
         }
@@ -619,6 +629,63 @@ fn distributed_calibration_normalized_selected_resource_indices<'a>(
                         "distributed calibration shard on {device_id:?} has no ownership for partition ordinal {partition_ordinal}",
                     ))
                 })
+        })
+        .collect()
+}
+
+fn distributed_calibration_normalized_selected_resource_fragments<'a>(
+    selector_ids: impl Iterator<Item = &'a str>,
+    selected_resource_fragments: &BTreeMap<
+        String,
+        Vec<VulkanDistributedSelectedResourceFragmentPlan>,
+    >,
+    device_id: &str,
+) -> Result<
+    BTreeMap<usize, Vec<VulkanPlacementSelectedResourceFragmentIdentity>>,
+    VulkanResidentTokenModelPackageError,
+> {
+    let selector_ordinals = selector_ids.enumerate().collect::<BTreeMap<_, _>>();
+    let known_selectors = selector_ordinals
+        .values()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if selected_resource_fragments
+        .keys()
+        .any(|selector_id| !known_selectors.contains(selector_id.as_str()))
+    {
+        return distributed_calibration_error(format!(
+            "distributed calibration shard on {device_id:?} references an unknown selected-resource fragment selector",
+        ));
+    }
+    selector_ordinals
+        .into_iter()
+        .filter_map(|(partition_ordinal, selector_id)| {
+            let fragments = selected_resource_fragments.get(selector_id)?;
+            Some(Ok((
+                partition_ordinal,
+                fragments
+                    .iter()
+                    .map(|fragment| VulkanPlacementSelectedResourceFragmentIdentity {
+                        resource_index: fragment.resource_index,
+                        atomic_group_id: fragment.atomic_group_id.clone(),
+                        logical_start: fragment.logical_start,
+                        logical_count: fragment.logical_count,
+                        parameters: fragment
+                            .parameters
+                            .iter()
+                            .map(|parameter| {
+                                VulkanPlacementSelectedResourceParameterFragmentIdentity {
+                                    parameter_slot: parameter.parameter_slot,
+                                    resource_id: parameter.resource_id.clone(),
+                                    resource_byte_count: parameter.resource_byte_count,
+                                    byte_offset: parameter.byte_offset,
+                                    byte_count: parameter.byte_count,
+                                }
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            )))
         })
         .collect()
 }

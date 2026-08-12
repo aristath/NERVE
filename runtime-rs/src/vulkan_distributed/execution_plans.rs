@@ -726,11 +726,13 @@ fn merged_distributed_dispatch_shard(
             first.output_byte_count,
         ),
     };
+    let selected_resource_fragments = merged_selected_resource_fragments(dispatch)?;
     Ok(VulkanDistributedDispatchShard {
         device_id: first.device_id.clone(),
         selected_resource_indices: dispatch
             .selected_resource_partitions
             .iter()
+            .filter(|partition| partition.parameter_partitions.is_empty())
             .map(|partition| {
                 (
                     partition.selector_id.clone(),
@@ -738,6 +740,7 @@ fn merged_distributed_dispatch_shard(
                 )
             })
             .collect(),
+        selected_resource_fragments,
         row_start: first.row_start,
         row_count,
         workgroup_count_x,
@@ -748,6 +751,192 @@ fn merged_distributed_dispatch_shard(
         output_byte_count,
         parameters: parameters.into_values().collect(),
     })
+}
+
+fn merged_selected_resource_fragments(
+    dispatch: &VulkanDistributedDispatchPlan,
+) -> Result<
+    BTreeMap<String, Vec<VulkanDistributedSelectedResourceFragmentPlan>>,
+    VulkanDistributedPlanError,
+> {
+    let fragmented_selectors = dispatch
+        .selected_resource_partitions
+        .iter()
+        .filter(|partition| !partition.parameter_partitions.is_empty())
+        .map(|partition| partition.selector_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if dispatch.shards.iter().any(|shard| {
+        shard
+            .selected_resource_fragments
+            .keys()
+            .any(|selector| !fragmented_selectors.contains(selector.as_str()))
+    }) {
+        return Err(VulkanDistributedPlanError(format!(
+            "distributed dispatch {}.{} contains fragments for an undeclared selector",
+            dispatch.component_id, dispatch.node_id,
+        )));
+    }
+
+    let mut merged_by_selector = BTreeMap::new();
+    for partition in dispatch
+        .selected_resource_partitions
+        .iter()
+        .filter(|partition| !partition.parameter_partitions.is_empty())
+    {
+        let partitioned_slots = partition
+            .parameter_partitions
+            .iter()
+            .map(|parameter| parameter.parameter_slot)
+            .collect::<BTreeSet<_>>();
+        let mut merged_resources = Vec::with_capacity(partition.resource_count);
+        for resource_index in 0..partition.resource_count {
+            let mut source_fragments = dispatch
+                .shards
+                .iter()
+                .map(|shard| {
+                    let fragments = shard
+                        .selected_resource_fragments
+                        .get(&partition.selector_id)
+                        .ok_or_else(|| {
+                            VulkanDistributedPlanError(format!(
+                                "distributed dispatch {}.{} omits fragmented selector {:?} on device {:?}",
+                                dispatch.component_id,
+                                dispatch.node_id,
+                                partition.selector_id,
+                                shard.device_id,
+                            ))
+                        })?;
+                    let mut matching = fragments
+                        .iter()
+                        .filter(|fragment| fragment.resource_index == resource_index);
+                    let fragment = matching.next().ok_or_else(|| {
+                        VulkanDistributedPlanError(format!(
+                            "distributed selector {:?} omits resource {resource_index} on device {:?}",
+                            partition.selector_id, shard.device_id,
+                        ))
+                    })?;
+                    if matching.next().is_some() {
+                        return Err(VulkanDistributedPlanError(format!(
+                            "distributed selector {:?} duplicates resource {resource_index} on device {:?}",
+                            partition.selector_id, shard.device_id,
+                        )));
+                    }
+                    Ok(fragment)
+                })
+                .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
+            source_fragments.sort_by_key(|fragment| fragment.logical_start);
+            let leading = source_fragments[0];
+            if source_fragments.iter().any(|fragment| {
+                fragment.atomic_group_id != leading.atomic_group_id
+                    || fragment.parameters.len() != partition.parameters_per_resource
+            }) {
+                return Err(VulkanDistributedPlanError(format!(
+                    "distributed selector {:?} resource {resource_index} changes identity between fragments",
+                    partition.selector_id,
+                )));
+            }
+            let mut logical_frontier = 0usize;
+            for fragment in &source_fragments {
+                if fragment.logical_start != logical_frontier || fragment.logical_count == 0 {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "distributed selector {:?} resource {resource_index} has non-contiguous logical fragments",
+                        partition.selector_id,
+                    )));
+                }
+                logical_frontier = logical_frontier
+                    .checked_add(fragment.logical_count)
+                    .ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "merged selected-resource logical range overflowed".to_string(),
+                        )
+                    })?;
+            }
+            if logical_frontier != dispatch.output_rows {
+                return Err(VulkanDistributedPlanError(format!(
+                    "distributed selector {:?} resource {resource_index} covers {logical_frontier} logical rows, expected {}",
+                    partition.selector_id, dispatch.output_rows,
+                )));
+            }
+
+            let mut merged_parameters = Vec::with_capacity(partition.parameters_per_resource);
+            for parameter_slot in 0..partition.parameters_per_resource {
+                let source_parameters = source_fragments
+                    .iter()
+                    .map(|fragment| {
+                        fragment
+                            .parameters
+                            .iter()
+                            .find(|parameter| parameter.parameter_slot == parameter_slot)
+                            .ok_or_else(|| {
+                                VulkanDistributedPlanError(format!(
+                                    "distributed selector {:?} resource {resource_index} omits parameter slot {parameter_slot}",
+                                    partition.selector_id,
+                                ))
+                            })
+                    })
+                    .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
+                let first_parameter = source_parameters[0];
+                if source_parameters.iter().any(|parameter| {
+                    parameter.resource_id != first_parameter.resource_id
+                        || parameter.resource_byte_count != first_parameter.resource_byte_count
+                }) {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "distributed selector {:?} resource {resource_index} parameter slot {parameter_slot} changes identity between fragments",
+                        partition.selector_id,
+                    )));
+                }
+                if partitioned_slots.contains(&parameter_slot) {
+                    let mut byte_frontier = 0usize;
+                    for parameter in source_parameters {
+                        if parameter.byte_offset != byte_frontier || parameter.byte_count == 0 {
+                            return Err(VulkanDistributedPlanError(format!(
+                                "distributed selector {:?} resource {resource_index} parameter slot {parameter_slot} has non-contiguous byte fragments",
+                                partition.selector_id,
+                            )));
+                        }
+                        byte_frontier = byte_frontier.checked_add(parameter.byte_count).ok_or_else(
+                            || {
+                                VulkanDistributedPlanError(
+                                    "merged selected-resource parameter range overflowed"
+                                        .to_string(),
+                                )
+                            },
+                        )?;
+                    }
+                    if byte_frontier != first_parameter.resource_byte_count {
+                        return Err(VulkanDistributedPlanError(format!(
+                            "distributed selector {:?} resource {resource_index} parameter slot {parameter_slot} covers {byte_frontier} bytes, expected {}",
+                            partition.selector_id, first_parameter.resource_byte_count,
+                        )));
+                    }
+                    let mut merged = first_parameter.clone();
+                    merged.byte_offset = 0;
+                    merged.byte_count = byte_frontier;
+                    merged_parameters.push(merged);
+                } else {
+                    if source_parameters
+                        .iter()
+                        .any(|parameter| *parameter != first_parameter)
+                    {
+                        return Err(VulkanDistributedPlanError(format!(
+                            "distributed selector {:?} resource {resource_index} parameter slot {parameter_slot} changes an unpartitioned parameter between fragments",
+                            partition.selector_id,
+                        )));
+                    }
+                    merged_parameters.push(first_parameter.clone());
+                }
+            }
+            merged_resources.push(VulkanDistributedSelectedResourceFragmentPlan {
+                resource_index,
+                atomic_group_id: leading.atomic_group_id.clone(),
+                logical_start: 0,
+                logical_count: logical_frontier,
+                parameters: merged_parameters,
+            });
+        }
+        merged_by_selector.insert(partition.selector_id.clone(), merged_resources);
+    }
+    Ok(merged_by_selector)
 }
 
 fn sampled_distributed_dispatch_shard(
@@ -763,13 +952,14 @@ fn sampled_distributed_dispatch_shard(
             dispatch.component_id, dispatch.node_id,
         )));
     }
-    // A selector-owned expert shard is already the smallest behaviorally
-    // complete unit. Its shader still consumes the full router domain and
-    // skips resources absent from the participant-local address table.
-    // Scaling its logical range would describe work that the dispatch does
-    // not execute and would corrupt calibration identity/accounting.
-    if dispatch.distribution == VulkanDistributedDispatchDistribution::ExpertRange
-        && !source.selected_resource_indices.is_empty()
+    // Selected-resource ownership and fragment shards are behaviorally complete
+    // physical units. Whole-expert shaders consume the full router domain and
+    // skip absent resources; TP-expert shaders consume an exact declared
+    // fragment. Scaling either without rebuilding its resource contract would
+    // measure work that cannot be replayed by the runtime.
+    if (dispatch.distribution == VulkanDistributedDispatchDistribution::ExpertRange
+        && !source.selected_resource_indices.is_empty())
+        || !source.selected_resource_fragments.is_empty()
     {
         let mut exact = source.clone();
         exact.device_id = device_id.to_string();
@@ -877,6 +1067,7 @@ fn sampled_distributed_dispatch_shard(
     Ok(VulkanDistributedDispatchShard {
         device_id: device_id.to_string(),
         selected_resource_indices: source.selected_resource_indices.clone(),
+        selected_resource_fragments: source.selected_resource_fragments.clone(),
         row_start: source.row_start,
         row_count,
         workgroup_count_x,
@@ -1527,7 +1718,13 @@ fn selected_resource_expert_handoff(
                     == consumer_partition.parameter_partitions
                 && producer_partition.atomic_group_ids == consumer_partition.atomic_group_ids
                 && producer_partition.atomic_group_byte_counts
-                    == consumer_partition.atomic_group_byte_counts;
+                    == consumer_partition.atomic_group_byte_counts
+                && producer_partition.atomic_group_resource_ids
+                    == consumer_partition.atomic_group_resource_ids
+                && producer_partition.parameter_resource_ids
+                    == consumer_partition.parameter_resource_ids
+                && producer_partition.parameter_resource_byte_counts
+                    == consumer_partition.parameter_resource_byte_counts;
             if !selector_identity_matches {
                 return false;
             }
@@ -1804,6 +2001,9 @@ pub struct VulkanDistributedSelectedResourcePartitionPlan {
     pub selection_count_per_activation: usize,
     pub atomic_group_ids: Vec<String>,
     pub atomic_group_byte_counts: Vec<usize>,
+    pub atomic_group_resource_ids: Vec<Vec<String>>,
+    pub parameter_resource_ids: Vec<Vec<String>>,
+    pub parameter_resource_byte_counts: Vec<Vec<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -46,6 +46,9 @@ struct VulkanDistributedSelectedResourceSelectorIdentity {
     parameter_partitions: Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
     atomic_group_ids: Vec<String>,
     atomic_group_byte_counts: Vec<usize>,
+    atomic_group_resource_ids: Vec<Vec<String>>,
+    parameter_resource_ids: Vec<Vec<String>>,
+    parameter_resource_byte_counts: Vec<Vec<usize>>,
 }
 
 impl VulkanDistributedSelectedResourceStorePlan {
@@ -215,6 +218,11 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     parameter_partitions: partition.parameter_partitions.clone(),
                     atomic_group_ids: partition.atomic_group_ids.clone(),
                     atomic_group_byte_counts: partition.atomic_group_byte_counts.clone(),
+                    atomic_group_resource_ids: partition.atomic_group_resource_ids.clone(),
+                    parameter_resource_ids: partition.parameter_resource_ids.clone(),
+                    parameter_resource_byte_counts: partition
+                        .parameter_resource_byte_counts
+                        .clone(),
                 };
                 if let Some(existing) =
                     identities.insert(partition.selector_id.clone(), identity.clone())
@@ -430,6 +438,9 @@ fn validate_selected_resource_partition(
         || partition.selection_count_per_activation > partition.resource_count
         || partition.atomic_group_ids.len() != partition.resource_count
         || partition.atomic_group_byte_counts.len() != partition.resource_count
+        || partition.atomic_group_resource_ids.len() != partition.resource_count
+        || partition.parameter_resource_ids.len() != partition.resource_count
+        || partition.parameter_resource_byte_counts.len() != partition.resource_count
         || partition
             .atomic_group_ids
             .iter()
@@ -438,6 +449,25 @@ fn validate_selected_resource_partition(
             .atomic_group_byte_counts
             .iter()
             .any(|bytes| *bytes == 0)
+        || (0..partition.resource_count).any(|resource_index| {
+            partition.atomic_group_resource_ids[resource_index].is_empty()
+                || partition.parameter_resource_ids[resource_index].len()
+                    != partition.parameters_per_resource
+                || partition.parameter_resource_byte_counts[resource_index].len()
+                    != partition.parameters_per_resource
+                || partition.parameter_resource_ids[resource_index]
+                    .iter()
+                    .any(|resource_id| resource_id.trim().is_empty())
+                || partition.parameter_resource_byte_counts[resource_index]
+                    .iter()
+                    .any(|bytes| *bytes == 0)
+                || partition.parameter_resource_ids[resource_index]
+                    .iter()
+                    .any(|resource_id| {
+                        !partition.atomic_group_resource_ids[resource_index]
+                            .contains(resource_id)
+                    })
+        })
     {
         return Err(VulkanDistributedPlanError(format!(
             "distributed dispatch {}.{} has an invalid selected resource partition",
