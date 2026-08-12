@@ -427,8 +427,9 @@ impl VulkanPlacementCalibrationCatalog {
     }
 
     /// Returns candidates which are not dominated for the same physical graph
-    /// interface. Entry and exit placement remain in the partition key, so a
-    /// locally slower owner that removes a neighboring boundary is preserved.
+    /// interface. Entry, exit, and coordinator placement remain in the
+    /// partition key, so a locally slower owner that removes a neighboring
+    /// boundary or keeps owner state local is preserved.
     pub fn pareto_candidates(
         &self,
         behavior: &VulkanPlacementBehaviorIdentity,
@@ -443,6 +444,8 @@ impl VulkanPlacementCalibrationCatalog {
                         == candidate.execution_case.input_physical_device_id
                         && other.execution_case.output_physical_device_id
                             == candidate.execution_case.output_physical_device_id
+                        && other.execution_case.owner_physical_device_id
+                            == candidate.execution_case.owner_physical_device_id
                         && other.execution_case.devices == candidate.execution_case.devices
                         && observation_dominates(other, candidate)
                 })
@@ -1054,7 +1057,7 @@ mod placement_calibration_catalog_tests {
     }
 
     #[test]
-    fn pareto_frontier_removes_only_same_interface_resource_dominance() {
+    fn pareto_frontier_preserves_a_slower_candidate_with_a_different_owner() {
         let mut catalog = catalog_with_reference();
         catalog
             .record_observation(observation(behavior(), "gpu0", "gpu0", 10, 16))
@@ -1062,6 +1065,20 @@ mod placement_calibration_catalog_tests {
         catalog
             .record_observation(observation(behavior(), "gpu1", "gpu0", 12, 32))
             .unwrap();
+
+        let frontier = catalog.pareto_candidates(&behavior());
+        assert_eq!(frontier.len(), 2);
+    }
+
+    #[test]
+    fn pareto_frontier_removes_only_same_interface_resource_dominance() {
+        let mut catalog = catalog_with_reference();
+        catalog
+            .record_observation(observation(behavior(), "gpu0", "gpu0", 10, 16))
+            .unwrap();
+        let mut slower = observation(behavior(), "gpu0", "gpu0", 12, 32);
+        slower.execution_case.strategy = VulkanPlacementExecutionStrategy::Hybrid;
+        catalog.record_observation(slower).unwrap();
 
         let frontier = catalog.pareto_candidates(&behavior());
         assert_eq!(frontier.len(), 1);
@@ -1076,7 +1093,7 @@ mod placement_calibration_catalog_tests {
         two_calls.execution_case.strategy = VulkanPlacementExecutionStrategy::Hybrid;
         two_calls.measured_call_count = 2;
         two_calls.useful_activation_count = 2;
-        let one_call = observation(behavior.clone(), "gpu1", "gpu0", 10, 16);
+        let one_call = observation(behavior.clone(), "gpu0", "gpu0", 10, 16);
         catalog.record_observation(two_calls).unwrap();
         catalog.record_observation(one_call).unwrap();
 
