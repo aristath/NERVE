@@ -309,8 +309,12 @@ logical component as a measured single-device, serialized, tensor-parallel, or
 expert-parallel physical island. Decode owns the stable component backbone;
 prefill may use different measured helpers without remounting or changing the
 logical graph. Missing evidence makes that physical candidate unavailable,
-while corrupt or ambiguous evidence fails closed. The compact standalone GPU
-ranking is diagnostic evidence and is never consumed as an inference plan.
+while corrupt or ambiguous evidence fails closed. If unavailable or stale
+candidates leave no complete decode graph, normal chat preserves its validated
+capacity-packed placement; if only the constrained prefill solve is
+unavailable, decode remains exact and prefill stays on the stable decode-owned
+coordinators. The compact standalone GPU ranking is diagnostic evidence and is
+never consumed as an inference plan.
 
 ### Adding a representation provider
 

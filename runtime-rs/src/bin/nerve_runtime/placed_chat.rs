@@ -100,12 +100,18 @@ fn resolve_runtime_hybrid_physical_execution(
         available_bytes_by_device,
         host_available_bytes: vulkan_safe_host_available_bytes()?,
     };
-    let placement = plan_vulkan_runtime_hybrid_phase_set(
+    let Some(placement) = try_plan_vulkan_runtime_hybrid_phase_set(
         &runtime_model,
         &auto_placement.calibration_catalog,
         &capacity,
         prefill_width,
-    )?;
+    )?
+    else {
+        eprintln!(
+            "nerve runtime hybrid placement unavailable for the current exact device identities and capacity; preserving stable scalar/serialized placement"
+        );
+        return Ok((runtime_model, None));
+    };
     let logical_device_id_by_physical_device = bound_devices
         .physical_device_ids
         .iter()
@@ -125,13 +131,17 @@ fn resolve_runtime_hybrid_physical_execution(
         .prefill
         .as_ref()
         .map(|prefill| prefill.plan.predicted_duration_ns_per_activation);
+    let selected_prefill_width = placement
+        .prefill
+        .as_ref()
+        .map(|prefill| prefill.activation_batch_width);
     let (runtime_model, physical_execution_plan) = lower_vulkan_runtime_hybrid_phase_set(
         &runtime_model,
         &placement,
         &logical_device_id_by_physical_device,
     )?;
     eprintln!(
-        "nerve runtime hybrid placement: decode_predicted_ns_per_activation={decode_predicted_ns}, prefill_width={prefill_width:?}, prefill_predicted_ns_per_activation={prefill_predicted_ns:?}, devices={:?}",
+        "nerve runtime hybrid placement: decode_predicted_ns_per_activation={decode_predicted_ns}, prefill_width={selected_prefill_width:?}, prefill_predicted_ns_per_activation={prefill_predicted_ns:?}, devices={:?}",
         physical_execution_plan.device_ids(&runtime_model),
     );
     Ok((runtime_model, Some(physical_execution_plan)))

@@ -45,13 +45,19 @@ pub fn plan_vulkan_runtime_hybrid_ordered_graph(
     capacity: &VulkanPlacementCapacityEnvelope,
     phase: VulkanTargetedComponentExecutionPhase,
 ) -> Result<VulkanRuntimeHybridOrderedPlacement, VulkanRuntimeHybridPlacementError> {
-    plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+    try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
         runtime_model,
         catalog,
         capacity,
         phase,
         None,
-    )
+    )?
+    .ok_or_else(|| {
+        VulkanRuntimeHybridPlacementError(
+            "no exact measured runtime hybrid placement is available for the current devices and capacity"
+                .to_string(),
+        )
+    })
 }
 
 /// Chooses one persistent decode-owned backbone and then optimizes prefill
@@ -64,22 +70,56 @@ pub fn plan_vulkan_runtime_hybrid_phase_set(
     capacity: &VulkanPlacementCapacityEnvelope,
     prefill_activation_batch_width: Option<usize>,
 ) -> Result<VulkanRuntimeHybridPhaseSetPlacement, VulkanRuntimeHybridPlacementError> {
+    let phase_set = try_plan_vulkan_runtime_hybrid_phase_set(
+        runtime_model,
+        catalog,
+        capacity,
+        prefill_activation_batch_width,
+    )?
+    .ok_or_else(|| {
+        VulkanRuntimeHybridPlacementError(
+            "no exact measured runtime hybrid decode placement is available for the current devices and capacity"
+                .to_string(),
+        )
+    })?;
+    if prefill_activation_batch_width.is_some() && phase_set.prefill.is_none() {
+        return runtime_hybrid_error(
+            "no exact measured runtime hybrid prefill placement preserves the decode-owned backbone",
+        );
+    }
+    Ok(phase_set)
+}
+
+/// Attempts to select exact phase-local physical execution without making the
+/// optimization catalog a model-load dependency. Invalid or ambiguous evidence
+/// is still rejected. `None` means that valid evidence exists but no complete
+/// decode graph fits the current devices/capacity; an unavailable prefill
+/// cohort leaves decode selected and prefill on the stable coordinators.
+pub fn try_plan_vulkan_runtime_hybrid_phase_set(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    prefill_activation_batch_width: Option<usize>,
+) -> Result<Option<VulkanRuntimeHybridPhaseSetPlacement>, VulkanRuntimeHybridPlacementError> {
     if prefill_activation_batch_width.is_some_and(|width| width < 2) {
         return runtime_hybrid_error(
             "hybrid phase-set prefill requires a multi-lane activation batch width",
         );
     }
-    let decode = plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+    let Some(decode) = try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
         runtime_model,
         catalog,
         capacity,
         VulkanTargetedComponentExecutionPhase::Decode,
         None,
-    )?;
+    )?
+    else {
+        return Ok(None);
+    };
     let decode_owner_by_component = runtime_hybrid_physical_owners(&decode)?;
     let prefill = prefill_activation_batch_width
         .map(|activation_batch_width| {
-            plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+            try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
                 runtime_model,
                 catalog,
                 capacity,
@@ -89,17 +129,21 @@ pub fn plan_vulkan_runtime_hybrid_phase_set(
                 Some(&decode_owner_by_component),
             )
         })
-        .transpose()?;
-    Ok(VulkanRuntimeHybridPhaseSetPlacement { decode, prefill })
+        .transpose()?
+        .flatten();
+    Ok(Some(VulkanRuntimeHybridPhaseSetPlacement {
+        decode,
+        prefill,
+    }))
 }
 
-fn plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
     runtime_model: &VulkanResidentRuntimeModel,
     catalog: &VulkanPlacementCalibrationCatalog,
     capacity: &VulkanPlacementCapacityEnvelope,
     phase: VulkanTargetedComponentExecutionPhase,
     required_owner_by_component: Option<&BTreeMap<String, String>>,
-) -> Result<VulkanRuntimeHybridOrderedPlacement, VulkanRuntimeHybridPlacementError> {
+) -> Result<Option<VulkanRuntimeHybridOrderedPlacement>, VulkanRuntimeHybridPlacementError> {
     let execution_phase = runtime_hybrid_execution_phase(phase)?;
     let component_ids = runtime_model
         .circuit_graph
@@ -217,7 +261,7 @@ fn plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
         }
     }
 
-    let plan = plan_vulkan_hybrid_ordered_graph(
+    let plan = try_plan_vulkan_hybrid_ordered_graph(
         catalog,
         component_ids.len(),
         &region_candidates,
@@ -225,12 +269,12 @@ fn plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
         capacity,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    Ok(VulkanRuntimeHybridOrderedPlacement {
+    Ok(plan.map(|plan| VulkanRuntimeHybridOrderedPlacement {
         component_ids,
         execution_phase,
         activation_batch_width,
         plan,
-    })
+    }))
 }
 
 pub fn vulkan_runtime_hybrid_phase_is_calibrated(
@@ -341,11 +385,14 @@ fn runtime_hybrid_physical_owners(
                 "runtime hybrid phase set requires one physical case per component",
             );
         }
-        let component_id = placement.component_ids.get(*component_start).ok_or_else(|| {
-            VulkanRuntimeHybridPlacementError(
-                "runtime hybrid phase set contains an out-of-range component".to_string(),
-            )
-        })?;
+        let component_id = placement
+            .component_ids
+            .get(*component_start)
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(
+                    "runtime hybrid phase set contains an out-of-range component".to_string(),
+                )
+            })?;
         if owners
             .insert(
                 component_id.clone(),
@@ -371,7 +418,10 @@ pub fn lower_vulkan_runtime_hybrid_phase_set(
     placement: &VulkanRuntimeHybridPhaseSetPlacement,
     logical_device_id_by_physical_device: &BTreeMap<String, String>,
 ) -> Result<
-    (VulkanResidentRuntimeModel, VulkanRuntimePhysicalExecutionPlan),
+    (
+        VulkanResidentRuntimeModel,
+        VulkanRuntimePhysicalExecutionPlan,
+    ),
     VulkanRuntimeHybridPlacementError,
 > {
     let decode = lower_vulkan_runtime_hybrid_phase_placement(
@@ -408,8 +458,7 @@ pub fn lower_vulkan_runtime_hybrid_phase_set(
         ..VulkanRuntimePhysicalExecutionPlan::default()
     };
     if let Some(prefill) = prefill {
-        physical_execution_plan.component_device_pools.prefill =
-            prefill.component_device_pools;
+        physical_execution_plan.component_device_pools.prefill = prefill.component_device_pools;
         physical_execution_plan.prefill_execution_cases_by_component =
             prefill.execution_cases_by_component;
     }

@@ -138,11 +138,7 @@ fn record_hybrid_phase_candidates(
             ))
             .unwrap();
         catalog
-            .record_observation(hybrid_test_observation(
-                behavior,
-                "gpu1",
-                gpu1_duration_ns,
-            ))
+            .record_observation(hybrid_test_observation(behavior, "gpu1", gpu1_duration_ns))
             .unwrap();
     }
 }
@@ -483,8 +479,7 @@ fn runtime_hybrid_phase_set_keeps_decode_owners_while_optimizing_prefill() {
         let mut prefill_terminal = execution.kernels.last().unwrap().clone();
         prefill_terminal.execution_index += 1;
         prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
-        prefill_terminal.execution_domain =
-            VulkanResidentComponentKernelExecutionDomain::Prefill;
+        prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
         execution.kernels.push(prefill_terminal);
     }
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
@@ -512,30 +507,27 @@ fn runtime_hybrid_phase_set_keeps_decode_owners_while_optimizing_prefill() {
         host_available_bytes: 100,
     };
 
-    let phase_set = plan_vulkan_runtime_hybrid_phase_set(
-        &model,
-        &catalog,
-        &capacity,
-        Some(4),
-    )
-    .unwrap();
+    let phase_set =
+        plan_vulkan_runtime_hybrid_phase_set(&model, &catalog, &capacity, Some(4)).unwrap();
     assert!(phase_set.decode.plan.steps.iter().all(|step| matches!(
         step,
         VulkanHybridScheduledStep::Region { execution_case, .. }
             if execution_case.owner_physical_device_id == "gpu0"
     )));
-    assert!(phase_set
-        .prefill
-        .as_ref()
-        .unwrap()
-        .plan
-        .steps
-        .iter()
-        .all(|step| matches!(
-            step,
-            VulkanHybridScheduledStep::Region { execution_case, .. }
-                if execution_case.owner_physical_device_id == "gpu0"
-        )));
+    assert!(
+        phase_set
+            .prefill
+            .as_ref()
+            .unwrap()
+            .plan
+            .steps
+            .iter()
+            .all(|step| matches!(
+                step,
+                VulkanHybridScheduledStep::Region { execution_case, .. }
+                    if execution_case.owner_physical_device_id == "gpu0"
+            ))
+    );
 
     let bindings = BTreeMap::from([
         ("gpu0".to_string(), "logical0".to_string()),
@@ -543,19 +535,99 @@ fn runtime_hybrid_phase_set_keeps_decode_owners_while_optimizing_prefill() {
     ]);
     let (stable_model, physical_plan) =
         lower_vulkan_runtime_hybrid_phase_set(&model, &phase_set, &bindings).unwrap();
-    assert!(stable_model
-        .circuit_graph
-        .components
-        .iter()
-        .filter(|component| component.runtime_role.is_signal_processor())
-        .all(|component| stable_model
-            .placement
-            .device_for_component(&component.component_id)
-            == "logical0"));
+    assert!(
+        stable_model
+            .circuit_graph
+            .components
+            .iter()
+            .filter(|component| component.runtime_role.is_signal_processor())
+            .all(|component| stable_model
+                .placement
+                .device_for_component(&component.component_id)
+                == "logical0")
+    );
     assert_eq!(physical_plan.decode_execution_cases_by_component.len(), 3);
     assert_eq!(physical_plan.prefill_execution_cases_by_component.len(), 3);
     assert!(physical_plan.component_device_pools.decode.is_empty());
     assert!(physical_plan.component_device_pools.prefill.is_empty());
+}
+
+#[test]
+fn runtime_hybrid_try_phase_set_preserves_decode_when_prefill_cannot_keep_its_owners() {
+    let mut model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    for execution in &mut model.component_executions {
+        let mut prefill_terminal = execution.kernels.last().unwrap().clone();
+        prefill_terminal.execution_index += 1;
+        prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
+        prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
+        execution.kernels.push(prefill_terminal);
+    }
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    record_hybrid_phase_candidates(
+        &model,
+        &mut catalog,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        5,
+        10,
+    );
+    let mut prefill_signatures = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| {
+            vulkan_runtime_placement_calibration_target_for_component(
+                &model,
+                &component.component_id,
+                VulkanTargetedComponentExecutionPhase::Prefill {
+                    activation_batch_width: 4,
+                },
+            )
+            .unwrap()
+            .signature_id
+        })
+        .collect::<Vec<_>>();
+    prefill_signatures.sort();
+    prefill_signatures.dedup();
+    for signature in prefill_signatures {
+        let behavior = hybrid_test_behavior_for_phase(
+            &signature,
+            nerve_execution_contracts::ExecutionPhase::Prefill,
+            4,
+        );
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: behavior.clone(),
+                output_digest: "output".to_string(),
+                output_artifact: None,
+                state_digest: "state".to_string(),
+            })
+            .unwrap();
+        catalog
+            .record_observation(hybrid_test_observation(behavior, "gpu1", 1))
+            .unwrap();
+    }
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+
+    let phase_set = try_plan_vulkan_runtime_hybrid_phase_set(&model, &catalog, &capacity, Some(4))
+        .unwrap()
+        .unwrap();
+
+    assert!(phase_set.decode.plan.steps.iter().all(|step| matches!(
+        step,
+        VulkanHybridScheduledStep::Region { execution_case, .. }
+            if execution_case.owner_physical_device_id == "gpu0"
+    )));
+    assert!(phase_set.prefill.is_none());
+    let strict_error =
+        plan_vulkan_runtime_hybrid_phase_set(&model, &catalog, &capacity, Some(4)).unwrap_err();
+    assert!(strict_error.0.contains("prefill placement preserves"));
 }
 
 #[test]
@@ -565,8 +637,7 @@ fn runtime_hybrid_prefill_keeps_distinct_batch_width_cohorts() {
         let mut prefill_terminal = execution.kernels.last().unwrap().clone();
         prefill_terminal.execution_index += 1;
         prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
-        prefill_terminal.execution_domain =
-            VulkanResidentComponentKernelExecutionDomain::Prefill;
+        prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
         execution.kernels.push(prefill_terminal);
     }
     let mut catalog = VulkanPlacementCalibrationCatalog::default();

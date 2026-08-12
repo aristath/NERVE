@@ -83,12 +83,42 @@ pub fn plan_vulkan_hybrid_ordered_graph(
     boundary_candidates: &[VulkanHybridBoundaryCandidate],
     capacity: &VulkanPlacementCapacityEnvelope,
 ) -> Result<VulkanHybridPlacementPlan, VulkanHybridPlacementError> {
-    if component_count == 0 || region_candidates.is_empty() {
+    try_plan_vulkan_hybrid_ordered_graph(
+        catalog,
+        component_count,
+        region_candidates,
+        boundary_candidates,
+        capacity,
+    )?
+    .ok_or_else(|| {
+        VulkanHybridPlacementError(
+            "no exact measured hybrid placement covers the graph within current capacity"
+                .to_string(),
+        )
+    })
+}
+
+/// Returns `None` when all structurally valid, exactly measured candidates are
+/// unavailable for the current device identities, boundaries, or capacity.
+/// Invalid evidence remains an error. This distinction lets a product runtime
+/// preserve its valid single-device/serialized placement instead of treating a
+/// stale optional optimization catalog as a fatal model-load failure.
+pub fn try_plan_vulkan_hybrid_ordered_graph(
+    catalog: &VulkanPlacementCalibrationCatalog,
+    component_count: usize,
+    region_candidates: &[VulkanHybridRegionCandidate],
+    boundary_candidates: &[VulkanHybridBoundaryCandidate],
+    capacity: &VulkanPlacementCapacityEnvelope,
+) -> Result<Option<VulkanHybridPlacementPlan>, VulkanHybridPlacementError> {
+    if component_count == 0 {
         return Err(VulkanHybridPlacementError(
-            "hybrid placement requires a nonempty ordered graph and region candidates".to_string(),
+            "hybrid placement requires a nonempty ordered graph".to_string(),
         ));
     }
     validate_hybrid_capacity_envelope(capacity)?;
+    if region_candidates.is_empty() {
+        return Ok(None);
+    }
 
     let mut candidate_ids = BTreeSet::new();
     let mut expected_phase = None;
@@ -256,25 +286,22 @@ pub fn plan_vulkan_hybrid_ordered_graph(
         }
     }
 
-    let best = states_by_cursor
+    let Some(best) = states_by_cursor
         .pop()
         .expect("a state bucket exists for the graph terminus")
         .into_iter()
         .min_by(|left, right| {
             hybrid_state_ordering_key(left).cmp(&hybrid_state_ordering_key(right))
         })
-        .ok_or_else(|| {
-            VulkanHybridPlacementError(
-                "no exact measured hybrid placement covers the graph within current capacity"
-                    .to_string(),
-            )
-        })?;
-    Ok(VulkanHybridPlacementPlan {
+    else {
+        return Ok(None);
+    };
+    Ok(Some(VulkanHybridPlacementPlan {
         steps: best.steps,
         predicted_duration_ns_per_activation: best.predicted_duration_ns_per_activation,
         resident_bytes_by_device: best.resident_bytes_by_device,
         host_resident_bytes: best.host_resident_bytes,
-    })
+    }))
 }
 
 fn validate_hybrid_capacity_envelope(
@@ -1008,6 +1035,18 @@ mod hybrid_placement_optimizer_tests {
         ];
 
         assert!(
+            try_plan_vulkan_hybrid_ordered_graph(
+                &catalog,
+                2,
+                &candidates,
+                &[],
+                &capacity(2, 100, 100),
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        assert!(
             plan_vulkan_hybrid_ordered_graph(
                 &catalog,
                 2,
@@ -1018,6 +1057,18 @@ mod hybrid_placement_optimizer_tests {
             .unwrap_err()
             .0
                 .contains("no exact measured")
+        );
+
+        assert!(
+            try_plan_vulkan_hybrid_ordered_graph(
+                &catalog,
+                2,
+                &candidates,
+                &[],
+                &capacity(3, 100, 100),
+            )
+            .unwrap()
+            .is_none()
         );
 
         let boundary = record(&mut catalog, boundary_observation("gpu0", "gpu1", 7));
