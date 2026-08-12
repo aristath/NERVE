@@ -276,8 +276,10 @@ def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
         output_rows = int(intermediate_size) if stage == "gate_up" else int(hidden_size)
         tile_rows = 32 if stage == "gate_up" else 64
         operation = "compact" if stage == "gate_up" else "count"
+        parameters_per_resource = 4 if stage == "gate_up" else 2
         return (
-            f"moe_route_{operation}_batch1_i{intermediate_size}_"
+            f"moe_route_{operation}_selected_p{parameters_per_resource}_batch1_"
+            f"i{intermediate_size}_"
             f"k{experts_per_token}_t{(output_rows + tile_rows - 1) // tile_rows}.comp"
         )
     match = re.fullmatch(
@@ -314,7 +316,8 @@ def sparse_moe_route_scheduling_shader_file(shader_file: str) -> str | None:
 
 def sparse_moe_route_scheduling_workgroup_count_x(shader_file: str) -> int:
     match = re.fullmatch(
-        r"moe_route_(compact|count)_batch1_i\d+_k(\d+)_t\d+\.comp",
+        r"moe_route_(compact|count)(?:_selected_p\d+)?_batch1_"
+        r"i\d+_k(\d+)_t\d+\.comp",
         shader_file,
     )
     if match is None:
@@ -359,6 +362,19 @@ def sparse_moe_route_scheduling_descriptor_bindings(node: Json) -> list[Json]:
                 "binding": 2,
                 "source_binding": len(inputs),
             }
+        )
+    if node["op"] in {
+        "independent_sparse_moe_gate_up",
+        "independent_sparse_moe_down",
+    }:
+        # Independent resources are not required to form contiguous owner
+        # ranges after runtime placement. The scheduling stage consumes the
+        # same device-local dynamic tables as the projection and filters the
+        # routed worklist by exact resident ownership.
+        bindings.extend(
+            [
+                {"binding": 3, "source_binding": len(inputs) + 2},
+            ]
         )
     return bindings
 

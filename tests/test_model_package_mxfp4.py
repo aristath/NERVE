@@ -37,6 +37,21 @@ def _payload(path: Path) -> bytes:
     return data[8 + header_bytes :]
 
 
+def test_selected_resource_route_scheduler_rejects_empty_parameter_groups(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    with pytest.raises(
+        ModelCompileError,
+        match="selected-resource route scheduling requires parameter slots",
+    ):
+        copy_shader_templates(
+            shader_source_dir,
+            tmp_path,
+            {"moe_route_compact_selected_p0_batch1_i128_k1_t4.comp"},
+        )
+
+
 def test_packages_mxfp4_experts_as_independent_byte_exact_resources(
     tmp_path: Path,
 ) -> None:
@@ -272,10 +287,10 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     )
     assert is_sparse_moe_projection_shader(gate_batch_shader)
     assert sparse_moe_route_scheduling_shader_file(gate_shader) == (
-        "moe_route_compact_batch1_i128_k1_t4.comp"
+        "moe_route_compact_selected_p4_batch1_i128_k1_t4.comp"
     )
     assert sparse_moe_route_scheduling_shader_file(down_shader) == (
-        "moe_route_count_batch1_i128_k1_t2.comp"
+        "moe_route_count_selected_p2_batch1_i128_k1_t2.comp"
     )
     assert workgroup_count_x_for_node(circuit, gate, tensor_index) == 4
     assert workgroup_count_x_for_node(circuit, down, tensor_index) == 2
@@ -294,6 +309,34 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
         "resident_derivation": None,
         "selection": "fixed_source",
     }
+    gate_scheduler, gate_projection = gate_kernel["batch_implementations"][0]["stages"]
+    assert gate_scheduler["shader_path"] == (
+        "shaders/moe_route_compact_selected_p4_batch1_i128_k1_t4__pbc31.comp"
+    )
+    assert gate_scheduler["descriptor_bindings"] == [
+        {"binding": 1, "source_binding": 1},
+        {"binding": 2, "source_binding": 2},
+        {"binding": 3, "source_binding": 4},
+    ]
+    assert gate_projection["indirect_dispatch_byte_offset"] == 16
+
+    down_kernel = component_kernel_spec(
+        execution_index=1,
+        node=down,
+        circuit=circuit,
+        shader_file=down_shader,
+        local_size_x=512,
+        workgroup_count_x=2,
+    )
+    down_scheduler, down_projection = down_kernel["batch_implementations"][0]["stages"]
+    assert down_scheduler["shader_path"] == (
+        "shaders/moe_route_count_selected_p2_batch1_i128_k1_t2__pbc31.comp"
+    )
+    assert down_scheduler["descriptor_bindings"] == [
+        {"binding": 1, "source_binding": 1},
+        {"binding": 3, "source_binding": 4},
+    ]
+    assert down_projection["indirect_dispatch_byte_offset"] == 16
 
     tensors["expert_0.w1.weight"]["byte_count"] = hidden_size - 1
     with pytest.raises(ModelCompileError, match="incompatible MXFP4"):
@@ -319,6 +362,8 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
             adaptive_gate_batch_shader,
             adaptive_down_shader,
             adaptive_down_batch_shader,
+            "moe_route_compact_selected_p4_batch1_i128_k1_t4.comp",
+            "moe_route_count_selected_p2_batch1_i128_k1_t2.comp",
         },
     )
     gate_source = (tmp_path / gate_shader).read_text()
@@ -332,6 +377,12 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     adaptive_gate_batch_source = (tmp_path / adaptive_gate_batch_shader).read_text()
     adaptive_down_source = (tmp_path / adaptive_down_shader).read_text()
     adaptive_down_batch_source = (tmp_path / adaptive_down_batch_shader).read_text()
+    selected_compact_source = (
+        tmp_path / "moe_route_compact_selected_p4_batch1_i128_k1_t4.comp"
+    ).read_text()
+    selected_count_source = (
+        tmp_path / "moe_route_count_selected_p2_batch1_i128_k1_t2.comp"
+    ).read_text()
     assert "const uint DYNAMIC_PARAMETER_COUNT = 4u;" in gate_source
     assert "const uint DYNAMIC_PARAMETER_COUNT = 2u;" in down_source
     assert "const uint MXFP4_E4M3_BITS[8]" in gate_source
@@ -351,6 +402,11 @@ def test_renders_demand_addressed_native_mxfp4_expert_kernels(
     assert "route_index >= route_capacity" in gate_batch_source
     assert "bool dynamic_parameter_record_is_valid" in down_source
     assert "batch_control.owned_route_count" in gate_batch_source
+    assert "const uint PARAMETERS_PER_RESOURCE = 4u;" in selected_compact_source
+    assert "expert * PARAMETERS_PER_RESOURCE" in selected_compact_source
+    assert "!selected_resource_is_local(expert)" in selected_compact_source
+    assert "const uint PARAMETERS_PER_RESOURCE = 2u;" in selected_count_source
+    assert "&& selected_resource_is_local(expert)" in selected_count_source
     assert "batch_index * HIDDEN_WORDS" in gate_batch_source
     assert "readonly buffer QuantizedHidden" in prequant_gate_source
     assert "readonly buffer HiddenScales" in prequant_gate_source

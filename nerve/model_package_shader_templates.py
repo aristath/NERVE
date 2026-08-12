@@ -2,6 +2,7 @@ from nerve.model_package_common import *
 from nerve.model_package_shaders import *
 from nerve.model_package_sparse_projection_shaders import (
     render_sparse_moe_projection_shader,
+    render_sparse_moe_route_scheduler_shader,
 )
 from nerve.model_package_latent_compression import render_latent_compression_shader
 from nerve.model_package_tensors import *
@@ -5069,32 +5070,13 @@ if (
             },
         )
 
-    moe_route_schedule_shape = re.fullmatch(
-        r"moe_route_(compact|count)_batch1_i(\d+)_k(\d+)_t(\d+)\.comp",
+    sparse_route_scheduler = render_sparse_moe_route_scheduler_shader(
+        source_dir,
         shader_file,
+        render_shader_template,
     )
-    if moe_route_schedule_shape is not None:
-        operation = moe_route_schedule_shape.group(1)
-        intermediate_size, experts_per_token, tiles_per_route = map(
-            int, moe_route_schedule_shape.groups()[1:]
-        )
-        if intermediate_size <= 0 or intermediate_size % 2:
-            raise ModelCompileError(
-                "route-native sparse expert batching requires an even intermediate size"
-            )
-        if experts_per_token <= 0:
-            raise ModelCompileError(
-                "route-native sparse expert batching requires selected experts"
-            )
-        return render_shader_template(
-            source_dir,
-            f"moe_route_{operation}_batch1.comp.template",
-            {
-                "INTERMEDIATE_SIZE": str(intermediate_size),
-                "EXPERTS_PER_TOKEN": str(experts_per_token),
-                "TILES_PER_ROUTE": str(tiles_per_route),
-            },
-        )
+    if sparse_route_scheduler is not None:
+        return sparse_route_scheduler
 
     sparse_projection = render_sparse_moe_projection_shader(
         source_dir,

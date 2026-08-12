@@ -1182,6 +1182,7 @@ impl VulkanCompiledResourceDeviceStore {
             &self.layout,
             Some(execution_scope),
             component_ids,
+            Some(&self.selector_ownership),
         )
         .map(Arc::new)
         .map_err(compiled_device_store_vulkan_error)

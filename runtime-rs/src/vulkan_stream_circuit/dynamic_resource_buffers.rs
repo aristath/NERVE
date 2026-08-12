@@ -38,6 +38,7 @@ impl VulkanDynamicResourceBuffers {
             layout,
             None,
             &BTreeSet::new(),
+            None,
         )
     }
 
@@ -47,6 +48,7 @@ impl VulkanDynamicResourceBuffers {
         layout: &VulkanCompiledResourceAddressLayout,
         execution_scope: Option<&str>,
         component_ids: &BTreeSet<String>,
+        selector_ownership: Option<&VulkanCompiledResourceSelectorOwnership>,
     ) -> Result<Self, VulkanError> {
         if address_table.slot_count() != layout.slot_count() {
             return Err(VulkanError(format!(
@@ -62,16 +64,11 @@ impl VulkanDynamicResourceBuffers {
                 && (component_ids.is_empty()
                     || component_ids.contains(&table.key.component_id))
         }) {
-            let words = table
-                .slots()
-                .map(|slot| {
-                    u32::try_from(slot).map_err(|_| {
-                        VulkanError(format!(
-                            "dynamic resource parameter slot {slot} exceeds u32"
-                        ))
-                    })
+            let words = dynamic_parameter_slot_words(table, |resource_index| {
+                selector_ownership.is_none_or(|ownership| {
+                    ownership.owns(&table.selector_id, resource_index)
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+            })?;
             let bytes = words
                 .iter()
                 .flat_map(|word| word.to_le_bytes())
@@ -163,5 +160,96 @@ impl VulkanDynamicResourceBuffers {
 
     pub fn parameter_slot_binding_count(&self) -> usize {
         self.parameter_slots.len()
+    }
+}
+
+fn dynamic_parameter_slot_words(
+    table: &VulkanCompiledParameterSlotTable,
+    owns_resource: impl Fn(usize) -> bool,
+) -> Result<Vec<u32>, VulkanError> {
+    let slot_count = table.slot_count().ok_or_else(|| {
+        VulkanError(format!(
+            "dynamic resource parameter-slot table for selector {:?} overflows",
+            table.selector_id
+        ))
+    })?;
+    if table.resource_count == 0 || !slot_count.is_multiple_of(table.resource_count) {
+        return Err(VulkanError(format!(
+            "dynamic resource parameter-slot table for selector {:?} has invalid resource geometry",
+            table.selector_id
+        )));
+    }
+    let parameters_per_resource = slot_count / table.resource_count;
+    table
+        .slots()
+        .enumerate()
+        .map(|(index, slot)| {
+            let resource_index = index / parameters_per_resource;
+            if !owns_resource(resource_index) {
+                return Ok(u32::MAX);
+            }
+            u32::try_from(slot).map_err(|_| {
+                VulkanError(format!(
+                    "dynamic resource parameter slot {slot} exceeds u32"
+                ))
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod dynamic_resource_buffer_tests {
+    use super::*;
+
+    fn parameter_slot_table(
+        resource_count: usize,
+        mapping: VulkanCompiledParameterSlotMapping,
+    ) -> VulkanCompiledParameterSlotTable {
+        VulkanCompiledParameterSlotTable {
+            key: VulkanDynamicResourceBindingKey::new("block", "experts", "routes"),
+            selector_id: "experts".to_string(),
+            execution_scope: "decode".to_string(),
+            parameter_ids: vec!["weight".to_string(), "scale".to_string()],
+            resource_count,
+            mapping,
+        }
+    }
+
+    #[test]
+    fn device_parameter_slots_encode_exact_ownership_without_residency() {
+        let explicit = parameter_slot_table(
+            3,
+            VulkanCompiledParameterSlotMapping::Explicit {
+                parameter_slots: vec![7, 8, 11, 12, 20, 21],
+            },
+        );
+        assert_eq!(
+            dynamic_parameter_slot_words(&explicit, |resource| resource != 1).unwrap(),
+            vec![7, 8, u32::MAX, u32::MAX, 20, 21],
+        );
+
+        let partitioned = parameter_slot_table(
+            3,
+            VulkanCompiledParameterSlotMapping::Partitioned {
+                parameter_slot_bases: vec![10, 20],
+            },
+        );
+        assert_eq!(
+            dynamic_parameter_slot_words(&partitioned, |resource| resource == 1).unwrap(),
+            vec![u32::MAX, u32::MAX, 11, 21, u32::MAX, u32::MAX],
+        );
+
+        let malformed = parameter_slot_table(
+            0,
+            VulkanCompiledParameterSlotMapping::Explicit {
+                parameter_slots: Vec::new(),
+            },
+        );
+        assert!(
+            dynamic_parameter_slot_words(&malformed, |_| true)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid resource geometry")
+        );
     }
 }

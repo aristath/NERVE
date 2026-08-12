@@ -4,6 +4,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 1) readonly buffer ExpertRoutes { uint words[]; } expert_routes;
 layout(set = 0, binding = 2) buffer ExpertIntermediates { uint words[]; } expert_intermediates;
+{{SELECTED_RESOURCE_BINDINGS}}
 layout(set = 0, binding = 31) buffer BatchControl {
     uint batch_width;
     uint expert_start;
@@ -20,6 +21,7 @@ const uint INTERMEDIATE_WORDS = INTERMEDIATE_SIZE / 2u;
 const uint EXPERT_DATA_WORDS = EXPERTS_PER_TOKEN * INTERMEDIATE_WORDS;
 const uint EXPERT_FRAME_WORDS = EXPERT_DATA_WORDS + EXPERTS_PER_TOKEN;
 const uint TILES_PER_ROUTE = {{TILES_PER_ROUTE}}u;
+{{SELECTED_RESOURCE_HELPERS}}
 
 void main() {
     if (batch_control.expert_count != 0u) {
@@ -34,10 +36,10 @@ void main() {
         uint owned_count = 0u;
         uint expert_end = batch_control.expert_start + batch_control.expert_count;
         for (uint source_index = 0u; source_index < source_count; source_index++) {
-            uint source_expert = expert_routes.words[source_index] & 0xffffu;
+            uint expert = expert_routes.words[source_index] & 0xffffu;
             if (
-                source_expert < batch_control.expert_start
-                || source_expert >= expert_end
+                expert < batch_control.expert_start
+                || expert >= expert_end{{SELECTED_RESOURCE_REJECTION}}
             ) {
                 continue;
             }

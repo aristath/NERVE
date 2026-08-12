@@ -1085,7 +1085,10 @@ mod tests {
         let rendered = template
             .replace("{{INTERMEDIATE_SIZE}}", "4")
             .replace("{{EXPERTS_PER_TOKEN}}", "2")
-            .replace("{{TILES_PER_ROUTE}}", "7");
+            .replace("{{TILES_PER_ROUTE}}", "7")
+            .replace("{{SELECTED_RESOURCE_BINDINGS}}", "")
+            .replace("{{SELECTED_RESOURCE_HELPERS}}", "")
+            .replace("{{SELECTED_RESOURCE_REJECTION}}", "");
         let source_path = std::env::temp_dir().join(format!(
             "nerve-test-sparse-moe-route-compact-{}.comp",
             std::process::id()

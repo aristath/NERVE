@@ -3,6 +3,75 @@ from nerve.model_package_shaders import *
 from nerve.model_package_tensors import *
 
 
+def render_sparse_moe_route_scheduler_shader(
+    source_dir: Path,
+    shader_file: str,
+    render_template,
+) -> str | None:
+    shape = re.fullmatch(
+        r"moe_route_(compact|count)(?:_(selected)_p(\d+))?_batch1_"
+        r"i(\d+)_k(\d+)_t(\d+)\.comp",
+        shader_file,
+    )
+    if shape is None:
+        return None
+    operation, selected, parameters_per_resource = shape.groups()[:3]
+    intermediate_size, experts_per_token, tiles_per_route = map(
+        int, shape.groups()[3:]
+    )
+    if intermediate_size <= 0 or intermediate_size % 2:
+        raise ModelCompileError(
+            "route-native sparse expert batching requires an even intermediate size"
+        )
+    if experts_per_token <= 0:
+        raise ModelCompileError(
+            "route-native sparse expert batching requires selected experts"
+        )
+    if selected is not None and int(parameters_per_resource or 0) <= 0:
+        raise ModelCompileError(
+            "selected-resource route scheduling requires parameter slots"
+        )
+    return render_template(
+        source_dir,
+        f"moe_route_{operation}_batch1.comp.template",
+        {
+            "INTERMEDIATE_SIZE": str(intermediate_size),
+            "EXPERTS_PER_TOKEN": str(experts_per_token),
+            "TILES_PER_ROUTE": str(tiles_per_route),
+            "SELECTED_RESOURCE_BINDINGS": (
+                "layout(set = 0, binding = 3) readonly buffer "
+                "DynamicParameterSlots { uint words[]; } "
+                "dynamic_parameter_slots;"
+                if selected is not None
+                else ""
+            ),
+            "SELECTED_RESOURCE_HELPERS": (
+                f"const uint PARAMETERS_PER_RESOURCE = {parameters_per_resource}u;\n"
+                "const uint UNBOUND_PARAMETER_SLOT = 0xffffffffu;\n\n"
+                "bool selected_resource_is_local(uint expert) {\n"
+                "    uint parameter_index = expert * PARAMETERS_PER_RESOURCE;\n"
+                "    if (parameter_index >= dynamic_parameter_slots.words.length()) "
+                "return false;\n"
+                "    uint slot = dynamic_parameter_slots.words[parameter_index];\n"
+                "    return slot != UNBOUND_PARAMETER_SLOT;\n"
+                "}"
+                if selected is not None
+                else ""
+            ),
+            "SELECTED_RESOURCE_REJECTION": (
+                " || !selected_resource_is_local(expert)"
+                if selected is not None
+                else ""
+            ),
+            "SELECTED_RESOURCE_MATCH": (
+                " && selected_resource_is_local(expert)"
+                if selected is not None
+                else ""
+            ),
+        },
+    )
+
+
 def render_sparse_moe_projection_shader(
     source_dir: Path,
     shader_file: str,
