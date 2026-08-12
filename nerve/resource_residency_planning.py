@@ -41,6 +41,16 @@ _SELECTION_ENCODING_FIELDS = frozenset(
         "index_mask",
     )
 )
+_PREDICTABLE_DEPENDENCY_FIELDS = frozenset(
+    (
+        "schema",
+        "kind",
+        "key_signal",
+        "table_parameter",
+        "selection_semantics",
+    )
+)
+_PREDICTABLE_DEPENDENCY_SCHEMA = "nerve.predictable_resource_selection.v1"
 _PARTITIONED_ACCESS_FIELDS = frozenset(
     ("selection_signal", "partition_axis", "parameter_ids")
 )
@@ -218,6 +228,11 @@ def analyze_resource_residency_components(
                 )
             domain = attrs.get("selection_domain")
             if domain is None:
+                if attrs.get("predictable_dependency") is not None:
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} selector {node_id!r} "
+                        "predictable dependency requires a selection domain"
+                    )
                 continue
             if not isinstance(domain, dict) or set(domain) != _SELECTION_DOMAIN_FIELDS:
                 raise ModelCompileError(
@@ -246,6 +261,41 @@ def analyze_resource_residency_components(
                     f"{scope} component {component_id!r} selector {node_id!r} "
                     "has an unsupported selection encoding"
                 )
+            predictable_dependency = attrs.get("predictable_dependency")
+            if predictable_dependency is not None:
+                if (
+                    not isinstance(predictable_dependency, dict)
+                    or set(predictable_dependency) != _PREDICTABLE_DEPENDENCY_FIELDS
+                    or predictable_dependency.get("schema")
+                    != _PREDICTABLE_DEPENDENCY_SCHEMA
+                    or predictable_dependency.get("kind")
+                    != "parameter_table_lookup"
+                    or predictable_dependency.get("selection_semantics") != "exact"
+                ):
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} selector {node_id!r} "
+                        "has an invalid predictable dependency"
+                    )
+                key_signal = _non_empty_string(
+                    predictable_dependency.get("key_signal"),
+                    "predictable dependency key signal",
+                )
+                table_parameter = _non_empty_string(
+                    predictable_dependency.get("table_parameter"),
+                    "predictable dependency table parameter",
+                )
+                inputs = node.get("inputs", [])
+                params = node.get("params", [])
+                if (
+                    not isinstance(inputs, list)
+                    or not isinstance(params, list)
+                    or key_signal not in inputs
+                    or table_parameter not in params
+                ):
+                    raise ModelCompileError(
+                        f"{scope} component {component_id!r} selector {node_id!r} "
+                        "predictable dependency is not bound by the selector"
+                    )
             selection_count_per_activation = _positive_int(
                 encoding.get("selection_count_per_activation"),
                 "selection count per activation",
@@ -280,6 +330,7 @@ def analyze_resource_residency_components(
                     "index_mask": index_mask,
                 },
                 "outputs": set(outputs),
+                "predictable_dependency": deepcopy(predictable_dependency),
                 "accesses": [],
             }
 
@@ -331,11 +382,6 @@ def analyze_resource_residency_components(
                         f"repeats access for selection signal {selection_signal!r}"
                     )
                 seen_signals.add(selection_signal)
-                if selection_signal not in inputs:
-                    raise ModelCompileError(
-                        f"{scope} component {component_id!r} node {node_id!r} "
-                        f"does not physically consume selection signal {selection_signal!r}"
-                    )
                 producer = signal_producers.get(selection_signal)
                 selector = (
                     None if producer is None else selectors.get(str(producer[1]["id"]))
@@ -550,6 +596,10 @@ def analyze_resource_residency_components(
                 "partition_count": selector["resource_count"],
                 "resume_node_id": accesses[0]["node_id"],
             }
+            if selector["predictable_dependency"] is not None:
+                group["predictable_dependency"] = deepcopy(
+                    selector["predictable_dependency"]
+                )
             if access_kinds == {"partitioned_tensor"}:
                 axes = {access["partition_axis"] for access in accesses}
                 if len(axes) != 1:

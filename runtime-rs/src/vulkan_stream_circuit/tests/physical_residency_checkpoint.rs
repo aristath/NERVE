@@ -113,6 +113,48 @@ fn physical_residency_schedule_derives_generic_selected_execution_boundaries() {
 }
 
 #[test]
+fn exact_preselection_can_gate_before_non_selected_router_weighting() {
+    let (contract, _) = physical_checkpoint_fixture();
+    let dispatches = [
+        (10, 0, "choose"),
+        (11, 1, "router_projection"),
+        (12, 2, "weight_preselected_routes"),
+        (13, 3, "compute_a"),
+        (14, 4, "between_selected_work"),
+        (15, 5, "compute_b"),
+        (16, 6, "combine_selected_results"),
+    ]
+    .into_iter()
+    .map(
+        |(dispatch_index, node_index, node_id)| VulkanPhysicalResidencyDispatch {
+            dispatch_index,
+            component_id: "component".to_string(),
+            node_index,
+            node_id: node_id.to_string(),
+        },
+    )
+    .collect::<Vec<_>>();
+
+    let schedule = VulkanPhysicalResidencySchedule::from_dispatches(
+        &contract,
+        "target".to_string(),
+        &dispatches,
+    )
+    .unwrap();
+    let checkpoint = &schedule.checkpoints[0];
+
+    assert_eq!(checkpoint.selection_dispatch_index, 10);
+    assert_eq!(
+        checkpoint.selected_computation_dispatch_indices,
+        [13, 14, 15]
+    );
+    assert_eq!(
+        checkpoint.selected_result_continuation_dispatch_index,
+        Some(16)
+    );
+}
+
+#[test]
 fn physical_residency_schedule_materializes_gates_only_for_demand_policies() {
     let (contract, dispatches) = physical_checkpoint_fixture();
     let schedule = VulkanPhysicalResidencySchedule::from_dispatches(

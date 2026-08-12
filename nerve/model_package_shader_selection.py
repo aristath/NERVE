@@ -5,7 +5,10 @@ from nerve.model_package_independent_experts import (
     INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS,
     independent_sparse_moe_shader_file,
 )
-from nerve.model_package_moe_routing import independent_moe_route_shader_file
+from nerve.model_package_moe_routing import (
+    independent_moe_route_shader_file,
+    parameter_table_resource_preselection_shader_file,
+)
 from nerve.model_package_latent_compression import latent_compression_shader_file
 from nerve.model_package_tensors import *
 
@@ -1893,6 +1896,10 @@ def shader_file_for_node(
         )
     if op == "moe_route":
         return independent_moe_route_shader_file(circuit, node, tensor_index)
+    if op == "parameter_table_resource_preselection":
+        return parameter_table_resource_preselection_shader_file(
+            circuit, node, tensor_index
+        )
     if op in {
         "independent_sparse_moe_gate_up",
         "independent_sparse_moe_down",

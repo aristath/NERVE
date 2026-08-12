@@ -144,7 +144,9 @@ def independent_expert_physical_implementations(
         for parameter_id in entry["parameter_ids"]
     ]
     selected_partition = {
-        "selection_signal": node["inputs"][-1],
+        "selection_signal": node["attrs"]["selected_parameter_accesses"][0][
+            "selection_signal"
+        ],
         "address_table_binding": dynamic_binding_base,
         "parameter_slots_binding": dynamic_binding_base + 1,
         "kind": "expert_range",

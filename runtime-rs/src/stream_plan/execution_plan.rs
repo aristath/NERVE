@@ -214,6 +214,7 @@ impl StreamCircuitResourcePlan {
                         selection_count_per_activation: domain
                             .encoding
                             .selection_count_per_activation,
+                        predictable_dependency: domain.predictable_dependency.clone(),
                     });
                 }
             }

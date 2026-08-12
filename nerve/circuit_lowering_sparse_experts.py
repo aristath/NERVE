@@ -9,9 +9,9 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
     expert_ids = [int(value) for value in feed_forward["expert_ids"]]
     route_inputs = ["moe_router_logits"]
     route_params: list[str] = []
-    if routing["selection"] == "token_id_table":
-        route_inputs.append("token_id")
-        route_params.append("moe_route_table")
+    predictable_preselection = routing["selection"] == "token_id_table"
+    if predictable_preselection:
+        route_inputs.append("moe_resource_routes")
     else:
         route_params.append("moe_router_selection_bias")
 
@@ -53,7 +53,48 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
     routed_selection_count = int(feed_forward["experts_per_token"])
     selected_resource_count = routed_selection_count + 1
     resource_count = len(selected_gate_up)
-    return [
+    selection_domain = {
+        "id": "experts",
+        "resource_count": resource_count,
+        "selection_signal": (
+            "moe_resource_routes" if predictable_preselection else "moe_routes"
+        ),
+        "encoding": {
+            "element_type": "u32",
+            "selection_count_per_activation": selected_resource_count,
+            "index_shift": 0,
+            "index_mask": (1 << (resource_count - 1).bit_length()) - 1,
+        },
+    }
+    resource_selection_signal = selection_domain["selection_signal"]
+    body = []
+    if predictable_preselection:
+        body.append(
+            {
+                "id": "moe_resource_preselection",
+                "op": "parameter_table_resource_preselection",
+                "inputs": ["token_id"],
+                "outputs": ["moe_resource_routes"],
+                "params": ["moe_route_table"],
+                "attrs": {
+                    "experts_per_token": selected_resource_count,
+                    "routed_resource_count": len(expert_ids),
+                    "routed_selection_count": routed_selection_count,
+                    "always_selected_resources": [
+                        {"resource_index": shared_resource, "weight": 1.0}
+                    ],
+                    "predictable_dependency": {
+                        "schema": "nerve.predictable_resource_selection.v1",
+                        "kind": "parameter_table_lookup",
+                        "key_signal": "token_id",
+                        "table_parameter": "moe_route_table",
+                        "selection_semantics": "exact",
+                    },
+                    "selection_domain": selection_domain,
+                },
+            }
+        )
+    body.extend([
         {
             "id": "moe_router_projection",
             "op": "linear",
@@ -74,18 +115,12 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
                 "always_selected_resources": [
                     {"resource_index": shared_resource, "weight": 1.0}
                 ],
-                **routing,
-                "selection_domain": {
-                    "id": "experts",
-                    "resource_count": resource_count,
-                    "selection_signal": "moe_routes",
-                    "encoding": {
-                        "element_type": "u32",
-                        "selection_count_per_activation": selected_resource_count,
-                        "index_shift": 0,
-                        "index_mask": (1 << (resource_count - 1).bit_length()) - 1,
-                    },
-                },
+                **(
+                    {**routing, "selection": "preselected_resource_indices"}
+                    if predictable_preselection
+                    else routing
+                ),
+                **({} if predictable_preselection else {"selection_domain": selection_domain}),
             },
         },
         {
@@ -104,7 +139,10 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
                 "experts_per_token": selected_resource_count,
                 "swiglu_limit": limit,
                 "selected_parameter_accesses": [
-                    {"selection_signal": "moe_routes", "mapping": selected_gate_up}
+                    {
+                        "selection_signal": resource_selection_signal,
+                        "mapping": selected_gate_up,
+                    }
                 ],
             },
         },
@@ -123,7 +161,10 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
                 "intermediate_size": width,
                 "experts_per_token": selected_resource_count,
                 "selected_parameter_accesses": [
-                    {"selection_signal": "moe_routes", "mapping": selected_down}
+                    {
+                        "selection_signal": resource_selection_signal,
+                        "mapping": selected_down,
+                    }
                 ],
             },
         },
@@ -139,4 +180,5 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
                 "routing_weights_already_scaled": True,
             },
         },
-    ]
+    ])
+    return body

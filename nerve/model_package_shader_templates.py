@@ -4890,26 +4890,20 @@ if (
             },
         )
 
-    token_table_router_shape = re.fullmatch(
-        r"moe_router(?:_(batch1))?_token_table_"
-        r"(sigmoid|sqrtsoftplus)_bf16_r(\d+)_k(\d+)_"
-        r"a(\d+)w([0-9eE+.-]+)_v(\d+)_"
-        r"norm([01])_scale([0-9eE+.-]+)_tablei(32|64)\.comp",
+    preselection_shape = re.fullmatch(
+        r"resource_preselect(?:_(batch1))?_table_r(\d+)_k(\d+)_"
+        r"a(\d+)_v(\d+)_tablei(32|64)\.comp",
         shader_file,
     )
-    if token_table_router_shape is not None:
+    if preselection_shape is not None:
         (
             batch_mode,
-            activation,
             num_experts,
             experts_per_token,
             always_selected_count,
-            always_selected_weight,
             vocab_size,
-            normalize_selected,
-            routed_scale,
             table_width,
-        ) = token_table_router_shape.groups()
+        ) = preselection_shape.groups()
         num_experts, experts_per_token, always_selected_count, vocab_size = map(
             int,
             (num_experts, experts_per_token, always_selected_count, vocab_size),
@@ -4927,18 +4921,61 @@ if (
         return render_shader_template(
             source_dir,
             (
-                "moe_router_token_table_bf16.comp.template"
+                "resource_preselect_table.comp.template"
                 if batch_mode is None
-                else "moe_router_token_table_batch1_bf16.comp.template"
+                else "resource_preselect_table_batch1.comp.template"
             ),
             {
                 "ROUTED_RESOURCE_COUNT": str(num_experts),
                 "ROUTED_SELECTION_COUNT": str(experts_per_token),
                 "ALWAYS_SELECTED_RESOURCE_START": str(num_experts),
                 "ALWAYS_SELECTED_RESOURCE_COUNT": str(always_selected_count),
-                "ALWAYS_SELECTED_WEIGHT": always_selected_weight,
                 "VOCAB_SIZE": str(vocab_size),
                 "TABLE_WORD_STRIDE": "1" if table_width == "32" else "2",
+            },
+        )
+
+    preselected_router_shape = re.fullmatch(
+        r"moe_router(?:_(batch1))?_preselected_"
+        r"(sigmoid|sqrtsoftplus)_bf16_r(\d+)_k(\d+)_"
+        r"a(\d+)w([0-9eE+.-]+)_norm([01])_scale([0-9eE+.-]+)\.comp",
+        shader_file,
+    )
+    if preselected_router_shape is not None:
+        (
+            batch_mode,
+            activation,
+            num_experts,
+            experts_per_token,
+            always_selected_count,
+            always_selected_weight,
+            normalize_selected,
+            routed_scale,
+        ) = preselected_router_shape.groups()
+        num_experts, experts_per_token, always_selected_count = map(
+            int, (num_experts, experts_per_token, always_selected_count)
+        )
+        if (
+            not 0 < experts_per_token <= num_experts <= 4096
+            or always_selected_count <= 0
+            or num_experts + always_selected_count > 4096
+        ):
+            raise ModelCompileError(
+                f"invalid preselected sparse expert routing e{num_experts} "
+                f"k{experts_per_token} a{always_selected_count}"
+            )
+        return render_shader_template(
+            source_dir,
+            (
+                "moe_router_preselected_bf16.comp.template"
+                if batch_mode is None
+                else "moe_router_preselected_batch1_bf16.comp.template"
+            ),
+            {
+                "ROUTED_RESOURCE_COUNT": str(num_experts),
+                "ROUTED_SELECTION_COUNT": str(experts_per_token),
+                "ALWAYS_SELECTED_RESOURCE_COUNT": str(always_selected_count),
+                "ALWAYS_SELECTED_WEIGHT": always_selected_weight,
                 "ROUTER_ACTIVATION": "0" if activation == "sigmoid" else "2",
                 "NORMALIZE_SELECTED": normalize_selected,
                 "ROUTED_SCALE": routed_scale,

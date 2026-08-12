@@ -453,6 +453,14 @@ def _feature_transform_modules(component: Json) -> list[Json]:
                 nodes=["moe_router_projection", "moe_topk"],
             ),
             _module(
+                "layer.feature_transform.routing.resource_preselection",
+                "resource_preselection",
+                "Resolve exact expert resources from an earlier dependency",
+                parent="layer.feature_transform.routing",
+                nodes=["moe_resource_preselection"],
+                optional=True,
+            ),
+            _module(
                 "layer.feature_transform.expert_bank",
                 "selected_expert_bank",
                 (

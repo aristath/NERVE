@@ -342,7 +342,7 @@ fn infer_node_output_shapes(
             let output_shape = attr_usize(node, "max_indices").map(|count| vec![count]);
             Ok(repeat_shape(output_shape, outputs))
         }
-        "moe_topk" | "moe_route" => {
+        "moe_topk" | "moe_route" | "parameter_table_resource_preselection" => {
             let output_shape = attr_usize(node, "experts_per_token").map(|routes| vec![routes, 2]);
             Ok(repeat_shape(output_shape, outputs))
         }

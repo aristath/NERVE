@@ -422,6 +422,7 @@ fn bind_node(
                 resource_count: domain.resource_count,
                 selection_signal: domain.selection_signal.clone(),
                 encoding: domain.encoding.clone(),
+                predictable_dependency: domain.predictable_dependency.clone(),
             }
         }),
         selected_parameter_accesses: node

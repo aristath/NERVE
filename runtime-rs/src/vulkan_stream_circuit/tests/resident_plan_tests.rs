@@ -169,6 +169,7 @@ fn placed_resident_plan_hosts_only_the_components_assigned_to_a_device() {
             domain_id: "resources".to_string(),
             resource_count: 256,
             selection_count_per_activation: 8,
+            predictable_dependency: None,
         },
         crate::stream_plan::PlannedSelectionDomain {
             component_id: "layer_00_remote".to_string(),
@@ -177,6 +178,7 @@ fn placed_resident_plan_hosts_only_the_components_assigned_to_a_device() {
             domain_id: "resources".to_string(),
             resource_count: 128,
             selection_count_per_activation: 1,
+            predictable_dependency: None,
         },
     ]);
     let placement_plan = graph.placement_plan(&runtime_model.placement).unwrap();

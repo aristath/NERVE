@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from model_package_layout_common import *
 from nerve.model_package_batching import sparse_moe_route_scheduling_shader_file
 from nerve.model_package_shader_selection import local_size_x_for_shader_file
@@ -602,7 +604,7 @@ def test_independent_router_rejects_stale_total_selection_domain() -> None:
         "outputs": ["routes"],
         "params": ["selection_bias"],
         "attrs": {
-            "experts_per_token": 6,
+            "experts_per_token": 7,
             "routed_resource_count": 256,
             "routed_selection_count": 6,
             "always_selected_resources": [
@@ -649,7 +651,7 @@ def test_independent_router_rejects_stale_total_selection_domain() -> None:
         )
 
 
-def test_compiler_renders_token_table_sqrtsoftplus_router(
+def test_compiler_renders_exact_table_preselection_and_router_weighting(
     tmp_path: Path,
 ) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
@@ -660,11 +662,11 @@ def test_compiler_renders_token_table_sqrtsoftplus_router(
             }
         }
     }
-    node = {
-        "id": "route",
-        "op": "moe_route",
-        "inputs": ["router_logits", "token_id"],
-        "outputs": ["routes"],
+    preselection = {
+        "id": "preselect",
+        "op": "parameter_table_resource_preselection",
+        "inputs": ["token_id"],
+        "outputs": ["resource_routes"],
         "params": ["route_table"],
         "attrs": {
             "experts_per_token": 7,
@@ -673,15 +675,17 @@ def test_compiler_renders_token_table_sqrtsoftplus_router(
             "always_selected_resources": [
                 {"resource_index": 256, "weight": 1.0}
             ],
-            "selection": "token_id_table",
-            "activation": "sqrtsoftplus",
-            "normalize_selected": True,
-            "routed_scaling_factor": 1.5,
-            "route_table": "router.token_routes",
+            "predictable_dependency": {
+                "schema": "nerve.predictable_resource_selection.v1",
+                "kind": "parameter_table_lookup",
+                "key_signal": "token_id",
+                "table_parameter": "route_table",
+                "selection_semantics": "exact",
+            },
             "selection_domain": {
                 "id": "experts",
                 "resource_count": 257,
-                "selection_signal": "routes",
+                "selection_signal": "resource_routes",
                 "encoding": {
                     "element_type": "u32",
                     "selection_count_per_activation": 7,
@@ -689,6 +693,25 @@ def test_compiler_renders_token_table_sqrtsoftplus_router(
                     "index_mask": 511,
                 },
             },
+        },
+    }
+    weighting = {
+        "id": "route",
+        "op": "moe_route",
+        "inputs": ["router_logits", "resource_routes"],
+        "outputs": ["routes"],
+        "params": [],
+        "attrs": {
+            "experts_per_token": 7,
+            "routed_resource_count": 256,
+            "routed_selection_count": 6,
+            "always_selected_resources": [
+                {"resource_index": 256, "weight": 1.0}
+            ],
+            "selection": "preselected_resource_indices",
+            "activation": "sqrtsoftplus",
+            "normalize_selected": True,
+            "routed_scaling_factor": 1.5,
         },
     }
     tensor_index = {
@@ -700,55 +723,152 @@ def test_compiler_renders_token_table_sqrtsoftplus_router(
             }
         }
     }
-    primary = (
-        "moe_router_token_table_sqrtsoftplus_bf16_r256_k6_a1w1_v129280_"
-        "norm1_scale1.5_tablei64.comp"
+    preselection_primary = "resource_preselect_table_r256_k6_a1_v129280_tablei64.comp"
+    preselection_batch = (
+        "resource_preselect_batch1_table_r256_k6_a1_v129280_tablei64.comp"
     )
-    batch = (
-        "moe_router_batch1_token_table_sqrtsoftplus_bf16_r256_k6_a1w1_v129280_"
-        "norm1_scale1.5_tablei64.comp"
+    weighting_primary = (
+        "moe_router_preselected_sqrtsoftplus_bf16_r256_k6_a1w1_"
+        "norm1_scale1.5.comp"
+    )
+    weighting_batch = (
+        "moe_router_batch1_preselected_sqrtsoftplus_bf16_r256_k6_a1w1_"
+        "norm1_scale1.5.comp"
     )
 
     assert (
         shader_file_for_node(
             circuit,
-            node,
+            preselection,
             tensor_index,
             {"hidden_size": 4096, "intermediate_size": 2176},
         )
-        == primary
+        == preselection_primary
     )
-    assert frame_parallel_batch_shader_file(primary) == batch
-    copy_shader_templates(shader_source_dir, tmp_path, {primary, batch})
+    assert (
+        shader_file_for_node(
+            circuit,
+            weighting,
+            tensor_index,
+            {"hidden_size": 4096, "intermediate_size": 2176},
+        )
+        == weighting_primary
+    )
+    assert (
+        frame_parallel_batch_shader_file(preselection_primary) == preselection_batch
+    )
+    assert frame_parallel_batch_shader_file(weighting_primary) == weighting_batch
+    copy_shader_templates(
+        shader_source_dir,
+        tmp_path,
+        {
+            preselection_primary,
+            preselection_batch,
+            weighting_primary,
+            weighting_batch,
+        },
+    )
 
-    primary_source = (tmp_path / primary).read_text()
-    batch_source = (tmp_path / batch).read_text()
-    assert "const uint VOCAB_SIZE = 129280u;" in primary_source
-    assert "const uint TABLE_WORD_STRIDE = 2u;" in primary_source
-    assert "route_table.words[table_element * TABLE_WORD_STRIDE]" in primary_source
-    assert "high_word != 0u" in primary_source
-    assert "for (uint previous = 0u; previous < lane; previous++)" in primary_source
-    assert "sqrt(softplus(value))" in primary_source
-    assert "weight = weight / denominator * ROUTED_SCALE;" in primary_source
-    assert "binding = 0) readonly buffer RouterLogits" in primary_source
-    assert "binding = 1) readonly buffer TokenId" in primary_source
-    assert "binding = 2) buffer ExpertRoutes" in primary_source
-    assert "binding = 3) readonly buffer RouteTable" in primary_source
-    assert "binding = 4) buffer SelectionTelemetry" in primary_source
-    assert "selected_indices[route] = ALWAYS_SELECTED_RESOURCE_START + offset;" in primary_source
-    assert "selected_values[route] = ALWAYS_SELECTED_WEIGHT;" in primary_source
-    assert "high_word != 0u" in batch_source
+    preselection_source = (tmp_path / preselection_primary).read_text()
+    preselection_batch_source = (tmp_path / preselection_batch).read_text()
+    weighting_source = (tmp_path / weighting_primary).read_text()
+    assert "const uint VOCAB_SIZE = 129280u;" in preselection_source
+    assert "const uint TABLE_WORD_STRIDE = 2u;" in preselection_source
+    assert "selection_table.words[table_element * TABLE_WORD_STRIDE]" in preselection_source
+    assert "high_word != 0u" in preselection_source
+    assert "for (uint previous = 0u; previous < lane; previous++)" in preselection_source
+    assert "resource_selections.words[selection] = 0xffffffffu;" in preselection_source
+    assert "binding = 0) readonly buffer TokenId" in preselection_source
+    assert "binding = 1) buffer ResourceSelections" in preselection_source
+    assert "binding = 2) readonly buffer SelectionTable" in preselection_source
+    assert "binding = 3) buffer SelectionTelemetry" in preselection_source
+    assert "high_word != 0u" in preselection_batch_source
+    assert "sqrt(softplus(value))" in weighting_source
+    assert "weight = weight / denominator * ROUTED_SCALE;" in weighting_source
+    assert "binding = 0) readonly buffer RouterLogits" in weighting_source
+    assert "binding = 1) readonly buffer ResourceSelections" in weighting_source
+    assert "binding = 2) buffer ExpertRoutes" in weighting_source
     assert (
         "selection_telemetry.counts[TOTAL_RESOURCE_COUNT + pair_index]"
-        in primary_source
+        in preselection_source
     )
-    assert "gl_WorkGroupID.y" in batch_source
-    assert "token_ids.values[batch_index]" in batch_source
-    assert "batch_index * ROUTER_WORDS" in batch_source
-    assert "batch_index * TOTAL_SELECTION_COUNT" in batch_source
-    assert "{{" not in primary_source
-    assert "{{" not in batch_source
+    weighting_batch_source = (tmp_path / weighting_batch).read_text()
+    assert "gl_WorkGroupID.y" in preselection_batch_source
+    assert "token_ids.values[batch_index]" in preselection_batch_source
+    assert "batch_index * ROUTER_WORDS" in weighting_batch_source
+    assert "batch_index * TOTAL_SELECTION_COUNT" in weighting_batch_source
+    assert "{{" not in preselection_source
+    assert "{{" not in preselection_batch_source
+    assert "{{" not in weighting_source
+    assert "{{" not in weighting_batch_source
     compile_shader_artifacts(tmp_path)
+
+
+def test_resource_preselection_rejects_advisory_or_implicit_dependencies() -> None:
+    circuit = {
+        "parameters": {"refs": {"route_table": {"tensor": "router.routes"}}}
+    }
+    tensor_index = {
+        "tensors": {
+            "router.routes": {
+                "dtype": "I32",
+                "shape": [1024, 2],
+                "layout": "row_major",
+            }
+        }
+    }
+    base = {
+        "id": "preselect",
+        "op": "parameter_table_resource_preselection",
+        "inputs": ["token_id"],
+        "outputs": ["resource_routes"],
+        "params": ["route_table"],
+        "attrs": {
+            "experts_per_token": 3,
+            "routed_resource_count": 4,
+            "routed_selection_count": 2,
+            "always_selected_resources": [
+                {"resource_index": 4, "weight": 1.0}
+            ],
+            "predictable_dependency": {
+                "schema": "nerve.predictable_resource_selection.v1",
+                "kind": "parameter_table_lookup",
+                "key_signal": "token_id",
+                "table_parameter": "route_table",
+                "selection_semantics": "exact",
+            },
+            "selection_domain": {
+                "id": "experts",
+                "resource_count": 5,
+                "selection_signal": "resource_routes",
+                "encoding": {
+                    "element_type": "u32",
+                    "selection_count_per_activation": 3,
+                    "index_shift": 0,
+                    "index_mask": 7,
+                },
+            },
+        },
+    }
+
+    for mutation in (
+        lambda node: node["attrs"]["predictable_dependency"].update(
+            {"selection_semantics": "advisory"}
+        ),
+        lambda node: node["attrs"].pop("predictable_dependency"),
+        lambda node: node["attrs"]["predictable_dependency"].update(
+            {"table_parameter": "different_table"}
+        ),
+    ):
+        node = deepcopy(base)
+        mutation(node)
+        with pytest.raises(ModelCompileError, match="predictable dependency contract"):
+            shader_file_for_node(
+                circuit,
+                node,
+                tensor_index,
+                {"hidden_size": 128, "intermediate_size": 128},
+            )
 
 
 def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(

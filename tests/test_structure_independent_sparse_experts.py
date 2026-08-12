@@ -115,16 +115,31 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
             "runtime_source": "input_token_id",
         }
     ]
-    assert nodes["moe_topk"]["inputs"] == ["moe_router_logits", "token_id"]
+    assert nodes["moe_resource_preselection"]["inputs"] == ["token_id"]
+    assert nodes["moe_resource_preselection"]["params"] == ["moe_route_table"]
+    assert nodes["moe_resource_preselection"]["attrs"][
+        "predictable_dependency"
+    ] == {
+        "schema": "nerve.predictable_resource_selection.v1",
+        "kind": "parameter_table_lookup",
+        "key_signal": "token_id",
+        "table_parameter": "moe_route_table",
+        "selection_semantics": "exact",
+    }
+    assert nodes["moe_topk"]["inputs"] == [
+        "moe_router_logits",
+        "moe_resource_routes",
+    ]
+    assert nodes["moe_topk"]["params"] == []
     assert nodes["moe_topk"]["attrs"]["routed_resource_count"] == 3
     assert nodes["moe_topk"]["attrs"]["routed_selection_count"] == 2
     assert nodes["moe_topk"]["attrs"]["always_selected_resources"] == [
         {"resource_index": 3, "weight": 1.0}
     ]
-    assert nodes["moe_topk"]["attrs"]["selection_domain"] == {
+    assert nodes["moe_resource_preselection"]["attrs"]["selection_domain"] == {
         "id": "experts",
         "resource_count": 4,
-        "selection_signal": "moe_routes",
+        "selection_signal": "moe_resource_routes",
         "encoding": {
             "element_type": "u32",
             "selection_count_per_activation": 3,
@@ -133,7 +148,8 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
         },
     }
     selected = nodes["sparse_moe_gate_up"]["attrs"]["selected_parameter_accesses"][0]
-    assert selected["selection_signal"] == "moe_routes"
+    assert selected["selection_signal"] == "moe_resource_routes"
+    assert "moe_resource_routes" not in nodes["sparse_moe_gate_up"]["inputs"]
     assert selected["mapping"][1] == {
         "selector": 1,
         "parameter_ids": [
@@ -157,6 +173,16 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
     assert "shared_mlp_up_projection" not in node_ids
     assert "shared_mlp_output_projection" not in node_ids
     assert "shared_and_sparse_expert_add" not in node_ids
+
+    scored_component = make_layer(structure, scored)
+    scored_circuit = build_component_circuit(scored_component, Path("layer_01.json"))
+    scored_nodes = {node["id"]: node for node in scored_circuit["nodes"]}
+    assert "moe_resource_preselection" not in scored_nodes
+    assert scored_nodes["moe_topk"]["inputs"] == ["moe_router_logits"]
+    assert scored_nodes["moe_topk"]["params"] == ["moe_router_selection_bias"]
+    assert scored_nodes["moe_topk"]["attrs"]["selection_domain"][
+        "selection_signal"
+    ] == "moe_routes"
     assert nodes["sparse_moe_gate_up"]["attrs"]["experts_per_token"] == 3
     assert nodes["sparse_moe_down"]["attrs"]["experts_per_token"] == 3
     assert nodes["moe_reduce"]["inputs"] == ["moe_expert_outputs"]

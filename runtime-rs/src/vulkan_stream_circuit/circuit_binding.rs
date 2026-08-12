@@ -230,6 +230,7 @@ pub struct VulkanSelectionDomainBinding {
     pub resource_count: usize,
     pub selection_signal: String,
     pub encoding: PlannedSelectionEncoding,
+    pub predictable_dependency: Option<PlannedPredictableResourceSelection>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

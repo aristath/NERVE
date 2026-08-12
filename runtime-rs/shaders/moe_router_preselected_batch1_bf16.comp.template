@@ -1,0 +1,88 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer RouterLogits {
+    uint words[];
+} router_logits;
+
+layout(set = 0, binding = 1) readonly buffer ResourceSelections {
+    uint words[];
+} resource_selections;
+
+layout(set = 0, binding = 2) buffer ExpertRoutes {
+    uint words[];
+} expert_routes;
+
+layout(push_constant) uniform BatchControl { uint batch_width; } batch_control;
+
+const uint ROUTED_RESOURCE_COUNT = {{ROUTED_RESOURCE_COUNT}}u;
+const uint ROUTED_SELECTION_COUNT = {{ROUTED_SELECTION_COUNT}}u;
+const uint ALWAYS_SELECTED_RESOURCE_COUNT = {{ALWAYS_SELECTED_RESOURCE_COUNT}}u;
+const uint TOTAL_SELECTION_COUNT = ROUTED_SELECTION_COUNT + ALWAYS_SELECTED_RESOURCE_COUNT;
+const float ALWAYS_SELECTED_WEIGHT = {{ALWAYS_SELECTED_WEIGHT}};
+const uint ROUTER_ACTIVATION = {{ROUTER_ACTIVATION}}u;
+const bool NORMALIZE_SELECTED = {{NORMALIZE_SELECTED}} != 0;
+const float ROUTED_SCALE = {{ROUTED_SCALE}};
+const uint ROUTER_WORDS = (ROUTED_RESOURCE_COUNT + 1u) / 2u;
+
+shared float routed_values[ROUTED_SELECTION_COUNT];
+
+float bf16_to_f32(uint value) {
+    return uintBitsToFloat((value & 0xffffu) << 16);
+}
+
+uint f32_to_bf16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint lsb = (bits >> 16) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16;
+}
+
+float unpack_bf16(uint packed, uint index) {
+    return bf16_to_f32((index & 1u) == 0u ? packed : packed >> 16);
+}
+
+float softplus(float value) {
+    return max(value, 0.0) + log(1.0 + exp(-abs(value)));
+}
+
+float activate_router_value(float value) {
+    if (ROUTER_ACTIVATION == 0u) return 1.0 / (1.0 + exp(-value));
+    return sqrt(softplus(value));
+}
+
+void main() {
+    uint batch_index = gl_WorkGroupID.y;
+    if (batch_index >= batch_control.batch_width) return;
+    uint lane = gl_LocalInvocationID.x;
+    uint route_base = batch_index * TOTAL_SELECTION_COUNT;
+    if (lane < ROUTED_SELECTION_COUNT) {
+        uint resource_index = resource_selections.words[route_base + lane] & 0xffffu;
+        routed_values[lane] = activate_router_value(
+            unpack_bf16(
+                router_logits.words[batch_index * ROUTER_WORDS + (resource_index >> 1u)],
+                resource_index
+            )
+        );
+    }
+    barrier();
+    if (lane != 0u) return;
+
+    float denominator = 0.0;
+    if (NORMALIZE_SELECTED) {
+        for (uint route = 0u; route < ROUTED_SELECTION_COUNT; route++) {
+            denominator += routed_values[route];
+        }
+    }
+    for (uint route = 0u; route < TOTAL_SELECTION_COUNT; route++) {
+        uint resource_index = resource_selections.words[route_base + route] & 0xffffu;
+        float weight = ALWAYS_SELECTED_WEIGHT;
+        if (route < ROUTED_SELECTION_COUNT) {
+            weight = routed_values[route];
+            if (NORMALIZE_SELECTED) weight = weight / denominator * ROUTED_SCALE;
+            else weight *= ROUTED_SCALE;
+        }
+        expert_routes.words[route_base + route] =
+            (f32_to_bf16(weight) << 16u) | resource_index;
+    }
+}

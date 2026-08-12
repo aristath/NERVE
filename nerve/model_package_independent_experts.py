@@ -55,7 +55,8 @@ def independent_sparse_moe_shader_file(
         or not isinstance(accesses, list)
         or len(accesses) != 1
         or len(node.get("inputs", [])) != expected_input_count
-        or accesses[0].get("selection_signal") != node["inputs"][-1]
+        or not isinstance(accesses[0].get("selection_signal"), str)
+        or not accesses[0]["selection_signal"].strip()
         or len(node.get("outputs", [])) != 1
     ):
         raise ModelCompileError(

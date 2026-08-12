@@ -110,7 +110,10 @@ fn critical_path_phase_for_component_operation(
         || component_parts().any(|part| part == "expert" || part == "experts")
     {
         RuntimeCriticalPathPhase::ExpertCompute
-    } else if operation == "top_k" || operation == "moe_route" {
+    } else if operation == "top_k"
+        || operation == "moe_route"
+        || operation == "parameter_table_resource_preselection"
+    {
         RuntimeCriticalPathPhase::Routing
     } else if operation == "index_vector_transform" {
         RuntimeCriticalPathPhase::IndexTransform

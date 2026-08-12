@@ -1,0 +1,92 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer TokenId {
+    uint values[];
+} token_ids;
+
+layout(set = 0, binding = 1) buffer ResourceSelections {
+    uint words[];
+} resource_selections;
+
+layout(set = 0, binding = 2) readonly buffer SelectionTable {
+    uint words[];
+} selection_table;
+
+layout(set = 0, binding = 3) buffer SelectionTelemetry {
+    uint counts[];
+} selection_telemetry;
+
+const uint ROUTED_RESOURCE_COUNT = {{ROUTED_RESOURCE_COUNT}}u;
+const uint ROUTED_SELECTION_COUNT = {{ROUTED_SELECTION_COUNT}}u;
+const uint ALWAYS_SELECTED_RESOURCE_START = {{ALWAYS_SELECTED_RESOURCE_START}}u;
+const uint ALWAYS_SELECTED_RESOURCE_COUNT = {{ALWAYS_SELECTED_RESOURCE_COUNT}}u;
+const uint TOTAL_RESOURCE_COUNT = ROUTED_RESOURCE_COUNT + ALWAYS_SELECTED_RESOURCE_COUNT;
+const uint TOTAL_SELECTION_COUNT = ROUTED_SELECTION_COUNT + ALWAYS_SELECTED_RESOURCE_COUNT;
+const uint VOCAB_SIZE = {{VOCAB_SIZE}}u;
+const uint TABLE_WORD_STRIDE = {{TABLE_WORD_STRIDE}}u;
+
+shared uint selected_indices[TOTAL_SELECTION_COUNT];
+shared uint invalid_selection;
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint token_id = token_ids.values[0];
+    if (lane == 0u) invalid_selection = token_id >= VOCAB_SIZE ? 1u : 0u;
+    barrier();
+
+    if (lane < ROUTED_SELECTION_COUNT && token_id < VOCAB_SIZE) {
+        uint table_element = token_id * ROUTED_SELECTION_COUNT + lane;
+        uint resource_index = selection_table.words[table_element * TABLE_WORD_STRIDE];
+        uint high_word = TABLE_WORD_STRIDE == 2u
+            ? selection_table.words[table_element * TABLE_WORD_STRIDE + 1u]
+            : 0u;
+        if (resource_index >= ROUTED_RESOURCE_COUNT || high_word != 0u) {
+            atomicOr(invalid_selection, 1u);
+        }
+        for (uint previous = 0u; previous < lane; previous++) {
+            uint previous_element = token_id * ROUTED_SELECTION_COUNT + previous;
+            if (resource_index == selection_table.words[previous_element * TABLE_WORD_STRIDE]) {
+                atomicOr(invalid_selection, 1u);
+            }
+        }
+        selected_indices[lane] = min(resource_index, ROUTED_RESOURCE_COUNT - 1u);
+    }
+    if (lane < ALWAYS_SELECTED_RESOURCE_COUNT) {
+        selected_indices[ROUTED_SELECTION_COUNT + lane] =
+            ALWAYS_SELECTED_RESOURCE_START + lane;
+    }
+    barrier();
+
+    if (lane != 0u) return;
+    if (invalid_selection != 0u) {
+        for (uint selection = 0u; selection < TOTAL_SELECTION_COUNT; selection++) {
+            resource_selections.words[selection] = 0xffffffffu;
+        }
+        return;
+    }
+    for (uint selection = 1u; selection < TOTAL_SELECTION_COUNT; selection++) {
+        uint resource_index = selected_indices[selection];
+        uint insertion = selection;
+        while (insertion > 0u && selected_indices[insertion - 1u] > resource_index) {
+            selected_indices[insertion] = selected_indices[insertion - 1u];
+            insertion--;
+        }
+        selected_indices[insertion] = resource_index;
+    }
+    for (uint selection = 0u; selection < TOTAL_SELECTION_COUNT; selection++) {
+        uint resource_index = selected_indices[selection];
+        resource_selections.words[selection] = resource_index;
+        atomicAdd(selection_telemetry.counts[resource_index], 1u);
+    }
+    for (uint left_selection = 0u; left_selection < TOTAL_SELECTION_COUNT; left_selection++) {
+        uint left = selected_indices[left_selection];
+        for (uint right_selection = left_selection + 1u; right_selection < TOTAL_SELECTION_COUNT; right_selection++) {
+            uint right = selected_indices[right_selection];
+            uint preceding = left * (2u * TOTAL_RESOURCE_COUNT - left - 1u) / 2u;
+            uint pair_index = preceding + right - left - 1u;
+            atomicAdd(selection_telemetry.counts[TOTAL_RESOURCE_COUNT + pair_index], 1u);
+        }
+    }
+}

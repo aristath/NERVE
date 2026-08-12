@@ -41,6 +41,7 @@ pub struct PlannedSelectionDomain {
     pub domain_id: String,
     pub resource_count: usize,
     pub selection_count_per_activation: usize,
+    pub predictable_dependency: Option<PlannedPredictableResourceSelection>,
 }
 
 pub(crate) fn circuit_dtype_bytes(dtype: &str) -> Result<usize, CircuitPlanError> {
@@ -509,6 +510,13 @@ pub struct PlannedNodeSelectionDomain {
     pub resource_count: usize,
     pub selection_signal: String,
     pub encoding: PlannedSelectionEncoding,
+    pub predictable_dependency: Option<PlannedPredictableResourceSelection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedPredictableResourceSelection {
+    pub key_signal: String,
+    pub table_parameter: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -609,11 +617,16 @@ fn planned_node_selection_domain(
     component_id: &str,
     node: &CircuitNode,
 ) -> Result<Option<PlannedNodeSelectionDomain>, CircuitPlanError> {
-    let Some(domain) = node
-        .attrs
-        .as_object()
-        .and_then(|attrs| attrs.get("selection_domain"))
+    let attrs = node.attrs.as_object();
+    let predictable_dependency = attrs.and_then(|attrs| attrs.get("predictable_dependency"));
+    let Some(domain) = attrs.and_then(|attrs| attrs.get("selection_domain"))
     else {
+        if predictable_dependency.is_some() {
+            return Err(CircuitPlanError(format!(
+                "{component_id} node {} predictable_dependency requires a selection_domain",
+                node.id
+            )));
+        }
         return Ok(None);
     };
     let domain = domain.as_object().ok_or_else(|| {
@@ -744,6 +757,68 @@ fn planned_node_selection_domain(
                 node.id
             ))
         })?;
+    let predictable_dependency = predictable_dependency
+        .map(|dependency| {
+            let dependency = dependency.as_object().ok_or_else(|| {
+                CircuitPlanError(format!(
+                    "{component_id} node {} predictable_dependency must be an object",
+                    node.id
+                ))
+            })?;
+            if dependency.len() != 5
+                || ![
+                    "schema",
+                    "kind",
+                    "key_signal",
+                    "table_parameter",
+                    "selection_semantics",
+                ]
+                .iter()
+                .all(|field| dependency.contains_key(*field))
+                || dependency.get("schema").and_then(serde_json::Value::as_str)
+                    != Some("nerve.predictable_resource_selection.v1")
+                || dependency.get("kind").and_then(serde_json::Value::as_str)
+                    != Some("parameter_table_lookup")
+                || dependency
+                    .get("selection_semantics")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("exact")
+            {
+                return Err(CircuitPlanError(format!(
+                    "{component_id} node {} has an invalid predictable_dependency contract",
+                    node.id
+                )));
+            }
+            let key_signal = dependency
+                .get("key_signal")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .filter(|value| node.inputs.iter().any(|input| input == *value))
+                .ok_or_else(|| {
+                    CircuitPlanError(format!(
+                        "{component_id} node {} predictable_dependency key_signal must name a node input",
+                        node.id
+                    ))
+                })?
+                .to_string();
+            let table_parameter = dependency
+                .get("table_parameter")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .filter(|value| node.params.iter().any(|parameter| parameter == *value))
+                .ok_or_else(|| {
+                    CircuitPlanError(format!(
+                        "{component_id} node {} predictable_dependency table_parameter must name a node parameter",
+                        node.id
+                    ))
+                })?
+                .to_string();
+            Ok(PlannedPredictableResourceSelection {
+                key_signal,
+                table_parameter,
+            })
+        })
+        .transpose()?;
     Ok(Some(PlannedNodeSelectionDomain {
         domain_id,
         resource_count,
@@ -754,6 +829,7 @@ fn planned_node_selection_domain(
             index_shift,
             index_mask,
         },
+        predictable_dependency,
     }))
 }
 
@@ -801,10 +877,9 @@ fn planned_node_selected_parameter_accesses(
             .get("selection_signal")
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .filter(|value| node.inputs.iter().any(|input| input == *value))
             .ok_or_else(|| {
                 CircuitPlanError(format!(
-                    "{component_id} node {} selected parameter access signal must name a node input",
+                    "{component_id} node {} selected parameter access signal must be non-empty",
                     node.id
                 ))
             })?
@@ -1066,8 +1141,89 @@ mod selection_domain_tests {
                     index_shift: 0,
                     index_mask: 0xffff,
                 },
+                predictable_dependency: None,
             })
         );
+    }
+
+    #[test]
+    fn selection_domain_preserves_an_exact_predictable_dependency() {
+        let mut node = node_with_selection_domain(valid_selection_domain());
+        node.inputs.push("token_id".to_string());
+        node.params.push("route_table".to_string());
+        node.attrs["predictable_dependency"] = serde_json::json!({
+            "schema": "nerve.predictable_resource_selection.v1",
+            "kind": "parameter_table_lookup",
+            "key_signal": "token_id",
+            "table_parameter": "route_table",
+            "selection_semantics": "exact"
+        });
+
+        let domain = planned_node_selection_domain("component", &node)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            domain.predictable_dependency,
+            Some(PlannedPredictableResourceSelection {
+                key_signal: "token_id".to_string(),
+                table_parameter: "route_table".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn selection_domain_rejects_non_exact_or_unbound_predictable_dependencies() {
+        for dependency in [
+            serde_json::json!({
+                "schema": "nerve.predictable_resource_selection.v1",
+                "kind": "parameter_table_lookup",
+                "key_signal": "token_id",
+                "table_parameter": "route_table",
+                "selection_semantics": "advisory"
+            }),
+            serde_json::json!({
+                "schema": "nerve.predictable_resource_selection.v1",
+                "kind": "parameter_table_lookup",
+                "key_signal": "missing",
+                "table_parameter": "route_table",
+                "selection_semantics": "exact"
+            }),
+        ] {
+            let mut node = node_with_selection_domain(valid_selection_domain());
+            node.inputs.push("token_id".to_string());
+            node.params.push("route_table".to_string());
+            node.attrs["predictable_dependency"] = dependency;
+            let error = planned_node_selection_domain("component", &node).unwrap_err();
+            assert!(error.to_string().contains("predictable_dependency"));
+        }
+    }
+
+    #[test]
+    fn predictable_dependency_requires_a_selection_domain() {
+        let node = CircuitNode {
+            id: "selector".to_string(),
+            op: "top_k".to_string(),
+            inputs: vec!["token_id".to_string()],
+            outputs: vec!["selected".to_string()],
+            params: vec!["route_table".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "predictable_dependency": {
+                    "schema": "nerve.predictable_resource_selection.v1",
+                    "kind": "parameter_table_lookup",
+                    "key_signal": "token_id",
+                    "table_parameter": "route_table",
+                    "selection_semantics": "exact"
+                }
+            }),
+        };
+
+        let error = planned_node_selection_domain("component", &node).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("predictable_dependency requires a selection_domain"));
     }
 
     #[test]
@@ -1097,6 +1253,37 @@ mod selection_domain_tests {
                     partition_axis: 0,
                 },
                 parameter_ids: vec!["bank".to_string(), "scale".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn selected_parameter_access_can_use_an_earlier_exact_resource_selection() {
+        let node = CircuitNode {
+            id: "selected_compute".to_string(),
+            op: "generic_compute".to_string(),
+            inputs: vec!["weighted_activation".to_string()],
+            outputs: vec!["output".to_string()],
+            params: vec!["bank".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({
+                "selected_parameter_accesses": [{
+                    "selection_signal": "early_exact_selection",
+                    "partition_axis": 0,
+                    "parameter_ids": ["bank"]
+                }]
+            }),
+        };
+
+        assert_eq!(
+            planned_node_selected_parameter_accesses("component", &node).unwrap(),
+            vec![PlannedSelectedParameterAccess {
+                selection_signal: "early_exact_selection".to_string(),
+                layout: PlannedSelectedParameterLayout::Partitioned {
+                    partition_axis: 0,
+                },
+                parameter_ids: vec!["bank".to_string()],
             }]
         );
     }

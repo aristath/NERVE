@@ -40,8 +40,9 @@ use crate::stream_circuit::{
 };
 use crate::stream_plan::{
     CircuitActivationPlan, PlannedNode, PlannedParameterResource, PlannedPort,
-    PlannedSelectedParameterLayout, PlannedSelectionEncoding, SignalProducer, SignalStorage,
-    StreamCircuitExecutionPlan, StreamCircuitResourcePlan, TensorIndex,
+    PlannedPredictableResourceSelection, PlannedSelectedParameterLayout, PlannedSelectionEncoding,
+    SignalProducer, SignalStorage, StreamCircuitExecutionPlan, StreamCircuitResourcePlan,
+    TensorIndex,
 };
 use crate::stream_prefix_cache::{RuntimePrefixStateCacheInsert, RuntimePrefixStateCacheKey};
 use crate::stream_runtime::{

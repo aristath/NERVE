@@ -584,6 +584,99 @@ def test_reuses_compatible_partitions_across_independent_selectors() -> None:
     }
 
 
+def test_exact_early_selection_can_control_later_dynamic_parameters() -> None:
+    nodes, refs = _independent_component()
+    nodes[0]["attrs"]["predictable_dependency"] = {
+        "schema": "nerve.predictable_resource_selection.v1",
+        "kind": "parameter_table_lookup",
+        "key_signal": "input",
+        "table_parameter": "router",
+        "selection_semantics": "exact",
+    }
+    nodes.insert(
+        1,
+        {
+            "id": "weight_selected_units",
+            "op": "weight_preselected_units",
+            "inputs": ["input", "chosen"],
+            "outputs": ["weighted"],
+            "params": [],
+            "attrs": {},
+        },
+    )
+    nodes[2]["inputs"] = ["weighted"]
+
+    analysis = analyze_resource_residency_components(
+        components=[_component(nodes, refs)],
+        tensor_index={
+            "tensors": {
+                "tensor.router": _tensor(4, [2]),
+                "tensor.unit_0_scale": _tensor(2, [2]),
+                "tensor.unit_0_weight": _tensor(8, [2, 4]),
+                "tensor.unit_1_scale": _tensor(2, [2]),
+                "tensor.unit_1_weight": _tensor(8, [2, 4]),
+            }
+        },
+        require_direct_packaging=True,
+    )
+
+    assert analysis["groups"][0]["selector_node_id"] == "choose"
+    assert analysis["groups"][0]["selection_signal"] == "chosen"
+    assert analysis["groups"][0]["resume_node_id"] == "selected_compute"
+    assert analysis["groups"][0]["predictable_dependency"] == nodes[0]["attrs"][
+        "predictable_dependency"
+    ]
+
+
+def test_rejects_non_exact_or_unbound_predictable_selection_dependencies() -> None:
+    for dependency in (
+        {
+            "schema": "nerve.predictable_resource_selection.v1",
+            "kind": "parameter_table_lookup",
+            "key_signal": "input",
+            "table_parameter": "router",
+            "selection_semantics": "advisory",
+        },
+        {
+            "schema": "nerve.predictable_resource_selection.v1",
+            "kind": "parameter_table_lookup",
+            "key_signal": "not_an_input",
+            "table_parameter": "router",
+            "selection_semantics": "exact",
+        },
+    ):
+        nodes, refs = _optional_component()
+        nodes[0]["params"] = ["always_bias"]
+        nodes[0]["attrs"]["predictable_dependency"] = dependency
+        with pytest.raises(ModelCompileError, match="predictable dependency"):
+            analyze_resource_residency_components(
+                components=[_component(nodes, refs)],
+                tensor_index=_analysis_tensors(),
+                require_direct_packaging=True,
+            )
+
+
+def test_rejects_predictable_dependency_without_selection_domain() -> None:
+    nodes, refs = _optional_component()
+    dependency = {
+        "schema": "nerve.predictable_resource_selection.v1",
+        "kind": "parameter_table_lookup",
+        "key_signal": "input",
+        "table_parameter": "router",
+        "selection_semantics": "exact",
+    }
+    nodes[1]["attrs"]["predictable_dependency"] = dependency
+
+    with pytest.raises(
+        ModelCompileError, match="predictable dependency requires a selection domain"
+    ):
+        analyze_resource_residency_components(
+            components=[_component(nodes, refs)],
+            tensor_index=_analysis_tensors(),
+            require_direct_packaging=True,
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (

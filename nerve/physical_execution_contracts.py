@@ -667,7 +667,7 @@ def _distributed_kernel_contract(
         selection_signal = access.get("selection_signal")
         if (
             not isinstance(selection_signal, str)
-            or selection_signal not in node.get("inputs", [])
+            or not selection_signal.strip()
             or parameter_ids != node.get("params", [])
             or parameters_per_resource is None
         ):
@@ -1459,9 +1459,7 @@ def _validate_selected_resource_partitions(
         bindings.update((address_binding, slots_binding))
         if _enum(item["kind"], _PARTITION_KINDS, f"{path}.kind") != "expert_range":
             _invalid("selected resource partitions currently require expert ranges")
-        resource_count = _positive_int(
-            item["resource_count"], f"{path}.resource_count"
-        )
+        _positive_int(item["resource_count"], f"{path}.resource_count")
         parameters_per_resource = _positive_int(
             item["parameters_per_resource"], f"{path}.parameters_per_resource"
         )
