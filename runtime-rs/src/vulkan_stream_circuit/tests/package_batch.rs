@@ -2018,6 +2018,7 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
         physical_artifact_id: node_id.to_string(),
         physical_execution_contract_id: format!("sha256:{}", "a".repeat(64)),
         implementation_digest: format!("sha256:{}", "b".repeat(64)),
+        execution_strategy: nerve_execution_contracts::ExecutionStrategy::ExpertParallel,
         equivalence: crate::VulkanDistributedEquivalencePlan {
             output: crate::VulkanDistributedEquivalenceKind::BitExact,
             state: crate::VulkanDistributedEquivalenceKind::BitExact,

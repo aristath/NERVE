@@ -612,6 +612,7 @@ fn plan_contract_dispatch(
         physical_artifact_id: artifact.artifact_id.clone(),
         physical_execution_contract_id: contract.contract_id.clone(),
         implementation_digest: contract.implementation_digest.clone(),
+        execution_strategy: contract.strategy,
         equivalence: VulkanDistributedEquivalencePlan::from_contract(&contract.equivalence),
         contract_member_node_ids: contract.member_node_ids.clone(),
         local_intermediates: contract.local_intermediates.clone(),

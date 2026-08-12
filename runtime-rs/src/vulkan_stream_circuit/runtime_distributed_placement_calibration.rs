@@ -584,13 +584,14 @@ fn distributed_calibration_execution_case(
             input_fixture_digest,
             equivalence,
         },
-        strategy: distributed_calibration_execution_strategy(
+        strategy: vulkan_distributed_placement_strategy(
             devices.len(),
             execution_plan
                 .dispatches
                 .iter()
-                .map(|dispatch| dispatch.distribution),
-        )?,
+                .map(|dispatch| dispatch.execution_strategy),
+        )
+        .map_err(|error| distributed_calibration_error_value(error.to_string()))?,
         devices,
         shards,
         input_physical_device_id,
@@ -732,42 +733,6 @@ fn distributed_calibration_reduction_geometry(
         element_byte_count: size_of::<f32>(),
         participant_count,
     }))
-}
-
-fn distributed_calibration_execution_strategy(
-    device_count: usize,
-    distributions: impl IntoIterator<Item = VulkanDistributedDispatchDistribution>,
-) -> Result<VulkanPlacementExecutionStrategy, VulkanResidentTokenModelPackageError> {
-    if device_count == 0 {
-        return distributed_calibration_error(
-            "distributed calibration strategy requires at least one physical device",
-        );
-    }
-    let mut saw_output_rows = false;
-    let mut saw_input_columns = false;
-    let mut saw_expert_range = false;
-    for distribution in distributions {
-        match distribution {
-            VulkanDistributedDispatchDistribution::OutputRows => saw_output_rows = true,
-            VulkanDistributedDispatchDistribution::InputColumns => saw_input_columns = true,
-            VulkanDistributedDispatchDistribution::ExpertRange => saw_expert_range = true,
-        }
-    }
-    if !saw_output_rows && !saw_input_columns && !saw_expert_range {
-        return distributed_calibration_error(
-            "distributed calibration strategy requires at least one partitioned dispatch",
-        );
-    }
-    if device_count == 1 {
-        return Ok(VulkanPlacementExecutionStrategy::SingleDevice);
-    }
-    let saw_tensor_parallel = saw_output_rows || saw_input_columns;
-    match (saw_tensor_parallel, saw_expert_range) {
-        (true, false) => Ok(VulkanPlacementExecutionStrategy::TensorParallel),
-        (false, true) => Ok(VulkanPlacementExecutionStrategy::WholeExpertParallel),
-        (true, true) => Ok(VulkanPlacementExecutionStrategy::Hybrid),
-        (false, false) => unreachable!("checked nonempty distributions above"),
-    }
 }
 
 fn distributed_calibration_distribution_name(
@@ -2579,43 +2544,43 @@ mod runtime_distributed_placement_calibration_strategy_tests {
     #[test]
     fn classifies_physical_strategy_from_partition_contracts() {
         assert_eq!(
-            distributed_calibration_execution_strategy(
+            vulkan_distributed_placement_strategy(
                 1,
-                [VulkanDistributedDispatchDistribution::ExpertRange],
+                [nerve_execution_contracts::ExecutionStrategy::ExpertParallel],
             )
             .unwrap(),
             VulkanPlacementExecutionStrategy::SingleDevice,
         );
         assert_eq!(
-            distributed_calibration_execution_strategy(
+            vulkan_distributed_placement_strategy(
                 2,
-                [VulkanDistributedDispatchDistribution::OutputRows],
+                [nerve_execution_contracts::ExecutionStrategy::TensorParallel],
             )
             .unwrap(),
             VulkanPlacementExecutionStrategy::TensorParallel,
         );
         assert_eq!(
-            distributed_calibration_execution_strategy(
+            vulkan_distributed_placement_strategy(
                 2,
-                [VulkanDistributedDispatchDistribution::InputColumns],
+                [nerve_execution_contracts::ExecutionStrategy::TensorParallelExpert],
             )
             .unwrap(),
-            VulkanPlacementExecutionStrategy::TensorParallel,
+            VulkanPlacementExecutionStrategy::IntraExpertTensorParallel,
         );
         assert_eq!(
-            distributed_calibration_execution_strategy(
+            vulkan_distributed_placement_strategy(
                 3,
-                [VulkanDistributedDispatchDistribution::ExpertRange],
+                [nerve_execution_contracts::ExecutionStrategy::ExpertParallel],
             )
             .unwrap(),
             VulkanPlacementExecutionStrategy::WholeExpertParallel,
         );
         assert_eq!(
-            distributed_calibration_execution_strategy(
+            vulkan_distributed_placement_strategy(
                 4,
                 [
-                    VulkanDistributedDispatchDistribution::ExpertRange,
-                    VulkanDistributedDispatchDistribution::OutputRows,
+                    nerve_execution_contracts::ExecutionStrategy::ExpertParallel,
+                    nerve_execution_contracts::ExecutionStrategy::TensorParallel,
                 ],
             )
             .unwrap(),
@@ -2625,15 +2590,15 @@ mod runtime_distributed_placement_calibration_strategy_tests {
 
     #[test]
     fn rejects_an_empty_physical_strategy() {
-        let no_devices = distributed_calibration_execution_strategy(
+        let no_devices = vulkan_distributed_placement_strategy(
             0,
-            [VulkanDistributedDispatchDistribution::OutputRows],
+            [nerve_execution_contracts::ExecutionStrategy::TensorParallel],
         )
         .unwrap_err();
         assert!(no_devices.to_string().contains("physical device"));
 
         let no_dispatches =
-            distributed_calibration_execution_strategy(1, std::iter::empty()).unwrap_err();
+            vulkan_distributed_placement_strategy(1, std::iter::empty()).unwrap_err();
         assert!(no_dispatches.to_string().contains("partitioned dispatch"));
     }
 

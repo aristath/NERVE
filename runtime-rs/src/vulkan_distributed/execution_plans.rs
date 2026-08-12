@@ -1668,6 +1668,7 @@ pub struct VulkanDistributedDispatchPlan {
     pub physical_artifact_id: String,
     pub physical_execution_contract_id: String,
     pub implementation_digest: String,
+    pub execution_strategy: nerve_execution_contracts::ExecutionStrategy,
     pub equivalence: VulkanDistributedEquivalencePlan,
     pub contract_member_node_ids: Vec<String>,
     pub local_intermediates: Vec<nerve_execution_contracts::LocalIntermediateContract>,
@@ -1689,6 +1690,60 @@ pub struct VulkanDistributedDispatchPlan {
     pub distribution: VulkanDistributedDispatchDistribution,
     pub distributed_parameter_byte_count: usize,
     pub shards: Vec<VulkanDistributedDispatchShard>,
+}
+
+pub(crate) fn vulkan_distributed_placement_strategy(
+    device_count: usize,
+    strategies: impl IntoIterator<Item = nerve_execution_contracts::ExecutionStrategy>,
+) -> Result<crate::vulkan_stream_circuit::VulkanPlacementExecutionStrategy, VulkanDistributedPlanError>
+{
+    use crate::vulkan_stream_circuit::VulkanPlacementExecutionStrategy as Placement;
+    use nerve_execution_contracts::ExecutionStrategy;
+
+    if device_count == 0 {
+        return Err(VulkanDistributedPlanError(
+            "distributed placement strategy requires at least one physical device".to_string(),
+        ));
+    }
+    let mut saw_tensor_parallel = false;
+    let mut saw_expert_parallel = false;
+    let mut saw_intra_expert_tensor_parallel = false;
+    let mut dispatch_count = 0usize;
+    for strategy in strategies {
+        dispatch_count += 1;
+        match strategy {
+            ExecutionStrategy::TensorParallel => saw_tensor_parallel = true,
+            ExecutionStrategy::ExpertParallel => saw_expert_parallel = true,
+            ExecutionStrategy::TensorParallelExpert => {
+                saw_intra_expert_tensor_parallel = true
+            }
+            ExecutionStrategy::SingleDevice => {
+                return Err(VulkanDistributedPlanError(
+                    "distributed placement contains a single-device physical contract"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    if dispatch_count == 0 {
+        return Err(VulkanDistributedPlanError(
+            "distributed placement strategy requires at least one partitioned dispatch"
+                .to_string(),
+        ));
+    }
+    if device_count == 1 {
+        return Ok(Placement::SingleDevice);
+    }
+    match (
+        saw_tensor_parallel,
+        saw_expert_parallel,
+        saw_intra_expert_tensor_parallel,
+    ) {
+        (true, false, false) => Ok(Placement::TensorParallel),
+        (false, true, false) => Ok(Placement::WholeExpertParallel),
+        (false, false, true) => Ok(Placement::IntraExpertTensorParallel),
+        _ => Ok(Placement::Hybrid),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

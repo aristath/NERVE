@@ -153,6 +153,17 @@ fn replay_exact_distributed_component_case(
             "exact case for component {component_id:?} was measured with different physical execution contracts",
         ));
     }
+    let runtime_strategy = vulkan_distributed_placement_strategy(
+        case.devices.len(),
+        dispatch_indices.iter().map(|dispatch_index| {
+            execution_plan.dispatches[*dispatch_index].execution_strategy
+        }),
+    )?;
+    if runtime_strategy != case.strategy {
+        return exact_case_error(format!(
+            "exact case for component {component_id:?} was measured with a different physical execution strategy",
+        ));
+    }
     let runtime_participants = dispatch_indices
         .iter()
         .flat_map(|dispatch_index| {
@@ -458,6 +469,7 @@ mod exact_case_replay_tests {
             physical_artifact_id: "artifact".to_string(),
             physical_execution_contract_id: "contract".to_string(),
             implementation_digest: "implementation".to_string(),
+            execution_strategy: nerve_execution_contracts::ExecutionStrategy::ExpertParallel,
             equivalence: VulkanDistributedEquivalencePlan {
                 output: VulkanDistributedEquivalenceKind::BitExact,
                 state: VulkanDistributedEquivalenceKind::BitExact,
@@ -732,5 +744,49 @@ mod exact_case_replay_tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("different physical execution contracts"));
+    }
+
+    #[test]
+    fn exact_replay_rejects_relabelled_physical_execution_strategy() {
+        let mut plan = VulkanDistributedExecutionPlan {
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            storage_buffer_offset_alignment: 4,
+            dispatches: vec![dispatch()],
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 16,
+            shared_output_byte_capacity: 16,
+            distributed_parameter_byte_count: 0,
+        };
+        let mut relabelled = exact_case(&[0, 1], &[2, 3]);
+        relabelled.strategy = VulkanPlacementExecutionStrategy::IntraExpertTensorParallel;
+
+        let error = replay_exact_distributed_component_case(
+            &mut plan,
+            "moe",
+            &[0],
+            &relabelled,
+            &BTreeMap::from([
+                (
+                    "owner".to_string(),
+                    VulkanPlacementDeviceExecutionIdentity {
+                        physical_device_id: "physical-owner".to_string(),
+                        api_version: 1,
+                        driver_version: 2,
+                    },
+                ),
+                (
+                    "helper".to_string(),
+                    VulkanPlacementDeviceExecutionIdentity {
+                        physical_device_id: "physical-helper".to_string(),
+                        api_version: 1,
+                        driver_version: 2,
+                    },
+                ),
+            ]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("different physical execution strategy"));
     }
 }
