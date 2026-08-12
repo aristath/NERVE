@@ -43,6 +43,22 @@ fn selected_resource_activation<'a>(
     Ok(*activation)
 }
 
+fn selected_resource_gate_lane_layout(
+    activation: &VulkanDistributedActivationSlot,
+    lane_capacity: usize,
+) -> Result<(usize, usize), VulkanDistributedDispatchRunnerError> {
+    if lane_capacity == 0
+        || activation.signal_byte_capacity == 0
+        || activation.signal_byte_capacity > activation.byte_capacity
+    {
+        return Err(VulkanDistributedDispatchRunnerError(format!(
+            "distributed selected-resource activation {:?} has an invalid {}-lane layout",
+            activation.signal_id, lane_capacity,
+        )));
+    }
+    Ok((activation.signal_byte_capacity, lane_capacity))
+}
+
 fn distributed_sequence_for_kind<'a, T>(
     direct: &'a T,
     feedback_indirect: Option<&'a T>,
@@ -710,14 +726,19 @@ impl VulkanDistributedDispatchRunners {
                                             planned_shard.device_id
                                         ))
                                     })?;
+                                let (selection_lane_stride_bytes, lane_count) =
+                                    selected_resource_gate_lane_layout(
+                                        selection_activation,
+                                        activation_buffers.lane_capacity,
+                                    )?;
                                 VulkanDistributedSelectedResourceGate::new(
                                     device,
                                     execution_scope,
                                     planned_dispatch,
                                     partition,
                                     selection_buffer,
-                                    selection_activation.signal_byte_capacity,
-                                    1,
+                                    selection_lane_stride_bytes,
+                                    lane_count,
                                     dynamic_resources,
                                     Arc::clone(&store),
                                     Arc::clone(&local_predicate),

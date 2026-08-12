@@ -2079,6 +2079,14 @@ mod tests {
         route.slot = 3;
         producer.auxiliary_input_activations = vec![route.clone()];
         producer.auxiliary_input_distributions = vec![InputDistribution::Replicated];
+        assert_eq!(
+            selected_resource_gate_lane_layout(&route, 16).unwrap(),
+            (route.signal_byte_capacity, 16),
+        );
+        assert!(selected_resource_gate_lane_layout(&route, 0).is_err());
+        let mut undersized_route = route.clone();
+        undersized_route.byte_capacity = undersized_route.signal_byte_capacity - 1;
+        assert!(selected_resource_gate_lane_layout(&undersized_route, 16).is_err());
         producer.selected_resource_partitions = vec![
             VulkanDistributedSelectedResourcePartitionPlan {
                 execution_scope: "model".to_string(),
