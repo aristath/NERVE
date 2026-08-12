@@ -148,31 +148,6 @@ pub fn measure_package_candidates(
     let calibration_result = (|| {
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
         let mut reports = Vec::new();
-        if candidates.is_empty() {
-            for (physical_device_id, device) in &devices {
-                if let Some(canonical) =
-                    calibrate_vulkan_runtime_canonical_placement_candidate_with_policy(
-                        physical_device_id,
-                        device.clone(),
-                        package.manifest_dir(),
-                        package.runtime_model(),
-                        target,
-                        execution_phase,
-                        policy.clone(),
-                    )?
-                {
-                    record_vulkan_runtime_canonical_placement_calibration(
-                        &mut catalog,
-                        canonical,
-                    )
-                        .map_err(|error| {
-                            nerve_runtime::VulkanResidentTokenModelPackageError::new(
-                                error.to_string(),
-                            )
-                        })?;
-                }
-            }
-        }
         for candidate in candidates {
             let report = calibrate_vulkan_runtime_staged_contract_candidate_with_policy(
                 &devices,
@@ -189,6 +164,28 @@ pub fn measure_package_candidates(
             }
             if ordered_target_ids.len() == 1 && catalog.observation_count() > 0 {
                 break;
+            }
+        }
+        if catalog.observation_count() == 0 {
+            for (physical_device_id, device) in &devices {
+                if let Some(canonical) =
+                    calibrate_vulkan_runtime_canonical_placement_candidate_with_policy(
+                        physical_device_id,
+                        device.clone(),
+                        package.manifest_dir(),
+                        package.runtime_model(),
+                        target,
+                        execution_phase,
+                        policy.clone(),
+                    )?
+                {
+                    record_vulkan_runtime_canonical_placement_calibration(&mut catalog, canonical)
+                        .map_err(|error| {
+                            nerve_runtime::VulkanResidentTokenModelPackageError::new(
+                                error.to_string(),
+                            )
+                        })?;
+                }
             }
         }
         Ok::<_, nerve_runtime::VulkanResidentTokenModelPackageError>((catalog, reports))
