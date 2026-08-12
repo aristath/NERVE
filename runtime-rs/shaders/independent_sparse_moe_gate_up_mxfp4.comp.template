@@ -21,6 +21,7 @@ layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
 #define PREQUANTIZED_INPUT {{PREQUANTIZED_INPUT}}
 #define PREEXPANDED_FP8 {{PREEXPANDED_FP8}}
 #define DYNAMIC_WEIGHT_REPRESENTATION {{DYNAMIC_WEIGHT_REPRESENTATION}}
+#define TENSOR_PARALLEL {{TENSOR_PARALLEL}}
 #if PREQUANTIZED_INPUT
 layout(set = 0, binding = 0) readonly buffer QuantizedHidden { uint words[]; } quantized_hidden;
 layout(set = 0, binding = 1) readonly buffer HiddenScales { float values[]; } hidden_scales;
@@ -40,10 +41,12 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Dyn
     uint words[];
 };
 
+#if !TENSOR_PARALLEL
 layout(push_constant) uniform ExpertRange {
     uint expert_start;
     uint expert_count;
 } expert_range;
+#endif
 
 const uint HIDDEN_SIZE = {{HIDDEN_SIZE}}u;
 const uint INTERMEDIATE_SIZE = {{INTERMEDIATE_SIZE}}u;
@@ -70,7 +73,11 @@ const uint MXFP4_E4M3_BITS[8] = uint[8](
 shared fe4m3vec4 cached_hidden[HIDDEN_FP8_WORDS];
 shared float cached_hidden_scales[HIDDEN_BLOCKS];
 #endif
+#if TENSOR_PARALLEL
+shared float activated_rows[TILE_ROWS * 2u];
+#else
 shared float activated_rows[TILE_ROWS];
+#endif
 
 float bf16_to_f32(uint value) { return uintBitsToFloat((value & 0xffffu) << 16); }
 
@@ -172,6 +179,15 @@ bool dynamic_weight_is_preexpanded(uint expert, uint parameter) {
 bool dynamic_expert_is_valid(uint expert) {
     bool gate_preexpanded = dynamic_weight_is_preexpanded(expert, 0u);
     bool up_preexpanded = dynamic_weight_is_preexpanded(expert, 2u);
+#if TENSOR_PARALLEL
+    uint64_t gate_weight_bytes = uint64_t(
+        gate_preexpanded ? EXPANDED_WEIGHT_ROW_BYTES : COMPACT_WEIGHT_ROW_BYTES
+    );
+    uint64_t up_weight_bytes = uint64_t(
+        up_preexpanded ? EXPANDED_WEIGHT_ROW_BYTES : COMPACT_WEIGHT_ROW_BYTES
+    );
+    uint64_t scale_bytes = uint64_t(SCALE_ROW_BYTES);
+#else
     uint64_t gate_weight_bytes = uint64_t(INTERMEDIATE_SIZE) * uint64_t(
         gate_preexpanded ? EXPANDED_WEIGHT_ROW_BYTES : COMPACT_WEIGHT_ROW_BYTES
     );
@@ -179,6 +195,7 @@ bool dynamic_expert_is_valid(uint expert) {
         up_preexpanded ? EXPANDED_WEIGHT_ROW_BYTES : COMPACT_WEIGHT_ROW_BYTES
     );
     uint64_t scale_bytes = uint64_t(INTERMEDIATE_SIZE) * uint64_t(SCALE_ROW_BYTES);
+#endif
     return dynamic_weight_representation_is_valid(expert, 0u)
         && dynamic_weight_representation_is_valid(expert, 2u)
         && gate_preexpanded == up_preexpanded
@@ -193,6 +210,11 @@ DynamicU32Buffer dynamic_parameter(uint expert, uint parameter) {
     uint64_t address = uint64_t(dynamic_resource_addresses.words[record])
         | (uint64_t(dynamic_resource_addresses.words[record + 1u]) << 32u);
     return DynamicU32Buffer(address);
+}
+
+uint64_t dynamic_parameter_byte_count(uint expert, uint parameter) {
+    uint record = dynamic_parameter_slot(expert, parameter) * ADDRESS_RECORD_WORDS;
+    return address_record_byte_count(record);
 }
 
 uint read_u8(DynamicU32Buffer source, uint index) {
@@ -372,6 +394,139 @@ void accumulate_gate_up_expanded(
 }
 #endif
 
+#if TENSOR_PARALLEL
+void main() {
+    uint tile = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+#if !PREQUANTIZED_INPUT
+    quantize_hidden(lane);
+    barrier();
+#endif
+    uint first_row = tile * TILE_ROWS;
+    for (uint route_pair = 0u; route_pair < EXPERTS_PER_TOKEN / 2u; ++route_pair) {
+        for (uint route_in_pair = 0u; route_in_pair < 2u; ++route_in_pair) {
+            uint route = route_pair * 2u + route_in_pair;
+            uint expert = expert_routes.words[route] & 0xffffu;
+            if (expert >= NUM_EXPERTS || !dynamic_expert_is_valid(expert)) return;
+            DynamicU32Buffer gate_weight = dynamic_parameter(expert, 0u);
+            DynamicU32Buffer gate_scale = dynamic_parameter(expert, 1u);
+            DynamicU32Buffer up_weight = dynamic_parameter(expert, 2u);
+            DynamicU32Buffer up_scale = dynamic_parameter(expert, 3u);
+            bool gate_preexpanded = dynamic_weight_is_preexpanded(expert, 0u);
+            bool up_preexpanded = dynamic_weight_is_preexpanded(expert, 2u);
+            uint local_intermediate_size = uint(
+                dynamic_parameter_byte_count(expert, 0u)
+                / uint64_t(
+                    gate_preexpanded
+                        ? EXPANDED_WEIGHT_ROW_BYTES
+                        : COMPACT_WEIGHT_ROW_BYTES
+                )
+            );
+
+            for (
+                uint local_row = gl_SubgroupID;
+                local_row < TILE_ROWS;
+                local_row += gl_NumSubgroups
+            ) {
+                uint row = first_row + local_row;
+                float gate = 0.0;
+                float up = 0.0;
+                if (row < local_intermediate_size) {
+#if DYNAMIC_WEIGHT_REPRESENTATION
+                    if (gate_preexpanded) {
+                        accumulate_gate_up_expanded(
+                            gate_weight,
+                            gate_scale,
+                            up_weight,
+                            up_scale,
+                            row,
+                            gate,
+                            up
+                        );
+                    } else {
+                        accumulate_gate_up_compact(
+                            gate_weight,
+                            gate_scale,
+                            up_weight,
+                            up_scale,
+                            row,
+                            gate,
+                            up
+                        );
+                    }
+#else
+                    for (
+                        uint word = gl_SubgroupInvocationID;
+                        word < HIDDEN_FP8_WORDS;
+                        word += gl_SubgroupSize
+                    ) {
+                        uint column = word * 4u;
+                        uint activation_block = column / 128u;
+                        uint weight_block = column / 32u;
+#if PREQUANTIZED_INPUT
+                        float activation_scale = hidden_scales.values[activation_block];
+                        fe4m3vec4 hidden = read_fp8x4(quantized_hidden.words[word]);
+#else
+                        float activation_scale = cached_hidden_scales[activation_block];
+                        fe4m3vec4 hidden = cached_hidden[word];
+#endif
+                        gate = fma(
+                            fp8_dot4_acc32(
+                                hidden,
+                                read_mxfp4x4(
+                                    gate_weight, row, column, gate_preexpanded
+                                ),
+                                0.0
+                            ),
+                            activation_scale
+                                * read_e8m0_scale(gate_scale, row, weight_block),
+                            gate
+                        );
+                        up = fma(
+                            fp8_dot4_acc32(
+                                hidden,
+                                read_mxfp4x4(up_weight, row, column, up_preexpanded),
+                                0.0
+                            ),
+                            activation_scale
+                                * read_e8m0_scale(up_scale, row, weight_block),
+                            up
+                        );
+                    }
+#endif
+                }
+                gate = subgroupAdd(gate);
+                up = subgroupAdd(up);
+                if (gl_SubgroupInvocationID == 0u) {
+                    float activated = 0.0;
+                    if (row < local_intermediate_size) {
+                        float gate_value = round_bf16(gate);
+                        float up_value = round_bf16(up);
+                        if (SWIGLU_LIMIT > 0.0) {
+                            gate_value = min(gate_value, SWIGLU_LIMIT);
+                            up_value = clamp(up_value, -SWIGLU_LIMIT, SWIGLU_LIMIT);
+                        }
+                        activated = round_bf16(
+                            (gate_value / (1.0 + exp(-gate_value))) * up_value
+                        );
+                    }
+                    activated_rows[route_in_pair * TILE_ROWS + local_row] = activated;
+                }
+            }
+            barrier();
+        }
+        if (lane < TILE_ROWS) {
+            uint row = first_row + lane;
+            uint low = f32_to_bf16(activated_rows[lane]);
+            uint high = f32_to_bf16(activated_rows[TILE_ROWS + lane]);
+            expert_intermediates.words[
+                row * (EXPERTS_PER_TOKEN / 2u) + route_pair
+            ] = low | (high << 16u);
+        }
+        barrier();
+    }
+}
+#else
 void main() {
     uint route = gl_WorkGroupID.x / TILES_PER_ROUTE;
     uint tile = gl_WorkGroupID.x % TILES_PER_ROUTE;
@@ -494,3 +649,4 @@ void main() {
         }
     }
 }
+#endif

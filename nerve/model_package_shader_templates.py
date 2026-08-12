@@ -4751,6 +4751,7 @@ if (
 
     independent_mxfp4_expert_shape = re.fullmatch(
         r"independent_sparse_moe_(gate_up|down)(?:_(batch1))?"
+        r"(?:_(tensor_parallel))?"
         r"(?:_(prequant))?_"
         r"(?:(input_block_major_b128)_)?"
         r"mxfp4_e2m1(?:_(resident_fp8_e4m3|adaptive_fp8_e4m3))?_g32_"
@@ -4762,6 +4763,7 @@ if (
         (
             stage,
             batch_mode,
+            tensor_parallel,
             prequant,
             input_block_major,
             weight_representation,
@@ -4782,6 +4784,14 @@ if (
             or intermediate_size % 128
             or not 0 < experts_per_token <= num_experts
             or (stage == "gate_up") != (swiglu_limit is not None)
+            or (tensor_parallel is not None and batch_mode is not None)
+            or (
+                tensor_parallel is not None
+                and (
+                    experts_per_token % 2
+                    or (stage == "down") != (input_block_major is not None)
+                )
+            )
         ):
             raise ModelCompileError(
                 f"invalid demand-addressed MXFP4 expert kernel {shader_file!r}"
@@ -4805,6 +4815,7 @@ if (
                     "1" if weight_representation == "adaptive_fp8_e4m3" else "0"
                 ),
                 "INPUT_BLOCK_MAJOR": "1" if input_block_major is not None else "0",
+                "TENSOR_PARALLEL": "1" if tensor_parallel is not None else "0",
             },
         )
 

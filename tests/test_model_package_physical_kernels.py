@@ -472,15 +472,104 @@ def test_partitioned_byte_matrix_reorders_preserve_exact_physical_ranges(
     assert len(partition_digests) == 4
 
 
-def test_compiler_derives_fragmentable_independent_expert_down_resources(
+def independent_mxfp4_expert_pair_fixture(
     tmp_path: Path,
+) -> tuple[dict, dict, dict, dict]:
+    tensor_index: dict = {"tensors": {}}
+    refs: dict = {}
+    gate_params: list[str] = []
+    down_params: list[str] = []
+    gate_mapping: list[dict] = []
+    down_mapping: list[dict] = []
+    for expert in range(2):
+        gate_ids: list[str] = []
+        for projection in ("gate", "up"):
+            weight_id = f"expert_{expert}_{projection}_weight"
+            scale_id = f"expert_{expert}_{projection}_scale"
+            weight_name = f"expert.{expert}.{projection}.weight"
+            scale_name = f"expert.{expert}.{projection}.scale"
+            _write_mxfp4_fixture_tensor_pair(
+                tmp_path,
+                tensor_index,
+                weight_name=weight_name,
+                scale_name=scale_name,
+                rows=256,
+                columns=128,
+            )
+            refs[weight_id] = {"tensor": weight_name}
+            refs[scale_id] = {"tensor": scale_name}
+            gate_ids.extend((weight_id, scale_id))
+        down_weight_id = f"expert_{expert}_down_weight"
+        down_scale_id = f"expert_{expert}_down_scale"
+        down_weight_name = f"expert.{expert}.down.weight"
+        down_scale_name = f"expert.{expert}.down.scale"
+        _write_mxfp4_fixture_tensor_pair(
+            tmp_path,
+            tensor_index,
+            weight_name=down_weight_name,
+            scale_name=down_scale_name,
+            rows=128,
+            columns=256,
+        )
+        refs[down_weight_id] = {"tensor": down_weight_name}
+        refs[down_scale_id] = {"tensor": down_scale_name}
+        gate_params.extend(gate_ids)
+        down_params.extend((down_weight_id, down_scale_id))
+        gate_mapping.append({"selector": expert, "parameter_ids": gate_ids})
+        down_mapping.append(
+            {
+                "selector": expert,
+                "parameter_ids": [down_weight_id, down_scale_id],
+            }
+        )
+    common_attrs = {
+        "hidden_size": 128,
+        "intermediate_size": 256,
+        "experts_per_token": 2,
+    }
+    gate_up = {
+        "id": "expert_gate_up",
+        "op": "independent_sparse_moe_gate_up",
+        "inputs": ["hidden", "routes"],
+        "outputs": ["expert_intermediates"],
+        "params": gate_params,
+        "attrs": {
+            **common_attrs,
+            "swiglu_limit": 0.0,
+            "selected_parameter_accesses": [
+                {"selection_signal": "routes", "mapping": gate_mapping}
+            ],
+        },
+    }
+    down = {
+        "id": "expert_down",
+        "op": "independent_sparse_moe_down",
+        "inputs": ["expert_intermediates", "routes"],
+        "outputs": ["expert_outputs"],
+        "params": down_params,
+        "attrs": {
+            **common_attrs,
+            "selected_parameter_accesses": [
+                {"selection_signal": "routes", "mapping": down_mapping}
+            ],
+        },
+    }
+    circuit = {"nodes": [gate_up, down], "parameters": {"refs": refs}}
+    return gate_up, down, circuit, tensor_index
+
+
+def _write_mxfp4_fixture_tensor_pair(
+    tmp_path: Path,
+    tensor_index: dict,
+    *,
+    weight_name: str,
+    scale_name: str,
+    rows: int,
+    columns: int,
 ) -> None:
-    weight_name = "expert.0.down.weight"
-    scale_name = "expert.0.down.scale"
-    tensor_index = {"tensors": {}}
     for name, dtype, shape in (
-        (weight_name, "I8", [128, 128]),
-        (scale_name, "F8_E8M0", [128, 8]),
+        (weight_name, "I8", [rows, columns // 2]),
+        (scale_name, "F8_E8M0", [rows, columns // 32]),
     ):
         numpy_dtype = "i1" if dtype == "I8" else "u1"
         values = np.arange(math.prod(shape), dtype=numpy_dtype).reshape(shape)
@@ -497,8 +586,8 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
         tensor_index["tensors"][name] = {
             "dtype": dtype,
             "shape": shape,
-            "logical_shape": [128, 256] if dtype == "I8" else shape,
-            "parameter_count": 128 * 256 if dtype == "I8" else 128 * 8,
+            **({"logical_shape": [rows, columns]} if dtype == "I8" else {}),
+            "parameter_count": rows * columns if dtype == "I8" else rows * columns // 32,
             "byte_count": len(payload),
             "layout": "row_major",
             "source_file": str(source),
@@ -517,38 +606,14 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
         "scale_dtype": "F8_E8M0",
         "scale_mode": "power_of_two_per_output_row_k_group",
     }
-    node = {
-        "id": "expert_down",
-        "op": "independent_sparse_moe_down",
-        "inputs": ["expert_intermediates", "routes"],
-        "outputs": ["expert_outputs"],
-        "params": ["down_weight", "down_scale"],
-        "attrs": {
-            "hidden_size": 128,
-            "intermediate_size": 256,
-            "experts_per_token": 1,
-            "selected_parameter_accesses": [
-                {
-                    "selection_signal": "routes",
-                    "mapping": [
-                        {
-                            "selector": 0,
-                            "parameter_ids": ["down_weight", "down_scale"],
-                        }
-                    ],
-                }
-            ],
-        },
-    }
-    circuit = {
-        "nodes": [node],
-        "parameters": {
-            "refs": {
-                "down_weight": {"tensor": weight_name},
-                "down_scale": {"tensor": scale_name},
-            }
-        },
-    }
+
+
+def test_compiler_derives_fragmentable_independent_expert_down_resources(
+    tmp_path: Path,
+) -> None:
+    gate_up, down, circuit, tensor_index = independent_mxfp4_expert_pair_fixture(
+        tmp_path
+    )
     lowered_dir = tmp_path / "lowered"
     lowered_dir.mkdir()
     circuit_path = lowered_dir / "circuit.json"
@@ -561,13 +626,15 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
         target=NativeTarget(),  # type: ignore[arg-type]
     )
 
+    weight_name = "expert.0.down.weight"
+    scale_name = "expert.0.down.scale"
     weight = input_block_major_tensor_name(weight_name, 64)
     scale = input_block_major_tensor_name(scale_name, 4)
     rewritten = json.loads(circuit_path.read_text())
-    assert rewritten["parameters"]["refs"] == {
-        "down_weight": {"tensor": weight},
-        "down_scale": {"tensor": scale},
+    assert rewritten["parameters"]["refs"]["expert_0_down_weight"] == {
+        "tensor": weight
     }
+    assert rewritten["parameters"]["refs"]["expert_0_down_scale"] == {"tensor": scale}
     assert tensor_index["tensors"][weight]["shape"] == [2, 128, 64]
     assert tensor_index["tensors"][weight]["logical_shape"] == [128, 256]
     assert tensor_index["tensors"][scale]["shape"] == [2, 128, 4]
@@ -575,27 +642,111 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
     assert tensor_index["tensors"][scale]["source_integrity_partition_count"] == 2
     assert tensor_index["tensors"][weight]["quantization"]["scales"] == scale
     assert "physical_execution_only" not in tensor_index["tensors"][weight]
+    for parameter_id in gate_up["params"]:
+        tensor_name = circuit["parameters"]["refs"][parameter_id]["tensor"]
+        assert tensor_index["tensors"][tensor_name][
+            "source_integrity_partition_count"
+        ] == 2
 
     shader_file = independent_sparse_moe_shader_file(
+        rewritten,
+        rewritten["nodes"][1],
+        tensor_index,
+    )
+    assert "down_input_block_major_b128_mxfp4" in shader_file
+    gate_shader_file = independent_sparse_moe_shader_file(
         rewritten,
         rewritten["nodes"][0],
         tensor_index,
     )
-    assert "down_input_block_major_b128_mxfp4" in shader_file
+    gate_implementation = physical_kernel_implementations_for_node(
+        rewritten, rewritten["nodes"][0], tensor_index
+    )[0]
+    down_implementation = physical_kernel_implementations_for_node(
+        rewritten, rewritten["nodes"][1], tensor_index
+    )[0]
+    assert gate_implementation["strategy"] == "tensor_parallel_expert"
+    assert gate_implementation["execution_form"] == (
+        "replicated_input_partitioned_output"
+    )
+    assert gate_implementation["local_intermediates"] == [
+        {
+            "signal": "expert_intermediates",
+            "producer_binding": 2,
+            "consumer_binding": 0,
+            "format": "bf16",
+        }
+    ]
+    assert [
+        partition["parameter_slot"]
+        for partition in gate_implementation["selected_resource_partitions"][0][
+            "parameter_partitions"
+        ]
+    ] == [0, 1, 2, 3]
+    assert down_implementation["strategy"] == "tensor_parallel_expert"
+    assert down_implementation["execution_form"] == "partitioned_input_partial_output"
+    assert down_implementation["outputs"][0]["reduction"] == {
+        "operation": "sum_f32",
+        "dimension_name": "expert_output_elements",
+        "finalization": {"kind": "store_f32_to_bf16"},
+    }
     batch_shader_file = frame_parallel_batch_shader_file(shader_file)
     assert batch_shader_file is not None
-    rendered_dir = tmp_path / "rendered"
+    physical_shader_files = {
+        Path(gate_implementation["shader_path"]).name,
+        Path(down_implementation["shader_path"]).name,
+    }
+    rendered_dir = tmp_path / "shaders"
     copy_shader_templates(
         Path(__file__).parents[1] / "runtime-rs" / "shaders",
         rendered_dir,
-        {shader_file, batch_shader_file},
+        {
+            shader_file,
+            gate_shader_file,
+            batch_shader_file,
+            *physical_shader_files,
+        },
     )
     for rendered_shader in rendered_dir.glob("*.comp"):
         source = rendered_shader.read_text()
-        assert "#define INPUT_BLOCK_MAJOR 1" in source
-        assert "block * HIDDEN_SIZE + row" in source
         assert "{{" not in source
+        if "_down" in rendered_shader.name:
+            assert "#define INPUT_BLOCK_MAJOR 1" in source
+            assert "block * HIDDEN_SIZE + row" in source
+        if rendered_shader.name in physical_shader_files:
+            assert "#define TENSOR_PARALLEL 1" in source
     compile_shader_artifacts(rendered_dir)
+
+    for node, canonical_shader, implementation in (
+        (rewritten["nodes"][0], gate_shader_file, gate_implementation),
+        (rewritten["nodes"][1], shader_file, down_implementation),
+    ):
+        implementation["shader_path"] = implementation["shader_path"].replace(
+            ".comp", ".spv"
+        )
+        kernel = {
+            "source_node_ids": [node["id"]],
+            "semantic_module_ids": [f"layer.feed_forward.{node['id']}"],
+            "shader_path": f"shaders/{canonical_shader.replace('.comp', '.spv')}",
+            "local_size_x": 512,
+            "workgroup_count_x": 1,
+            "batch_implementations": [],
+            "physical_implementations": [implementation],
+        }
+        contracts = build_kernel_physical_execution_contracts(
+            node=node,
+            circuit=rewritten,
+            tensor_index=tensor_index,
+            kernel=kernel,
+            package_dir=tmp_path,
+        )
+        distributed = [
+            contract
+            for contract in contracts
+            if contract["strategy"] == "tensor_parallel_expert"
+        ]
+        assert len(distributed) == 1
+        assert distributed[0]["artifacts"][0]["path"] == implementation["shader_path"]
 
     packaged = copy_tensor_package(
         tensor_index,

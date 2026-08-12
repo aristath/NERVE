@@ -16,6 +16,7 @@ from nerve.physical_representations import (
 
 INDEPENDENT_MXFP4_GATE_UP_TILE_ROWS = 32
 INDEPENDENT_MXFP4_DOWN_TILE_ROWS = 64
+INDEPENDENT_MXFP4_TP_COLUMNS = 128
 
 
 def independent_sparse_moe_shader_file(

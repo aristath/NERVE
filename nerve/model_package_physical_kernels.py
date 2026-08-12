@@ -5,6 +5,9 @@ from nerve.model_package_derived_tensors import (
     transposed_tensor_name,
 )
 from nerve.model_package_tensors import tensor_dtype, tensor_shape
+from nerve.model_package_physical_experts import (
+    independent_expert_physical_implementations,
+)
 
 
 def _local_output_shard_intermediates_for_node(
@@ -130,6 +133,18 @@ def physical_kernel_implementations_for_node(
     tensor_index: Json,
 ) -> list[Json]:
     """Return legal compiler-owned physical implementations for one node."""
+
+    local_intermediates = local_shard_intermediates_for_node(
+        circuit, node, tensor_index
+    )
+    expert_implementations = independent_expert_physical_implementations(
+        circuit,
+        node,
+        tensor_index,
+        local_intermediates=local_intermediates,
+    )
+    if expert_implementations:
+        return expert_implementations
 
     if (
         node.get("op") != "linear_residual"
@@ -295,9 +310,7 @@ def physical_kernel_implementations_for_node(
                     },
                 }
             ],
-            "local_intermediates": local_shard_intermediates_for_node(
-                circuit, node, tensor_index
-            ),
+            "local_intermediates": local_intermediates,
             "resources": resources,
             "equivalence": {
                 "output": "absolute_relative_tolerance",

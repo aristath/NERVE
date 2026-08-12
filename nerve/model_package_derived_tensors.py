@@ -1,6 +1,9 @@
 from nerve.model_package_common import *
 from nerve.model_package_tensors import dtype_byte_count, tensor_dtype, tensor_shape
 from nerve.model_package_independent_experts import independent_sparse_moe_shader_file
+from nerve.model_package_physical_experts import (
+    tensor_parallel_independent_expert_pair,
+)
 from nerve.compiler_target import CompilerTarget
 
 TP_INPUT_BLOCK_COLUMNS = 128
@@ -23,13 +26,25 @@ def derive_tensor_parallel_independent_expert_tensors(
         refs = circuit.get("parameters", {}).get("refs", {})
         changed = False
         for node in circuit.get("nodes", []):
-            if node.get("op") != "independent_sparse_moe_down":
+            if node.get("op") != "independent_sparse_moe_gate_up":
                 continue
-            independent_sparse_moe_shader_file(circuit, node, tensor_index)
-            intermediate_size = int(node["attrs"]["intermediate_size"])
+            pair = tensor_parallel_independent_expert_pair(circuit, node)
+            if pair is None:
+                continue
+            gate_up, down = pair
+            independent_sparse_moe_shader_file(circuit, gate_up, tensor_index)
+            independent_sparse_moe_shader_file(circuit, down, tensor_index)
+            intermediate_size = int(gate_up["attrs"]["intermediate_size"])
             partition_count = intermediate_size // TP_INPUT_BLOCK_COLUMNS
-            accesses = node["attrs"]["selected_parameter_accesses"]
-            for mapping in accesses[0]["mapping"]:
+            gate_accesses = gate_up["attrs"]["selected_parameter_accesses"]
+            for mapping in gate_accesses[0]["mapping"]:
+                for parameter_id in mapping["parameter_ids"]:
+                    tensor_name = refs[parameter_id]["tensor"]
+                    tensor_index["tensors"][tensor_name][
+                        "source_integrity_partition_count"
+                    ] = partition_count
+            down_accesses = down["attrs"]["selected_parameter_accesses"]
+            for mapping in down_accesses[0]["mapping"]:
                 weight_id, scale_id = mapping["parameter_ids"]
                 source_weight = refs[weight_id]["tensor"]
                 source_scale = refs[scale_id]["tensor"]

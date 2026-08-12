@@ -1417,6 +1417,8 @@ mod mxfp4_tests {
             ),
             ("{{PREEXPANDED_FP8}}", "0"),
             ("{{DYNAMIC_WEIGHT_REPRESENTATION}}", "0"),
+            ("{{INPUT_BLOCK_MAJOR}}", "0"),
+            ("{{TENSOR_PARALLEL}}", "0"),
         ]
         .into_iter()
         .chain(stage_replacements.iter().copied())
@@ -1544,6 +1546,8 @@ mod mxfp4_tests {
                 "{{DYNAMIC_WEIGHT_REPRESENTATION}}",
                 if adaptive_fp8 { "1" } else { "0" },
             ),
+            ("{{INPUT_BLOCK_MAJOR}}", "0"),
+            ("{{TENSOR_PARALLEL}}", "0"),
         ]
         .into_iter()
         .chain(stage_replacements.iter().copied())
