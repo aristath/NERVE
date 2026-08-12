@@ -10,26 +10,24 @@ mod tests {
     use nerve_execution_contracts::{
         ArtifactIdentity, ArtifactRole, EquivalenceKind, EquivalenceRequirement, ExecutionForm,
         ExecutionGeometry, ExecutionPhase, ExecutionShape, ExecutionStrategy, InputContract,
-        InputDistribution, OutputCollection, OutputContract, ParameterPartition,
-        ParameterPartitionKind, PartitionExtent, PartitionLaunch, PartitionOrigin,
-        PhysicalExecutionContract, PhysicalFormats, ReductionContract,
-        ReductionFinalization, ReductionOperation, ResourceAccess, ResourceKind,
-        ResourceRequirement, ResidencyRequirement, SelectedResourcePartition, WorkgroupXMapping,
-        PHYSICAL_EXECUTION_CONTRACT_SCHEMA,
+        InputDistribution, OutputCollection, OutputContract, PHYSICAL_EXECUTION_CONTRACT_SCHEMA,
+        ParameterPartition, ParameterPartitionKind, PartitionExtent, PartitionLaunch,
+        PartitionOrigin, PhysicalExecutionContract, PhysicalFormats, ReductionContract,
+        ReductionFinalization, ReductionOperation, ResidencyRequirement, ResourceAccess,
+        ResourceKind, ResourceRequirement, SelectedResourcePartition, WorkgroupXMapping,
     };
 
     use super::*;
     use crate::stream_plan::TensorMetadata;
     use crate::vulkan_stream_circuit::{
-        CompiledAtomicResidencyGroup, CompiledImmutableResource,
-        CompiledResourceBinding, CompiledResourceBindingMapping, CompiledResourceByteRange,
-        CompiledResourceCompatibility, CompiledResourceLifetime,
-        CompiledResourceRangeIntegrity, CompiledResourceResidencyContract,
-        CompiledResourceSelectionElementType, CompiledResourceSelectionEncoding,
-        CompiledResourceSelector, CompiledResourceSelectorMapping, ResourceResidencyPolicy,
-        VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
-        VulkanPhysicalKernelArtifact, VulkanResolvedDescriptorBinding,
-        VulkanReusableKernelArtifact,
+        CompiledAtomicResidencyGroup, CompiledImmutableResource, CompiledResourceBinding,
+        CompiledResourceBindingMapping, CompiledResourceByteRange, CompiledResourceCompatibility,
+        CompiledResourceLifetime, CompiledResourceRangeIntegrity,
+        CompiledResourceResidencyContract, CompiledResourceSelectionElementType,
+        CompiledResourceSelectionEncoding, CompiledResourceSelector,
+        CompiledResourceSelectorMapping, ResourceResidencyPolicy, VulkanKernelDescriptorUsage,
+        VulkanKernelScalarBinding, VulkanKernelScalarSource, VulkanPhysicalKernelArtifact,
+        VulkanResolvedDescriptorBinding, VulkanReusableKernelArtifact,
         physical_execution_artifact_id,
     };
 
@@ -71,7 +69,11 @@ mod tests {
             4,
         )
         .unwrap_err();
-        assert!(decode_error.to_string().contains("no compatible distributable dispatch"));
+        assert!(
+            decode_error
+                .to_string()
+                .contains("no compatible distributable dispatch")
+        );
 
         let shape_error = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase(
             &[("owner", &prepared_plan)],
@@ -84,7 +86,11 @@ mod tests {
             ExecutionShape::MultiLane,
         )
         .unwrap_err();
-        assert!(shape_error.to_string().contains("no compatible distributable dispatch"));
+        assert!(
+            shape_error
+                .to_string()
+                .contains("no compatible distributable dispatch")
+        );
 
         prepared_plan.dispatches[0].physical_execution_contracts[0].execution_shape =
             ExecutionShape::SingleAndMultiLane;
@@ -268,7 +274,11 @@ mod tests {
         ])
         .unwrap_err();
 
-        assert!(error.to_string().contains("different private intermediate devices"));
+        assert!(
+            error
+                .to_string()
+                .contains("different private intermediate devices")
+        );
     }
 
     #[test]
@@ -336,7 +346,11 @@ mod tests {
         ])
         .unwrap_err();
 
-        assert!(error.to_string().contains("different reduction participants"));
+        assert!(
+            error
+                .to_string()
+                .contains("different reduction participants")
+        );
     }
 
     #[test]
@@ -357,7 +371,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plans.all().iter().map(|plan| plan.dispatches.len()).sum::<usize>(), 3);
+        assert_eq!(
+            plans
+                .all()
+                .iter()
+                .map(|plan| plan.dispatches.len())
+                .sum::<usize>(),
+            3
+        );
         assert_eq!(
             plans.decode.execution_islands[0].phase_schedules[0].phase,
             ExecutionPhase::Decode,
@@ -367,10 +388,17 @@ mod tests {
             ExecutionPhase::Prefill,
         );
         VulkanDistributedActivationBufferPlan::from_execution_plan_set(&plans).unwrap();
-        let parameters =
-            VulkanDistributedParameterAllocationPlan::from_execution_plan_set(&plans, &tensor_index)
-                .unwrap();
-        assert!(parameters.allocations.iter().all(|allocation| allocation.use_count == 3));
+        let parameters = VulkanDistributedParameterAllocationPlan::from_execution_plan_set(
+            &plans,
+            &tensor_index,
+        )
+        .unwrap();
+        assert!(
+            parameters
+                .allocations
+                .iter()
+                .all(|allocation| allocation.use_count == 3)
+        );
         VulkanDistributedParameterExclusionPlan::from_execution_plan_set(
             &plans,
             &[("owner", &prepared_plan)],
@@ -459,8 +487,14 @@ mod tests {
         assert_eq!(island.exit_device_id, "owner");
         assert_eq!(island.owner_device_id, "owner");
         assert_eq!(island.member_node_ids, ["ffn"]);
-        assert_eq!(island.contract_ids, [dispatch.physical_execution_contract_id.clone()]);
-        assert_eq!(island.implementation_digests, [dispatch.implementation_digest.clone()]);
+        assert_eq!(
+            island.contract_ids,
+            [dispatch.physical_execution_contract_id.clone()]
+        );
+        assert_eq!(
+            island.implementation_digests,
+            [dispatch.implementation_digest.clone()]
+        );
         assert_eq!(island.participants.len(), 4);
         assert!(island.participants.iter().any(|participant| {
             participant.device_id == "owner"
@@ -481,20 +515,21 @@ mod tests {
             192,
         );
         assert!(island.transient_memory.iter().all(|requirement| {
-            requirement.fixed_byte_capacity == 0
-                && requirement.per_lane_byte_capacity > 0
+            requirement.fixed_byte_capacity == 0 && requirement.per_lane_byte_capacity > 0
         }));
         assert_eq!(island.transport_routes.len(), 6);
-        assert!(island.transport_routes.iter().all(|route| {
-            route.kind == VulkanPhysicalExecutionTransportKind::SharedHost
-        }));
+        assert!(
+            island
+                .transport_routes
+                .iter()
+                .all(|route| { route.kind == VulkanPhysicalExecutionTransportKind::SharedHost })
+        );
         assert_eq!(island.synchronization_routes.len(), 6);
         assert!(island.synchronization_routes.iter().all(|route| {
             route.kind == VulkanPhysicalExecutionSynchronizationKind::TimelineSemaphore
         }));
         assert_eq!(
-            island
-                .phase_schedules[0]
+            island.phase_schedules[0]
                 .steps
                 .iter()
                 .map(|step| step.kind)
@@ -530,7 +565,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("without a resolved atomic residency plan"));
+        assert!(
+            error
+                .to_string()
+                .contains("without a resolved atomic residency plan")
+        );
     }
 
     #[test]
@@ -544,14 +583,12 @@ mod tests {
             edge_index: 4,
             owner_device_id: "downstream".to_string(),
         };
-        dispatch.owner_residency_requirements = vec![
-            VulkanPhysicalExecutionResidencyRequirement {
-                device_id: "owner".to_string(),
-                kind: VulkanPhysicalExecutionResidencyKind::OwnerState,
-                resource_id: "state:component:kv".to_string(),
-                byte_capacity: 4096,
-            },
-        ];
+        dispatch.owner_residency_requirements = vec![VulkanPhysicalExecutionResidencyRequirement {
+            device_id: "owner".to_string(),
+            kind: VulkanPhysicalExecutionResidencyKind::OwnerState,
+            resource_id: "state:component:kv".to_string(),
+            byte_capacity: 4096,
+        }];
 
         let islands = resolved_physical_execution_islands(
             &[dispatch],
@@ -563,12 +600,10 @@ mod tests {
         assert_eq!(island.entry_device_id, "upstream");
         assert_eq!(island.exit_device_id, "downstream");
         assert!(island.transport_routes.iter().any(|route| {
-            route.source_device_id == "upstream"
-                && route.destination_device_id == "owner"
+            route.source_device_id == "upstream" && route.destination_device_id == "owner"
         }));
         assert!(island.transport_routes.iter().any(|route| {
-            route.source_device_id == "owner"
-                && route.destination_device_id == "downstream"
+            route.source_device_id == "owner" && route.destination_device_id == "downstream"
         }));
         assert!(island.residency.iter().any(|requirement| {
             requirement.kind == VulkanPhysicalExecutionResidencyKind::OwnerState
@@ -591,9 +626,11 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        let allocations = VulkanDistributedParameterAllocationPlan::
-            from_sampled_execution_plan(&sampled, &tensor_index)
-            .unwrap();
+        let allocations = VulkanDistributedParameterAllocationPlan::from_sampled_execution_plan(
+            &sampled,
+            &tensor_index,
+        )
+        .unwrap();
 
         assert!(allocations.total_byte_capacity <= 96);
         assert_eq!(sampled.device_ids, ["owner", "helper-a"]);
@@ -606,11 +643,8 @@ mod tests {
                 })
         }));
         assert!(
-            VulkanDistributedParameterAllocationPlan::from_execution_plan(
-                &sampled,
-                &tensor_index,
-            )
-            .is_err()
+            VulkanDistributedParameterAllocationPlan::from_execution_plan(&sampled, &tensor_index,)
+                .is_err()
         );
     }
 
@@ -618,16 +652,14 @@ mod tests {
     fn samples_the_same_real_dispatch_for_a_single_participant() {
         let tensor_index = fixture_tensor_index("row_major");
         let sampled = fixture_plan("row_major")
-            .sampled_for_parameter_budget(
-                &tensor_index,
-                &["owner".to_string()],
-                64,
-            )
+            .sampled_for_parameter_budget(&tensor_index, &["owner".to_string()], 64)
             .unwrap()
             .unwrap();
-        let allocations = VulkanDistributedParameterAllocationPlan::
-            from_sampled_execution_plan(&sampled, &tensor_index)
-            .unwrap();
+        let allocations = VulkanDistributedParameterAllocationPlan::from_sampled_execution_plan(
+            &sampled,
+            &tensor_index,
+        )
+        .unwrap();
 
         assert_eq!(sampled.device_ids, ["owner"]);
         assert_eq!(sampled.dispatches[0].shards.len(), 1);
@@ -636,28 +668,61 @@ mod tests {
     }
 
     #[test]
+    fn fixed_sampling_fraction_preserves_equivalent_work_across_participant_groups() {
+        let tensor_index = fixture_tensor_index("row_major");
+        let (single, fraction_millionths) = fixture_plan("row_major")
+            .sampled_for_parameter_budget_with_fraction(&tensor_index, &["owner".to_string()], 64)
+            .unwrap()
+            .unwrap();
+        let pair = fixture_plan("row_major")
+            .sampled_for_fraction_millionths(
+                &["owner".to_string(), "helper-a".to_string()],
+                fraction_millionths,
+            )
+            .unwrap();
+        let sampled_rows = |plan: &VulkanDistributedExecutionPlan| {
+            plan.dispatches
+                .iter()
+                .map(|dispatch| {
+                    dispatch
+                        .shards
+                        .iter()
+                        .map(|shard| shard.row_count)
+                        .sum::<usize>()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(sampled_rows(&single), sampled_rows(&pair));
+        assert!(
+            fixture_plan("row_major")
+                .sampled_for_fraction_millionths(&["owner".to_string()], 1_000_001)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn sampled_expert_ranges_keep_route_launch_and_output_geometry() {
         let mut dispatch = fixture_plan("row_major").dispatches.remove(0);
         dispatch.distribution = VulkanDistributedDispatchDistribution::ExpertRange;
         let source = dispatch.shards[0].clone();
-        let sampled = sampled_distributed_dispatch_shard(
-            &dispatch,
-            &source,
-            "owner",
-            1,
-            2,
-        )
-        .unwrap();
+        let sampled =
+            sampled_distributed_dispatch_shard(&dispatch, &source, "owner", 1, 2).unwrap();
 
         assert_eq!(sampled.row_count, source.row_count / 2);
         assert_eq!(sampled.workgroup_count_x, source.workgroup_count_x);
         assert_eq!(sampled.output_byte_count, source.output_byte_count);
-        assert_eq!(sampled.auxiliary_input_ranges, source.auxiliary_input_ranges);
-        assert!(sampled
-            .parameters
-            .iter()
-            .zip(&source.parameters)
-            .all(|(sampled, source)| sampled.byte_count == source.byte_count / 2));
+        assert_eq!(
+            sampled.auxiliary_input_ranges,
+            source.auxiliary_input_ranges
+        );
+        assert!(
+            sampled
+                .parameters
+                .iter()
+                .zip(&source.parameters)
+                .all(|(sampled, source)| sampled.byte_count == source.byte_count / 2)
+        );
     }
 
     #[test]
@@ -669,21 +734,18 @@ mod tests {
             "experts".to_string(),
             (source.row_start..source.row_start + source.row_count).collect(),
         );
-        let sampled = sampled_distributed_dispatch_shard(
-            &dispatch,
-            &source,
-            "calibration",
-            1,
-            100,
-        )
-        .unwrap();
+        let sampled =
+            sampled_distributed_dispatch_shard(&dispatch, &source, "calibration", 1, 100).unwrap();
 
         assert_eq!(sampled.device_id, "calibration");
         assert_eq!(sampled.row_start, source.row_start);
         assert_eq!(sampled.row_count, source.row_count);
         assert_eq!(sampled.workgroup_count_x, source.workgroup_count_x);
         assert_eq!(sampled.parameters, source.parameters);
-        assert_eq!(sampled.selected_resource_indices, source.selected_resource_indices);
+        assert_eq!(
+            sampled.selected_resource_indices,
+            source.selected_resource_indices
+        );
     }
 
     #[test]
@@ -701,8 +763,7 @@ mod tests {
         );
 
         let output_rows = fixture_plan("row_major").dispatches.remove(0);
-        let bytes =
-            distributed_shard_push_constants(&output_rows, &output_rows.shards[1]).unwrap();
+        let bytes = distributed_shard_push_constants(&output_rows, &output_rows.shards[1]).unwrap();
         assert!(bytes.is_empty());
     }
 
@@ -745,9 +806,11 @@ mod tests {
             "helper",
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("feedback shard on \"helper\" has no indirect sequence"));
+        assert!(
+            error
+                .to_string()
+                .contains("feedback shard on \"helper\" has no indirect sequence")
+        );
     }
 
     #[test]
@@ -785,10 +848,9 @@ mod tests {
         );
 
         let add_bf16 = VulkanDistributedReductionPlan {
-            finalization:
-                VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
-                    residual_input_index: 1,
-                },
+            finalization: VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
+                residual_input_index: 1,
+            },
             ..store_f32.clone()
         };
         assert_eq!(
@@ -813,10 +875,9 @@ mod tests {
             operation: ReductionOperation::SumF32,
             element_count: 3,
             partial_byte_capacity: 3 * 4,
-            finalization:
-                VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
-                    residual_input_index: 1,
-                },
+            finalization: VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
+                residual_input_index: 1,
+            },
         };
         assert!(distributed_reduction_buffer_capacities(&odd_bf16, 2, 1).is_err());
     }
@@ -981,8 +1042,7 @@ mod tests {
         assert_eq!(planned.input_distribution, InputDistribution::Sharded);
         assert_eq!(planned.output_collection, OutputCollection::Reduced);
         assert!(planned.shards.iter().all(|shard| {
-            shard.parameters.len() == 1
-                && shard.parameters[0].tensor == "down-input-major"
+            shard.parameters.len() == 1 && shard.parameters[0].tensor == "down-input-major"
         }));
         assert_eq!(
             planned.reduction,
@@ -1023,12 +1083,14 @@ mod tests {
         };
         *byte_capacity = 8;
         *signal_byte_capacity = 8;
-        residual_finalized.dispatches[0].descriptors.push(activation(
-            3,
-            VulkanKernelDescriptorUsage::InputSignal,
-            "residual",
-            8,
-        ));
+        residual_finalized.dispatches[0]
+            .descriptors
+            .push(activation(
+                3,
+                VulkanKernelDescriptorUsage::InputSignal,
+                "residual",
+                8,
+            ));
         residual_finalized.total_descriptor_count = 4;
         let residual_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &residual_finalized)],
@@ -1045,10 +1107,9 @@ mod tests {
                 operation: ReductionOperation::SumF32,
                 element_count: 4,
                 partial_byte_capacity: 16,
-                finalization:
-                    VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
-                        residual_input_index: 1,
-                    },
+                finalization: VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
+                    residual_input_index: 1,
+                },
             })
         );
         assert_eq!(
@@ -1060,15 +1121,11 @@ mod tests {
             VulkanDistributedEquivalenceKind::AbsoluteRelativeTolerance,
         );
         assert_eq!(
-            residual_plan.dispatches[0]
-                .equivalence
-                .absolute_tolerance(),
+            residual_plan.dispatches[0].equivalence.absolute_tolerance(),
             Some(0.01),
         );
         assert_eq!(
-            residual_plan.dispatches[0]
-                .equivalence
-                .relative_tolerance(),
+            residual_plan.dispatches[0].equivalence.relative_tolerance(),
             Some(0.02),
         );
 
@@ -1192,9 +1249,11 @@ mod tests {
             4,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("no tensor metadata for \"down-input-major\""));
+        assert!(
+            error
+                .to_string()
+                .contains("no tensor metadata for \"down-input-major\"")
+        );
 
         let mut wrong_output_size = prepared.clone();
         let VulkanDescriptorResourceAddress::ActivationSlot {
@@ -1232,8 +1291,7 @@ mod tests {
         assert!(error.to_string().contains("exact push-constant ABI"));
 
         let mut strided_partition = prepared;
-        strided_partition.dispatches[0].physical_execution_contracts[0]
-            .parameter_partitions[0]
+        strided_partition.dispatches[0].physical_execution_contracts[0].parameter_partitions[0]
             .dimension = 1;
         let error = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &strided_partition)],
@@ -1382,27 +1440,27 @@ mod tests {
             ]),
         };
         let artifacts = test_artifact_manifest_with_physical(VulkanReusableKernelArtifact {
-                family_id: "sparse-family".to_string(),
-                op: "sparse_moe_down".to_string(),
-                path: "sparse.spv".to_string(),
-                entry_point: "main".to_string(),
-                local_size_x: 64,
-                workgroup_count_x: 8192,
-                descriptor_signature: Vec::new(),
-                push_constants: vec![
-                    VulkanKernelScalarBinding {
-                        name: "expert_start".to_string(),
-                        scalar_type: "u32".to_string(),
-                        source: VulkanKernelScalarSource::PushConstant,
-                    },
-                    VulkanKernelScalarBinding {
-                        name: "expert_count".to_string(),
-                        scalar_type: "u32".to_string(),
-                        source: VulkanKernelScalarSource::PushConstant,
-                    },
-                ],
-                stream_control_binding: None,
-            });
+            family_id: "sparse-family".to_string(),
+            op: "sparse_moe_down".to_string(),
+            path: "sparse.spv".to_string(),
+            entry_point: "main".to_string(),
+            local_size_x: 64,
+            workgroup_count_x: 8192,
+            descriptor_signature: Vec::new(),
+            push_constants: vec![
+                VulkanKernelScalarBinding {
+                    name: "expert_start".to_string(),
+                    scalar_type: "u32".to_string(),
+                    source: VulkanKernelScalarSource::PushConstant,
+                },
+                VulkanKernelScalarBinding {
+                    name: "expert_count".to_string(),
+                    scalar_type: "u32".to_string(),
+                    source: VulkanKernelScalarSource::PushConstant,
+                },
+            ],
+            stream_control_binding: None,
+        });
 
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared)],
@@ -1479,44 +1537,36 @@ mod tests {
             },
         );
         prequant.total_descriptor_count = 6;
-        prequant.dispatches[0].physical_execution_contracts = vec![
-            test_physical_contract(
-                "sparse_moe_down",
-                "sparse-down",
-                "sparse.spv",
-                ExecutionStrategy::ExpertParallel,
-                ExecutionForm::WholeExpertOwnership,
-                256,
-                1,
-                8192,
-                WorkgroupXMapping::Repeated,
-                PartitionOrigin::PushConstantU32,
-                Some("expert_start"),
-                Some("expert_count"),
-                vec![
-                    test_partition(
-                        "expert-weight",
-                        4,
-                        ParameterPartitionKind::ExpertRange,
-                        1,
-                        1,
-                    ),
-                    test_partition(
-                        "expert-scale",
-                        5,
-                        ParameterPartitionKind::ExpertRange,
-                        1,
-                        1,
-                    ),
-                ],
-                vec![
-                    test_input(0, InputDistribution::Replicated, None),
-                    test_input(1, InputDistribution::Replicated, None),
-                    test_input(2, InputDistribution::Routed, Some(1)),
-                ],
-                test_output(3, OutputCollection::Routed, Some(1)),
-            ),
-        ];
+        prequant.dispatches[0].physical_execution_contracts = vec![test_physical_contract(
+            "sparse_moe_down",
+            "sparse-down",
+            "sparse.spv",
+            ExecutionStrategy::ExpertParallel,
+            ExecutionForm::WholeExpertOwnership,
+            256,
+            1,
+            8192,
+            WorkgroupXMapping::Repeated,
+            PartitionOrigin::PushConstantU32,
+            Some("expert_start"),
+            Some("expert_count"),
+            vec![
+                test_partition(
+                    "expert-weight",
+                    4,
+                    ParameterPartitionKind::ExpertRange,
+                    1,
+                    1,
+                ),
+                test_partition("expert-scale", 5, ParameterPartitionKind::ExpertRange, 1, 1),
+            ],
+            vec![
+                test_input(0, InputDistribution::Replicated, None),
+                test_input(1, InputDistribution::Replicated, None),
+                test_input(2, InputDistribution::Routed, Some(1)),
+            ],
+            test_output(3, OutputCollection::Routed, Some(1)),
+        )];
         let prequant_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prequant)],
             &tensor_index,
@@ -1576,9 +1626,11 @@ mod tests {
             256,
         )
         .unwrap_err();
-        assert!(stale_abi_plan
-            .to_string()
-            .contains("requires exact push-constant ABI"));
+        assert!(
+            stale_abi_plan
+                .to_string()
+                .contains("requires exact push-constant ABI")
+        );
         assert!(stale_abi_plan.to_string().contains("expert_count"));
     }
 
@@ -1620,7 +1672,10 @@ mod tests {
                 selection_signal: "routes".to_string(),
                 parameter_ids: (0..8)
                     .flat_map(|expert| {
-                        [format!("expert-{expert}-weight"), format!("expert-{expert}-scale")]
+                        [
+                            format!("expert-{expert}-weight"),
+                            format!("expert-{expert}-scale"),
+                        ]
                     })
                     .collect(),
             },
@@ -1795,9 +1850,7 @@ mod tests {
                     index_shift: 0,
                     index_mask: 7,
                 },
-                mapping: CompiledResourceSelectorMapping::GroupTable {
-                    atomic_group_ids,
-                },
+                mapping: CompiledResourceSelectorMapping::GroupTable { atomic_group_ids },
             }],
             checkpoints: Vec::new(),
         };
@@ -1821,22 +1874,31 @@ mod tests {
         let routes = selected_resource_activation(dispatch, "routes").unwrap();
         assert_eq!(routes.signal_id, "routes");
         assert_eq!(routes.binding, 1);
-        assert!(selected_resource_activation(dispatch, "missing-routes")
-            .unwrap_err()
-            .to_string()
-            .contains("resolves 0 activation signals"));
+        assert!(
+            selected_resource_activation(dispatch, "missing-routes")
+                .unwrap_err()
+                .to_string()
+                .contains("resolves 0 activation signals")
+        );
         let mut ambiguous_routes = dispatch.clone();
         ambiguous_routes.input_activation = routes.clone();
-        assert!(selected_resource_activation(&ambiguous_routes, "routes")
-            .unwrap_err()
-            .to_string()
-            .contains("resolves 2 activation signals"));
+        assert!(
+            selected_resource_activation(&ambiguous_routes, "routes")
+                .unwrap_err()
+                .to_string()
+                .contains("resolves 2 activation signals")
+        );
         assert_eq!(
             dispatch.selected_resource_partitions[0].atomic_group_byte_counts,
             vec![8; 8]
         );
         assert_eq!(dispatch.shards.len(), 2);
-        assert!(dispatch.shards.iter().all(|shard| shard.parameters.is_empty()));
+        assert!(
+            dispatch
+                .shards
+                .iter()
+                .all(|shard| shard.parameters.is_empty())
+        );
         assert_eq!(dispatch.shards[0].row_start, 0);
         assert_eq!(dispatch.shards[0].row_count, 4);
         assert_eq!(dispatch.shards[1].row_start, 4);
@@ -1878,22 +1940,13 @@ mod tests {
             }])
             .unwrap();
         let rewired_ownership =
-            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&rewired)
-                .unwrap();
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&rewired).unwrap();
         assert_eq!(
-            rewired_ownership
-                .device("owner")
-                .unwrap()
-                .selectors[0]
-                .owned_resource_indices,
+            rewired_ownership.device("owner").unwrap().selectors[0].owned_resource_indices,
             vec![0, 2, 4, 6]
         );
         assert_eq!(
-            rewired_ownership
-                .device("helper")
-                .unwrap()
-                .selectors[0]
-                .owned_resource_indices,
+            rewired_ownership.device("helper").unwrap().selectors[0].owned_resource_indices,
             vec![1, 3, 5, 7]
         );
         assert_eq!(
@@ -1920,7 +1973,11 @@ mod tests {
         let phase_error =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&phase_mismatch)
                 .unwrap_err();
-        assert!(phase_error.to_string().contains("assign different selected resources"));
+        assert!(
+            phase_error
+                .to_string()
+                .contains("assign different selected resources")
+        );
 
         let mut incomplete = plan.clone();
         incomplete.dispatches[0].shards[1]
@@ -1931,7 +1988,11 @@ mod tests {
         let coverage_error =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&incomplete)
                 .unwrap_err();
-        assert!(coverage_error.to_string().contains("not partitioned exactly once"));
+        assert!(
+            coverage_error
+                .to_string()
+                .contains("not partitioned exactly once")
+        );
 
         let mut wrong_abi = prepared;
         let VulkanDescriptorResourceAddress::DynamicResourceParameterSlots {
@@ -1965,14 +2026,12 @@ mod tests {
         producer.output_activation.signal_id = "expert-intermediate".to_string();
         producer.output_activation.slot += 1;
         producer.output_collection = OutputCollection::Routed;
-        producer.local_intermediates = vec![
-            nerve_execution_contracts::LocalIntermediateContract {
-                signal: producer.output_activation.signal_id.clone(),
-                producer_binding: 1,
-                consumer_binding: 0,
-                format: "bf16".to_string(),
-            },
-        ];
+        producer.local_intermediates = vec![nerve_execution_contracts::LocalIntermediateContract {
+            signal: producer.output_activation.signal_id.clone(),
+            producer_binding: 1,
+            consumer_binding: 0,
+            format: "bf16".to_string(),
+        }];
         let mut consumer = producer.clone();
         consumer.dispatch_index = 8;
         consumer.node_id = "consumer".to_string();
@@ -1981,9 +2040,7 @@ mod tests {
         consumer.input_distribution = InputDistribution::Routed;
         consumer.output_activation.signal_id = "expert-output".to_string();
         consumer.output_activation.slot += 1;
-        for (producer_shard, consumer_shard) in
-            producer.shards.iter().zip(&mut consumer.shards)
-        {
+        for (producer_shard, consumer_shard) in producer.shards.iter().zip(&mut consumer.shards) {
             consumer_shard.input_range.byte_count = producer_shard.output_byte_count;
         }
 
@@ -2013,8 +2070,8 @@ mod tests {
                 &[producer.clone(), non_adjacent],
                 VulkanSharedResidentBufferRoute::SharedHost,
             )
-                .unwrap()
-                .len(),
+            .unwrap()
+            .len(),
             2
         );
 
@@ -2025,8 +2082,8 @@ mod tests {
                 &[producer.clone(), different_dataflow],
                 VulkanSharedResidentBufferRoute::SharedHost,
             )
-                .unwrap()
-                .len(),
+            .unwrap()
+            .len(),
             2
         );
 
@@ -2037,8 +2094,8 @@ mod tests {
                 &[producer.clone(), different_shards],
                 VulkanSharedResidentBufferRoute::SharedHost,
             )
-                .unwrap()
-                .len(),
+            .unwrap()
+            .len(),
             2
         );
 
@@ -2049,8 +2106,8 @@ mod tests {
                 &[producer, row_distributed],
                 VulkanSharedResidentBufferRoute::SharedHost,
             )
-                .unwrap()
-                .len(),
+            .unwrap()
+            .len(),
             2
         );
     }
@@ -2065,14 +2122,12 @@ mod tests {
         producer.output_activation.signal_id = "expert-intermediate".to_string();
         producer.output_activation.slot += 1;
         producer.output_collection = OutputCollection::Routed;
-        producer.local_intermediates = vec![
-            nerve_execution_contracts::LocalIntermediateContract {
-                signal: producer.output_activation.signal_id.clone(),
-                producer_binding: 1,
-                consumer_binding: 0,
-                format: "bf16".to_string(),
-            },
-        ];
+        producer.local_intermediates = vec![nerve_execution_contracts::LocalIntermediateContract {
+            signal: producer.output_activation.signal_id.clone(),
+            producer_binding: 1,
+            consumer_binding: 0,
+            format: "bf16".to_string(),
+        }];
         let mut route = producer.input_activation.clone();
         route.binding = 8;
         route.signal_id = "expert-routes".to_string();
@@ -2087,8 +2142,8 @@ mod tests {
         let mut undersized_route = route.clone();
         undersized_route.byte_capacity = undersized_route.signal_byte_capacity - 1;
         assert!(selected_resource_gate_lane_layout(&undersized_route, 16).is_err());
-        producer.selected_resource_partitions = vec![
-            VulkanDistributedSelectedResourcePartitionPlan {
+        producer.selected_resource_partitions =
+            vec![VulkanDistributedSelectedResourcePartitionPlan {
                 execution_scope: "model".to_string(),
                 selector_id: "routed-experts".to_string(),
                 node_id: "router".to_string(),
@@ -2099,12 +2154,9 @@ mod tests {
                 resource_count: 4,
                 parameters_per_resource: 2,
                 selection_count_per_activation: 2,
-                atomic_group_ids: (0..4)
-                    .map(|index| format!("expert-{index}"))
-                    .collect(),
+                atomic_group_ids: (0..4).map(|index| format!("expert-{index}")).collect(),
                 atomic_group_byte_counts: vec![1024; 4],
-            },
-        ];
+            }];
         let shard_count = producer.shards.len();
         for (shard_index, shard) in producer.shards.iter_mut().enumerate() {
             shard.selected_resource_indices.insert(
@@ -2124,9 +2176,7 @@ mod tests {
         consumer.selected_resource_partitions[0].parameters_per_resource = 1;
         consumer.selected_resource_partitions[0].address_table_binding = 6;
         consumer.selected_resource_partitions[0].parameter_slots_binding = 7;
-        for (producer_shard, consumer_shard) in
-            producer.shards.iter().zip(&mut consumer.shards)
-        {
+        for (producer_shard, consumer_shard) in producer.shards.iter().zip(&mut consumer.shards) {
             consumer_shard.input_range.byte_count = producer_shard.output_byte_count;
         }
 
@@ -2171,8 +2221,7 @@ mod tests {
             distributed_parameter_byte_count: 0,
         };
         let activation_plan =
-            VulkanDistributedActivationBufferPlan::from_execution_plan(&execution_plan)
-                .unwrap();
+            VulkanDistributedActivationBufferPlan::from_execution_plan(&execution_plan).unwrap();
         assert_eq!(activation_plan.private_intermediate_allocations.len(), 1);
         assert_eq!(
             activation_plan.private_intermediate_allocations[0]
@@ -2244,14 +2293,12 @@ mod tests {
         let mut producer = fixture_plan("row_major").dispatches.remove(0);
         producer.dispatch_index = 7;
         producer.output_activation.signal_id = "activated".to_string();
-        producer.local_intermediates = vec![
-            nerve_execution_contracts::LocalIntermediateContract {
-                signal: producer.output_activation.signal_id.clone(),
-                producer_binding: u32::try_from(producer.output_activation.binding).unwrap(),
-                consumer_binding: 0,
-                format: "bf16".to_string(),
-            },
-        ];
+        producer.local_intermediates = vec![nerve_execution_contracts::LocalIntermediateContract {
+            signal: producer.output_activation.signal_id.clone(),
+            producer_binding: u32::try_from(producer.output_activation.binding).unwrap(),
+            consumer_binding: 0,
+            format: "bf16".to_string(),
+        }];
         let mut consumer = producer.clone();
         consumer.dispatch_index = 8;
         consumer.node_id = "down".to_string();
@@ -2261,13 +2308,10 @@ mod tests {
         consumer.input_activation.binding = 0;
         consumer.output_activation.signal_id = "hidden".to_string();
         consumer.output_activation.slot += 1;
-        for (producer_shard, consumer_shard) in
-            producer.shards.iter().zip(&mut consumer.shards)
-        {
+        for (producer_shard, consumer_shard) in producer.shards.iter().zip(&mut consumer.shards) {
             consumer_shard.input_range.byte_offset = producer_shard.output_byte_offset;
             consumer_shard.input_range.byte_count = producer_shard.output_byte_count;
-            consumer_shard.base_workgroup_z =
-                u32::try_from(consumer_shard.row_start).unwrap();
+            consumer_shard.base_workgroup_z = u32::try_from(consumer_shard.row_start).unwrap();
         }
 
         let mut islands = resolved_physical_execution_islands(
@@ -2305,8 +2349,7 @@ mod tests {
                     .contains(&format!("slot_{}", producer.output_activation.slot))
         }));
         assert_eq!(
-            islands[0]
-                .phase_schedules[0]
+            islands[0].phase_schedules[0]
                 .steps
                 .iter()
                 .map(|step| step.kind)
@@ -2330,13 +2373,11 @@ mod tests {
             shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
             shared_input_byte_capacity: producer.input_byte_capacity,
             shared_output_byte_capacity: consumer.output_byte_capacity,
-            distributed_parameter_byte_count: producer
-                .distributed_parameter_byte_count
+            distributed_parameter_byte_count: producer.distributed_parameter_byte_count
                 + consumer.distributed_parameter_byte_count,
         };
         let activation_plan =
-            VulkanDistributedActivationBufferPlan::from_execution_plan(&execution_plan)
-                .unwrap();
+            VulkanDistributedActivationBufferPlan::from_execution_plan(&execution_plan).unwrap();
         assert_eq!(activation_plan.private_intermediate_allocations.len(), 1);
         let private = &activation_plan.private_intermediate_allocations[0];
         assert_eq!(private.producer_dispatch_index, 7);
@@ -2351,11 +2392,15 @@ mod tests {
                 .map(|shard| shard.output_byte_count)
                 .sum::<usize>()
         );
-        assert!(activation_plan.allocations.iter().all(|allocation| {
-            !allocation
-                .signal_ids
-                .contains(&producer.output_activation.signal_id)
-        }), "shared allocations retained private signal: {:?}", activation_plan.allocations);
+        assert!(
+            activation_plan.allocations.iter().all(|allocation| {
+                !allocation
+                    .signal_ids
+                    .contains(&producer.output_activation.signal_id)
+            }),
+            "shared allocations retained private signal: {:?}",
+            activation_plan.allocations
+        );
         islands[0].dispatches[1].reduction = Some(VulkanDistributedReductionPlan {
             operation: ReductionOperation::SumF32,
             element_count: 12,
@@ -2467,7 +2512,9 @@ mod tests {
     #[test]
     fn requested_distribution_without_a_dispatch_contract_fails_closed() {
         let mut prepared_plan = fixture_prepared_plan();
-        prepared_plan.dispatches[0].physical_execution_contracts.clear();
+        prepared_plan.dispatches[0]
+            .physical_execution_contracts
+            .clear();
 
         let error = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared_plan)],
@@ -2479,9 +2526,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("has no compatible distributable dispatch"));
+        assert!(
+            error
+                .to_string()
+                .contains("has no compatible distributable dispatch")
+        );
     }
 
     #[test]
@@ -2494,10 +2543,8 @@ mod tests {
             .push(duplicate);
         let mut artifact_manifest = fixture_artifact_manifest();
         let mut duplicate_artifact = artifact_manifest.artifacts[0].clone();
-        duplicate_artifact.artifact_id = physical_execution_artifact_id(
-            &format!("sha256:{}", "d".repeat(64)),
-            0,
-        );
+        duplicate_artifact.artifact_id =
+            physical_execution_artifact_id(&format!("sha256:{}", "d".repeat(64)), 0);
         artifact_manifest.artifacts.push(duplicate_artifact);
 
         let error = VulkanDistributedExecutionPlan::from_prepared_plans(
@@ -2510,7 +2557,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("ambiguous decode distribution contracts"));
+        assert!(
+            error
+                .to_string()
+                .contains("ambiguous decode distribution contracts")
+        );
     }
 
     #[test]
@@ -2696,8 +2747,7 @@ mod tests {
         consumer.output_activation.component_id = "consumer".to_string();
         consumer.output_activation.slot = 4;
         consumer.output_activation.signal_id = "consumer_output".to_string();
-        consumer.output_activation.storage =
-            VulkanDistributedActivationStorage::ActivationSlot;
+        consumer.output_activation.storage = VulkanDistributedActivationStorage::ActivationSlot;
         execution_plan.dispatches.push(consumer);
 
         let activation_plan =
@@ -2763,9 +2813,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(plan
-            .to_string()
-            .contains("local-zero partition contract forbids push constants"));
+        assert!(
+            plan.to_string()
+                .contains("local-zero partition contract forbids push constants")
+        );
     }
 
     #[test]
@@ -2822,45 +2873,31 @@ mod tests {
             parameter(5, "up", "up", 48),
             parameter(6, "up_scale", "up_scale", 6),
         ];
-        prepared_plan.dispatches[0].physical_execution_contracts = vec![
-            test_physical_contract(
-                "parallel_linear_silu_multiply",
-                "ffn",
-                "ffn.spv",
-                ExecutionStrategy::TensorParallel,
-                ExecutionForm::ReplicatedInputPartitionedOutput,
-                12,
-                4,
-                6,
-                WorkgroupXMapping::Proportional,
-                PartitionOrigin::LocalZero,
-                None,
-                None,
-                vec![
-                    test_partition("gate", 3, ParameterPartitionKind::Contiguous, 4, 1),
-                    test_partition(
-                        "gate_scale",
-                        4,
-                        ParameterPartitionKind::Contiguous,
-                        1,
-                        4,
-                    ),
-                    test_partition("up", 5, ParameterPartitionKind::Contiguous, 4, 1),
-                    test_partition(
-                        "up_scale",
-                        6,
-                        ParameterPartitionKind::Contiguous,
-                        1,
-                        4,
-                    ),
-                ],
-                vec![
-                    test_input(0, InputDistribution::Replicated, None),
-                    test_input(1, InputDistribution::Replicated, None),
-                ],
-                test_output(2, OutputCollection::Concatenated, Some(2)),
-            ),
-        ];
+        prepared_plan.dispatches[0].physical_execution_contracts = vec![test_physical_contract(
+            "parallel_linear_silu_multiply",
+            "ffn",
+            "ffn.spv",
+            ExecutionStrategy::TensorParallel,
+            ExecutionForm::ReplicatedInputPartitionedOutput,
+            12,
+            4,
+            6,
+            WorkgroupXMapping::Proportional,
+            PartitionOrigin::LocalZero,
+            None,
+            None,
+            vec![
+                test_partition("gate", 3, ParameterPartitionKind::Contiguous, 4, 1),
+                test_partition("gate_scale", 4, ParameterPartitionKind::Contiguous, 1, 4),
+                test_partition("up", 5, ParameterPartitionKind::Contiguous, 4, 1),
+                test_partition("up_scale", 6, ParameterPartitionKind::Contiguous, 1, 4),
+            ],
+            vec![
+                test_input(0, InputDistribution::Replicated, None),
+                test_input(1, InputDistribution::Replicated, None),
+            ],
+            test_output(2, OutputCollection::Concatenated, Some(2)),
+        )];
         let mut tensor_index = fixture_tensor_index("row_major");
         for tensor in ["gate", "up"] {
             let metadata = tensor_index.tensors.get_mut(tensor).unwrap();
@@ -2883,12 +2920,8 @@ mod tests {
             .insert("gate_scale".to_string(), scale.clone());
         tensor_index.tensors.insert("up_scale".to_string(), scale);
 
-        let artifacts = test_artifact_manifest(
-            "family",
-            "parallel_linear_silu_multiply",
-            "ffn.spv",
-            6,
-        );
+        let artifacts =
+            test_artifact_manifest("family", "parallel_linear_silu_multiply", "ffn.spv", 6);
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared_plan)],
             &tensor_index,
@@ -2961,17 +2994,16 @@ mod tests {
                     signal_byte_capacity: bytes,
                 },
             };
-        let parameter =
-            |binding, tensor: &str, byte_count| VulkanResolvedDescriptorBinding {
-                binding,
-                usage: VulkanKernelDescriptorUsage::Parameter,
-                name: tensor.to_string(),
-                resource: VulkanDescriptorResourceAddress::PermanentParameter {
-                    param_id: tensor.to_string(),
-                    tensor: tensor.to_string(),
-                    byte_count: Some(byte_count),
-                },
-            };
+        let parameter = |binding, tensor: &str, byte_count| VulkanResolvedDescriptorBinding {
+            binding,
+            usage: VulkanKernelDescriptorUsage::Parameter,
+            name: tensor.to_string(),
+            resource: VulkanDescriptorResourceAddress::PermanentParameter {
+                param_id: tensor.to_string(),
+                tensor: tensor.to_string(),
+                byte_count: Some(byte_count),
+            },
+        };
         let prepared = VulkanPreparedDispatchPlan {
             backend_id: "vulkan_stream_circuit".to_string(),
             reusable_family_count: 1,
@@ -3035,20 +3067,8 @@ mod tests {
                     None,
                     None,
                     vec![
-                        test_partition(
-                            "weight",
-                            4,
-                            ParameterPartitionKind::Contiguous,
-                            4,
-                            1,
-                        ),
-                        test_partition(
-                            "weight_scale",
-                            5,
-                            ParameterPartitionKind::Contiguous,
-                            1,
-                            4,
-                        ),
+                        test_partition("weight", 4, ParameterPartitionKind::Contiguous, 4, 1),
+                        test_partition("weight_scale", 5, ParameterPartitionKind::Contiguous, 1, 4),
                     ],
                     vec![
                         test_input(0, InputDistribution::Replicated, None),
@@ -3090,16 +3110,16 @@ mod tests {
             ]),
         };
         let artifacts = test_artifact_manifest_with_physical(VulkanReusableKernelArtifact {
-                family_id: "residual-family".to_string(),
-                op: "linear_residual".to_string(),
-                path: "residual.spv".to_string(),
-                entry_point: "main".to_string(),
-                local_size_x: 64,
-                workgroup_count_x: 6,
-                descriptor_signature: Vec::new(),
-                push_constants: Vec::new(),
-                stream_control_binding: None,
-            });
+            family_id: "residual-family".to_string(),
+            op: "linear_residual".to_string(),
+            path: "residual.spv".to_string(),
+            entry_point: "main".to_string(),
+            local_size_x: 64,
+            workgroup_count_x: 6,
+            descriptor_signature: Vec::new(),
+            push_constants: Vec::new(),
+            stream_control_binding: None,
+        });
 
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
             &[("owner", &prepared)],
@@ -3177,11 +3197,9 @@ mod tests {
         )
         .unwrap();
 
-        let merged = VulkanDistributedParameterAllocationPlan::merged(&[
-            plan.clone(),
-            plan.clone(),
-        ])
-        .unwrap();
+        let merged =
+            VulkanDistributedParameterAllocationPlan::merged(&[plan.clone(), plan.clone()])
+                .unwrap();
         assert_eq!(merged.allocation_count, plan.allocation_count);
         assert_eq!(merged.tensor_count, plan.tensor_count);
         assert_eq!(merged.total_byte_capacity, plan.total_byte_capacity);
@@ -3206,15 +3224,14 @@ mod tests {
                 allocations,
             }
         };
-        let allocation = |device_id: &str, byte_offset, byte_count| {
-            VulkanDistributedParameterAllocation {
+        let allocation =
+            |device_id: &str, byte_offset, byte_count| VulkanDistributedParameterAllocation {
                 device_id: device_id.to_string(),
                 tensor: "weight".to_string(),
                 byte_offset,
                 byte_count,
                 use_count: 1,
-            }
-        };
+            };
         let scalar = plan(vec![
             allocation("owner", 0, 64),
             allocation("helper", 64, 64),
@@ -3397,10 +3414,7 @@ mod tests {
             &[("owner", &prepared_plan)],
             &tensor_index,
             &artifact_manifest,
-            &component_device_pools(
-                "component",
-                &["owner", "helper-a", "helper-b", "helper-c"],
-            ),
+            &component_device_pools("component", &["owner", "helper-a", "helper-b", "helper-c"]),
             &[],
             storage_buffer_offset_alignment,
         )
@@ -3496,12 +3510,7 @@ mod tests {
     }
 
     fn fixture_artifact_manifest() -> VulkanPhysicalKernelArtifactManifest {
-        test_artifact_manifest(
-            "family",
-            "parallel_linear_silu_multiply",
-            "ffn.spv",
-            6,
-        )
+        test_artifact_manifest("family", "parallel_linear_silu_multiply", "ffn.spv", 6)
     }
 
     fn test_artifact_manifest(
@@ -3527,10 +3536,7 @@ mod tests {
         canonical: VulkanReusableKernelArtifact,
     ) -> VulkanPhysicalKernelArtifactManifest {
         VulkanPhysicalKernelArtifactManifest::new(vec![VulkanPhysicalKernelArtifact {
-            artifact_id: physical_execution_artifact_id(
-                &format!("sha256:{}", "a".repeat(64)),
-                0,
-            ),
+            artifact_id: physical_execution_artifact_id(&format!("sha256:{}", "a".repeat(64)), 0),
             op: canonical.op,
             path: canonical.path,
             entry_point: canonical.entry_point,
@@ -3596,7 +3602,10 @@ mod tests {
                 dimensions: BTreeMap::from([
                     ("partition".to_string(), extent),
                     ("local_size_x".to_string(), 64),
-                    ("workgroup_count_x".to_string(), u64::from(workgroup_count_x)),
+                    (
+                        "workgroup_count_x".to_string(),
+                        u64::from(workgroup_count_x),
+                    ),
                 ]),
                 dynamic_dimensions: Vec::new(),
             },

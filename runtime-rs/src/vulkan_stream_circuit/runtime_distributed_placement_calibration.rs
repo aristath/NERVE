@@ -5,6 +5,7 @@ pub struct VulkanRuntimeDistributedPlacementCalibrationReport {
     pub phase: String,
     pub activation_batch_width: usize,
     pub sampled_workload: bool,
+    pub sample_fraction_millionths: usize,
     pub measured_execution_ns: u64,
     pub measured_ns_per_activation: u64,
     pub measured_windows: Vec<VulkanTargetedComponentThroughputWindow>,
@@ -128,6 +129,7 @@ struct VulkanRuntimeDistributedPlacementSession {
     activation_routes: Vec<String>,
     dispatch_work: Vec<VulkanRuntimeDistributedPlacementDispatchWork>,
     sampled_workload: bool,
+    sample_fraction_millionths: usize,
     execution_case: VulkanPlacementExecutionCaseIdentity,
 }
 
@@ -147,6 +149,7 @@ pub fn calibrate_vulkan_runtime_distributed_placement_candidate_with_policy(
         runtime_model,
         target,
         VulkanTargetedComponentExecutionPhase::Decode,
+        None,
         policy,
     )
 }
@@ -175,6 +178,7 @@ pub fn calibrate_vulkan_runtime_distributed_prefill_placement_candidate_with_pol
         VulkanTargetedComponentExecutionPhase::Prefill {
             activation_batch_width,
         },
+        None,
         policy,
     )
 }
@@ -185,6 +189,7 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
     runtime_model: &VulkanResidentRuntimeModel,
     target: &VulkanRuntimePlacementCalibrationTarget,
     phase: VulkanTargetedComponentExecutionPhase,
+    required_sample_fraction_millionths: Option<usize>,
     policy: VulkanRuntimePlacementCalibrationPolicy,
 ) -> Result<
     Option<VulkanRuntimeDistributedPlacementCalibrationReport>,
@@ -241,6 +246,7 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
         runtime_model,
         target,
         phase,
+        required_sample_fraction_millionths,
         maximum_total_resident_parameter_bytes,
         &logical_parameter_capacities,
     )?
@@ -308,6 +314,7 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
             phase: measured.phase,
             activation_batch_width: measured.activation_batch_width,
             sampled_workload: session.sampled_workload,
+            sample_fraction_millionths: session.sample_fraction_millionths,
             measured_execution_ns: measured.execution_ns,
             measured_ns_per_activation,
             measured_windows: measured.windows,
@@ -937,6 +944,7 @@ impl VulkanRuntimeDistributedPlacementSession {
         runtime_model: &VulkanResidentRuntimeModel,
         target: &VulkanRuntimePlacementCalibrationTarget,
         phase: VulkanTargetedComponentExecutionPhase,
+        required_sample_fraction_millionths: Option<usize>,
         maximum_total_resident_parameter_bytes: usize,
         maximum_resident_parameter_bytes_by_logical_device: &BTreeMap<String, usize>,
     ) -> Result<Option<Self>, VulkanResidentTokenModelPackageError> {
@@ -1079,16 +1087,27 @@ impl VulkanRuntimeDistributedPlacementSession {
         else {
             return Ok(None);
         };
-        let Some(distributed_execution_plan) = full_distributed_execution_plan
-            .sampled_for_parameter_budget(
-                &tensor_index,
-                &logical_device_ids,
-                distributed_parameter_budget,
-            )
-            .map_err(|error| distributed_calibration_error_value(error.to_string()))?
-        else {
-            return Ok(None);
-        };
+        let (distributed_execution_plan, sample_fraction_millionths) =
+            if let Some(fraction_millionths) = required_sample_fraction_millionths {
+                (
+                    full_distributed_execution_plan
+                        .sampled_for_fraction_millionths(&logical_device_ids, fraction_millionths)
+                        .map_err(|error| distributed_calibration_error_value(error.to_string()))?,
+                    fraction_millionths,
+                )
+            } else {
+                let Some(sampled) = full_distributed_execution_plan
+                    .sampled_for_parameter_budget_with_fraction(
+                        &tensor_index,
+                        &logical_device_ids,
+                        distributed_parameter_budget,
+                    )
+                    .map_err(|error| distributed_calibration_error_value(error.to_string()))?
+                else {
+                    return Ok(None);
+                };
+                sampled
+            };
         let has_distributed_selected_resources = distributed_execution_plan
             .dispatches
             .iter()
@@ -1584,6 +1603,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             activation_routes,
             dispatch_work,
             sampled_workload,
+            sample_fraction_millionths,
             execution_case,
         }))
     }
@@ -1892,6 +1912,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             activation_routes: _,
             dispatch_work: _,
             sampled_workload: _,
+            sample_fraction_millionths: _,
             execution_case: _,
         } = self;
         let mut cleanup_errors = Vec::new();

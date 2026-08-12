@@ -4,28 +4,24 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
-use crate::stream_plan::TensorIndex;
 use crate::stream_circuit::ComponentEdgePlacement;
+use crate::stream_plan::TensorIndex;
 use crate::tensor_storage::{TensorStorage, TensorStorageRange};
 use crate::vulkan_compute::{
-    VulkanComputeDevice, VulkanError, VulkanResidentBuffer,
-    VulkanResidentBufferPool, VulkanResidentBufferPoolAllocation,
-    VulkanResidentBufferPoolKey,
-    VulkanResidentKernelBufferAccess,
-    VulkanResidentKernelBufferBinding, VulkanResidentKernelDispatch,
-    VulkanResidentKernelSequence, VulkanResidentKernelSequenceStep,
-    VulkanResidentQueueSubmissionBatch, VulkanSharedResidentBufferRoute,
-    VulkanTimelineSemaphore, VulkanTimelineSemaphorePoint,
-    VulkanTimelineSemaphoreReplayState,
+    VulkanComputeDevice, VulkanError, VulkanResidentBuffer, VulkanResidentBufferPool,
+    VulkanResidentBufferPoolAllocation, VulkanResidentBufferPoolKey,
+    VulkanResidentKernelBufferAccess, VulkanResidentKernelBufferBinding,
+    VulkanResidentKernelDispatch, VulkanResidentKernelSequence, VulkanResidentKernelSequenceStep,
+    VulkanResidentQueueSubmissionBatch, VulkanSharedResidentBufferRoute, VulkanTimelineSemaphore,
+    VulkanTimelineSemaphorePoint, VulkanTimelineSemaphoreReplayState,
 };
 use crate::vulkan_stream_circuit::{
-    CompiledResourceBindingMapping, CompiledResourceLifetime,
-    CompiledResourceResidencyContract, CompiledResourceSelectorMapping,
-    VulkanActivationSlotBufferOverride, VulkanDescriptorResourceAddress,
-    VulkanCompiledResourceDeviceStore, VulkanDistributedSelectedResourceGate,
-    VulkanDynamicResourceBuffers,
+    CompiledResourceBindingMapping, CompiledResourceLifetime, CompiledResourceResidencyContract,
+    CompiledResourceSelectorMapping, VulkanActivationSlotBufferOverride,
+    VulkanCompiledResourceDeviceStore, VulkanDescriptorResourceAddress,
+    VulkanDistributedSelectedResourceGate, VulkanDynamicResourceBuffers,
     VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
-    VulkanLoadedPhysicalKernelArtifact, VulkanLoadedKernelArtifactCatalog,
+    VulkanLoadedKernelArtifactCatalog, VulkanLoadedPhysicalKernelArtifact,
     VulkanModelBoundaryBufferOverride, VulkanModelBoundaryDirection,
     VulkanPhysicalKernelArtifactManifest, VulkanPreparedDispatch, VulkanPreparedDispatchPlan,
     VulkanResidentFeedbackControlPlane,
@@ -215,13 +211,12 @@ impl VulkanDistributedExecutionPlan {
                         dispatch.component_id, owner_device_id
                     )));
                 }
-                let Some((contract, artifact)) =
-                    select_distributed_contract(
-                        dispatch,
-                        artifact_manifest,
-                        phase,
-                        execution_shape,
-                    )?
+                let Some((contract, artifact)) = select_distributed_contract(
+                    dispatch,
+                    artifact_manifest,
+                    phase,
+                    execution_shape,
+                )?
                 else {
                     continue;
                 };
@@ -310,6 +305,20 @@ impl VulkanDistributedExecutionPlan {
         participant_device_ids: &[String],
         maximum_total_parameter_bytes: usize,
     ) -> Result<Option<Self>, VulkanDistributedPlanError> {
+        self.sampled_for_parameter_budget_with_fraction(
+            tensor_index,
+            participant_device_ids,
+            maximum_total_parameter_bytes,
+        )
+        .map(|sampled| sampled.map(|(plan, _)| plan))
+    }
+
+    pub fn sampled_for_parameter_budget_with_fraction(
+        &self,
+        tensor_index: &TensorIndex,
+        participant_device_ids: &[String],
+        maximum_total_parameter_bytes: usize,
+    ) -> Result<Option<(Self, usize)>, VulkanDistributedPlanError> {
         if participant_device_ids.is_empty()
             || maximum_total_parameter_bytes == 0
             || participant_device_ids.iter().any(String::is_empty)
@@ -325,16 +334,14 @@ impl VulkanDistributedExecutionPlan {
             return Ok(None);
         }
         let build = |fraction_millionths: usize| {
-            sampled_distributed_execution_plan(
-                self,
-                participant_device_ids,
-                fraction_millionths,
-            )
+            sampled_distributed_execution_plan(self, participant_device_ids, fraction_millionths)
         };
         let minimum = build(0)?;
-        let minimum_bytes = VulkanDistributedParameterAllocationPlan::
-            from_sampled_execution_plan(&minimum, tensor_index)?
-            .total_byte_capacity;
+        let minimum_bytes = VulkanDistributedParameterAllocationPlan::from_sampled_execution_plan(
+            &minimum,
+            tensor_index,
+        )?
+        .total_byte_capacity;
         if minimum_bytes > maximum_total_parameter_bytes {
             return Ok(None);
         }
@@ -344,16 +351,37 @@ impl VulkanDistributedExecutionPlan {
         while low < high {
             let middle = low + (high - low).div_ceil(2);
             let candidate = build(middle)?;
-            let bytes = VulkanDistributedParameterAllocationPlan::
-                from_sampled_execution_plan(&candidate, tensor_index)?
-                .total_byte_capacity;
+            let bytes = VulkanDistributedParameterAllocationPlan::from_sampled_execution_plan(
+                &candidate,
+                tensor_index,
+            )?
+            .total_byte_capacity;
             if bytes <= maximum_total_parameter_bytes {
                 low = middle;
             } else {
                 high = middle - 1;
             }
         }
-        Ok(Some(build(low)?))
+        Ok(Some((build(low)?, low)))
+    }
+
+    pub fn sampled_for_fraction_millionths(
+        &self,
+        participant_device_ids: &[String],
+        fraction_millionths: usize,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        if participant_device_ids.is_empty()
+            || participant_device_ids.iter().any(String::is_empty)
+            || participant_device_ids.iter().collect::<BTreeSet<_>>().len()
+                != participant_device_ids.len()
+            || fraction_millionths > 1_000_000
+        {
+            return Err(VulkanDistributedPlanError(
+                "fixed sampled distributed execution requires distinct participants and a fraction in 0..=1000000"
+                    .to_string(),
+            ));
+        }
+        sampled_distributed_execution_plan(self, participant_device_ids, fraction_millionths)
     }
 }
 
@@ -541,9 +569,8 @@ fn sampled_distributed_execution_plan(
             Ok(sampled)
         })
         .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
-    let distributed_parameter_byte_count = dispatches.iter().try_fold(
-        0usize,
-        |total, dispatch| {
+    let distributed_parameter_byte_count =
+        dispatches.iter().try_fold(0usize, |total, dispatch| {
             total
                 .checked_add(dispatch.distributed_parameter_byte_count)
                 .ok_or_else(|| {
@@ -551,8 +578,7 @@ fn sampled_distributed_execution_plan(
                         "sampled distributed parameter total overflowed".to_string(),
                     )
                 })
-        },
-    )?;
+        })?;
     let execution_islands =
         resolved_physical_execution_islands(&dispatches, source.shared_activation_route)?;
     Ok(VulkanDistributedExecutionPlan {
@@ -578,9 +604,7 @@ fn merged_distributed_dispatch_shard(
     })?;
     let row_count = dispatch.shards.iter().try_fold(0usize, |total, shard| {
         total.checked_add(shard.row_count).ok_or_else(|| {
-            VulkanDistributedPlanError(
-                "merged distributed row count overflowed".to_string(),
-            )
+            VulkanDistributedPlanError("merged distributed row count overflowed".to_string())
         })
     })?;
     let merge_ranges = |ranges: Vec<&VulkanDistributedActivationRange>, label: &str| {
@@ -597,9 +621,7 @@ fn merged_distributed_dispatch_shard(
             .byte_offset
             .checked_add(leading.byte_count)
             .ok_or_else(|| {
-                VulkanDistributedPlanError(format!(
-                    "merged distributed {label} range overflowed",
-                ))
+                VulkanDistributedPlanError(format!("merged distributed {label} range overflowed",))
             })?;
         for range in ranges.iter().skip(1) {
             if range.byte_offset != byte_end {
@@ -609,9 +631,7 @@ fn merged_distributed_dispatch_shard(
                 )));
             }
             byte_end = byte_end.checked_add(range.byte_count).ok_or_else(|| {
-                VulkanDistributedPlanError(format!(
-                    "merged distributed {label} range overflowed",
-                ))
+                VulkanDistributedPlanError(format!("merged distributed {label} range overflowed",))
             })?;
         }
         Ok(VulkanDistributedActivationRange {
@@ -620,7 +640,11 @@ fn merged_distributed_dispatch_shard(
         })
     };
     let input_range = merge_ranges(
-        dispatch.shards.iter().map(|shard| &shard.input_range).collect(),
+        dispatch
+            .shards
+            .iter()
+            .map(|shard| &shard.input_range)
+            .collect(),
         "input",
     )?;
     let auxiliary_count = first.auxiliary_input_ranges.len();
@@ -732,10 +756,7 @@ fn sampled_distributed_dispatch_shard(
     numerator: usize,
     denominator: usize,
 ) -> Result<VulkanDistributedDispatchShard, VulkanDistributedPlanError> {
-    if source.row_count == 0
-        || source.workgroup_count_x == 0
-        || dispatch.row_alignment == 0
-    {
+    if source.row_count == 0 || source.workgroup_count_x == 0 || dispatch.row_alignment == 0 {
         return Err(VulkanDistributedPlanError(format!(
             "distributed dispatch {}.{} has invalid shard geometry",
             dispatch.component_id, dispatch.node_id,
@@ -753,15 +774,9 @@ fn sampled_distributed_dispatch_shard(
         exact.device_id = device_id.to_string();
         return Ok(exact);
     }
-    let proportional_rows = source
-        .row_count
-        .checked_mul(numerator)
-        .ok_or_else(|| {
-            VulkanDistributedPlanError(
-                "sampled distributed row calculation overflowed".to_string(),
-            )
-        })?
-        / denominator;
+    let proportional_rows = source.row_count.checked_mul(numerator).ok_or_else(|| {
+        VulkanDistributedPlanError("sampled distributed row calculation overflowed".to_string())
+    })? / denominator;
     let row_count = proportional_rows
         .min(source.row_count)
         .checked_div(dispatch.row_alignment)
@@ -787,9 +802,7 @@ fn sampled_distributed_dispatch_shard(
             })
     };
     let scaled_activation_range =
-        |range: &VulkanDistributedActivationRange,
-         distribution: InputDistribution,
-         label: &str| {
+        |range: &VulkanDistributedActivationRange, distribution: InputDistribution, label: &str| {
             if distribution == InputDistribution::Sharded {
                 Ok(VulkanDistributedActivationRange {
                     byte_offset: range.byte_offset,
@@ -823,33 +836,31 @@ fn sampled_distributed_dispatch_shard(
             })
             .collect::<Result<Vec<_>, _>>()
     };
-    let (workgroup_count_x, output_byte_count, auxiliary_input_ranges) =
-        match dispatch.distribution {
-            VulkanDistributedDispatchDistribution::OutputRows => {
-                let output_byte_count = scale(source.output_byte_count, "output range")?;
-                let workgroup_count_x = u32::try_from(scale(
-                    source.workgroup_count_x as usize,
-                    "workgroup count",
-                )?)
-                .map_err(|_| {
-                    VulkanDistributedPlanError(
-                        "sampled distributed workgroup count exceeds u32".to_string(),
-                    )
-                })?;
-                let auxiliary = scaled_auxiliary_input_ranges()?;
-                (workgroup_count_x, output_byte_count, auxiliary)
-            }
-            VulkanDistributedDispatchDistribution::InputColumns => (
-                source.workgroup_count_x,
-                source.output_byte_count,
-                scaled_auxiliary_input_ranges()?,
-            ),
-            VulkanDistributedDispatchDistribution::ExpertRange => (
-                source.workgroup_count_x,
-                source.output_byte_count,
-                source.auxiliary_input_ranges.clone(),
-            ),
-        };
+    let (workgroup_count_x, output_byte_count, auxiliary_input_ranges) = match dispatch.distribution
+    {
+        VulkanDistributedDispatchDistribution::OutputRows => {
+            let output_byte_count = scale(source.output_byte_count, "output range")?;
+            let workgroup_count_x =
+                u32::try_from(scale(source.workgroup_count_x as usize, "workgroup count")?)
+                    .map_err(|_| {
+                        VulkanDistributedPlanError(
+                            "sampled distributed workgroup count exceeds u32".to_string(),
+                        )
+                    })?;
+            let auxiliary = scaled_auxiliary_input_ranges()?;
+            (workgroup_count_x, output_byte_count, auxiliary)
+        }
+        VulkanDistributedDispatchDistribution::InputColumns => (
+            source.workgroup_count_x,
+            source.output_byte_count,
+            scaled_auxiliary_input_ranges()?,
+        ),
+        VulkanDistributedDispatchDistribution::ExpertRange => (
+            source.workgroup_count_x,
+            source.output_byte_count,
+            source.auxiliary_input_ranges.clone(),
+        ),
+    };
     let parameters = source
         .parameters
         .iter()
@@ -1045,7 +1056,9 @@ pub(crate) fn resolved_physical_execution_islands_for_phase(
     for dispatch in dispatches {
         if let Some(group) = groups.last_mut()
             && distributed_dispatches_can_share_sequence(
-                group.last().expect("physical execution islands are never empty"),
+                group
+                    .last()
+                    .expect("physical execution islands are never empty"),
                 dispatch,
             )
         {
@@ -1058,12 +1071,7 @@ pub(crate) fn resolved_physical_execution_islands_for_phase(
         .into_iter()
         .enumerate()
         .map(|(index, dispatches)| {
-            resolved_physical_execution_island(
-                index,
-                dispatches,
-                shared_activation_route,
-                phase,
-            )
+            resolved_physical_execution_island(index, dispatches, shared_activation_route, phase)
         })
         .collect()
 }
@@ -1089,18 +1097,15 @@ fn resolved_physical_execution_island(
         ));
     }
     if dispatches.iter().any(|dispatch| {
-        dispatch.has_lazy_resource_requirements
-            && dispatch.selected_resource_partitions.is_empty()
+        dispatch.has_lazy_resource_requirements && dispatch.selected_resource_partitions.is_empty()
     }) {
         return Err(VulkanDistributedPlanError(format!(
             "physical execution island for component {component_id:?} contains lazy resources without a resolved atomic residency plan",
         )));
     }
 
-    let mut participant_roles = BTreeMap::<
-        String,
-        BTreeSet<VulkanPhysicalExecutionParticipantRole>,
-    >::new();
+    let mut participant_roles =
+        BTreeMap::<String, BTreeSet<VulkanPhysicalExecutionParticipantRole>>::new();
     participant_roles
         .entry(owner_device_id.clone())
         .or_default()
@@ -1113,16 +1118,12 @@ fn resolved_physical_execution_island(
     let mut member_node_ids = Vec::new();
     let mut contract_ids = Vec::new();
     let mut implementation_digests = Vec::new();
-    let mut shared_activation_allocations = BTreeMap::<
-        (String, VulkanDistributedActivationStorage, String, usize),
-        usize,
-    >::new();
+    let mut shared_activation_allocations =
+        BTreeMap::<(String, VulkanDistributedActivationStorage, String, usize), usize>::new();
     let mut private_intermediate_allocations =
         BTreeMap::<(String, String, usize, usize, usize), usize>::new();
-    let mut owner_residency = BTreeMap::<
-        (String, VulkanPhysicalExecutionResidencyKind, String),
-        usize,
-    >::new();
+    let mut owner_residency =
+        BTreeMap::<(String, VulkanPhysicalExecutionResidencyKind, String), usize>::new();
     let private_handoff_producers = dispatches
         .windows(2)
         .filter(|pair| local_shard_handoff(&pair[0], &pair[1]))
@@ -1159,8 +1160,7 @@ fn resolved_physical_execution_island(
             {
                 return Err(VulkanDistributedPlanError(format!(
                     "physical execution island resource {:?} has conflicting capacities {existing} and {}",
-                    requirement.resource_id,
-                    requirement.byte_capacity,
+                    requirement.resource_id, requirement.byte_capacity,
                 )));
             }
         }
@@ -1172,26 +1172,21 @@ fn resolved_physical_execution_island(
                     .filter(|_| !private_handoff_producers.contains(&dispatch.dispatch_index)),
             );
         for activation in activations {
-            let allocation_device_id = distributed_activation_owner_device_id(
-                &dispatch.owner_device_id,
-                activation,
-            );
+            let allocation_device_id =
+                distributed_activation_owner_device_id(&dispatch.owner_device_id, activation);
             let key = (
                 allocation_device_id,
                 activation.storage.clone(),
                 activation.component_id.clone(),
                 activation.slot,
             );
-            if let Some(existing) = shared_activation_allocations.insert(
-                key,
-                activation.byte_capacity,
-            ) && existing != activation.byte_capacity
+            if let Some(existing) =
+                shared_activation_allocations.insert(key, activation.byte_capacity)
+                && existing != activation.byte_capacity
             {
                 return Err(VulkanDistributedPlanError(format!(
                     "physical execution island activation {}.slot_{} has conflicting capacities {existing} and {}",
-                    activation.component_id,
-                    activation.slot,
-                    activation.byte_capacity,
+                    activation.component_id, activation.slot, activation.byte_capacity,
                 )));
             }
         }
@@ -1205,16 +1200,17 @@ fn resolved_physical_execution_island(
             if !worker_device_ids.contains(&shard.device_id) {
                 worker_device_ids.push(shard.device_id.clone());
             }
-            let parameter_bytes = shard.parameters.iter().try_fold(
-                0usize,
-                |total, parameter| {
-                    total.checked_add(parameter.byte_count).ok_or_else(|| {
-                        VulkanDistributedPlanError(
-                            "physical execution shard parameter bytes overflowed".to_string(),
-                        )
-                    })
-                },
-            )?;
+            let parameter_bytes =
+                shard
+                    .parameters
+                    .iter()
+                    .try_fold(0usize, |total, parameter| {
+                        total.checked_add(parameter.byte_count).ok_or_else(|| {
+                            VulkanDistributedPlanError(
+                                "physical execution shard parameter bytes overflowed".to_string(),
+                            )
+                        })
+                    })?;
             let entry = parameter_bytes_by_device
                 .entry(shard.device_id.clone())
                 .or_default();
@@ -1273,18 +1269,18 @@ fn resolved_physical_execution_island(
         .into_iter()
         .map(|(device_id, roles)| VulkanPhysicalExecutionParticipant { device_id, roles })
         .collect::<Vec<_>>();
-    let entry_device_id = distributed_activation_owner_device_id(
-        &owner_device_id,
-        &first.input_activation,
-    );
+    let entry_device_id =
+        distributed_activation_owner_device_id(&owner_device_id, &first.input_activation);
     let tail = dispatches
         .last()
         .expect("physical execution island was checked above");
     let exit_device_id =
         distributed_activation_owner_device_id(&owner_device_id, &tail.output_activation);
-    if let Some(collect) = schedule.iter_mut().rev().find(|step| {
-        step.kind == VulkanPhysicalExecutionScheduleKind::CollectOutputs
-    }) {
+    if let Some(collect) = schedule
+        .iter_mut()
+        .rev()
+        .find(|step| step.kind == VulkanPhysicalExecutionScheduleKind::CollectOutputs)
+    {
         collect.device_ids = vec![exit_device_id.clone()];
     }
     for participant in &participants {
@@ -1307,12 +1303,14 @@ fn resolved_physical_execution_island(
     }
     let mut residency = parameter_bytes_by_device
         .into_iter()
-        .map(|(device_id, byte_capacity)| VulkanPhysicalExecutionResidencyRequirement {
-            device_id,
-            kind: VulkanPhysicalExecutionResidencyKind::PermanentParameterShard,
-            resource_id: "parameter_shards".to_string(),
-            byte_capacity,
-        })
+        .map(
+            |(device_id, byte_capacity)| VulkanPhysicalExecutionResidencyRequirement {
+                device_id,
+                kind: VulkanPhysicalExecutionResidencyKind::PermanentParameterShard,
+                resource_id: "parameter_shards".to_string(),
+                byte_capacity,
+            },
+        )
         .collect::<Vec<_>>();
     residency.extend(owner_residency.into_iter().map(
         |((device_id, kind, resource_id), byte_capacity)| {
@@ -1328,9 +1326,7 @@ fn resolved_physical_execution_island(
         let producer = &pair[0];
         let consumer = &pair[1];
         if local_shard_handoff(producer, consumer) {
-            for (producer_shard, consumer_shard) in
-                producer.shards.iter().zip(&consumer.shards)
-            {
+            for (producer_shard, consumer_shard) in producer.shards.iter().zip(&consumer.shards) {
                 let key = (
                     producer_shard.device_id.clone(),
                     producer.output_activation.component_id.clone(),
@@ -1338,10 +1334,9 @@ fn resolved_physical_execution_island(
                     producer.dispatch_index,
                     consumer.dispatch_index,
                 );
-                if let Some(existing) = private_intermediate_allocations.insert(
-                    key,
-                    producer_shard.output_byte_count,
-                ) && existing != producer_shard.output_byte_count
+                if let Some(existing) =
+                    private_intermediate_allocations.insert(key, producer_shard.output_byte_count)
+                    && existing != producer_shard.output_byte_count
                 {
                     return Err(VulkanDistributedPlanError(format!(
                         "physical execution private intermediate {}.slot_{} has conflicting capacities {existing} and {}",
@@ -1443,9 +1438,7 @@ fn distributed_activation_owner_device_id(
         } => owner_device_id.clone(),
         VulkanDistributedActivationStorage::ActivationSlot
         | VulkanDistributedActivationStorage::BoundaryInput
-        | VulkanDistributedActivationStorage::BoundaryOutput => {
-            default_owner_device_id.to_string()
-        }
+        | VulkanDistributedActivationStorage::BoundaryOutput => default_owner_device_id.to_string(),
     }
 }
 
@@ -1456,10 +1449,7 @@ fn distributed_dispatches_can_share_sequence(
     if producer.owner_device_id != consumer.owner_device_id
         || producer.component_id != consumer.component_id
         || producer.dispatch_index.checked_add(1) != Some(consumer.dispatch_index)
-        || !same_distributed_activation(
-            &producer.output_activation,
-            &consumer.input_activation,
-        )
+        || !same_distributed_activation(&producer.output_activation, &consumer.input_activation)
         || producer.shards.len() != consumer.shards.len()
     {
         return false;
@@ -1488,8 +1478,7 @@ fn local_shard_handoff(
     producer: &VulkanDistributedDispatchPlan,
     consumer: &VulkanDistributedDispatchPlan,
 ) -> bool {
-    dense_local_shard_handoff(producer, consumer)
-        || expert_local_shard_handoff(producer, consumer)
+    dense_local_shard_handoff(producer, consumer) || expert_local_shard_handoff(producer, consumer)
 }
 
 /// Proves that two adjacent expert kernels consume the same atomic expert
@@ -1509,67 +1498,68 @@ fn selected_resource_expert_handoff(
         return producer.selected_resource_partitions.is_empty()
             && consumer.selected_resource_partitions.is_empty();
     }
-    if producer.selected_resource_partitions.len()
-        != consumer.selected_resource_partitions.len()
-    {
+    if producer.selected_resource_partitions.len() != consumer.selected_resource_partitions.len() {
         return false;
     }
 
-    producer.selected_resource_partitions.iter().all(|producer_partition| {
-        let matching = consumer
-            .selected_resource_partitions
-            .iter()
-            .filter(|partition| partition.selector_id == producer_partition.selector_id)
-            .collect::<Vec<_>>();
-        let [consumer_partition] = matching.as_slice() else {
-            return false;
-        };
-        let selector_identity_matches = producer_partition.execution_scope
-            == consumer_partition.execution_scope
-            && producer_partition.node_id == consumer_partition.node_id
-            && producer_partition.domain_id == consumer_partition.domain_id
-            && producer_partition.selection_signal == consumer_partition.selection_signal
-            && producer_partition.resource_count == consumer_partition.resource_count
-            && producer_partition.selection_count_per_activation
-                == consumer_partition.selection_count_per_activation
-            && producer_partition.atomic_group_ids == consumer_partition.atomic_group_ids
-            && producer_partition.atomic_group_byte_counts
-                == consumer_partition.atomic_group_byte_counts;
-        if !selector_identity_matches {
-            return false;
-        }
+    producer
+        .selected_resource_partitions
+        .iter()
+        .all(|producer_partition| {
+            let matching = consumer
+                .selected_resource_partitions
+                .iter()
+                .filter(|partition| partition.selector_id == producer_partition.selector_id)
+                .collect::<Vec<_>>();
+            let [consumer_partition] = matching.as_slice() else {
+                return false;
+            };
+            let selector_identity_matches = producer_partition.execution_scope
+                == consumer_partition.execution_scope
+                && producer_partition.node_id == consumer_partition.node_id
+                && producer_partition.domain_id == consumer_partition.domain_id
+                && producer_partition.selection_signal == consumer_partition.selection_signal
+                && producer_partition.resource_count == consumer_partition.resource_count
+                && producer_partition.selection_count_per_activation
+                    == consumer_partition.selection_count_per_activation
+                && producer_partition.atomic_group_ids == consumer_partition.atomic_group_ids
+                && producer_partition.atomic_group_byte_counts
+                    == consumer_partition.atomic_group_byte_counts;
+            if !selector_identity_matches {
+                return false;
+            }
 
-        let producer_activation = distributed_selected_resource_activation(
-            producer,
-            &producer_partition.selection_signal,
-        );
-        let consumer_activation = distributed_selected_resource_activation(
-            consumer,
-            &consumer_partition.selection_signal,
-        );
-        if !producer_activation
-            .zip(consumer_activation)
-            .is_some_and(|(producer, consumer)| {
-                same_distributed_activation(producer, consumer)
-            })
-        {
-            return false;
-        }
+            let producer_activation = distributed_selected_resource_activation(
+                producer,
+                &producer_partition.selection_signal,
+            );
+            let consumer_activation = distributed_selected_resource_activation(
+                consumer,
+                &consumer_partition.selection_signal,
+            );
+            if !producer_activation
+                .zip(consumer_activation)
+                .is_some_and(|(producer, consumer)| same_distributed_activation(producer, consumer))
+            {
+                return false;
+            }
 
-        producer.shards.iter().zip(&consumer.shards).all(
-            |(producer_shard, consumer_shard)| {
-                producer_shard
-                    .selected_resource_indices
-                    .get(&producer_partition.selector_id)
-                    .zip(
-                        consumer_shard
-                            .selected_resource_indices
-                            .get(&consumer_partition.selector_id),
-                    )
-                    .is_some_and(|(producer, consumer)| producer == consumer)
-            },
-        )
-    })
+            producer
+                .shards
+                .iter()
+                .zip(&consumer.shards)
+                .all(|(producer_shard, consumer_shard)| {
+                    producer_shard
+                        .selected_resource_indices
+                        .get(&producer_partition.selector_id)
+                        .zip(
+                            consumer_shard
+                                .selected_resource_indices
+                                .get(&consumer_partition.selector_id),
+                        )
+                        .is_some_and(|(producer, consumer)| producer == consumer)
+                })
+        })
 }
 
 fn distributed_selected_resource_activation<'a>(
@@ -1597,22 +1587,20 @@ fn expert_local_shard_handoff(
         && consumer.distribution == VulkanDistributedDispatchDistribution::ExpertRange
         && producer.output_collection == OutputCollection::Routed
         && consumer.input_distribution == InputDistribution::Routed
-        && same_distributed_activation(
-            &producer.output_activation,
-            &consumer.input_activation,
-        )
+        && same_distributed_activation(&producer.output_activation, &consumer.input_activation)
         && selected_resource_expert_handoff(producer, consumer)
         && producer.shards.len() == consumer.shards.len()
-        && producer.shards.iter().zip(&consumer.shards).all(
-            |(producer_shard, consumer_shard)| {
+        && producer
+            .shards
+            .iter()
+            .zip(&consumer.shards)
+            .all(|(producer_shard, consumer_shard)| {
                 producer_shard.device_id == consumer_shard.device_id
                     && producer_shard.row_start == consumer_shard.row_start
                     && producer_shard.row_count == consumer_shard.row_count
                     && producer_shard.base_workgroup_z == consumer_shard.base_workgroup_z
-                    && producer_shard.output_byte_count
-                        == consumer_shard.input_range.byte_count
-            },
-        )
+                    && producer_shard.output_byte_count == consumer_shard.input_range.byte_count
+            })
         && declared_local_shard_handoff(producer, consumer)
 }
 
@@ -1637,27 +1625,24 @@ fn dense_local_shard_handoff(
     producer.owner_device_id == consumer.owner_device_id
         && producer.component_id == consumer.component_id
         && producer.dispatch_index.checked_add(1) == Some(consumer.dispatch_index)
-        && same_distributed_activation(
-            &producer.output_activation,
-            &consumer.input_activation,
-        )
+        && same_distributed_activation(&producer.output_activation, &consumer.input_activation)
         && !producer.shards.is_empty()
         && producer.shards.len() == consumer.shards.len()
         && producer.distribution == VulkanDistributedDispatchDistribution::OutputRows
         && producer.output_collection == OutputCollection::Concatenated
         && consumer.distribution == VulkanDistributedDispatchDistribution::InputColumns
         && consumer.input_distribution == InputDistribution::Sharded
-        && producer.shards.iter().zip(&consumer.shards).all(
-            |(producer_shard, consumer_shard)| {
+        && producer
+            .shards
+            .iter()
+            .zip(&consumer.shards)
+            .all(|(producer_shard, consumer_shard)| {
                 producer_shard.device_id == consumer_shard.device_id
                     && producer_shard.row_start == consumer_shard.row_start
                     && producer_shard.row_count == consumer_shard.row_count
-                    && producer_shard.output_byte_offset
-                    == consumer_shard.input_range.byte_offset
-                    && producer_shard.output_byte_count
-                        == consumer_shard.input_range.byte_count
-            },
-        )
+                    && producer_shard.output_byte_offset == consumer_shard.input_range.byte_offset
+                    && producer_shard.output_byte_count == consumer_shard.input_range.byte_count
+            })
         && declared_local_shard_handoff(producer, consumer)
 }
 
@@ -1720,9 +1705,7 @@ pub struct VulkanDistributedEquivalencePlan {
 }
 
 impl VulkanDistributedEquivalencePlan {
-    fn from_contract(
-        equivalence: &nerve_execution_contracts::EquivalenceRequirement,
-    ) -> Self {
+    fn from_contract(equivalence: &nerve_execution_contracts::EquivalenceRequirement) -> Self {
         let kind = |value| match value {
             nerve_execution_contracts::EquivalenceKind::BitExact => {
                 VulkanDistributedEquivalenceKind::BitExact

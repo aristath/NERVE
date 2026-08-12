@@ -68,8 +68,13 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
 > {
     validate_vulkan_runtime_staged_placement_phase(phase)?;
     let stages = vulkan_runtime_staged_placement_device_groups(devices)?;
+    let common_parameter_budget = vulkan_runtime_staged_common_parameter_budget(
+        devices.iter().map(|(physical_id, _)| physical_id.as_str()),
+        &policy,
+    )?;
     let started = Instant::now();
     let mut final_report = None;
+    let mut sample_fraction_millionths = None;
     for stage in stages {
         let remaining = policy
             .maximum_duration
@@ -81,33 +86,22 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
             })?;
         let stage_policy = VulkanRuntimePlacementCalibrationPolicy {
             maximum_duration: remaining,
+            maximum_total_resident_parameter_bytes: common_parameter_budget,
             ..policy.clone()
         };
         let expected_ids = stage
             .iter()
             .map(|(physical_id, _)| physical_id.clone())
             .collect::<Vec<_>>();
-        let report = match phase {
-            VulkanTargetedComponentExecutionPhase::Decode => {
-                calibrate_vulkan_runtime_distributed_placement_candidate_with_policy(
-                    stage,
-                    manifest_dir,
-                    runtime_model,
-                    target,
-                    stage_policy,
-                )?
-            }
-            VulkanTargetedComponentExecutionPhase::Prefill {
-                activation_batch_width,
-            } => calibrate_vulkan_runtime_distributed_prefill_placement_candidate_with_policy(
-                stage,
-                manifest_dir,
-                runtime_model,
-                target,
-                activation_batch_width,
-                stage_policy,
-            )?,
-        };
+        let report = calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
+            stage,
+            manifest_dir,
+            runtime_model,
+            target,
+            phase,
+            sample_fraction_millionths,
+            stage_policy,
+        )?;
         let Some(report) = report else {
             return Ok(None);
         };
@@ -118,11 +112,39 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
                 "staged runtime placement calibration changed its requested participants or owner",
             ));
         }
+        if sample_fraction_millionths
+            .is_some_and(|expected| expected != report.sample_fraction_millionths)
+        {
+            return Err(VulkanResidentTokenModelPackageError::new(
+                "staged runtime placement calibration changed its fixed sampled workload",
+            ));
+        }
+        sample_fraction_millionths = Some(report.sample_fraction_millionths);
         record_vulkan_runtime_distributed_calibration_report(catalog, &report)
             .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
         final_report = Some(report);
     }
     Ok(final_report)
+}
+
+fn vulkan_runtime_staged_common_parameter_budget<'a>(
+    physical_device_ids: impl IntoIterator<Item = &'a str>,
+    policy: &VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<usize, VulkanResidentTokenModelPackageError> {
+    let common = physical_device_ids
+        .into_iter()
+        .map(|physical_id| policy.parameter_capacity_for_physical_device(physical_id))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .min()
+        .unwrap_or(policy.maximum_total_resident_parameter_bytes)
+        .min(policy.maximum_total_resident_parameter_bytes);
+    if common == 0 {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "staged runtime placement calibration has no common positive parameter budget",
+        ));
+    }
+    Ok(common)
 }
 
 fn validate_vulkan_runtime_staged_placement_phase(
@@ -248,5 +270,30 @@ mod runtime_staged_placement_calibration_tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn common_sampling_budget_uses_the_smallest_exact_participant_capacity() {
+        let policy = VulkanRuntimePlacementCalibrationPolicy {
+            maximum_total_resident_parameter_bytes: 1_000,
+            maximum_resident_parameter_bytes_by_physical_device: BTreeMap::from([
+                ("gpu-a".to_string(), 800),
+                ("gpu-b".to_string(), 300),
+                ("gpu-c".to_string(), 600),
+            ]),
+            ..VulkanRuntimePlacementCalibrationPolicy::default()
+        };
+
+        assert_eq!(
+            vulkan_runtime_staged_common_parameter_budget(["gpu-a", "gpu-b", "gpu-c"], &policy,)
+                .unwrap(),
+            300,
+        );
+        assert!(
+            vulkan_runtime_staged_common_parameter_budget(["gpu-a", "missing"], &policy)
+                .unwrap_err()
+                .to_string()
+                .contains("no positive parameter capacity")
+        );
     }
 }
