@@ -95,6 +95,7 @@ use crate::vulkan_distributed::{
     VulkanDistributedDispatchSequenceKind, VulkanDistributedDispatchSubmission,
     VulkanDistributedEquivalenceKind, VulkanDistributedExecutionPlan,
     VulkanDistributedExecutionPlanSet, VulkanDistributedParameterAllocationPlan,
+    VulkanDistributedPhaseComponentDevicePools,
     VulkanDistributedParameterBuffers, VulkanDistributedParameterExclusionPlan,
     VulkanDistributedQueueSynchronization, VulkanDistributedReductionBuffer,
     VulkanDistributedReductionFinalizationPlan, VulkanDistributedReductionPlan,

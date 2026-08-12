@@ -392,12 +392,29 @@ pub struct VulkanDistributedExecutionPlanSet {
     pub prefill: VulkanDistributedExecutionPlan,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VulkanDistributedPhaseComponentDevicePools {
+    pub decode: BTreeMap<String, Vec<String>>,
+    pub decode_batch: BTreeMap<String, Vec<String>>,
+    pub prefill: BTreeMap<String, Vec<String>>,
+}
+
+impl VulkanDistributedPhaseComponentDevicePools {
+    pub fn uniform(component_device_pools: &BTreeMap<String, Vec<String>>) -> Self {
+        Self {
+            decode: component_device_pools.clone(),
+            decode_batch: component_device_pools.clone(),
+            prefill: component_device_pools.clone(),
+        }
+    }
+}
+
 impl VulkanDistributedExecutionPlanSet {
     pub fn from_prepared_plans(
         prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
         tensor_index: &TensorIndex,
         artifact_manifest: &VulkanPhysicalKernelArtifactManifest,
-        component_device_pools: &BTreeMap<String, Vec<String>>,
+        component_device_pools: &VulkanDistributedPhaseComponentDevicePools,
         edge_placements: &[ComponentEdgePlacement],
         storage_buffer_offset_alignment: usize,
     ) -> Result<Self, VulkanDistributedPlanError> {
@@ -405,7 +422,7 @@ impl VulkanDistributedExecutionPlanSet {
             prepared_plans,
             tensor_index,
             artifact_manifest,
-            component_device_pools,
+            &component_device_pools.decode,
             edge_placements,
             storage_buffer_offset_alignment,
         )?;
@@ -413,7 +430,7 @@ impl VulkanDistributedExecutionPlanSet {
             prepared_plans,
             tensor_index,
             artifact_manifest,
-            component_device_pools,
+            &component_device_pools.decode_batch,
             edge_placements,
             storage_buffer_offset_alignment,
             ExecutionPhase::Decode,
@@ -423,20 +440,12 @@ impl VulkanDistributedExecutionPlanSet {
             prepared_plans,
             tensor_index,
             artifact_manifest,
-            component_device_pools,
+            &component_device_pools.prefill,
             edge_placements,
             storage_buffer_offset_alignment,
             ExecutionPhase::Prefill,
             ExecutionShape::MultiLane,
         )?;
-        if !decode.replaces_same_logical_dispatches(&decode_batch)
-            || !decode.replaces_same_logical_dispatches(&prefill)
-        {
-            return Err(VulkanDistributedPlanError(
-                "single-lane decode, multi-lane decode, and multi-lane prefill replace different logical dispatches"
-                    .to_string(),
-            ));
-        }
         Ok(Self {
             decode,
             decode_batch,
@@ -449,7 +458,7 @@ impl VulkanDistributedExecutionPlanSet {
         prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
         tensor_index: &TensorIndex,
         artifact_manifest: &VulkanPhysicalKernelArtifactManifest,
-        component_device_pools: &BTreeMap<String, Vec<String>>,
+        component_device_pools: &VulkanDistributedPhaseComponentDevicePools,
         edge_placements: &[ComponentEdgePlacement],
         storage_buffer_offset_alignment: usize,
         execution_scope: &str,
@@ -460,7 +469,7 @@ impl VulkanDistributedExecutionPlanSet {
             prepared_plans,
             tensor_index,
             artifact_manifest,
-            component_device_pools,
+            &component_device_pools.decode,
             edge_placements,
             storage_buffer_offset_alignment,
             ExecutionPhase::Decode,
@@ -472,7 +481,7 @@ impl VulkanDistributedExecutionPlanSet {
                 prepared_plans,
                 tensor_index,
                 artifact_manifest,
-                component_device_pools,
+                &component_device_pools.decode_batch,
                 edge_placements,
                 storage_buffer_offset_alignment,
                 ExecutionPhase::Decode,
@@ -483,21 +492,13 @@ impl VulkanDistributedExecutionPlanSet {
             prepared_plans,
             tensor_index,
             artifact_manifest,
-            component_device_pools,
+            &component_device_pools.prefill,
             edge_placements,
             storage_buffer_offset_alignment,
             ExecutionPhase::Prefill,
             ExecutionShape::MultiLane,
             resource_context,
         )?;
-        if !decode.replaces_same_logical_dispatches(&decode_batch)
-            || !decode.replaces_same_logical_dispatches(&prefill)
-        {
-            return Err(VulkanDistributedPlanError(
-                "single-lane decode, multi-lane decode, and multi-lane prefill replace different logical dispatches"
-                    .to_string(),
-            ));
-        }
         Ok(Self {
             decode,
             decode_batch,

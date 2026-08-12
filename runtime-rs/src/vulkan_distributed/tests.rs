@@ -365,7 +365,10 @@ mod tests {
             &[("owner", &prepared_plan)],
             &tensor_index,
             &fixture_artifact_manifest(),
-            &component_device_pools("component", &["owner", "helper"]),
+            &VulkanDistributedPhaseComponentDevicePools::uniform(&component_device_pools(
+                "component",
+                &["owner", "helper"],
+            )),
             &[],
             4,
         )
@@ -405,6 +408,35 @@ mod tests {
             &tensor_index,
         )
         .unwrap();
+
+        let phase_specific = VulkanDistributedExecutionPlanSet::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &tensor_index,
+            &fixture_artifact_manifest(),
+            &VulkanDistributedPhaseComponentDevicePools {
+                decode: component_device_pools("component", &["owner", "decode-helper"]),
+                decode_batch: component_device_pools(
+                    "component",
+                    &["owner", "batch-helper"],
+                ),
+                prefill: component_device_pools("component", &["owner", "prefill-helper"]),
+            },
+            &[],
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            phase_specific.decode.dispatches[0].shards[1].device_id,
+            "decode-helper"
+        );
+        assert_eq!(
+            phase_specific.decode_batch.dispatches[0].shards[1].device_id,
+            "batch-helper"
+        );
+        assert_eq!(
+            phase_specific.prefill.dispatches[0].shards[1].device_id,
+            "prefill-helper"
+        );
     }
 
     #[test]
@@ -1858,7 +1890,10 @@ mod tests {
             &[("owner", &prepared)],
             &tensor_index,
             &artifacts,
-            &component_device_pools("moe", &["owner", "helper"]),
+            &VulkanDistributedPhaseComponentDevicePools::uniform(&component_device_pools(
+                "moe",
+                &["owner", "helper"],
+            )),
             &[],
             256,
             "target",
@@ -2006,7 +2041,10 @@ mod tests {
             &[("owner", &wrong_abi)],
             &tensor_index,
             &artifacts,
-            &component_device_pools("moe", &["owner", "helper"]),
+            &VulkanDistributedPhaseComponentDevicePools::uniform(&component_device_pools(
+                "moe",
+                &["owner", "helper"],
+            )),
             &[],
             256,
             "target",
