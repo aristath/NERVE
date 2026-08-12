@@ -43,7 +43,7 @@ pub struct PlannedSelectionDomain {
     pub selection_count_per_activation: usize,
 }
 
-fn circuit_dtype_bytes(dtype: &str) -> Result<usize, CircuitPlanError> {
+pub(crate) fn circuit_dtype_bytes(dtype: &str) -> Result<usize, CircuitPlanError> {
     match dtype {
         "U8" | "I8" | "FP8_E4M3" | "FP8_E5M2" => Ok(1),
         "BF16" | "F16" => Ok(2),

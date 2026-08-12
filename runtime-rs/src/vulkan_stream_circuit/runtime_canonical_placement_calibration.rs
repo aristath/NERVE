@@ -1,6 +1,151 @@
-struct VulkanRuntimeCanonicalPlacementCalibration {
-    reference: VulkanPlacementCanonicalReference,
-    observation: VulkanPlacementCalibrationObservation,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanRuntimeCanonicalPlacementCalibration {
+    pub reference: VulkanPlacementCanonicalReference,
+    pub observation: VulkanPlacementCalibrationObservation,
+}
+
+pub fn record_vulkan_runtime_canonical_placement_calibration(
+    catalog: &mut VulkanPlacementCalibrationCatalog,
+    calibration: VulkanRuntimeCanonicalPlacementCalibration,
+) -> Result<(), VulkanPlacementCalibrationCatalogError> {
+    let mut updated = catalog.clone();
+    if let Some(existing) = updated.canonical_reference(&calibration.reference.behavior) {
+        if existing != &calibration.reference {
+            return Err(VulkanPlacementCalibrationCatalogError(
+                "canonical placement devices produced different reference evidence".to_string(),
+            ));
+        }
+    } else {
+        updated.record_reference(calibration.reference)?;
+    }
+    updated.record_observation(calibration.observation)?;
+    *catalog = updated;
+    Ok(())
+}
+
+pub fn calibrate_vulkan_runtime_canonical_placement_candidate_with_policy(
+    physical_device_id: &str,
+    device: Rc<VulkanComputeDevice>,
+    manifest_dir: impl AsRef<Path>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    target: &VulkanRuntimePlacementCalibrationTarget,
+    phase: VulkanTargetedComponentExecutionPhase,
+    policy: VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<Option<VulkanRuntimeCanonicalPlacementCalibration>, VulkanResidentTokenModelPackageError>
+{
+    if physical_device_id.is_empty() || device.physical_device_id() != physical_device_id {
+        return canonical_calibration_error(
+            "canonical placement calibration requires the exact physical device identity",
+        );
+    }
+    let behavior = canonical_component_boundary_behavior(runtime_model, target, phase)?;
+    calibrate_vulkan_runtime_canonical_component(
+        physical_device_id,
+        device,
+        manifest_dir.as_ref(),
+        runtime_model,
+        target,
+        phase,
+        &behavior,
+        policy,
+    )
+}
+
+fn canonical_component_boundary_behavior(
+    runtime_model: &VulkanResidentRuntimeModel,
+    target: &VulkanRuntimePlacementCalibrationTarget,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<VulkanPlacementBehaviorIdentity, VulkanResidentTokenModelPackageError> {
+    let component = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| {
+            component.component_id == target.component_id
+                && component.runtime_role.is_signal_processor()
+        })
+        .ok_or_else(|| {
+            canonical_calibration_error_value(format!(
+                "canonical placement calibration found no signal processor {:?}",
+                target.component_id,
+            ))
+        })?;
+    let fallback_element_bytes = runtime_model.package.activation_element_bytes.ok_or_else(|| {
+        canonical_calibration_error_value(
+            "canonical placement calibration requires a compiled activation element width",
+        )
+    })?;
+    let input_byte_capacity = canonical_boundary_ports_byte_capacity(
+        &component.circuit.boundary.inputs,
+        fallback_element_bytes,
+    )?;
+    let output_byte_capacity = canonical_boundary_ports_byte_capacity(
+        &component.circuit.boundary.outputs,
+        fallback_element_bytes,
+    )?;
+    let execution_phase = match phase {
+        VulkanTargetedComponentExecutionPhase::Decode => {
+            nerve_execution_contracts::ExecutionPhase::Decode
+        }
+        VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+            nerve_execution_contracts::ExecutionPhase::Prefill
+        }
+    };
+    let shape = VulkanPlacementShapeClass {
+        activation_batch_width: phase.activation_batch_width(),
+        input_byte_capacity,
+        output_byte_capacity,
+    };
+    Ok(VulkanPlacementBehaviorIdentity {
+        compiled_execution_signature: target.signature_id.clone(),
+        runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.to_string(),
+        phase: execution_phase,
+        input_fixture_digest: distributed_calibration_fixture_identity(execution_phase, &shape, 0)?,
+        shape,
+    })
+}
+
+fn canonical_boundary_ports_byte_capacity(
+    ports: &[CircuitPort],
+    fallback_element_bytes: usize,
+) -> Result<usize, VulkanResidentTokenModelPackageError> {
+    if ports.is_empty() || fallback_element_bytes == 0 {
+        return canonical_calibration_error(
+            "canonical placement calibration requires nonempty typed component boundaries",
+        );
+    }
+    let byte_capacity = ports.iter().try_fold(0usize, |total, port| {
+        let element_count = port.shape.iter().try_fold(1usize, |elements, dimension| {
+            elements.checked_mul(*dimension).ok_or_else(|| {
+                canonical_calibration_error_value(
+                    "canonical component boundary shape overflowed",
+                )
+            })
+        })?;
+        let element_bytes = port
+            .dtype
+            .as_deref()
+            .map(crate::stream_plan::circuit_dtype_bytes)
+            .transpose()
+            .map_err(|error| canonical_calibration_error_value(error.to_string()))?
+            .unwrap_or(fallback_element_bytes);
+        let port_bytes = element_count.checked_mul(element_bytes).ok_or_else(|| {
+            canonical_calibration_error_value(
+                "canonical component boundary byte capacity overflowed",
+            )
+        })?;
+        total.checked_add(port_bytes).ok_or_else(|| {
+            canonical_calibration_error_value(
+                "canonical component boundary aggregate capacity overflowed",
+            )
+        })
+    })?;
+    if byte_capacity == 0 {
+        return canonical_calibration_error(
+            "canonical component boundary byte capacity must be positive",
+        );
+    }
+    Ok(byte_capacity)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -531,6 +676,50 @@ mod runtime_canonical_placement_calibration_tests {
     }
 
     #[test]
+    fn canonical_only_behavior_uses_the_typed_component_boundary() {
+        let model = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let target = vulkan_runtime_placement_calibration_targets(&model)
+            .unwrap()
+            .remove(0);
+        let behavior = canonical_component_boundary_behavior(
+            &model,
+            &target,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
+
+        assert_eq!(behavior.compiled_execution_signature, target.signature_id);
+        assert_eq!(behavior.shape.activation_batch_width, 1);
+        assert!(behavior.shape.input_byte_capacity > 0);
+        assert!(behavior.shape.output_byte_capacity > 0);
+        assert!(behavior.input_fixture_digest.starts_with("sha256:"));
+
+        let mut invalid = model.clone();
+        invalid
+            .circuit_graph
+            .components
+            .iter_mut()
+            .find(|component| component.component_id == target.component_id)
+            .unwrap()
+            .circuit
+            .boundary
+            .inputs[0]
+            .dtype = Some("NOT_A_DTYPE".to_string());
+        assert!(
+            canonical_component_boundary_behavior(
+                &invalid,
+                &target,
+                VulkanTargetedComponentExecutionPhase::Decode,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported circuit dtype")
+        );
+    }
+
+    #[test]
     fn canonical_single_device_case_is_valid_catalog_evidence() {
         let model = tests::tiny_fixture_model_runtime_model_with_placement(
             StreamCircuitPlacementSpec::new("gpu0"),
@@ -587,17 +776,14 @@ mod runtime_canonical_placement_calibration_tests {
             VulkanPlacementExecutionStrategy::SingleDevice
         );
 
-        let mut catalog = VulkanPlacementCalibrationCatalog::default();
-        catalog
-            .record_reference(VulkanPlacementCanonicalReference {
+        let calibration = VulkanRuntimeCanonicalPlacementCalibration {
+            reference: VulkanPlacementCanonicalReference {
                 behavior,
                 output_digest: "output".to_string(),
                 output_artifact: None,
                 state_digest: "state".to_string(),
-            })
-            .unwrap();
-        catalog
-            .record_observation(VulkanPlacementCalibrationObservation {
+            },
+            observation: VulkanPlacementCalibrationObservation {
                 execution_case,
                 warmup_call_count: 1,
                 measured_call_count: 1,
@@ -618,8 +804,29 @@ mod runtime_canonical_placement_calibration_tests {
                 )]),
                 host_resident_bytes: 0,
                 host_transient_peak_bytes: 0,
-            })
-            .unwrap();
+            },
+        };
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        record_vulkan_runtime_canonical_placement_calibration(
+            &mut catalog,
+            calibration.clone(),
+        )
+        .unwrap();
         assert_eq!(catalog.observation_count(), 1);
+
+        let before = catalog.clone();
+        let mut conflicting = calibration;
+        conflicting.reference.output_digest = "different".to_string();
+        conflicting.observation.execution_case.devices[0].driver_version += 1;
+        assert!(
+            record_vulkan_runtime_canonical_placement_calibration(
+                &mut catalog,
+                conflicting,
+            )
+            .unwrap_err()
+            .0
+            .contains("different reference evidence")
+        );
+        assert_eq!(catalog, before);
     }
 }

@@ -7,7 +7,9 @@ use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, VulkanRuntimeDistributedPlacementCalibrationReport,
     VulkanRuntimePlacementCalibrationPolicy, VulkanRuntimePlacementCalibrationTarget,
     VulkanTargetedComponentExecutionPhase,
+    calibrate_vulkan_runtime_canonical_placement_candidate_with_policy,
     calibrate_vulkan_runtime_staged_contract_candidate_with_policy,
+    record_vulkan_runtime_canonical_placement_calibration,
     vulkan_runtime_distributed_contract_candidates,
     vulkan_runtime_placement_calibration_target_for_component,
 };
@@ -146,6 +148,31 @@ pub fn measure_package_candidates(
     let calibration_result = (|| {
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
         let mut reports = Vec::new();
+        if candidates.is_empty() {
+            for (physical_device_id, device) in &devices {
+                if let Some(canonical) =
+                    calibrate_vulkan_runtime_canonical_placement_candidate_with_policy(
+                        physical_device_id,
+                        device.clone(),
+                        package.manifest_dir(),
+                        package.runtime_model(),
+                        target,
+                        execution_phase,
+                        policy.clone(),
+                    )?
+                {
+                    record_vulkan_runtime_canonical_placement_calibration(
+                        &mut catalog,
+                        canonical,
+                    )
+                        .map_err(|error| {
+                            nerve_runtime::VulkanResidentTokenModelPackageError::new(
+                                error.to_string(),
+                            )
+                        })?;
+                }
+            }
+        }
         for candidate in candidates {
             let report = calibrate_vulkan_runtime_staged_contract_candidate_with_policy(
                 &devices,

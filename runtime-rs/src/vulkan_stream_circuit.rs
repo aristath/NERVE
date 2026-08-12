@@ -27,16 +27,16 @@ use crate::execution_schedule::{
 };
 use crate::stream_circuit::{
     CapacityPackedPlacementComponent, CapacityPackedPlacementDevice, CircuitNode,
-    CircuitParamsArtifact, CircuitRuntimeRole, CircuitStateArtifact, ComponentEdgePlacement,
-    EdgeTransport, LOWERED_EXECUTION_GRAPH_SCHEMA, LoweredCircuitRef, LoweredExecutionGraph,
-    LoweredExecutionGraphGraph, LoweredExecutionGraphSource, LoweredExecutionGraphSummary,
-    RUNTIME_DEFAULT_LOGICAL_DEVICE_ID, ResolvedCircuitArtifact, ResolvedLoweredExecutionGraph,
-    RuntimeSelectedResourceCountReport, RuntimeSelectionCoverageReport,
-    RuntimeSelectionDomainCoverageReport, RuntimeSparseMoeWorkReport, StreamCircuit,
-    StreamCircuitConnection, StreamCircuitGraphBoundary, StreamCircuitGraphSourceTap,
-    StreamCircuitGraphSourceTapInstanceSelection, StreamCircuitNodeInstanceStatePolicy,
-    StreamCircuitPlacementPlan, StreamCircuitPlacementSpec, StreamCircuitRuntimeGraph,
-    capacity_packed_component_placement,
+    CircuitParamsArtifact, CircuitPort, CircuitRuntimeRole, CircuitStateArtifact,
+    ComponentEdgePlacement, EdgeTransport, LOWERED_EXECUTION_GRAPH_SCHEMA, LoweredCircuitRef,
+    LoweredExecutionGraph, LoweredExecutionGraphGraph, LoweredExecutionGraphSource,
+    LoweredExecutionGraphSummary, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID, ResolvedCircuitArtifact,
+    ResolvedLoweredExecutionGraph, RuntimeSelectedResourceCountReport,
+    RuntimeSelectionCoverageReport, RuntimeSelectionDomainCoverageReport,
+    RuntimeSparseMoeWorkReport, StreamCircuit, StreamCircuitConnection, StreamCircuitGraphBoundary,
+    StreamCircuitGraphSourceTap, StreamCircuitGraphSourceTapInstanceSelection,
+    StreamCircuitNodeInstanceStatePolicy, StreamCircuitPlacementPlan, StreamCircuitPlacementSpec,
+    StreamCircuitRuntimeGraph, capacity_packed_component_placement,
 };
 use crate::stream_plan::{
     CircuitActivationPlan, PlannedNode, PlannedParameterResource, PlannedPort,
