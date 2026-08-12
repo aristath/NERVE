@@ -558,6 +558,7 @@ mod hybrid_placement_optimizer_tests {
 
     fn region_behavior(contract: &str) -> VulkanPlacementBehaviorIdentity {
         VulkanPlacementBehaviorIdentity {
+            compiled_execution_signature: digest('e'),
             contract_ids: vec![contract.to_string()],
             implementation_digests: vec![digest('a')],
             artifact_digest: digest('b'),

@@ -1,5 +1,4 @@
-const VULKAN_DIRECTED_TRANSFER_CONTRACT_ID: &str =
-    "nerve.physical_activation_boundary.copy.v1";
+const VULKAN_DIRECTED_TRANSFER_CONTRACT_ID: &str = "nerve.physical_activation_boundary.copy.v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanRuntimePlacementTransferCalibrationReport {
@@ -122,6 +121,7 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
             ],
         );
         VulkanPlacementBehaviorIdentity {
+            compiled_execution_signature: execution_graph_digest.clone(),
             contract_ids: vec![VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.to_string()],
             implementation_digests: vec![implementation_digest],
             artifact_digest,
@@ -183,9 +183,11 @@ pub fn record_vulkan_runtime_transfer_calibration_report(
 pub fn vulkan_runtime_placement_transfer_byte_counts(
     runtime_model: &VulkanResidentRuntimeModel,
 ) -> Result<Vec<usize>, VulkanRuntimeResidencyPlanError> {
-    Ok(vulkan_runtime_placement_boundary_byte_counts(runtime_model)?
-        .into_iter()
-        .collect())
+    Ok(
+        vulkan_runtime_placement_boundary_byte_counts(runtime_model)?
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// Measures the exact activation payload sizes and physical route that the
@@ -229,8 +231,7 @@ pub fn calibrate_vulkan_runtime_placement_phase_transfers(
         || source.shares_logical_device_with(target)
     {
         return Err(VulkanError(
-            "runtime transfer calibration requires two distinct named physical devices"
-                .to_string(),
+            "runtime transfer calibration requires two distinct named physical devices".to_string(),
         ));
     }
     if activation_batch_width == 0
@@ -249,8 +250,7 @@ pub fn calibrate_vulkan_runtime_placement_phase_transfers(
             .any(|byte_count| *byte_count == 0)
     {
         return Err(VulkanError(
-            "runtime transfer calibration requires unique positive frame payload sizes"
-                .to_string(),
+            "runtime transfer calibration requires unique positive frame payload sizes".to_string(),
         ));
     }
     unique_frame_byte_counts
@@ -428,7 +428,9 @@ mod runtime_transfer_calibration_validation_tests {
         assert!(validate_runtime_transfer_calibration_output(&fixture, &fixture[..256]).is_err());
     }
 
-    fn report(route: VulkanSharedResidentBufferRoute) -> VulkanRuntimePlacementTransferCalibrationReport {
+    fn report(
+        route: VulkanSharedResidentBufferRoute,
+    ) -> VulkanRuntimePlacementTransferCalibrationReport {
         let fixture = runtime_transfer_calibration_fixture(257);
         let digest = format!("sha256:{:x}", Sha256::digest(&fixture));
         VulkanRuntimePlacementTransferCalibrationReport {
@@ -454,11 +456,7 @@ mod runtime_transfer_calibration_validation_tests {
     fn directed_boundary_report_records_an_exact_typed_observation() {
         let report = report(VulkanSharedResidentBufferRoute::SharedHost);
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
-        record_vulkan_runtime_transfer_calibration_report(
-            &mut catalog,
-            &report,
-        )
-        .unwrap();
+        record_vulkan_runtime_transfer_calibration_report(&mut catalog, &report).unwrap();
         let observation = report.calibration_observation().unwrap();
         assert_eq!(
             catalog.exact_observation(&observation.execution_case),
@@ -469,8 +467,16 @@ mod runtime_transfer_calibration_validation_tests {
             VulkanPlacementExecutionStrategy::DirectedBoundary,
         );
         assert!(matches!(
-            observation.execution_case.behavior.shape.operations.as_slice(),
-            [VulkanPlacementOperationGeometry::DirectedTransfer { byte_count: 257, .. }],
+            observation
+                .execution_case
+                .behavior
+                .shape
+                .operations
+                .as_slice(),
+            [VulkanPlacementOperationGeometry::DirectedTransfer {
+                byte_count: 257,
+                ..
+            }],
         ));
     }
 
@@ -481,10 +487,11 @@ mod runtime_transfer_calibration_validation_tests {
             .unwrap();
         let mut external_report = report(VulkanSharedResidentBufferRoute::ExternalDeviceLocal);
         external_report.target_driver_version += 1;
-        let external = external_report
-            .calibration_observation()
-            .unwrap();
-        assert_eq!(shared.execution_case.behavior, external.execution_case.behavior);
+        let external = external_report.calibration_observation().unwrap();
+        assert_eq!(
+            shared.execution_case.behavior,
+            external.execution_case.behavior
+        );
         assert_ne!(shared.execution_case, external.execution_case);
     }
 
@@ -505,7 +512,11 @@ mod runtime_transfer_calibration_validation_tests {
             64,
         );
         assert_eq!(
-            observation.execution_case.behavior.shape.input_byte_capacity,
+            observation
+                .execution_case
+                .behavior
+                .shape
+                .input_byte_capacity,
             257 * 64,
         );
         assert!(matches!(

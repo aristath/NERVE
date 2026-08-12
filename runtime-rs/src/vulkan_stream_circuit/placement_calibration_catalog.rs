@@ -1,5 +1,5 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v4";
+    "nerve.vulkan_placement_calibration_catalog.v5";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,6 +132,12 @@ pub struct VulkanPlacementTransportIdentity {
 /// validated reference can authorize comparison across legal placements.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VulkanPlacementBehaviorIdentity {
+    /// Stable producer-emitted identity of the executable transaction. This
+    /// is the model-independent join key that binds measurements back to the
+    /// same compiled contract. Producers for repeated graph components must
+    /// exclude semantic component names so equivalent instances can share
+    /// evidence.
+    pub compiled_execution_signature: String,
     pub contract_ids: Vec<String>,
     pub implementation_digests: Vec<String>,
     pub artifact_digest: String,
@@ -236,10 +242,7 @@ impl VulkanPlacementCalibrationCatalog {
     /// its slowest complete observed duration. All non-timing evidence must be
     /// identical; changing resources, outputs, state, or call shape is a
     /// conflict rather than a remeasurement.
-    pub fn merge(
-        &mut self,
-        other: &Self,
-    ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
+    pub fn merge(&mut self, other: &Self) -> Result<(), VulkanPlacementCalibrationCatalogError> {
         self.validate()?;
         other.validate()?;
         let mut merged = self.clone();
@@ -248,9 +251,7 @@ impl VulkanPlacementCalibrationCatalog {
         }
         for observation in &other.observations {
             match merged.observations.binary_search_by(|existing| {
-                existing
-                    .execution_case
-                    .cmp(&observation.execution_case)
+                existing.execution_case.cmp(&observation.execution_case)
             }) {
                 Ok(index) => {
                     let existing = &merged.observations[index];
@@ -353,9 +354,7 @@ impl VulkanPlacementCalibrationCatalog {
         let reference = self
             .references
             .binary_search_by(|reference| {
-                reference
-                    .behavior
-                    .cmp(&observation.execution_case.behavior)
+                reference.behavior.cmp(&observation.execution_case.behavior)
             })
             .ok()
             .map(|index| &self.references[index])
@@ -381,11 +380,10 @@ impl VulkanPlacementCalibrationCatalog {
                 "placement candidate output-equivalence evidence is not reproducible".to_string(),
             ));
         }
-        match self.observations.binary_search_by(|existing| {
-            existing
-                .execution_case
-                .cmp(&observation.execution_case)
-        }) {
+        match self
+            .observations
+            .binary_search_by(|existing| existing.execution_case.cmp(&observation.execution_case))
+        {
             Ok(_) => {
                 return Err(VulkanPlacementCalibrationCatalogError(
                     "placement calibration repeats an exact execution case".to_string(),
@@ -511,6 +509,7 @@ fn validate_behavior_identity(
     behavior: &VulkanPlacementBehaviorIdentity,
 ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
     if behavior.contract_ids.is_empty()
+        || behavior.compiled_execution_signature.is_empty()
         || behavior.contract_ids.iter().any(String::is_empty)
         || behavior.implementation_digests.len() != behavior.contract_ids.len()
         || behavior.implementation_digests.iter().any(String::is_empty)
@@ -535,11 +534,12 @@ fn validate_behavior_identity(
             .implementation_digests
             .iter()
             .any(|digest| !valid_sha256_digest(digest))
-        || behavior
-            .shape
-            .operations
-            .iter()
-            .any(|operation| !behavior.contract_ids.iter().any(|id| id == operation.contract_id()))
+        || behavior.shape.operations.iter().any(|operation| {
+            !behavior
+                .contract_ids
+                .iter()
+                .any(|id| id == operation.contract_id())
+        })
     {
         return Err(VulkanPlacementCalibrationCatalogError(
             "placement behavior identity is not canonical or digest-complete".to_string(),
@@ -564,7 +564,10 @@ fn validate_observation(
     validate_behavior_identity(&observation.execution_case.behavior)?;
     let case = &observation.execution_case;
     if case.devices.is_empty()
-        || case.devices.iter().any(|device| device.physical_device_id.is_empty())
+        || case
+            .devices
+            .iter()
+            .any(|device| device.physical_device_id.is_empty())
         || case
             .devices
             .iter()
@@ -591,8 +594,7 @@ fn validate_observation(
         || observation.state_digest.is_empty()
     {
         return Err(VulkanPlacementCalibrationCatalogError(
-            "placement observation is incomplete or not a bounded complete transaction"
-                .to_string(),
+            "placement observation is incomplete or not a bounded complete transaction".to_string(),
         ));
     }
     let participant_count_valid = match case.strategy {
@@ -631,11 +633,14 @@ fn validate_observation(
                 || shard.logical_count == 0
                 || (shard.parameter_bytes == 0 && shard.selected_resource_indices.is_empty())
                 || shard.distribution.is_empty()
-                || shard.selected_resource_indices.iter().any(|(selector_id, indices)| {
-                    selector_id.is_empty()
-                        || indices.is_empty()
-                        || indices.windows(2).any(|pair| pair[0] >= pair[1])
-                })
+                || shard
+                    .selected_resource_indices
+                    .iter()
+                    .any(|(selector_id, indices)| {
+                        selector_id.is_empty()
+                            || indices.is_empty()
+                            || indices.windows(2).any(|pair| pair[0] >= pair[1])
+                    })
         })
         || case.transports.iter().any(|route| {
             !devices.contains(route.source_physical_device_id.as_str())
@@ -668,6 +673,7 @@ mod placement_calibration_catalog_tests {
 
     fn behavior() -> VulkanPlacementBehaviorIdentity {
         VulkanPlacementBehaviorIdentity {
+            compiled_execution_signature: format!("sha256:{}", "f".repeat(64)),
             contract_ids: vec!["contract".to_string()],
             implementation_digests: vec![format!("sha256:{}", "a".repeat(64))],
             artifact_digest: format!("sha256:{}", "b".repeat(64)),
@@ -703,11 +709,13 @@ mod placement_calibration_catalog_tests {
     ) -> VulkanPlacementCalibrationObservation {
         let devices = ["gpu0", "gpu1"]
             .into_iter()
-            .map(|physical_device_id| VulkanPlacementDeviceExecutionIdentity {
-                physical_device_id: physical_device_id.to_string(),
-                api_version: 1,
-                driver_version: 2,
-            })
+            .map(
+                |physical_device_id| VulkanPlacementDeviceExecutionIdentity {
+                    physical_device_id: physical_device_id.to_string(),
+                    api_version: 1,
+                    driver_version: 2,
+                },
+            )
             .collect::<Vec<_>>();
         VulkanPlacementCalibrationObservation {
             execution_case: VulkanPlacementExecutionCaseIdentity {
@@ -781,10 +789,8 @@ mod placement_calibration_catalog_tests {
         let mut selected = observation(behavior(), "gpu0", "gpu0", 100, 16);
         selected.execution_case.shards[0].distribution = "expert_range".to_string();
         selected.execution_case.shards[0].parameter_bytes = 0;
-        selected.execution_case.shards[0].selected_resource_indices = BTreeMap::from([(
-            "selector".to_string(),
-            vec![0, 2, 4, 6],
-        )]);
+        selected.execution_case.shards[0].selected_resource_indices =
+            BTreeMap::from([("selector".to_string(), vec![0, 2, 4, 6])]);
         let mut catalog = catalog_with_reference();
         catalog.record_observation(selected.clone()).unwrap();
 
@@ -793,10 +799,7 @@ mod placement_calibration_catalog_tests {
             .selected_resource_indices
             .get_mut("selector")
             .unwrap() = vec![1, 3, 5, 7];
-        assert_ne!(
-            selected.execution_case,
-            different_ownership.execution_case
-        );
+        assert_ne!(selected.execution_case, different_ownership.execution_case);
 
         let mut malformed = selected;
         *malformed.execution_case.shards[0]
@@ -842,7 +845,10 @@ mod placement_calibration_catalog_tests {
 
         assert_eq!(forward, reverse);
         assert_eq!(
-            forward.exact_observation(&execution_case).unwrap().duration_ns,
+            forward
+                .exact_observation(&execution_case)
+                .unwrap()
+                .duration_ns,
             110
         );
     }
@@ -944,10 +950,8 @@ mod placement_calibration_catalog_tests {
         accepted.output_artifact = Some(candidate_artifact);
         accepted.output_equivalence = evidence;
         catalog.record_observation(accepted).unwrap();
-        VulkanPlacementCalibrationCatalog::from_json_slice(
-            &catalog.to_json_bytes().unwrap(),
-        )
-        .unwrap();
+        VulkanPlacementCalibrationCatalog::from_json_slice(&catalog.to_json_bytes().unwrap())
+            .unwrap();
 
         let mut rejected = observation(behavior, "gpu1", "gpu1", 10, 16);
         let rejected_artifact = artifact(1.03125);
@@ -977,6 +981,32 @@ mod placement_calibration_catalog_tests {
         let mut another_route = accepted_case;
         another_route.transports[0].route = "external_device_local".to_string();
         assert!(catalog.exact_observation(&another_route).is_none());
+    }
+
+    #[test]
+    fn compiled_execution_signature_separates_same_shape_transactions() {
+        let first_behavior = behavior();
+        let mut second_behavior = first_behavior.clone();
+        second_behavior.compiled_execution_signature = format!("sha256:{}", "e".repeat(64));
+
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        for behavior in [first_behavior.clone(), second_behavior.clone()] {
+            catalog
+                .record_reference(VulkanPlacementCanonicalReference {
+                    behavior: behavior.clone(),
+                    output_digest: "output".to_string(),
+                    output_artifact: None,
+                    state_digest: "state".to_string(),
+                })
+                .unwrap();
+            catalog
+                .record_observation(observation(behavior, "gpu0", "gpu1", 10, 16))
+                .unwrap();
+        }
+
+        assert_ne!(first_behavior, second_behavior);
+        assert_eq!(catalog.candidates_for_behavior(&first_behavior).len(), 1);
+        assert_eq!(catalog.candidates_for_behavior(&second_behavior).len(), 1);
     }
 
     #[test]
@@ -1046,10 +1076,8 @@ mod placement_calibration_catalog_tests {
         let mut slower_device_local = observation(behavior.clone(), "gpu0", "gpu0", 10, 16);
         slower_device_local.execution_case.transports[0].route =
             "external_device_local".to_string();
-        slower_device_local.transient_peak_bytes_by_physical_device = BTreeMap::from([
-            ("gpu0".to_string(), 4096),
-            ("gpu1".to_string(), 8),
-        ]);
+        slower_device_local.transient_peak_bytes_by_physical_device =
+            BTreeMap::from([("gpu0".to_string(), 4096), ("gpu1".to_string(), 8)]);
         catalog.record_observation(faster_shared_host).unwrap();
         catalog.record_observation(slower_device_local).unwrap();
 
@@ -1075,9 +1103,7 @@ mod placement_calibration_catalog_tests {
             host_available_bytes: 40,
         };
         assert_eq!(
-            catalog
-                .candidates_for_capacity(&behavior, &exact_fit)
-                .len(),
+            catalog.candidates_for_capacity(&behavior, &exact_fit).len(),
             1,
         );
 
@@ -1098,11 +1124,13 @@ mod placement_calibration_catalog_tests {
         assert!(
             catalog
                 .candidates_for_capacity(&behavior, &transient_does_not_fit)
-            .is_empty()
+                .is_empty()
         );
 
         let mut stale_driver = exact_fit.clone();
-        stale_driver.available_bytes_by_device.remove(&device_identity("gpu1"));
+        stale_driver
+            .available_bytes_by_device
+            .remove(&device_identity("gpu1"));
         stale_driver.available_bytes_by_device.insert(
             VulkanPlacementDeviceExecutionIdentity {
                 physical_device_id: "gpu1".to_string(),
@@ -1158,14 +1186,15 @@ mod placement_calibration_catalog_tests {
         let replacement = observation(behavior(), "gpu0", "gpu0", 99, 16);
         assert!(catalog.record_observation(replacement).is_err());
         assert_eq!(
-            catalog.exact_observation(&execution_case).unwrap().duration_ns,
+            catalog
+                .exact_observation(&execution_case)
+                .unwrap()
+                .duration_ns,
             10,
         );
 
         let mut incomplete = observation(behavior(), "gpu1", "gpu1", 12, 16);
-        incomplete
-            .resident_bytes_by_physical_device
-            .remove("gpu1");
+        incomplete.resident_bytes_by_physical_device.remove("gpu1");
         assert!(catalog.record_observation(incomplete).is_err());
     }
 
@@ -1265,12 +1294,11 @@ mod placement_calibration_catalog_tests {
         assert!(validate_behavior_identity(&invalid_reduction).is_err());
 
         let mut unknown_contract = behavior();
-        unknown_contract.shape.operations = vec![
-            VulkanPlacementOperationGeometry::DirectedTransfer {
+        unknown_contract.shape.operations =
+            vec![VulkanPlacementOperationGeometry::DirectedTransfer {
                 contract_id: "other-contract".to_string(),
                 byte_count: 16,
-            },
-        ];
+            }];
         assert!(validate_behavior_identity(&unknown_contract).is_err());
     }
 }

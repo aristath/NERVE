@@ -354,6 +354,7 @@ fn distributed_calibration_execution_case(
     logical_device_ids: &[String],
     execution_plan: &VulkanDistributedExecutionPlan,
     loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
+    compiled_execution_signature: String,
     artifact_digest: String,
     execution_graph_digest: String,
     phase: VulkanTargetedComponentExecutionPhase,
@@ -547,6 +548,7 @@ fn distributed_calibration_execution_case(
     let equivalence = distributed_calibration_equivalence(execution_plan)?;
     Ok(VulkanPlacementExecutionCaseIdentity {
         behavior: VulkanPlacementBehaviorIdentity {
+            compiled_execution_signature,
             contract_ids,
             implementation_digests,
             artifact_digest,
@@ -1571,6 +1573,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             &logical_device_ids,
             &distributed_execution_plan,
             &loaded_manifest,
+            target.signature_id.clone(),
             artifact_digest,
             execution_graph_digest,
             phase,
