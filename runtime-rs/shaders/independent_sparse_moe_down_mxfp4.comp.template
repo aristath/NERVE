@@ -257,33 +257,16 @@ float rounded_fp8_scale(float block_max) {
 
 vec4 read_intermediatex4(uint route, uint column) {
 #if TENSOR_PARALLEL
-    uint index0 = column * EXPERTS_PER_TOKEN + route;
-    uint index1 = index0 + EXPERTS_PER_TOKEN;
-    uint index2 = index1 + EXPERTS_PER_TOKEN;
-    uint index3 = index2 + EXPERTS_PER_TOKEN;
-    return vec4(
-        bf16_to_f32(
-            expert_intermediates.words[index0 >> 1u] >> ((index0 & 1u) * 16u)
-        ),
-        bf16_to_f32(
-            expert_intermediates.words[index1 >> 1u] >> ((index1 & 1u) * 16u)
-        ),
-        bf16_to_f32(
-            expert_intermediates.words[index2 >> 1u] >> ((index2 & 1u) * 16u)
-        ),
-        bf16_to_f32(
-            expert_intermediates.words[index3 >> 1u] >> ((index3 & 1u) * 16u)
-        )
-    );
+    uint offset = route * (input_range.input_count / 2u) + column / 2u;
 #else
     uint offset = route * INTERMEDIATE_WORDS + column / 2u;
+#endif
     uint lo = expert_intermediates.words[offset];
     uint hi = expert_intermediates.words[offset + 1u];
     return vec4(
         bf16_to_f32(lo), bf16_to_f32(lo >> 16u),
         bf16_to_f32(hi), bf16_to_f32(hi >> 16u)
     );
-#endif
 }
 
 void quantize_intermediate(uint lane, uint route) {

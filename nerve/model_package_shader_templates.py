@@ -4788,8 +4788,7 @@ if (
             or (
                 tensor_parallel is not None
                 and (
-                    experts_per_token % 2
-                    or (stage == "down") != (input_block_major is not None)
+                    (stage == "down") != (input_block_major is not None)
                 )
             )
         ):

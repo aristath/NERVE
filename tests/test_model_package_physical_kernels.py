@@ -674,7 +674,7 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
             "signal": "expert_intermediates",
             "producer_binding": 2,
             "consumer_binding": 0,
-            "format": "bf16",
+            "format": "bf16:route_major_local_rows",
         }
     ]
     assert [

@@ -81,7 +81,6 @@ def tensor_parallel_independent_expert_pair(
         or intermediate_size <= 0
         or intermediate_size % INDEPENDENT_MXFP4_TP_COLUMNS
         or experts_per_token <= 0
-        or experts_per_token % 2
     ):
         return None
     gate_mapping = _selected_mapping(gate_up)
@@ -159,6 +158,9 @@ def independent_expert_physical_implementations(
             for slot in range(parameters_per_resource)
         ],
     }
+    physical_intermediates = deepcopy(local_intermediates)
+    for intermediate in physical_intermediates:
+        intermediate["format"] = "bf16:route_major_local_rows"
     common: Json = {
         "local_size_x": 512,
         "phases": ["decode"],
@@ -182,7 +184,7 @@ def independent_expert_physical_implementations(
         },
         "parameter_partitions": [],
         "selected_resource_partitions": [selected_partition],
-        "local_intermediates": deepcopy(local_intermediates),
+        "local_intermediates": physical_intermediates,
         "resources": resources,
         "equivalence": {
             "output": "absolute_relative_tolerance",

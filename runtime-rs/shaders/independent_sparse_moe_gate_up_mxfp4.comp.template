@@ -73,11 +73,7 @@ const uint MXFP4_E4M3_BITS[8] = uint[8](
 shared fe4m3vec4 cached_hidden[HIDDEN_FP8_WORDS];
 shared float cached_hidden_scales[HIDDEN_BLOCKS];
 #endif
-#if TENSOR_PARALLEL
-shared float activated_rows[TILE_ROWS * 2u];
-#else
 shared float activated_rows[TILE_ROWS];
-#endif
 
 float bf16_to_f32(uint value) { return uintBitsToFloat((value & 0xffffu) << 16); }
 
@@ -403,9 +399,7 @@ void main() {
     barrier();
 #endif
     uint first_row = tile * TILE_ROWS;
-    for (uint route_pair = 0u; route_pair < EXPERTS_PER_TOKEN / 2u; ++route_pair) {
-        for (uint route_in_pair = 0u; route_in_pair < 2u; ++route_in_pair) {
-            uint route = route_pair * 2u + route_in_pair;
+    for (uint route = 0u; route < EXPERTS_PER_TOKEN; ++route) {
             uint expert = expert_routes.words[route] & 0xffffu;
             if (expert >= NUM_EXPERTS || !dynamic_expert_is_valid(expert)) return;
             DynamicU32Buffer gate_weight = dynamic_parameter(expert, 0u);
@@ -510,17 +504,16 @@ void main() {
                             (gate_value / (1.0 + exp(-gate_value))) * up_value
                         );
                     }
-                    activated_rows[route_in_pair * TILE_ROWS + local_row] = activated;
+                    activated_rows[local_row] = activated;
                 }
             }
             barrier();
-        }
-        if (lane < TILE_ROWS) {
-            uint row = first_row + lane;
-            uint low = f32_to_bf16(activated_rows[lane]);
-            uint high = f32_to_bf16(activated_rows[TILE_ROWS + lane]);
+        if (lane < TILE_ROWS / 2u) {
+            uint row = first_row + lane * 2u;
+            uint low = f32_to_bf16(activated_rows[lane * 2u]);
+            uint high = f32_to_bf16(activated_rows[lane * 2u + 1u]);
             expert_intermediates.words[
-                row * (EXPERTS_PER_TOKEN / 2u) + route_pair
+                route * (local_intermediate_size / 2u) + row / 2u
             ] = low | (high << 16u);
         }
         barrier();
