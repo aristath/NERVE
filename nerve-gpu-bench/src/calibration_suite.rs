@@ -266,10 +266,7 @@ mod tests {
         fast_contiguous.strategy = VulkanPlacementExecutionStrategy::WholeExpertParallel;
 
         assert_eq!(
-            non_dominated_target_orders(&[
-                fast_contiguous.clone(),
-                hot_expert_friendly.clone(),
-            ]),
+            non_dominated_target_orders(&[fast_contiguous.clone(), hot_expert_friendly.clone(),]),
             vec![fast_contiguous.order, hot_expert_friendly.order],
         );
     }

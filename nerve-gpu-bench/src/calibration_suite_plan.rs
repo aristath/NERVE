@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use std::io;
 
 use nerve_runtime::{
-    CompiledResourceSelector, VulkanResidentRuntimeModel, VulkanRuntimePlacementCalibrationTarget,
+    CompiledResourceResidencyContract, CompiledResourceSelector, CompiledResourceSelectorMapping,
+    VulkanResidentRuntimeModel, VulkanRuntimePlacementCalibrationTarget,
     VulkanTargetedComponentExecutionPhase, instantiate_runtime_resource_contract,
     vulkan_runtime_placement_calibration_targets_for_phase,
     vulkan_runtime_placement_transfer_byte_counts,
@@ -90,21 +91,19 @@ pub fn plan_calibration_suite(
 
     let contract = instantiate_runtime_resource_contract(runtime_model)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let load_wave_cases = phases
-        .iter()
-        .flat_map(|phase| {
-            contract.selectors.iter().flat_map(move |selector| {
-                representative_load_wave_resource_sets(selector)
-                    .into_iter()
-                    .map(move |resource_indices| LoadWaveCalibrationCase {
-                        phase: *phase,
-                        component_id: selector.component_id.clone(),
-                        selector_id: selector.id.clone(),
-                        resource_indices,
-                    })
-            })
-        })
-        .collect();
+    let mut load_wave_cases = Vec::new();
+    for phase in &phases {
+        for selector in &contract.selectors {
+            for resource_indices in representative_load_wave_resource_sets(&contract, selector)? {
+                load_wave_cases.push(LoadWaveCalibrationCase {
+                    phase: *phase,
+                    component_id: selector.component_id.clone(),
+                    selector_id: selector.id.clone(),
+                    resource_indices,
+                });
+            }
+        }
+    }
 
     Ok(CalibrationSuitePlan {
         component_cases,
@@ -206,13 +205,123 @@ fn ordered_target_pairs(target_ids: &[String]) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn representative_load_wave_resource_sets(selector: &CompiledResourceSelector) -> Vec<Vec<usize>> {
+fn representative_load_wave_resource_sets(
+    contract: &CompiledResourceResidencyContract,
+    selector: &CompiledResourceSelector,
+) -> Result<Vec<Vec<usize>>, io::Error> {
+    let source_byte_counts = selector_resource_source_byte_counts(contract, selector)?;
+    representative_load_wave_resource_sets_for_byte_counts(selector, &source_byte_counts)
+}
+
+fn representative_load_wave_resource_sets_for_byte_counts(
+    selector: &CompiledResourceSelector,
+    source_byte_counts: &[usize],
+) -> Result<Vec<Vec<usize>>, io::Error> {
+    if source_byte_counts.len() != selector.resource_count
+        || source_byte_counts.iter().any(|bytes| *bytes == 0)
+    {
+        return Err(invalid_input(
+            "load-wave planning requires one positive payload size per selector resource",
+        ));
+    }
     let maximum_width = selector
         .resource_count
         .min(selector.encoding.selection_count_per_activation);
-    (1..=maximum_width)
-        .map(|width| (0..width).collect())
-        .collect()
+    let mut ascending = (0..selector.resource_count).collect::<Vec<_>>();
+    ascending.sort_by_key(|index| (source_byte_counts[*index], *index));
+    let mut descending = ascending.clone();
+    descending.reverse();
+    let mut representatives = BTreeSet::new();
+    for width in 1..=maximum_width {
+        let mut smallest = ascending[..width].to_vec();
+        smallest.sort_unstable();
+        let mut largest = descending[..width].to_vec();
+        largest.sort_unstable();
+        let mut smallest_geometry = smallest
+            .iter()
+            .map(|index| source_byte_counts[*index])
+            .collect::<Vec<_>>();
+        let mut largest_geometry = largest
+            .iter()
+            .map(|index| source_byte_counts[*index])
+            .collect::<Vec<_>>();
+        smallest_geometry.sort_unstable();
+        largest_geometry.sort_unstable();
+        representatives.insert(smallest);
+        if smallest_geometry != largest_geometry {
+            representatives.insert(largest);
+        }
+    }
+    Ok(representatives.into_iter().collect())
+}
+
+fn selector_resource_source_byte_counts(
+    contract: &CompiledResourceResidencyContract,
+    selector: &CompiledResourceSelector,
+) -> Result<Vec<usize>, io::Error> {
+    match &selector.mapping {
+        CompiledResourceSelectorMapping::GroupTable { atomic_group_ids } => {
+            if atomic_group_ids.len() != selector.resource_count {
+                return Err(invalid_input(
+                    "selector group table does not match its declared resource count",
+                ));
+            }
+            atomic_group_ids
+                .iter()
+                .map(|group_id| {
+                    let group = contract
+                        .atomic_groups
+                        .iter()
+                        .find(|group| group.id == *group_id)
+                        .ok_or_else(|| {
+                            invalid_input("selector references an unknown atomic group")
+                        })?;
+                    group
+                        .resource_ids
+                        .iter()
+                        .try_fold(0usize, |total, resource_id| {
+                            let resource = contract
+                                .resources
+                                .iter()
+                                .find(|resource| resource.id == *resource_id)
+                                .ok_or_else(|| {
+                                    invalid_input("atomic group references an unknown resource")
+                                })?;
+                            total
+                                .checked_add(resource.source_byte_count()?)
+                                .ok_or_else(|| {
+                                    invalid_input("selector resource payload size overflowed")
+                                })
+                        })
+                })
+                .collect()
+        }
+        CompiledResourceSelectorMapping::PartitionTemplate {
+            partition_template_id,
+        } => {
+            let template = contract
+                .partition_templates
+                .iter()
+                .find(|template| template.id == *partition_template_id)
+                .ok_or_else(|| {
+                    invalid_input("selector references an unknown partition template")
+                })?;
+            if template.partition_count != selector.resource_count {
+                return Err(invalid_input(
+                    "selector partition template does not match its declared resource count",
+                ));
+            }
+            let bytes = template
+                .member_templates
+                .iter()
+                .try_fold(0usize, |total, member| {
+                    total
+                        .checked_add(member.source_byte_count()?)
+                        .ok_or_else(|| invalid_input("selector partition payload size overflowed"))
+                })?;
+            Ok(vec![bytes; selector.resource_count])
+        }
+    }
 }
 
 fn validate_distinct_nonempty_target_ids(target_ids: &[String]) -> Result<(), io::Error> {
@@ -312,8 +421,43 @@ mod tests {
             },
         };
         assert_eq!(
-            representative_load_wave_resource_sets(&selector),
+            representative_load_wave_resource_sets_for_byte_counts(&selector, &[8; 8]).unwrap(),
             vec![vec![0], vec![0, 1], vec![0, 1, 2]],
+        );
+    }
+
+    #[test]
+    fn representative_load_waves_include_smallest_and_largest_payloads() {
+        let selector = CompiledResourceSelector {
+            id: "selector".to_string(),
+            execution_scope: "source".to_string(),
+            component_id: "component".to_string(),
+            node_id: "node".to_string(),
+            domain_id: "domain".to_string(),
+            resource_count: 4,
+            selection_signal: "signal".to_string(),
+            encoding: nerve_runtime::CompiledResourceSelectionEncoding {
+                element_type: nerve_runtime::CompiledResourceSelectionElementType::U32,
+                selection_count_per_activation: 2,
+                index_shift: 0,
+                index_mask: 3,
+            },
+            mapping: nerve_runtime::CompiledResourceSelectorMapping::GroupTable {
+                atomic_group_ids: (0..4).map(|index| format!("group-{index}")).collect(),
+            },
+        };
+
+        assert_eq!(
+            representative_load_wave_resource_sets_for_byte_counts(&selector, &[40, 10, 30, 20],)
+                .unwrap(),
+            vec![vec![0], vec![0, 2], vec![1], vec![1, 3]],
+        );
+        assert!(
+            representative_load_wave_resource_sets_for_byte_counts(&selector, &[1, 2, 3]).is_err()
+        );
+        assert!(
+            representative_load_wave_resource_sets_for_byte_counts(&selector, &[1, 2, 0, 4])
+                .is_err()
         );
     }
 
