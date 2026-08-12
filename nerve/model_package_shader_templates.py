@@ -160,9 +160,7 @@ def render_hyper_connection_rms_norm_shader(
         or not math.isfinite(rms_epsilon)
         or not math.isfinite(rms_weight_offset)
     ):
-        raise ModelCompileError(
-            f"invalid fused hyper/RMS shader shape {shader_file!r}"
-        )
+        raise ModelCompileError(f"invalid fused hyper/RMS shader shape {shader_file!r}")
     base_file = (
         f"{operation}_m{multiplicity}_h{hidden_size}_i{sinkhorn_iterations}_"
         f"neps{normalization_epsilon_text}_heps{sinkhorn_epsilon_text}.comp"
@@ -960,11 +958,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             or (compression_ratio == 0) != (max_compressed_indices == 0)
             or (
                 schedule is not None
-                and (
-                    kv_heads != 1
-                    or head_width != 512
-                    or not has_compressed
-                )
+                and (kv_heads != 1 or head_width != 512 or not has_compressed)
             )
         ):
             raise ModelCompileError(
@@ -2767,9 +2761,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         shader_file,
     )
     if input_column_bf16 is not None:
-        block_columns, input_size, output_size = map(
-            int, input_column_bf16.groups()
-        )
+        block_columns, input_size, output_size = map(int, input_column_bf16.groups())
         if (
             block_columns <= 0
             or block_columns % 2
@@ -4797,9 +4789,7 @@ if (
             )
             or (
                 tensor_parallel is not None
-                and (
-                    (stage == "down") != (input_block_major is not None)
-                )
+                and ((stage == "down") != (input_block_major is not None))
             )
         ):
             raise ModelCompileError(
@@ -4853,7 +4843,7 @@ if (
         )
         if (
             not 0 < experts_per_token <= num_experts <= 4096
-            or always_selected_count <= 0
+            or always_selected_count < 0
             or num_experts + always_selected_count > 4096
         ):
             raise ModelCompileError(
@@ -4910,7 +4900,7 @@ if (
         )
         if (
             not 0 < experts_per_token <= num_experts <= 4096
-            or always_selected_count <= 0
+            or always_selected_count < 0
             or num_experts + always_selected_count > 4096
             or vocab_size <= 0
         ):
@@ -4957,7 +4947,7 @@ if (
         )
         if (
             not 0 < experts_per_token <= num_experts <= 4096
-            or always_selected_count <= 0
+            or always_selected_count < 0
             or num_experts + always_selected_count > 4096
         ):
             raise ModelCompileError(

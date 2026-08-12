@@ -52,9 +52,7 @@ def independent_moe_route_shader_file(
         f"{activation}_bf16_r{routed_resource_count}_k{routed_selection_count}_"
         f"a{always_count}w{shader_float_token(always_weight)}"
     )
-    policy = (
-        f"norm{int(normalize_selected)}_scale{shader_float_token(routed_scale)}"
-    )
+    policy = f"norm{int(normalize_selected)}_scale{shader_float_token(routed_scale)}"
     if selection == "score_topk":
         _validate_selection_domain(
             node,
@@ -80,8 +78,7 @@ def independent_moe_route_shader_file(
                 "incompatible selection bias"
             )
         return (
-            f"moe_router_score_topk_{geometry}_{policy}_"
-            f"bias{bias_dtype.lower()}.comp"
+            f"moe_router_score_topk_{geometry}_{policy}_bias{bias_dtype.lower()}.comp"
         )
 
     if selection == "preselected_resource_indices":
@@ -95,9 +92,7 @@ def independent_moe_route_shader_file(
                 f"preselected MoE router node {node['id']!r} requires router "
                 "logits and exact resource indices without parameters"
             )
-        return (
-            f"moe_router_preselected_{geometry}_{policy}.comp"
-        )
+        return f"moe_router_preselected_{geometry}_{policy}.comp"
 
     raise ModelCompileError(
         f"independent MoE router node {node['id']!r} has unsupported selection "
@@ -129,7 +124,9 @@ def parameter_table_resource_preselection_shader_file(
         "schema": "nerve.predictable_resource_selection.v1",
         "kind": "parameter_table_lookup",
         "key_signal": node["inputs"][0] if len(node.get("inputs", [])) == 1 else "",
-        "table_parameter": node["params"][0] if len(node.get("params", [])) == 1 else "",
+        "table_parameter": node["params"][0]
+        if len(node.get("params", [])) == 1
+        else "",
         "selection_semantics": "exact",
     }
     if (
@@ -168,7 +165,6 @@ def _routing_geometry(node: Json) -> tuple[int, int, int, float, int, int]:
     if (
         not 0 < routed_selection_count <= routed_resource_count <= 4096
         or not isinstance(always_selected, list)
-        or not always_selected
     ):
         raise ModelCompileError(
             f"independent MoE routing node {node['id']!r} has invalid routing "
@@ -177,9 +173,7 @@ def _routing_geometry(node: Json) -> tuple[int, int, int, float, int, int]:
     always_weights: list[float] = []
     for offset, resource in enumerate(always_selected):
         weight = (
-            float(resource.get("weight", 0.0))
-            if isinstance(resource, dict)
-            else 0.0
+            float(resource.get("weight", 0.0)) if isinstance(resource, dict) else 0.0
         )
         if (
             not isinstance(resource, dict)
@@ -193,7 +187,7 @@ def _routing_geometry(node: Json) -> tuple[int, int, int, float, int, int]:
                 f"always-selected resource at offset {offset}"
             )
         always_weights.append(weight)
-    if len(set(always_weights)) != 1:
+    if always_weights and len(set(always_weights)) != 1:
         raise ModelCompileError(
             f"independent MoE routing node {node['id']!r} requires one common "
             "always-selected resource weight"
@@ -213,7 +207,7 @@ def _routing_geometry(node: Json) -> tuple[int, int, int, float, int, int]:
         routed_resource_count,
         routed_selection_count,
         always_count,
-        always_weights[0],
+        always_weights[0] if always_weights else 1.0,
         total_resource_count,
         total_selection_count,
     )

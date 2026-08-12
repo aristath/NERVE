@@ -6,6 +6,7 @@ from nerve.model_package_shader_selection import local_size_x_for_shader_file
 from nerve.model_package_shader_compiler import compile_shader_artifacts
 from nerve.model_package_tensors import physical_input_prequantization_spec
 
+
 def test_compiler_renders_per_head_softplus_attention_gate(tmp_path: Path) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     primary = "softplus_multiply_bf16_q72_d128_per_head.comp"
@@ -36,7 +37,9 @@ def test_compiler_renders_per_head_softplus_attention_gate(tmp_path: Path) -> No
     assert "{{" not in batch_source
 
 
-def test_compiler_renders_sparse_moe_and_scaled_residual_components(tmp_path: Path) -> None:
+def test_compiler_renders_sparse_moe_and_scaled_residual_components(
+    tmp_path: Path,
+) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
         "moe_route_compact_batch1_i512_k8_t256.comp",
@@ -116,9 +119,7 @@ def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
             "intermediate_size": 512,
             "num_experts": 256,
             "experts_per_token": 8,
-            "physical_input_contract": (
-                "bf16_blockwise_fp8_e4m3_f32_scale.v1"
-            ),
+            "physical_input_contract": ("bf16_blockwise_fp8_e4m3_f32_scale.v1"),
         },
     }
     tensor_index = {
@@ -135,22 +136,22 @@ def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
             },
         }
     }
-    expected = (
-        "sparse_moe_gate_up_prequant_fp8_e4m3_"
-        "b128x128_h2048_i512_e256_k8.comp"
-    )
+    expected = "sparse_moe_gate_up_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp"
 
     assert physical_input_prequantization_spec(circuit, node, tensor_index) == {
         "contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
         "input_size": 2048,
         "block_columns": 128,
     }
-    assert shader_file_for_node(
-        circuit,
-        node,
-        tensor_index,
-        {"hidden_size": 2048, "intermediate_size": 512},
-    ) == expected
+    assert (
+        shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            {"hidden_size": 2048, "intermediate_size": 512},
+        )
+        == expected
+    )
     assert workgroup_count_x_for_node(circuit, node, tensor_index) == 128
     assert local_size_x_for_shader_file(expected, node) == 512
     assert frame_parallel_batch_shader_file(expected) == expected.replace(
@@ -167,9 +168,7 @@ def test_sparse_gate_reuses_blockwise_fp8_representation() -> None:
         local_size_x=512,
         workgroup_count_x=128,
     )
-    assert kernel["batch_implementations"][0]["stages"][0][
-        "descriptor_bindings"
-    ] == [
+    assert kernel["batch_implementations"][0]["stages"][0]["descriptor_bindings"] == [
         {"binding": 1, "source_binding": 2},
         {"binding": 2, "source_binding": 3},
     ]
@@ -220,26 +219,25 @@ def test_sparse_down_reuses_one_route_aware_fp8_intermediate() -> None:
             },
         }
     }
-    expected = (
-        "sparse_moe_down_prequant_fp8_e4m3_"
-        "b128x128_h2048_i512_e256_k8.comp"
-    )
+    expected = "sparse_moe_down_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp"
 
     assert physical_input_prequantization_spec(circuit, node, tensor_index) == {
         "contract": (
-            "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_"
-            "u32_route_map.v1"
+            "bf16_sparse_moe_intermediate_blockwise_fp8_e4m3_f32_scale_u32_route_map.v1"
         ),
         "input_size": 4096,
         "block_columns": 128,
         "experts_per_token": 8,
     }
-    assert shader_file_for_node(
-        circuit,
-        node,
-        tensor_index,
-        {"hidden_size": 2048, "intermediate_size": 512},
-    ) == expected
+    assert (
+        shader_file_for_node(
+            circuit,
+            node,
+            tensor_index,
+            {"hidden_size": 2048, "intermediate_size": 512},
+        )
+        == expected
+    )
     assert workgroup_count_x_for_node(circuit, node, tensor_index) == 256
     assert local_size_x_for_shader_file(expected, node) == 512
     assert frame_parallel_batch_shader_file(expected) == expected.replace(
@@ -252,14 +250,8 @@ def test_compiler_renders_route_aware_sparse_moe_fp8_intermediate(
 ) -> None:
     shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
     shader_files = {
-        (
-            "sparse_moe_down_prequant_fp8_e4m3_"
-            "b128x128_h2048_i512_e256_k8.comp"
-        ),
-        (
-            "sparse_moe_down_batch1_prequant_fp8_e4m3_"
-            "b128x128_h2048_i512_e256_k8.comp"
-        ),
+        ("sparse_moe_down_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp"),
+        ("sparse_moe_down_batch1_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp"),
         (
             "sparse_moe_gate_up_prequant_emit_intermediate_fp8_e4m3_"
             "b128x128_h2048_i512_e256_k8.comp"
@@ -274,17 +266,11 @@ def test_compiler_renders_route_aware_sparse_moe_fp8_intermediate(
 
     down = (
         tmp_path
-        / (
-            "sparse_moe_down_prequant_fp8_e4m3_"
-            "b128x128_h2048_i512_e256_k8.comp"
-        )
+        / ("sparse_moe_down_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp")
     ).read_text()
     batch_down = (
         tmp_path
-        / (
-            "sparse_moe_down_batch1_prequant_fp8_e4m3_"
-            "b128x128_h2048_i512_e256_k8.comp"
-        )
+        / ("sparse_moe_down_batch1_prequant_fp8_e4m3_b128x128_h2048_i512_e256_k8.comp")
     ).read_text()
     emitting_gate_up = (
         tmp_path
@@ -315,8 +301,7 @@ def test_compiler_renders_route_aware_sparse_moe_fp8_intermediate(
     assert "dispatch_control.expert_count != 0u" in emitting_gate_up
     assert "buffer ExpertIntermediates" in emitting_batch_gate_up
     assert all(
-        "{{" not in (tmp_path / shader_file).read_text()
-        for shader_file in shader_files
+        "{{" not in (tmp_path / shader_file).read_text() for shader_file in shader_files
     )
     compile_shader_artifacts(tmp_path)
 
@@ -410,10 +395,7 @@ def test_compiler_renders_sigmoid_router_with_selection_bias(tmp_path: Path) -> 
     assert "gl_WorkGroupID.y" in batch_source
     assert "binding = 3) buffer SelectionTelemetry" in batch_source
     assert "selection_telemetry.counts[NUM_EXPERTS + pair_index]" in batch_source
-    assert (
-        "router_values[expert] = router_logit(batch_index, expert);"
-        in batch_source
-    )
+    assert "router_values[expert] = router_logit(batch_index, expert);" in batch_source
     assert "selected_experts[expert] = 0u;" in batch_source
     assert "already_selected" not in batch_source
     assert "if (gl_NumSubgroups == 1u)" in batch_source
@@ -448,9 +430,7 @@ def test_compiler_renders_score_selected_sqrtsoftplus_router(
             "experts_per_token": 7,
             "routed_resource_count": 256,
             "routed_selection_count": 6,
-            "always_selected_resources": [
-                {"resource_index": 256, "weight": 1.0}
-            ],
+            "always_selected_resources": [{"resource_index": 256, "weight": 1.0}],
             "selection": "score_topk",
             "activation": "sqrtsoftplus",
             "normalize_selected": True,
@@ -511,8 +491,13 @@ def test_compiler_renders_score_selected_sqrtsoftplus_router(
     assert "binding = 2) readonly buffer RouterSelectionBias" in primary_source
     assert "binding = 3) buffer SelectionTelemetry" in primary_source
     assert "const uint TOTAL_RESOURCE_COUNT = ROUTED_RESOURCE_COUNT +" in primary_source
-    assert "const uint TOTAL_SELECTION_COUNT = ROUTED_SELECTION_COUNT +" in primary_source
-    assert "top_indices[route] = ALWAYS_SELECTED_RESOURCE_START + offset;" in primary_source
+    assert (
+        "const uint TOTAL_SELECTION_COUNT = ROUTED_SELECTION_COUNT +" in primary_source
+    )
+    assert (
+        "top_indices[route] = ALWAYS_SELECTED_RESOURCE_START + offset;"
+        in primary_source
+    )
     assert "top_weights[route] = ALWAYS_SELECTED_WEIGHT;" in primary_source
     assert (
         "selection_telemetry.counts[TOTAL_RESOURCE_COUNT + pair_index]"
@@ -529,7 +514,6 @@ def test_compiler_renders_score_selected_sqrtsoftplus_router(
 @pytest.mark.parametrize(
     ("always_selected", "message"),
     [
-        ([], "invalid routing geometry"),
         ([{"resource_index": 258, "weight": 1.0}], "malformed"),
         ([{"resource_index": 256, "weight": 0.0}], "malformed"),
         (
@@ -575,9 +559,7 @@ def test_independent_router_rejects_ambiguous_always_selected_contracts(
         },
     }
     circuit = {
-        "parameters": {
-            "refs": {"selection_bias": {"tensor": "router.selection_bias"}}
-        }
+        "parameters": {"refs": {"selection_bias": {"tensor": "router.selection_bias"}}}
     }
     tensor_index = {
         "tensors": {
@@ -598,6 +580,134 @@ def test_independent_router_rejects_ambiguous_always_selected_contracts(
         )
 
 
+def test_compiler_renders_routed_only_independent_expert_selection(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    circuit = {"parameters": {"refs": {"route_table": {"tensor": "router.routes"}}}}
+    common_attrs = {
+        "experts_per_token": 6,
+        "routed_resource_count": 256,
+        "routed_selection_count": 6,
+        "always_selected_resources": [],
+    }
+    selection_domain = {
+        "id": "experts",
+        "resource_count": 256,
+        "selection_signal": "resource_routes",
+        "encoding": {
+            "element_type": "u32",
+            "selection_count_per_activation": 6,
+            "index_shift": 0,
+            "index_mask": 255,
+            "calibration_word_base": 0,
+        },
+    }
+    preselection = {
+        "id": "preselect",
+        "op": "parameter_table_resource_preselection",
+        "inputs": ["token_id"],
+        "outputs": ["resource_routes"],
+        "params": ["route_table"],
+        "attrs": {
+            **common_attrs,
+            "predictable_dependency": {
+                "schema": "nerve.predictable_resource_selection.v1",
+                "kind": "parameter_table_lookup",
+                "key_signal": "token_id",
+                "table_parameter": "route_table",
+                "selection_semantics": "exact",
+            },
+            "selection_domain": selection_domain,
+        },
+    }
+    weighting = {
+        "id": "route",
+        "op": "moe_route",
+        "inputs": ["router_logits", "resource_routes"],
+        "outputs": ["routes"],
+        "params": [],
+        "attrs": {
+            **common_attrs,
+            "selection": "preselected_resource_indices",
+            "activation": "sqrtsoftplus",
+            "normalize_selected": True,
+            "routed_scaling_factor": 1.5,
+        },
+    }
+    tensor_index = {
+        "tensors": {
+            "router.routes": {
+                "dtype": "I64",
+                "shape": [129280, 6],
+                "layout": "row_major",
+            }
+        }
+    }
+    preselection_shader = "resource_preselect_table_r256_k6_a0_v129280_tablei64.comp"
+    weighting_shader = (
+        "moe_router_preselected_sqrtsoftplus_bf16_r256_k6_a0w1_norm1_scale1.5.comp"
+    )
+    preselection_batch_shader = (
+        "resource_preselect_batch1_table_r256_k6_a0_v129280_tablei64.comp"
+    )
+    weighting_batch_shader = (
+        "moe_router_batch1_preselected_sqrtsoftplus_bf16_r256_k6_a0w1_"
+        "norm1_scale1.5.comp"
+    )
+
+    assert (
+        shader_file_for_node(
+            circuit,
+            preselection,
+            tensor_index,
+            {"hidden_size": 4096, "intermediate_size": 2048},
+        )
+        == preselection_shader
+    )
+    assert (
+        shader_file_for_node(
+            circuit,
+            weighting,
+            tensor_index,
+            {"hidden_size": 4096, "intermediate_size": 2048},
+        )
+        == weighting_shader
+    )
+    assert (
+        frame_parallel_batch_shader_file(preselection_shader)
+        == preselection_batch_shader
+    )
+    assert frame_parallel_batch_shader_file(weighting_shader) == weighting_batch_shader
+    copy_shader_templates(
+        shader_source_dir,
+        tmp_path,
+        {
+            preselection_shader,
+            preselection_batch_shader,
+            weighting_shader,
+            weighting_batch_shader,
+        },
+    )
+    assert (
+        "ALWAYS_SELECTED_RESOURCE_COUNT = 0u"
+        in (tmp_path / preselection_shader).read_text()
+    )
+    assert (
+        "ALWAYS_SELECTED_RESOURCE_COUNT = 0u"
+        in (tmp_path / weighting_shader).read_text()
+    )
+    assert (
+        "ALWAYS_SELECTED_RESOURCE_COUNT = 0u"
+        in (tmp_path / preselection_batch_shader).read_text()
+    )
+    assert (
+        "ALWAYS_SELECTED_RESOURCE_COUNT = 0u"
+        in (tmp_path / weighting_batch_shader).read_text()
+    )
+    compile_shader_artifacts(tmp_path)
+
+
 def test_independent_router_rejects_stale_total_selection_domain() -> None:
     node = {
         "id": "route",
@@ -609,9 +719,7 @@ def test_independent_router_rejects_stale_total_selection_domain() -> None:
             "experts_per_token": 7,
             "routed_resource_count": 256,
             "routed_selection_count": 6,
-            "always_selected_resources": [
-                {"resource_index": 256, "weight": 1.0}
-            ],
+            "always_selected_resources": [{"resource_index": 256, "weight": 1.0}],
             "selection": "score_topk",
             "activation": "sqrtsoftplus",
             "normalize_selected": True,
@@ -631,9 +739,7 @@ def test_independent_router_rejects_stale_total_selection_domain() -> None:
         },
     }
     circuit = {
-        "parameters": {
-            "refs": {"selection_bias": {"tensor": "router.selection_bias"}}
-        }
+        "parameters": {"refs": {"selection_bias": {"tensor": "router.selection_bias"}}}
     }
     tensor_index = {
         "tensors": {
@@ -675,9 +781,7 @@ def test_compiler_renders_exact_table_preselection_and_router_weighting(
             "experts_per_token": 7,
             "routed_resource_count": 256,
             "routed_selection_count": 6,
-            "always_selected_resources": [
-                {"resource_index": 256, "weight": 1.0}
-            ],
+            "always_selected_resources": [{"resource_index": 256, "weight": 1.0}],
             "predictable_dependency": {
                 "schema": "nerve.predictable_resource_selection.v1",
                 "kind": "parameter_table_lookup",
@@ -709,9 +813,7 @@ def test_compiler_renders_exact_table_preselection_and_router_weighting(
             "experts_per_token": 7,
             "routed_resource_count": 256,
             "routed_selection_count": 6,
-            "always_selected_resources": [
-                {"resource_index": 256, "weight": 1.0}
-            ],
+            "always_selected_resources": [{"resource_index": 256, "weight": 1.0}],
             "selection": "preselected_resource_indices",
             "activation": "sqrtsoftplus",
             "normalize_selected": True,
@@ -732,8 +834,7 @@ def test_compiler_renders_exact_table_preselection_and_router_weighting(
         "resource_preselect_batch1_table_r256_k6_a1_v129280_tablei64.comp"
     )
     weighting_primary = (
-        "moe_router_preselected_sqrtsoftplus_bf16_r256_k6_a1w1_"
-        "norm1_scale1.5.comp"
+        "moe_router_preselected_sqrtsoftplus_bf16_r256_k6_a1w1_norm1_scale1.5.comp"
     )
     weighting_batch = (
         "moe_router_batch1_preselected_sqrtsoftplus_bf16_r256_k6_a1w1_"
@@ -758,9 +859,7 @@ def test_compiler_renders_exact_table_preselection_and_router_weighting(
         )
         == weighting_primary
     )
-    assert (
-        frame_parallel_batch_shader_file(preselection_primary) == preselection_batch
-    )
+    assert frame_parallel_batch_shader_file(preselection_primary) == preselection_batch
     assert frame_parallel_batch_shader_file(weighting_primary) == weighting_batch
     copy_shader_templates(
         shader_source_dir,
@@ -778,9 +877,14 @@ def test_compiler_renders_exact_table_preselection_and_router_weighting(
     weighting_source = (tmp_path / weighting_primary).read_text()
     assert "const uint VOCAB_SIZE = 129280u;" in preselection_source
     assert "const uint TABLE_WORD_STRIDE = 2u;" in preselection_source
-    assert "selection_table.words[table_element * TABLE_WORD_STRIDE]" in preselection_source
+    assert (
+        "selection_table.words[table_element * TABLE_WORD_STRIDE]"
+        in preselection_source
+    )
     assert "high_word != 0u" in preselection_source
-    assert "for (uint previous = 0u; previous < lane; previous++)" in preselection_source
+    assert (
+        "for (uint previous = 0u; previous < lane; previous++)" in preselection_source
+    )
     assert "resource_selections.words[selection] = 0xffffffffu;" in preselection_source
     assert "binding = 0) readonly buffer TokenId" in preselection_source
     assert "binding = 1) buffer ResourceSelections" in preselection_source
@@ -809,9 +913,7 @@ def test_compiler_renders_exact_table_preselection_and_router_weighting(
 
 
 def test_resource_preselection_rejects_advisory_or_implicit_dependencies() -> None:
-    circuit = {
-        "parameters": {"refs": {"route_table": {"tensor": "router.routes"}}}
-    }
+    circuit = {"parameters": {"refs": {"route_table": {"tensor": "router.routes"}}}}
     tensor_index = {
         "tensors": {
             "router.routes": {
@@ -831,9 +933,7 @@ def test_resource_preselection_rejects_advisory_or_implicit_dependencies() -> No
             "experts_per_token": 3,
             "routed_resource_count": 4,
             "routed_selection_count": 2,
-            "always_selected_resources": [
-                {"resource_index": 4, "weight": 1.0}
-            ],
+            "always_selected_resources": [{"resource_index": 4, "weight": 1.0}],
             "predictable_dependency": {
                 "schema": "nerve.predictable_resource_selection.v1",
                 "kind": "parameter_table_lookup",
@@ -983,10 +1083,7 @@ def test_compiler_renders_native_compressed_tensors_int4_sparse_experts(
     assert "quantized_hidden" not in gate_source
     assert "read_hiddenx4(batch_index, packed_column * 8u)" in gate_source
     assert "quantized_intermediate" not in down_source
-    assert (
-        "read_intermediatex4(batch_index, route, packed_column * 8u)"
-        in down_source
-    )
+    assert "read_intermediatex4(batch_index, route, packed_column * 8u)" in down_source
     assert "const uint GROUP_SIZE = 32u;" in gate_source
     assert "expert_scales.words[index >> 1u]" in gate_source
     assert "buffer DynamicResourceAddresses" in gate_source

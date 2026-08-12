@@ -117,9 +117,7 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
     ]
     assert nodes["moe_resource_preselection"]["inputs"] == ["token_id"]
     assert nodes["moe_resource_preselection"]["params"] == ["moe_route_table"]
-    assert nodes["moe_resource_preselection"]["attrs"][
-        "predictable_dependency"
-    ] == {
+    assert nodes["moe_resource_preselection"]["attrs"]["predictable_dependency"] == {
         "schema": "nerve.predictable_resource_selection.v1",
         "kind": "parameter_table_lookup",
         "key_signal": "token_id",
@@ -133,16 +131,14 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
     assert nodes["moe_topk"]["params"] == []
     assert nodes["moe_topk"]["attrs"]["routed_resource_count"] == 3
     assert nodes["moe_topk"]["attrs"]["routed_selection_count"] == 2
-    assert nodes["moe_topk"]["attrs"]["always_selected_resources"] == [
-        {"resource_index": 3, "weight": 1.0}
-    ]
+    assert nodes["moe_topk"]["attrs"]["always_selected_resources"] == []
     assert nodes["moe_resource_preselection"]["attrs"]["selection_domain"] == {
         "id": "experts",
-        "resource_count": 4,
+        "resource_count": 3,
         "selection_signal": "moe_resource_routes",
         "encoding": {
             "element_type": "u32",
-            "selection_count_per_activation": 3,
+            "selection_count_per_activation": 2,
             "index_shift": 0,
             "index_mask": 3,
             "calibration_word_base": 0,
@@ -160,22 +156,21 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
             "routed_expert_001_w3",
         ],
     }
-    assert selected["mapping"][3] == {
-        "selector": 3,
-        "parameter_ids": ["shared_expert_w1", "shared_expert_w3"],
-    }
+    assert len(selected["mapping"]) == 3
     assert "routed_expert_002_w2" in nodes["sparse_moe_down"]["params"]
-    assert nodes["sparse_moe_down"]["attrs"]["selected_parameter_accesses"][0][
-        "mapping"
-    ][3] == {
-        "selector": 3,
-        "parameter_ids": ["shared_expert_w2"],
-    }
+    assert (
+        len(
+            nodes["sparse_moe_down"]["attrs"]["selected_parameter_accesses"][0][
+                "mapping"
+            ]
+        )
+        == 3
+    )
     node_ids = [node["id"] for node in circuit["nodes"]]
-    assert "shared_mlp_gate_projection" not in node_ids
-    assert "shared_mlp_up_projection" not in node_ids
-    assert "shared_mlp_output_projection" not in node_ids
-    assert "shared_and_sparse_expert_add" not in node_ids
+    assert "shared_expert_gate_projection" in node_ids
+    assert "shared_expert_up_projection" in node_ids
+    assert "shared_expert_down_projection" in node_ids
+    assert "shared_and_sparse_expert_add" in node_ids
 
     scored_component = make_layer(structure, scored)
     scored_circuit = build_component_circuit(scored_component, Path("layer_01.json"))
@@ -183,35 +178,104 @@ def test_discovers_independently_addressable_experts_and_per_layer_routing() -> 
     assert "moe_resource_preselection" not in scored_nodes
     assert scored_nodes["moe_topk"]["inputs"] == ["moe_router_logits"]
     assert scored_nodes["moe_topk"]["params"] == ["moe_router_selection_bias"]
-    assert scored_nodes["moe_topk"]["attrs"]["selection_domain"][
-        "selection_signal"
-    ] == "moe_routes"
-    assert nodes["sparse_moe_gate_up"]["attrs"]["experts_per_token"] == 3
-    assert nodes["sparse_moe_down"]["attrs"]["experts_per_token"] == 3
+    assert (
+        scored_nodes["moe_topk"]["attrs"]["selection_domain"]["selection_signal"]
+        == "moe_routes"
+    )
+    assert nodes["sparse_moe_gate_up"]["attrs"]["experts_per_token"] == 2
+    assert nodes["sparse_moe_down"]["attrs"]["experts_per_token"] == 2
     assert nodes["moe_reduce"]["inputs"] == ["moe_expert_outputs"]
-    assert nodes["moe_reduce"]["outputs"] == ["ffn_out"]
-    assert nodes["moe_reduce"]["attrs"]["experts_per_token"] == 3
+    assert nodes["moe_reduce"]["outputs"] == ["routed_moe_out"]
+    assert nodes["moe_reduce"]["attrs"]["experts_per_token"] == 2
     modules = {
-        module["id"]: module
-        for module in circuit["semantic_module_tree"]["modules"]
+        module["id"]: module for module in circuit["semantic_module_tree"]["modules"]
     }
-    assert "layer.feature_transform.shared_expert" not in modules
+    assert modules["layer.feature_transform.shared_expert"]["source_node_ids"] == [
+        "shared_expert_gate_projection",
+        "shared_expert_up_projection",
+        "shared_expert_activation",
+        "shared_expert_down_projection",
+    ]
     assert modules["layer.feature_transform.expert_bank"]["source_node_ids"] == [
         "sparse_moe_gate_up",
         "sparse_moe_down",
     ]
     assert modules["layer.feature_transform.reduction"]["source_node_ids"] == [
-        "moe_reduce"
+        "moe_reduce",
+        "shared_and_sparse_expert_add",
     ]
-    always_selected = modules[
-        "layer.feature_transform.expert_bank.always_selected_000"
+    assert "layer.feature_transform.expert_bank.always_selected_000" not in modules
+
+
+def test_independent_shared_expert_is_a_separate_execution_cohort() -> None:
+    config, tensors = _source()
+    structure = discover_model_structure(Path("synthetic"), config, tensors)
+    component = make_layer(structure, structure.layers[0])
+
+    circuit = build_component_circuit(component, Path("layer_00.json"))
+
+    nodes = {node["id"]: node for node in circuit["nodes"]}
+    routed_domain = nodes["moe_resource_preselection"]["attrs"]["selection_domain"]
+    assert routed_domain["resource_count"] == 3
+    assert routed_domain["encoding"]["selection_count_per_activation"] == 2
+    assert nodes["moe_topk"]["attrs"]["always_selected_resources"] == []
+    gate_mapping = nodes["sparse_moe_gate_up"]["attrs"]["selected_parameter_accesses"][
+        0
+    ]["mapping"]
+    down_mapping = nodes["sparse_moe_down"]["attrs"]["selected_parameter_accesses"][0][
+        "mapping"
     ]
-    assert always_selected["parameter_ref_ids"] == [
+    assert len(gate_mapping) == 3
+    assert len(down_mapping) == 3
+    assert all(
+        not parameter.startswith("shared_expert_")
+        for mapping in (*gate_mapping, *down_mapping)
+        for parameter in mapping["parameter_ids"]
+    )
+    assert nodes["moe_reduce"]["outputs"] == ["routed_moe_out"]
+    assert nodes["shared_expert_gate_projection"] == {
+        "id": "shared_expert_gate_projection",
+        "op": "linear",
+        "inputs": ["ffn_norm_out"],
+        "outputs": ["shared_expert_gate"],
+        "params": ["shared_expert_w1"],
+    }
+    assert nodes["shared_expert_up_projection"] == {
+        "id": "shared_expert_up_projection",
+        "op": "linear",
+        "inputs": ["ffn_norm_out"],
+        "outputs": ["shared_expert_up"],
+        "params": ["shared_expert_w3"],
+    }
+    assert nodes["shared_expert_activation"]["inputs"] == [
+        "shared_expert_gate",
+        "shared_expert_up",
+    ]
+    assert nodes["shared_expert_down_projection"]["params"] == ["shared_expert_w2"]
+    assert nodes["shared_and_sparse_expert_add"] == {
+        "id": "shared_and_sparse_expert_add",
+        "op": "residual_add",
+        "inputs": ["routed_moe_out", "shared_expert_out"],
+        "outputs": ["ffn_out"],
+    }
+    modules = {
+        module["id"]: module for module in circuit["semantic_module_tree"]["modules"]
+    }
+    assert modules["layer.feature_transform.shared_expert"]["source_node_ids"] == [
+        "shared_expert_gate_projection",
+        "shared_expert_up_projection",
+        "shared_expert_activation",
+        "shared_expert_down_projection",
+    ]
+    assert modules["layer.feature_transform.shared_expert"]["attrs"] == {
+        "selection_policy": "always",
+        "resource_granularity": "expert",
+    }
+    assert modules["layer.feature_transform.shared_expert"]["parameter_ref_ids"] == [
         "shared_expert_w1",
-        "shared_expert_w2",
         "shared_expert_w3",
+        "shared_expert_w2",
     ]
-    assert always_selected["attrs"]["selection_policy"] == "always"
 
 
 def test_sparse_expert_discovery_depends_on_structure_not_model_identity() -> None:
@@ -226,11 +290,14 @@ def test_sparse_expert_discovery_depends_on_structure_not_model_identity() -> No
 
     assert future.model_type == "previously_unseen_decoder"
     assert future.architectures == ("PreviouslyUnseenSparseDecoder",)
-    assert replace(
-        future,
-        model_type=known.model_type,
-        architectures=known.architectures,
-    ) == known
+    assert (
+        replace(
+            future,
+            model_type=known.model_type,
+            architectures=known.architectures,
+        )
+        == known
+    )
     assert make_layer(future, future.layers[0]) == make_layer(known, known.layers[0])
 
 
@@ -248,9 +315,7 @@ def test_sparse_expert_discovery_normalizes_unseen_equivalent_tensor_roles() -> 
         renamed = renamed.replace(".w3.weight", ".up_proj.weight")
         future_tensors[renamed] = info
 
-    future = discover_model_structure(
-        Path("synthetic"), future_config, future_tensors
-    )
+    future = discover_model_structure(Path("synthetic"), future_config, future_tensors)
 
     hashed, scored = future.layers
     assert hashed.feed_forward_attributes["routing"]["selection"] == "token_id_table"

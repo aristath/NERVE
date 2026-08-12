@@ -32,26 +32,10 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
         {"selector": expert, "parameter_ids": expert_params(expert, ("w2",))}
         for expert in expert_ids
     ]
-    shared_resource = len(expert_ids)
-    selected_gate_up.append(
-        {
-            "selector": shared_resource,
-            "parameter_ids": [
-                *_linear_params("shared_expert_w1", parameters),
-                *_linear_params("shared_expert_w3", parameters),
-            ],
-        }
-    )
-    selected_down.append(
-        {
-            "selector": shared_resource,
-            "parameter_ids": _linear_params("shared_expert_w2", parameters),
-        }
-    )
     width = int(feed_forward["intermediate_size"])
     limit = float(feed_forward.get("swiglu_limit", 0.0))
     routed_selection_count = int(feed_forward["experts_per_token"])
-    selected_resource_count = routed_selection_count + 1
+    selected_resource_count = routed_selection_count
     resource_count = len(selected_gate_up)
     selection_domain = {
         "id": "experts",
@@ -81,9 +65,7 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
                     "experts_per_token": selected_resource_count,
                     "routed_resource_count": len(expert_ids),
                     "routed_selection_count": routed_selection_count,
-                    "always_selected_resources": [
-                        {"resource_index": shared_resource, "weight": 1.0}
-                    ],
+                    "always_selected_resources": [],
                     "predictable_dependency": {
                         "schema": "nerve.predictable_resource_selection.v1",
                         "kind": "parameter_table_lookup",
@@ -95,95 +77,136 @@ def independent_sparse_moe_body(*, feed_forward: Json, parameters: Json) -> list
                 },
             }
         )
-    body.extend([
-        {
-            "id": "moe_router_projection",
-            "op": "linear",
-            "inputs": ["ffn_norm_out"],
-            "outputs": ["moe_router_logits"],
-            "params": _linear_params("moe_router", parameters),
-        },
-        {
-            "id": "moe_topk",
-            "op": "moe_route",
-            "inputs": route_inputs,
-            "outputs": ["moe_routes"],
-            "params": route_params,
-            "attrs": {
-                "experts_per_token": selected_resource_count,
-                "routed_resource_count": len(expert_ids),
-                "routed_selection_count": routed_selection_count,
-                "always_selected_resources": [
-                    {"resource_index": shared_resource, "weight": 1.0}
+    body.extend(
+        [
+            {
+                "id": "moe_router_projection",
+                "op": "linear",
+                "inputs": ["ffn_norm_out"],
+                "outputs": ["moe_router_logits"],
+                "params": _linear_params("moe_router", parameters),
+            },
+            {
+                "id": "moe_topk",
+                "op": "moe_route",
+                "inputs": route_inputs,
+                "outputs": ["moe_routes"],
+                "params": route_params,
+                "attrs": {
+                    "experts_per_token": selected_resource_count,
+                    "routed_resource_count": len(expert_ids),
+                    "routed_selection_count": routed_selection_count,
+                    "always_selected_resources": [],
+                    **(
+                        {**routing, "selection": "preselected_resource_indices"}
+                        if predictable_preselection
+                        else routing
+                    ),
+                    **(
+                        {}
+                        if predictable_preselection
+                        else {"selection_domain": selection_domain}
+                    ),
+                },
+            },
+            {
+                "id": "sparse_moe_gate_up",
+                "op": "independent_sparse_moe_gate_up",
+                "inputs": ["ffn_norm_out", "moe_routes"],
+                "outputs": ["moe_expert_intermediates"],
+                "params": [
+                    parameter
+                    for entry in selected_gate_up
+                    for parameter in entry["parameter_ids"]
                 ],
-                **(
-                    {**routing, "selection": "preselected_resource_indices"}
-                    if predictable_preselection
-                    else routing
-                ),
-                **({} if predictable_preselection else {"selection_domain": selection_domain}),
+                "attrs": {
+                    "hidden_size": int(feed_forward["hidden_size"]),
+                    "intermediate_size": width,
+                    "experts_per_token": selected_resource_count,
+                    "swiglu_limit": limit,
+                    "selected_parameter_accesses": [
+                        {
+                            "selection_signal": resource_selection_signal,
+                            "execution_signal": "moe_routes",
+                            "execution_calibration_word_base": 0x3F800000,
+                            "mapping": selected_gate_up,
+                        }
+                    ],
+                },
             },
-        },
-        {
-            "id": "sparse_moe_gate_up",
-            "op": "independent_sparse_moe_gate_up",
-            "inputs": ["ffn_norm_out", "moe_routes"],
-            "outputs": ["moe_expert_intermediates"],
-            "params": [
-                parameter
-                for entry in selected_gate_up
-                for parameter in entry["parameter_ids"]
-            ],
-            "attrs": {
-                "hidden_size": int(feed_forward["hidden_size"]),
-                "intermediate_size": width,
-                "experts_per_token": selected_resource_count,
-                "swiglu_limit": limit,
-                "selected_parameter_accesses": [
-                    {
-                        "selection_signal": resource_selection_signal,
-                        "execution_signal": "moe_routes",
-                        "execution_calibration_word_base": 0x3F800000,
-                        "mapping": selected_gate_up,
-                    }
+            {
+                "id": "sparse_moe_down",
+                "op": "independent_sparse_moe_down",
+                "inputs": ["moe_expert_intermediates", "moe_routes"],
+                "outputs": ["moe_expert_outputs"],
+                "params": [
+                    parameter
+                    for entry in selected_down
+                    for parameter in entry["parameter_ids"]
                 ],
+                "attrs": {
+                    "hidden_size": int(feed_forward["hidden_size"]),
+                    "intermediate_size": width,
+                    "experts_per_token": selected_resource_count,
+                    "selected_parameter_accesses": [
+                        {
+                            "selection_signal": resource_selection_signal,
+                            "execution_signal": "moe_routes",
+                            "execution_calibration_word_base": 0x3F800000,
+                            "mapping": selected_down,
+                        }
+                    ],
+                },
             },
-        },
-        {
-            "id": "sparse_moe_down",
-            "op": "independent_sparse_moe_down",
-            "inputs": ["moe_expert_intermediates", "moe_routes"],
-            "outputs": ["moe_expert_outputs"],
-            "params": [
-                parameter
-                for entry in selected_down
-                for parameter in entry["parameter_ids"]
-            ],
-            "attrs": {
-                "hidden_size": int(feed_forward["hidden_size"]),
-                "intermediate_size": width,
-                "experts_per_token": selected_resource_count,
-                "selected_parameter_accesses": [
-                    {
-                        "selection_signal": resource_selection_signal,
-                        "execution_signal": "moe_routes",
-                        "execution_calibration_word_base": 0x3F800000,
-                        "mapping": selected_down,
-                    }
-                ],
+            {
+                "id": "moe_reduce",
+                "op": "moe_reduce",
+                "inputs": ["moe_expert_outputs"],
+                "outputs": ["routed_moe_out"],
+                "attrs": {
+                    "hidden_size": int(feed_forward["hidden_size"]),
+                    "experts_per_token": selected_resource_count,
+                    "routed_scaling_factor": 1.0,
+                    "routing_weights_already_scaled": True,
+                },
             },
-        },
-        {
-            "id": "moe_reduce",
-            "op": "moe_reduce",
-            "inputs": ["moe_expert_outputs"],
-            "outputs": ["ffn_out"],
-            "attrs": {
-                "hidden_size": int(feed_forward["hidden_size"]),
-                "experts_per_token": selected_resource_count,
-                "routed_scaling_factor": 1.0,
-                "routing_weights_already_scaled": True,
+            {
+                "id": "shared_expert_gate_projection",
+                "op": "linear",
+                "inputs": ["ffn_norm_out"],
+                "outputs": ["shared_expert_gate"],
+                "params": _linear_params("shared_expert_w1", parameters),
             },
-        },
-    ])
+            {
+                "id": "shared_expert_up_projection",
+                "op": "linear",
+                "inputs": ["ffn_norm_out"],
+                "outputs": ["shared_expert_up"],
+                "params": _linear_params("shared_expert_w3", parameters),
+            },
+            {
+                "id": "shared_expert_activation",
+                "op": "bounded_silu_multiply" if limit > 0.0 else "silu_multiply",
+                "inputs": ["shared_expert_gate", "shared_expert_up"],
+                "outputs": ["shared_expert_hidden"],
+                "attrs": {
+                    "element_count": width,
+                    **({"limit": limit} if limit > 0.0 else {}),
+                },
+            },
+            {
+                "id": "shared_expert_down_projection",
+                "op": "linear",
+                "inputs": ["shared_expert_hidden"],
+                "outputs": ["shared_expert_out"],
+                "params": _linear_params("shared_expert_w2", parameters),
+            },
+            {
+                "id": "shared_and_sparse_expert_add",
+                "op": "residual_add",
+                "inputs": ["routed_moe_out", "shared_expert_out"],
+                "outputs": ["ffn_out"],
+            },
+        ]
+    )
     return body

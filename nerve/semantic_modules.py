@@ -464,8 +464,7 @@ def _feature_transform_modules(component: Json) -> list[Json]:
                 "layer.feature_transform.expert_bank",
                 "selected_expert_bank",
                 (
-                    "Execute routed and always-selected experts from one "
-                    "independently addressable expert bank"
+                    "Execute the independently addressable routed expert bank"
                     if independent
                     else "Execute only the routed experts from the packed expert bank"
                 ),
@@ -475,39 +474,52 @@ def _feature_transform_modules(component: Json) -> list[Json]:
             _module(
                 "layer.feature_transform.reduction",
                 "expert_reduction",
-                (
-                    "Reduce the selected expert results"
-                    if independent
-                    else "Reduce routed expert results and combine optional shared output"
-                ),
+                "Reduce routed expert results and combine optional shared output",
                 parent="layer.feature_transform",
-                nodes=(
-                    ["moe_reduce"]
-                    if independent
-                    else ["moe_reduce", "shared_and_sparse_expert_add"]
-                ),
+                nodes=["moe_reduce", "shared_and_sparse_expert_add"],
                 optional=True,
             ),
         ]
     )
-    if not independent:
+    if int(feed_forward.get("shared_expert_count", 0)) or not independent:
         modules.append(
             _module(
                 "layer.feature_transform.shared_expert",
                 "shared_expert",
-                "Execute and optionally gate the shared expert",
+                (
+                    "Execute the always-selected shared expert"
+                    if independent
+                    else "Execute and optionally gate the shared expert"
+                ),
                 parent="layer.feature_transform",
-                nodes=[
-                    "shared_mlp_input_projection",
-                    "shared_mlp_split",
-                    "shared_mlp_gate_projection",
-                    "shared_mlp_up_projection",
-                    "shared_mlp_activation",
-                    "shared_mlp_output_projection",
-                    "shared_expert_gate_projection",
-                    "shared_expert_gate",
-                ],
+                nodes=(
+                    [
+                        "shared_expert_gate_projection",
+                        "shared_expert_up_projection",
+                        "shared_expert_activation",
+                        "shared_expert_down_projection",
+                    ]
+                    if independent
+                    else [
+                        "shared_mlp_input_projection",
+                        "shared_mlp_split",
+                        "shared_mlp_gate_projection",
+                        "shared_mlp_up_projection",
+                        "shared_mlp_activation",
+                        "shared_mlp_output_projection",
+                        "shared_expert_gate_projection",
+                        "shared_expert_gate",
+                    ]
+                ),
                 optional=True,
+                attrs=(
+                    {
+                        "selection_policy": "always",
+                        "resource_granularity": "expert",
+                    }
+                    if independent
+                    else None
+                ),
             )
         )
     for expert_index in range(int(feed_forward["num_experts"])):
@@ -553,27 +565,6 @@ def _feature_transform_modules(component: Json) -> list[Json]:
                     "resource_granularity": (
                         "expert" if independent else "expert_axis_partition"
                     ),
-                },
-            )
-        )
-    if independent and int(feed_forward.get("shared_expert_count", 0)):
-        modules.append(
-            _module(
-                "layer.feature_transform.expert_bank.always_selected_000",
-                "always_selected_expert",
-                "Independently addressable expert selected for every activation",
-                parent="layer.feature_transform.expert_bank",
-                params=[
-                    "shared_expert_w1",
-                    "shared_expert_w2",
-                    "shared_expert_w3",
-                ],
-                virtual=True,
-                attrs={
-                    "expert_index": int(feed_forward["num_experts"]),
-                    "selection_policy": "always",
-                    "parameter_slices": [],
-                    "resource_granularity": "expert",
                 },
             )
         )
