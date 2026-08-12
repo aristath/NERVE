@@ -213,6 +213,7 @@ include!("vulkan_stream_circuit/runtime_hybrid_placement.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_calibration.rs");
 include!("vulkan_stream_circuit/runtime_distributed_contract_candidates.rs");
 include!("vulkan_stream_circuit/runtime_distributed_placement_calibration.rs");
+include!("vulkan_stream_circuit/runtime_canonical_placement_calibration.rs");
 include!("vulkan_stream_circuit/runtime_staged_placement_calibration.rs");
 include!("vulkan_stream_circuit/runtime_transfer_calibration.rs");
 include!("vulkan_stream_circuit/resource_backing_store.rs");
