@@ -1,4 +1,5 @@
-const VULKAN_DIRECTED_TRANSFER_CONTRACT_ID: &str = "nerve.physical_activation_boundary.copy.v1";
+const VULKAN_DIRECTED_TRANSFER_CONTRACT_ID: &str =
+    "nerve.physical_activation_boundary.transaction.v2";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanRuntimePlacementTransferCalibrationReport {
@@ -12,7 +13,7 @@ pub struct VulkanRuntimePlacementTransferCalibrationReport {
     pub activation_batch_width: usize,
     pub frame_byte_count: usize,
     pub byte_count: usize,
-    pub route: VulkanSharedResidentBufferRoute,
+    pub route: VulkanPlacedEdgeTransferRoute,
     pub warmup_ns: u64,
     pub measured_ns: u64,
     pub fixture_digest: String,
@@ -49,23 +50,12 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
             },
         ];
         devices.sort();
-        let source_transient = self
-            .byte_count
-            .checked_mul(match self.route {
-                VulkanSharedResidentBufferRoute::ExternalDeviceLocal => 2,
-                VulkanSharedResidentBufferRoute::SharedHost => 1,
-            })
-            .ok_or_else(|| {
-                VulkanPlacementCalibrationCatalogError(
-                    "directed transfer transient byte accounting overflowed".to_string(),
-                )
-            })?;
         let implementation_digest = runtime_transfer_calibration_digest(
-            b"nerve.directed_transfer.implementation.v1",
+            b"nerve.directed_transfer.implementation.v2",
             &[crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.as_bytes()],
         );
         let artifact_digest = runtime_transfer_calibration_digest(
-            b"nerve.directed_transfer.artifact.v1",
+            b"nerve.directed_transfer.artifact.v2",
             &[
                 crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.as_bytes(),
                 VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.as_bytes(),
@@ -106,19 +96,27 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
             output_artifact: None,
             output_equivalence: VulkanPlacementOutputEquivalenceEvidence::BitExact,
             state_digest: runtime_transfer_calibration_state_digest(),
-            resident_bytes_by_physical_device: BTreeMap::from([
+            resident_bytes_by_physical_device: match self.route {
+                VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal => BTreeMap::from([
+                    (self.source_device_id.clone(), self.byte_count),
+                    (self.target_device_id.clone(), 0),
+                ]),
+                VulkanPlacedEdgeTransferRoute::DeviceLocalStaging => BTreeMap::from([
+                    (self.source_device_id.clone(), self.byte_count),
+                    (self.target_device_id.clone(), self.byte_count),
+                ]),
+                _ => unreachable!("transfer report route was validated"),
+            },
+            transient_peak_bytes_by_physical_device: BTreeMap::from([
                 (self.source_device_id.clone(), 0),
                 (self.target_device_id.clone(), 0),
             ]),
-            transient_peak_bytes_by_physical_device: BTreeMap::from([
-                (self.source_device_id.clone(), source_transient),
-                (self.target_device_id.clone(), self.byte_count),
-            ]),
-            host_resident_bytes: 0,
-            host_transient_peak_bytes: match self.route {
-                VulkanSharedResidentBufferRoute::ExternalDeviceLocal => 0,
-                VulkanSharedResidentBufferRoute::SharedHost => self.byte_count,
+            host_resident_bytes: match self.route {
+                VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal => 0,
+                VulkanPlacedEdgeTransferRoute::DeviceLocalStaging => self.byte_count,
+                _ => unreachable!("transfer report route was validated"),
             },
+            host_transient_peak_bytes: 0,
         })
     }
 
@@ -139,7 +137,7 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
 
     fn execution_graph_digest(&self) -> String {
         runtime_transfer_calibration_digest(
-            b"nerve.directed_transfer.graph.v1",
+            b"nerve.directed_transfer.graph.v2",
             &[
                 VULKAN_DIRECTED_TRANSFER_CONTRACT_ID.as_bytes(),
                 &self.byte_count.to_le_bytes(),
@@ -161,6 +159,11 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
             || self.byte_count != expected_byte_count
             || (self.phase == nerve_execution_contracts::ExecutionPhase::Decode
                 && self.activation_batch_width != 1)
+            || !matches!(
+                self.route,
+                VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+                    | VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+            )
         {
             return Err(VulkanPlacementCalibrationCatalogError(
                 "directed transfer report has inconsistent phase, frame, batch, or payload geometry"
@@ -238,6 +241,14 @@ pub fn calibrate_vulkan_runtime_placement_phase_transfers(
             "runtime transfer calibration requires two distinct named physical devices".to_string(),
         ));
     }
+    if !source.supports_opaque_fd_timeline_semaphores()
+        || !target.supports_opaque_fd_timeline_semaphores()
+    {
+        return Err(VulkanError(
+            "runtime transfer calibration requires cross-device timeline semaphores because a host-synchronized route is not resident replayable"
+                .to_string(),
+        ));
+    }
     if activation_batch_width == 0
         || (phase == nerve_execution_contracts::ExecutionPhase::Decode
             && activation_batch_width != 1)
@@ -293,53 +304,20 @@ fn calibrate_vulkan_runtime_placement_transfer(
 ) -> Result<VulkanRuntimePlacementTransferCalibrationReport, VulkanError> {
     let fixture = runtime_transfer_calibration_fixture(byte_count);
     let fixture_digest = format!("sha256:{:x}", Sha256::digest(&fixture));
-    let source_buffer = source.create_resident_buffer(byte_count)?;
-    source_buffer.write_bytes(&fixture)?;
-    let target_buffer = target.create_resident_buffer(byte_count)?;
-    let shared = if source.supports_opaque_fd_timeline_semaphores()
-        && target.supports_opaque_fd_timeline_semaphores()
-    {
-        source.create_shared_resident_buffers(&[target], byte_count)?
-    } else {
-        let allocation = source.create_shared_host_allocation(&[target], byte_count)?;
-        VulkanSharedResidentBufferSet {
-            route: VulkanSharedResidentBufferRoute::SharedHost,
-            buffers: vec![
-                Arc::new(source.import_shared_host_buffer(Arc::clone(&allocation))?),
-                Arc::new(target.import_shared_host_buffer(allocation)?),
-            ],
-            external_device_local_error: Some(
-                "cross-device timeline semaphores are unavailable".to_string(),
-            ),
-        }
-    };
-    let source_shared = shared
-        .buffers
-        .first()
-        .ok_or_else(|| VulkanError("transfer calibration omitted its source view".to_string()))?;
-    let target_shared = shared
-        .buffers
-        .get(1)
-        .ok_or_else(|| VulkanError("transfer calibration omitted its target view".to_string()))?;
-    let source_copy = source.create_timestamped_resident_buffer_copy(
-        &source_buffer,
-        source_shared,
+    let shared = source.create_shared_resident_buffers(&[target], byte_count)?;
+    let transaction = VulkanRuntimeTransferCalibrationTransaction::new(
+        source,
+        target,
+        shared,
         byte_count,
+        &fixture,
     )?;
-    let target_copy = target.create_timestamped_resident_buffer_copy(
-        target_shared,
-        &target_buffer,
-        byte_count,
-    )?;
-    let measure = || -> Result<u64, VulkanError> {
-        source_copy
-            .run_with_device_duration(byte_count)?
-            .checked_add(target_copy.run_with_device_duration(byte_count)?)
-            .ok_or_else(|| VulkanError("runtime transfer calibration time overflowed".to_string()))
-    };
-    let warmup_ns = measure()?;
-    let measured_ns = measure()?.min(measure()?).max(1);
-    let output = target_buffer.read_bytes(byte_count)?;
+    let warmup_ns = transaction.measure(source, target, 1)?;
+    let measured_ns = transaction
+        .measure(source, target, 2)?
+        .min(transaction.measure(source, target, 3)?)
+        .max(1);
+    let output = transaction.output.read_bytes(byte_count)?;
     validate_runtime_transfer_calibration_output(&fixture, &output)?;
     let output_digest = format!("sha256:{:x}", Sha256::digest(&output));
     Ok(VulkanRuntimePlacementTransferCalibrationReport {
@@ -353,7 +331,7 @@ fn calibrate_vulkan_runtime_placement_transfer(
         activation_batch_width,
         frame_byte_count,
         byte_count,
-        route: shared.route,
+        route: transaction.route,
         warmup_ns,
         measured_ns,
         fixture_digest,
@@ -361,10 +339,134 @@ fn calibrate_vulkan_runtime_placement_transfer(
     })
 }
 
-fn runtime_transfer_calibration_route_name(route: VulkanSharedResidentBufferRoute) -> &'static str {
+struct VulkanRuntimeTransferCalibrationTransaction {
+    route: VulkanPlacedEdgeTransferRoute,
+    output: Arc<VulkanResidentBuffer>,
+    source_copy: Option<VulkanResidentBufferCopy>,
+    destination_copy: Option<VulkanResidentBufferCopy>,
+    source_signal: VulkanTimelineSemaphore,
+    destination_wait: VulkanTimelineSemaphore,
+    completion: VulkanTimelineSemaphore,
+    _buffers: Vec<Arc<VulkanResidentBuffer>>,
+}
+
+impl VulkanRuntimeTransferCalibrationTransaction {
+    fn new(
+        source: &VulkanComputeDevice,
+        target: &VulkanComputeDevice,
+        shared: VulkanSharedResidentBufferSet,
+        byte_count: usize,
+        fixture: &[u8],
+    ) -> Result<Self, VulkanError> {
+        let source_signal = source.create_opaque_fd_exportable_timeline_semaphore(0)?;
+        let destination_wait = target.create_timeline_semaphore(0)?;
+        target.import_timeline_semaphore_opaque_fd(
+            &destination_wait,
+            source.export_timeline_semaphore_opaque_fd(&source_signal)?,
+        )?;
+        let completion = target.create_timeline_semaphore(0)?;
+        let source_shared = shared
+            .buffers
+            .first()
+            .cloned()
+            .ok_or_else(|| VulkanError("transfer calibration omitted its source view".to_string()))?;
+        let target_shared = shared
+            .buffers
+            .get(1)
+            .cloned()
+            .ok_or_else(|| VulkanError("transfer calibration omitted its target view".to_string()))?;
+        match shared.route {
+            VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
+                source_shared.write_bytes(fixture)?;
+                Ok(Self {
+                    route: VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
+                    output: Arc::clone(&target_shared),
+                    source_copy: None,
+                    destination_copy: None,
+                    source_signal,
+                    destination_wait,
+                    completion,
+                    _buffers: shared.buffers,
+                })
+            }
+            VulkanSharedResidentBufferRoute::SharedHost => {
+                let source_buffer = Arc::new(source.create_resident_buffer(byte_count)?);
+                source_buffer.write_bytes(fixture)?;
+                let target_buffer = Arc::new(target.create_resident_buffer(byte_count)?);
+                let source_copy = source.create_resident_buffer_copy(
+                    &source_buffer,
+                    &source_shared,
+                    byte_count,
+                )?;
+                let destination_copy = target.create_resident_buffer_copy(
+                    &target_shared,
+                    &target_buffer,
+                    byte_count,
+                )?;
+                let mut buffers = shared.buffers;
+                buffers.push(source_buffer);
+                buffers.push(Arc::clone(&target_buffer));
+                Ok(Self {
+                    route: VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                    output: target_buffer,
+                    source_copy: Some(source_copy),
+                    destination_copy: Some(destination_copy),
+                    source_signal,
+                    destination_wait,
+                    completion,
+                    _buffers: buffers,
+                })
+            }
+        }
+    }
+
+    fn measure(
+        &self,
+        source: &VulkanComputeDevice,
+        target: &VulkanComputeDevice,
+        timeline_value: u64,
+    ) -> Result<u64, VulkanError> {
+        let source_signal = VulkanTimelineSemaphorePoint::new(&self.source_signal, timeline_value);
+        let destination_wait =
+            VulkanTimelineSemaphorePoint::new(&self.destination_wait, timeline_value);
+        let completion = VulkanTimelineSemaphorePoint::new(&self.completion, timeline_value);
+        let started = Instant::now();
+        match (&self.source_copy, &self.destination_copy) {
+            (None, None) => {
+                source.submit_timeline_semaphore_bridge(&[], &[source_signal])?;
+                target.submit_timeline_semaphore_bridge(&[destination_wait], &[completion])?;
+            }
+            (Some(source_copy), Some(destination_copy)) => {
+                source.submit_resident_buffer_copy_with_timeline_semaphores(
+                    source_copy,
+                    &[],
+                    &[source_signal],
+                )?;
+                target.submit_resident_buffer_copy_with_timeline_semaphores(
+                    destination_copy,
+                    &[destination_wait],
+                    &[completion],
+                )?;
+            }
+            _ => {
+                return Err(VulkanError(
+                    "transfer calibration transaction has an incomplete staging route"
+                        .to_string(),
+                ));
+            }
+        }
+        target.wait_timeline_semaphore_value(&self.completion, timeline_value)?;
+        u64::try_from(started.elapsed().as_nanos())
+            .map(|duration| duration.max(1))
+            .map_err(|_| VulkanError("runtime transfer calibration time overflowed".to_string()))
+    }
+}
+
+fn runtime_transfer_calibration_route_name(route: VulkanPlacedEdgeTransferRoute) -> &'static str {
     match route {
-        VulkanSharedResidentBufferRoute::ExternalDeviceLocal => "external_device_local",
-        VulkanSharedResidentBufferRoute::SharedHost => "shared_host",
+        VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal => "external_device_local",
+        VulkanPlacedEdgeTransferRoute::DeviceLocalStaging => "device_local_staging",
+        _ => unreachable!("transfer report route was validated"),
     }
 }
 
@@ -433,7 +535,7 @@ mod runtime_transfer_calibration_validation_tests {
     }
 
     fn report(
-        route: VulkanSharedResidentBufferRoute,
+        route: VulkanPlacedEdgeTransferRoute,
     ) -> VulkanRuntimePlacementTransferCalibrationReport {
         let fixture = runtime_transfer_calibration_fixture(257);
         let digest = format!("sha256:{:x}", Sha256::digest(&fixture));
@@ -458,7 +560,7 @@ mod runtime_transfer_calibration_validation_tests {
 
     #[test]
     fn directed_boundary_report_records_an_exact_typed_observation() {
-        let report = report(VulkanSharedResidentBufferRoute::SharedHost);
+        let report = report(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging);
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
         record_vulkan_runtime_transfer_calibration_report(&mut catalog, &report).unwrap();
         let observation = report.calibration_observation().unwrap();
@@ -480,14 +582,22 @@ mod runtime_transfer_calibration_validation_tests {
                 ..
             }],
         ));
+        assert_eq!(
+            observation.execution_case.transports[0].route,
+            "device_local_staging"
+        );
+        assert_eq!(observation.resident_bytes_by_physical_device["gpu-a"], 257);
+        assert_eq!(observation.resident_bytes_by_physical_device["gpu-b"], 257);
+        assert_eq!(observation.host_resident_bytes, 257);
+        assert_eq!(observation.host_transient_peak_bytes, 0);
     }
 
     #[test]
     fn route_or_driver_change_creates_a_distinct_boundary_case() {
-        let shared = report(VulkanSharedResidentBufferRoute::SharedHost)
+        let shared = report(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging)
             .calibration_observation()
             .unwrap();
-        let mut external_report = report(VulkanSharedResidentBufferRoute::ExternalDeviceLocal);
+        let mut external_report = report(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal);
         external_report.target_driver_version += 1;
         let external = external_report.calibration_observation().unwrap();
         assert_eq!(
@@ -495,11 +605,26 @@ mod runtime_transfer_calibration_validation_tests {
             external.execution_case.behavior
         );
         assert_ne!(shared.execution_case, external.execution_case);
+        assert_eq!(external.resident_bytes_by_physical_device["gpu-a"], 257);
+        assert_eq!(external.resident_bytes_by_physical_device["gpu-b"], 0);
+        assert_eq!(external.host_resident_bytes, 0);
+    }
+
+    #[test]
+    fn report_rejects_a_route_that_the_resident_boundary_cannot_mount() {
+        let invalid = report(VulkanPlacedEdgeTransferRoute::SharedHost);
+        assert!(
+            invalid
+                .calibration_observation()
+                .unwrap_err()
+                .to_string()
+                .contains("inconsistent")
+        );
     }
 
     #[test]
     fn prefill_boundary_identity_preserves_batch_geometry() {
-        let mut report = report(VulkanSharedResidentBufferRoute::SharedHost);
+        let mut report = report(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging);
         report.phase = nerve_execution_contracts::ExecutionPhase::Prefill;
         report.activation_batch_width = 64;
         report.frame_byte_count = 257;
@@ -530,7 +655,7 @@ mod runtime_transfer_calibration_validation_tests {
 
     #[test]
     fn inconsistent_boundary_geometry_is_rejected_transactionally() {
-        let mut report = report(VulkanSharedResidentBufferRoute::SharedHost);
+        let mut report = report(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging);
         report.phase = nerve_execution_contracts::ExecutionPhase::Prefill;
         report.activation_batch_width = 64;
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
