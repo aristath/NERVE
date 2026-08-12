@@ -185,11 +185,12 @@ pub struct VulkanPlacementCalibrationObservation {
 
 /// Capacity available to a runtime placement decision after preserving every
 /// pre-existing reservation. Calibration evidence is usable only when the
-/// complete measured transaction fits this exact envelope; absent devices are
-/// unavailable, not zero-cost spill targets.
+/// complete measured transaction fits this exact envelope on the same Vulkan
+/// API and driver identity; absent or changed devices are unavailable, not
+/// zero-cost spill targets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanPlacementCapacityEnvelope {
-    pub available_bytes_by_physical_device: BTreeMap<String, usize>,
+    pub available_bytes_by_device: BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
     pub host_available_bytes: usize,
 }
 
@@ -490,8 +491,8 @@ fn observation_fits_capacity(
             });
         required.is_some_and(|required| {
             capacity
-                .available_bytes_by_physical_device
-                .get(physical_id)
+                .available_bytes_by_device
+                .get(device)
                 .is_some_and(|available| required <= *available)
         })
     })
@@ -827,6 +828,14 @@ mod placement_calibration_catalog_tests {
         catalog
     }
 
+    fn device_identity(physical_device_id: &str) -> VulkanPlacementDeviceExecutionIdentity {
+        VulkanPlacementDeviceExecutionIdentity {
+            physical_device_id: physical_device_id.to_string(),
+            api_version: 1,
+            driver_version: 2,
+        }
+    }
+
     #[test]
     fn selected_resource_shard_identity_is_exact_and_allows_dynamic_parameters() {
         let mut selected = observation(behavior(), "gpu0", "gpu0", 100, 16);
@@ -1108,9 +1117,9 @@ mod placement_calibration_catalog_tests {
         catalog.record_observation(candidate).unwrap();
 
         let exact_fit = VulkanPlacementCapacityEnvelope {
-            available_bytes_by_physical_device: BTreeMap::from([
-                ("gpu0".to_string(), 100),
-                ("gpu1".to_string(), 100),
+            available_bytes_by_device: BTreeMap::from([
+                (device_identity("gpu0"), 100),
+                (device_identity("gpu1"), 100),
             ]),
             host_available_bytes: 40,
         };
@@ -1123,8 +1132,8 @@ mod placement_calibration_catalog_tests {
 
         let mut missing_participant = exact_fit.clone();
         missing_participant
-            .available_bytes_by_physical_device
-            .remove("gpu1");
+            .available_bytes_by_device
+            .remove(&device_identity("gpu1"));
         assert!(
             catalog
                 .pareto_candidates_for_capacity(&behavior, &missing_participant)
@@ -1133,11 +1142,27 @@ mod placement_calibration_catalog_tests {
 
         let mut transient_does_not_fit = exact_fit.clone();
         transient_does_not_fit
-            .available_bytes_by_physical_device
-            .insert("gpu0".to_string(), 99);
+            .available_bytes_by_device
+            .insert(device_identity("gpu0"), 99);
         assert!(
             catalog
                 .pareto_candidates_for_capacity(&behavior, &transient_does_not_fit)
+            .is_empty()
+        );
+
+        let mut stale_driver = exact_fit.clone();
+        stale_driver.available_bytes_by_device.remove(&device_identity("gpu1"));
+        stale_driver.available_bytes_by_device.insert(
+            VulkanPlacementDeviceExecutionIdentity {
+                physical_device_id: "gpu1".to_string(),
+                api_version: 1,
+                driver_version: 3,
+            },
+            100,
+        );
+        assert!(
+            catalog
+                .pareto_candidates_for_capacity(&behavior, &stale_driver)
                 .is_empty()
         );
 
@@ -1159,9 +1184,9 @@ mod placement_calibration_catalog_tests {
             BTreeMap::from([("gpu0".to_string(), 1), ("gpu1".to_string(), 1)]);
         catalog.record_observation(candidate).unwrap();
         let capacity = VulkanPlacementCapacityEnvelope {
-            available_bytes_by_physical_device: BTreeMap::from([
-                ("gpu0".to_string(), usize::MAX),
-                ("gpu1".to_string(), usize::MAX),
+            available_bytes_by_device: BTreeMap::from([
+                (device_identity("gpu0"), usize::MAX),
+                (device_identity("gpu1"), usize::MAX),
             ]),
             host_available_bytes: usize::MAX,
         };
