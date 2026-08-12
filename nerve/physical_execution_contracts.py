@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from nerve.model_package_physical_kernels import (
-    local_output_shard_intermediates_for_node,
+    local_shard_intermediates_for_node,
 )
 
 
@@ -349,7 +349,7 @@ def build_kernel_physical_execution_contracts(
         formats=scalar_formats,
         geometry=scalar_geometry,
         workgroup_count_x=int(kernel["workgroup_count_x"]),
-        local_intermediates=local_output_shard_intermediates_for_node(
+        local_intermediates=local_shard_intermediates_for_node(
             circuit, node, tensor_index
         ),
     )
@@ -436,7 +436,7 @@ def build_kernel_physical_execution_contracts(
                 formats=batch_formats,
                 geometry=distributed_geometry,
                 workgroup_count_x=int(primary_stage["workgroup_count_x"]),
-                local_intermediates=local_output_shard_intermediates_for_node(
+                local_intermediates=local_shard_intermediates_for_node(
                     circuit, node, tensor_index
                 ),
             )
@@ -713,7 +713,7 @@ def _distributed_kernel_contract(
                     "alignment_elements": 1,
                 }
             ],
-            local_intermediates=[],
+            local_intermediates=local_intermediates,
         )
     output_binding = input_count
     output_rows = int(parameter_metadata[0][1].get("shape", [0])[0])

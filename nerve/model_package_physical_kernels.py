@@ -7,15 +7,13 @@ from nerve.model_package_derived_tensors import (
 from nerve.model_package_tensors import tensor_dtype, tensor_shape
 
 
-def local_output_shard_intermediates_for_node(
+def _local_output_shard_intermediates_for_node(
     circuit: Json,
     node: Json,
     tensor_index: Json,
 ) -> list[Json]:
     """Describe a legal device-local handoff to the next physical kernel."""
 
-    if node.get("op") != "parallel_linear_silu_multiply":
-        return []
     outputs = node.get("outputs", [])
     nodes = circuit.get("nodes", [])
     node_id = node.get("id")
@@ -26,23 +24,16 @@ def local_output_shard_intermediates_for_node(
     ]
     if len(outputs) != 1 or len(producer_indices) != 1:
         return []
-    if sum(
-        candidate.get("inputs", []).count(outputs[0])
-        for candidate in nodes
-        if isinstance(candidate, dict)
-    ) != 1:
-        return []
     producer_index = producer_indices[0]
     if producer_index + 1 >= len(nodes):
         return []
     consumer = nodes[producer_index + 1]
-    if (
-        consumer.get("op") != "linear_residual"
-        or not consumer.get("inputs")
-        or consumer["inputs"][0] != outputs[0]
-        or not physical_kernel_implementations_for_node(
-            circuit, consumer, tensor_index
-        )
+    if not _is_local_shard_handoff(
+        circuit,
+        node,
+        consumer,
+        tensor_index,
+        require_dense_consumer_implementation=True,
     ):
         return []
     return [
@@ -58,6 +49,7 @@ def local_output_shard_intermediates_for_node(
 def _local_input_shard_intermediates_for_node(
     circuit: Json,
     node: Json,
+    tensor_index: Json,
 ) -> list[Json]:
     inputs = node.get("inputs", [])
     nodes = circuit.get("nodes", [])
@@ -67,13 +59,15 @@ def _local_input_shard_intermediates_for_node(
         for index, candidate in enumerate(nodes)
         if isinstance(candidate, dict) and candidate.get("id") == node_id
     ]
-    if len(inputs) != 2 or len(consumer_indices) != 1 or consumer_indices[0] == 0:
+    if not inputs or len(consumer_indices) != 1 or consumer_indices[0] == 0:
         return []
     producer = nodes[consumer_indices[0] - 1]
-    if (
-        not isinstance(producer, dict)
-        or producer.get("op") != "parallel_linear_silu_multiply"
-        or producer.get("outputs") != [inputs[0]]
+    if not isinstance(producer, dict) or not _is_local_shard_handoff(
+        circuit,
+        producer,
+        node,
+        tensor_index,
+        require_dense_consumer_implementation=False,
     ):
         return []
     return [
@@ -84,6 +78,50 @@ def _local_input_shard_intermediates_for_node(
             "format": "bf16",
         }
     ]
+
+
+def local_shard_intermediates_for_node(
+    circuit: Json,
+    node: Json,
+    tensor_index: Json,
+) -> list[Json]:
+    """Declare a private handoff on both sides of a legal kernel pair."""
+
+    return [
+        *_local_output_shard_intermediates_for_node(circuit, node, tensor_index),
+        *_local_input_shard_intermediates_for_node(circuit, node, tensor_index),
+    ]
+
+
+def _is_local_shard_handoff(
+    circuit: Json,
+    producer: Json,
+    consumer: Json,
+    tensor_index: Json,
+    *,
+    require_dense_consumer_implementation: bool,
+) -> bool:
+    outputs = producer.get("outputs", [])
+    inputs = consumer.get("inputs", [])
+    if len(outputs) != 1 or not inputs or inputs[0] != outputs[0]:
+        return False
+    if sum(
+        candidate.get("inputs", []).count(outputs[0])
+        for candidate in circuit.get("nodes", [])
+        if isinstance(candidate, dict)
+    ) != 1:
+        return False
+    pair = (producer.get("op"), consumer.get("op"))
+    if pair == ("parallel_linear_silu_multiply", "linear_residual"):
+        return not require_dense_consumer_implementation or bool(
+            physical_kernel_implementations_for_node(circuit, consumer, tensor_index)
+        )
+    if pair == (
+        "independent_sparse_moe_gate_up",
+        "independent_sparse_moe_down",
+    ):
+        return True
+    return False
 
 
 def physical_kernel_implementations_for_node(
@@ -257,8 +295,8 @@ def physical_kernel_implementations_for_node(
                     },
                 }
             ],
-            "local_intermediates": _local_input_shard_intermediates_for_node(
-                circuit, node
+            "local_intermediates": local_shard_intermediates_for_node(
+                circuit, node, tensor_index
             ),
             "resources": resources,
             "equivalence": {

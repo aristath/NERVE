@@ -16,7 +16,7 @@ from nerve.model_package_derived_tensors import (
     transposed_tensor_name,
 )
 from nerve.model_package_physical_kernels import (
-    local_output_shard_intermediates_for_node,
+    local_shard_intermediates_for_node,
     physical_kernel_implementations_for_node,
 )
 from nerve.model_package_shader_compiler import compile_shader_artifacts
@@ -207,7 +207,7 @@ def test_compiler_declares_only_an_executable_local_shard_handoff(
     )
 
     compiled_gate_up = {**gate_up, "_physical_contract_member_node_ids": ["gate_up"]}
-    assert local_output_shard_intermediates_for_node(
+    assert local_shard_intermediates_for_node(
         circuit, compiled_gate_up, tensor_index
     ) == [
         {
@@ -238,7 +238,7 @@ def test_compiler_declares_only_an_executable_local_shard_handoff(
         }
     )
     assert (
-        local_output_shard_intermediates_for_node(
+        local_shard_intermediates_for_node(
             circuit, compiled_gate_up, tensor_index
         )
         == []
@@ -247,9 +247,50 @@ def test_compiler_declares_only_an_executable_local_shard_handoff(
 
     down["inputs"][0] = "another-signal"
     assert (
-        local_output_shard_intermediates_for_node(circuit, gate_up, tensor_index)
+        local_shard_intermediates_for_node(circuit, gate_up, tensor_index)
         == []
     )
+
+
+def test_compiler_declares_expert_intermediate_private_on_both_kernels() -> None:
+    gate_up = {
+        "id": "expert_gate_up",
+        "op": "independent_sparse_moe_gate_up",
+        "inputs": ["normalized", "routes"],
+        "outputs": ["expert_intermediates"],
+        "params": ["gate", "up"],
+    }
+    down = {
+        "id": "expert_down",
+        "op": "independent_sparse_moe_down",
+        "inputs": ["expert_intermediates", "routes"],
+        "outputs": ["expert_outputs"],
+        "params": ["down"],
+    }
+    circuit = {"nodes": [gate_up, down]}
+    expected = [
+        {
+            "signal": "expert_intermediates",
+            "producer_binding": 2,
+            "consumer_binding": 0,
+            "format": "bf16",
+        }
+    ]
+
+    assert local_shard_intermediates_for_node(circuit, gate_up, {}) == expected
+    assert local_shard_intermediates_for_node(circuit, down, {}) == expected
+
+    circuit["nodes"].append(
+        {
+            "id": "observer",
+            "op": "identity",
+            "inputs": ["expert_intermediates"],
+            "outputs": ["observed"],
+            "params": [],
+        }
+    )
+    assert local_shard_intermediates_for_node(circuit, gate_up, {}) == []
+    assert local_shard_intermediates_for_node(circuit, down, {}) == []
 
 
 def test_compiler_derives_fp8_weight_and_scale_physical_resources(
@@ -487,9 +528,16 @@ def test_independent_experts_compile_selector_partition_contracts(
             for parameter, ref in refs.items()
         }
     }
+    gate_up = {
+        "id": "expert_gate_up",
+        "op": "independent_sparse_moe_gate_up",
+        "inputs": ["normalized", "routes"],
+        "outputs": ["expert_intermediates"],
+        "params": [],
+    }
     contracts = build_kernel_physical_execution_contracts(
         node=node,
-        circuit={"nodes": [node], "parameters": {"refs": refs}},
+        circuit={"nodes": [gate_up, node], "parameters": {"refs": refs}},
         tensor_index=tensor_index,
         kernel={
             "source_node_ids": ["expert_down"],
@@ -558,6 +606,14 @@ def test_independent_experts_compile_selector_partition_contracts(
             "collection": "routed",
             "dimension": 0,
             "alignment_elements": 1,
+        }
+    ]
+    assert distributed["local_intermediates"] == [
+        {
+            "signal": "expert_intermediates",
+            "producer_binding": 2,
+            "consumer_binding": 0,
+            "format": "bf16",
         }
     ]
     distributed_batches = [
