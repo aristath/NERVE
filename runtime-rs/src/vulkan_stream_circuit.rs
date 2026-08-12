@@ -209,6 +209,7 @@ include!("vulkan_stream_circuit/runtime_auto_placement.rs");
 include!("vulkan_stream_circuit/runtime_placement_calibration.rs");
 include!("vulkan_stream_circuit/placement_equivalence.rs");
 include!("vulkan_stream_circuit/placement_calibration_catalog.rs");
+include!("vulkan_stream_circuit/selected_resource_calibration_catalog.rs");
 include!("vulkan_stream_circuit/package_placement_catalog.rs");
 include!("vulkan_stream_circuit/hybrid_placement_optimizer.rs");
 include!("vulkan_stream_circuit/runtime_hybrid_placement.rs");

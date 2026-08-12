@@ -1,5 +1,5 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v9";
+    "nerve.vulkan_placement_calibration_catalog.v10";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -13,6 +13,11 @@ pub enum VulkanPlacementExecutionStrategy {
     DirectedBoundary,
     Reduction,
     LazyLoadWave,
+    /// One complete compiler-declared selected-resource transaction measured
+    /// in isolation. This is deliberately distinct from `SingleDevice`: a
+    /// resource-class microtransaction must never become a whole-component
+    /// candidate merely because both execute on one target.
+    SelectedResourceTransaction,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -243,6 +248,8 @@ pub struct VulkanPlacementCalibrationCatalog {
     pub schema: String,
     references: Vec<VulkanPlacementCanonicalReference>,
     observations: Vec<VulkanPlacementCalibrationObservation>,
+    selected_resource_execution_classes:
+        Vec<VulkanPlacementSelectedResourceExecutionClassCalibration>,
 }
 
 impl Default for VulkanPlacementCalibrationCatalog {
@@ -251,6 +258,7 @@ impl Default for VulkanPlacementCalibrationCatalog {
             schema: VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA.to_string(),
             references: Vec::new(),
             observations: Vec::new(),
+            selected_resource_execution_classes: Vec::new(),
         }
     }
 }
@@ -262,6 +270,10 @@ impl VulkanPlacementCalibrationCatalog {
 
     pub fn observation_count(&self) -> usize {
         self.observations.len()
+    }
+
+    pub fn selected_resource_execution_class_count(&self) -> usize {
+        self.selected_resource_execution_classes.len()
     }
 
     /// Transactionally unions independently produced exact catalogs. An exact
@@ -294,6 +306,9 @@ impl VulkanPlacementCalibrationCatalog {
                 }
                 Err(_) => merged.record_observation(observation.clone())?,
             }
+        }
+        for calibration in &other.selected_resource_execution_classes {
+            merged.record_selected_resource_execution_class(calibration.clone())?;
         }
         merged.validate()?;
         *self = merged;
@@ -332,6 +347,9 @@ impl VulkanPlacementCalibrationCatalog {
         }
         for observation in &self.observations {
             rebuilt.record_observation(observation.clone())?;
+        }
+        for calibration in &self.selected_resource_execution_classes {
+            rebuilt.record_selected_resource_execution_class(calibration.clone())?;
         }
         if &rebuilt != self {
             return Err(VulkanPlacementCalibrationCatalogError(
@@ -678,7 +696,8 @@ fn validate_observation(
         ));
     }
     let participant_count_valid = match case.strategy {
-        VulkanPlacementExecutionStrategy::SingleDevice => {
+        VulkanPlacementExecutionStrategy::SingleDevice
+        | VulkanPlacementExecutionStrategy::SelectedResourceTransaction => {
             case.devices.len() == 1
                 && case.shards.is_empty()
                 && case.transports.is_empty()
