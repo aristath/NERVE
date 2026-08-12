@@ -126,6 +126,33 @@ fn replay_exact_distributed_component_case(
             "distributed exact case for component {component_id:?} has no matching runtime dispatches or participants",
         ));
     }
+    let mut runtime_contracts = BTreeMap::<&str, &str>::new();
+    for dispatch_index in dispatch_indices {
+        let dispatch = &execution_plan.dispatches[*dispatch_index];
+        if runtime_contracts
+            .insert(
+                dispatch.physical_execution_contract_id.as_str(),
+                dispatch.implementation_digest.as_str(),
+            )
+            .is_some_and(|existing| existing != dispatch.implementation_digest)
+        {
+            return exact_case_error(format!(
+                "compiled component {component_id:?} repeats one physical contract with conflicting implementations",
+            ));
+        }
+    }
+    let runtime_contract_ids = runtime_contracts.keys().map(|id| (*id).to_string()).collect::<Vec<_>>();
+    let runtime_implementation_digests = runtime_contracts
+        .values()
+        .map(|digest| (*digest).to_string())
+        .collect::<Vec<_>>();
+    if runtime_contract_ids != case.behavior.contract_ids
+        || runtime_implementation_digests != case.behavior.implementation_digests
+    {
+        return exact_case_error(format!(
+            "exact case for component {component_id:?} was measured with different physical execution contracts",
+        ));
+    }
     let runtime_participants = dispatch_indices
         .iter()
         .flat_map(|dispatch_index| {
@@ -661,5 +688,49 @@ mod exact_case_replay_tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("different physical devices or drivers"));
+    }
+
+    #[test]
+    fn exact_replay_rejects_stale_physical_execution_contracts() {
+        let mut plan = VulkanDistributedExecutionPlan {
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            storage_buffer_offset_alignment: 4,
+            dispatches: vec![dispatch()],
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 16,
+            shared_output_byte_capacity: 16,
+            distributed_parameter_byte_count: 0,
+        };
+        let mut stale = exact_case(&[0, 1], &[2, 3]);
+        stale.behavior.implementation_digests = vec!["stale".to_string()];
+
+        let error = replay_exact_distributed_component_case(
+            &mut plan,
+            "moe",
+            &[0],
+            &stale,
+            &BTreeMap::from([
+                (
+                    "owner".to_string(),
+                    VulkanPlacementDeviceExecutionIdentity {
+                        physical_device_id: "physical-owner".to_string(),
+                        api_version: 1,
+                        driver_version: 2,
+                    },
+                ),
+                (
+                    "helper".to_string(),
+                    VulkanPlacementDeviceExecutionIdentity {
+                        physical_device_id: "physical-helper".to_string(),
+                        api_version: 1,
+                        driver_version: 2,
+                    },
+                ),
+            ]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("different physical execution contracts"));
     }
 }

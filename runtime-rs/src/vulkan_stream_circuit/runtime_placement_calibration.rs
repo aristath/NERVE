@@ -415,6 +415,17 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
         kernels
             .iter()
             .map(|kernel| {
+                let mut physical_contracts = kernel
+                    .physical_execution_contracts
+                    .iter()
+                    .map(|contract| {
+                        (
+                            contract.contract_id.as_str(),
+                            contract.implementation_digest.as_str(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                physical_contracts.sort_unstable();
                 (
                     kernel.execution_index,
                     kernel.op.as_str(),
@@ -426,6 +437,7 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
                     &kernel.batch_mode,
                     &kernel.batch_implementations,
                     &kernel.resource_representation_dispatch,
+                    physical_contracts,
                 )
             })
             .collect::<Vec<_>>(),

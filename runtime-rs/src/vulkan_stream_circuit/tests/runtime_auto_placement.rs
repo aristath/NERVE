@@ -235,6 +235,55 @@ fn runtime_placement_calibration_groups_identical_complete_decode_transactions()
 }
 
 #[test]
+fn runtime_placement_calibration_signature_includes_physical_contract_identity() {
+    let runtime_model = fixture_model_runtime_model();
+    let component_id = runtime_model.component_executions[0].component_id.clone();
+    let original = vulkan_runtime_placement_calibration_target_for_component(
+        &runtime_model,
+        &component_id,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+
+    let mut changed = runtime_model.clone();
+    changed.component_executions[0].kernels[0].physical_execution_contracts[0]
+        .implementation_digest = format!("sha256:{}", "f".repeat(64));
+    let changed = vulkan_runtime_placement_calibration_target_for_component(
+        &changed,
+        &component_id,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+
+    assert_ne!(original.signature_id, changed.signature_id);
+}
+
+#[test]
+fn runtime_placement_calibration_signature_canonicalizes_contract_order() {
+    let runtime_model = fixture_model_runtime_model();
+    let component_id = runtime_model.component_executions[0].component_id.clone();
+    let original = vulkan_runtime_placement_calibration_target_for_component(
+        &runtime_model,
+        &component_id,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+
+    let mut reordered = runtime_model.clone();
+    reordered.component_executions[0].kernels[0]
+        .physical_execution_contracts
+        .reverse();
+    let reordered = vulkan_runtime_placement_calibration_target_for_component(
+        &reordered,
+        &component_id,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+
+    assert_eq!(original.signature_id, reordered.signature_id);
+}
+
+#[test]
 fn runtime_placement_calibration_resolves_the_requested_component_phase_exactly() {
     let mut runtime_model = fixture_model_runtime_model();
     let execution = runtime_model.component_executions.first_mut().unwrap();
