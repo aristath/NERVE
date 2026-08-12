@@ -12,6 +12,7 @@ from nerve.conversation_gate import (
     ConversationGateError,
     ConversationTurn,
     canonical_runtime_command,
+    parse_physical_execution_summary,
     parse_conversation_transcript,
     run_conversation_gate,
     run_resident_conversation,
@@ -43,6 +44,66 @@ def _valid_turns() -> list[ConversationTurn]:
         _turn(MEASURED_PROMPTS[3], "My knowledge cutoff is not available."),
         _turn(MEASURED_PROMPTS[4], "You asked about Greece."),
     ]
+
+
+def test_physical_execution_summary_proves_mounted_tensor_parallel_work() -> None:
+    summary = parse_physical_execution_summary(
+        "nerve chat ready: physical_execution=VulkanMountedPhysicalExecutionSummary { "
+        "tensor_parallel_island_count: 2, whole_expert_parallel_island_count: 3, "
+        "intra_expert_tensor_parallel_island_count: 5, hybrid_island_count: 7, "
+        "selected_resource_placement_count: 11 }, setup_ms=12.000\n",
+        minimum_tensor_parallel_islands=14,
+    )
+
+    assert summary is not None
+    assert summary.tensor_parallel_island_count == 2
+    assert summary.intra_expert_tensor_parallel_island_count == 5
+    assert summary.hybrid_island_count == 7
+    assert summary.total_tensor_parallel_island_count == 14
+
+
+def test_physical_execution_summary_rejects_missing_required_tp_proof() -> None:
+    with pytest.raises(
+        ConversationGateError, match="did not report mounted physical execution"
+    ):
+        parse_physical_execution_summary(
+            "nerve chat ready: setup_ms=12.000\n",
+            minimum_tensor_parallel_islands=1,
+        )
+
+
+def test_physical_execution_summary_rejects_whole_expert_parallel_as_tp() -> None:
+    with pytest.raises(ConversationGateError, match="0 tensor-parallel island"):
+        parse_physical_execution_summary(
+            "nerve chat ready: physical_execution=VulkanMountedPhysicalExecutionSummary { "
+            "tensor_parallel_island_count: 0, whole_expert_parallel_island_count: 4, "
+            "intra_expert_tensor_parallel_island_count: 0, hybrid_island_count: 0, "
+            "selected_resource_placement_count: 1 }, setup_ms=12.000\n",
+            minimum_tensor_parallel_islands=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    (
+        "physical_execution=VulkanMountedPhysicalExecutionSummary { tensor_parallel_island_count: nope }",
+        (
+            "physical_execution=VulkanMountedPhysicalExecutionSummary { "
+            "tensor_parallel_island_count: 1, tensor_parallel_island_count: 2, "
+            "whole_expert_parallel_island_count: 0, "
+            "intra_expert_tensor_parallel_island_count: 0, hybrid_island_count: 0, "
+            "selected_resource_placement_count: 0 }"
+        ),
+    ),
+)
+def test_physical_execution_summary_rejects_malformed_or_ambiguous_proof(
+    transcript: str,
+) -> None:
+    with pytest.raises(ConversationGateError, match="physical execution summary"):
+        parse_physical_execution_summary(
+            transcript,
+            minimum_tensor_parallel_islands=1,
+        )
 
 
 def test_transcript_parser_requires_all_completed_resident_turns() -> None:
@@ -93,13 +154,9 @@ def test_transcript_parser_requires_every_discarded_and_measured_set() -> None:
             )
     sections.append("you> ")
 
-    turns = parse_conversation_transcript(
-        "".join(sections), warmup_conversation_sets=1
-    )
+    turns = parse_conversation_transcript("".join(sections), warmup_conversation_sets=1)
 
-    assert [turn.prompt for turn in turns] == list(
-        CANONICAL_CONVERSATION_PROMPTS * 2
-    )
+    assert [turn.prompt for turn in turns] == list(CANONICAL_CONVERSATION_PROMPTS * 2)
 
 
 def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
@@ -419,7 +476,9 @@ for turn in range(7):
     assert len(parse_conversation_transcript(transcript)) == 6
 
 
-def test_resident_runner_stops_a_long_cycle_before_the_runtime_finishes(tmp_path) -> None:
+def test_resident_runner_stops_a_long_cycle_before_the_runtime_finishes(
+    tmp_path,
+) -> None:
     fake_runtime = tmp_path / "repeating_runtime.py"
     fake_runtime.write_text(
         """
@@ -555,6 +614,7 @@ answers = (
     "The country was Greece.",
 )
 print("ready")
+print("nerve chat ready: physical_execution=VulkanMountedPhysicalExecutionSummary { tensor_parallel_island_count: 1, whole_expert_parallel_island_count: 2, intra_expert_tensor_parallel_island_count: 3, hybrid_island_count: 4, selected_resource_placement_count: 5 }, setup_ms=12.000")
 completed = 0
 conversation_turn = 0
 conversation_set = 0
@@ -601,12 +661,15 @@ while True:
         ],
         seeds=(0,),
         minimum_decode_tokens_per_second=20.0,
+        minimum_tensor_parallel_islands=8,
         require_thinking=True,
         warmup_conversation_sets=1,
     )
 
     run = report.runs[0]
     assert len(run.discarded_warmup_sets) == 1
+    assert run.physical_execution is not None
+    assert run.physical_execution.total_tensor_parallel_island_count == 8
     assert report.warmup_conversation_sets == 1
     assert run.discarded_warmup_sets[0].mean_decode_tokens_per_second == 1.0
     assert run.measured_set.mean_decode_tokens_per_second == 30.0

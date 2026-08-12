@@ -35,8 +35,19 @@ _SESSION_RESET_MARKER = b"session_reset: "
 _STATS_MARKER = "\nstats:\n"
 _STAT_LINE = re.compile(r"^  ([a-z][a-z0-9_]*)=(.+)$")
 _RESIDENCY_POLICY = re.compile(r"^  policy=([^ ]+)", re.MULTILINE)
-_RESIDENCY_COUNTER_LINE = re.compile(
-    r"^  ([a-z_]+)\(([^)]+)\)=([^\n]+)$", re.MULTILINE
+_RESIDENCY_COUNTER_LINE = re.compile(r"^  ([a-z_]+)\(([^)]+)\)=([^\n]+)$", re.MULTILINE)
+_PHYSICAL_EXECUTION_SUMMARY_START = (
+    "physical_execution=VulkanMountedPhysicalExecutionSummary {"
+)
+_PHYSICAL_EXECUTION_SUMMARY = re.compile(
+    re.escape(_PHYSICAL_EXECUTION_SUMMARY_START) + r"(?P<body>[^{}\n]*)}"
+)
+_PHYSICAL_EXECUTION_FIELDS = (
+    "tensor_parallel_island_count",
+    "whole_expert_parallel_island_count",
+    "intra_expert_tensor_parallel_island_count",
+    "hybrid_island_count",
+    "selected_resource_placement_count",
 )
 
 _CUMULATIVE_RESIDENCY_COUNTER_GROUPS = {
@@ -56,6 +67,23 @@ class ResidentConversationError(ConversationGateError):
     def __init__(self, message: str, transcript: str) -> None:
         super().__init__(message)
         self.transcript = transcript
+
+
+@dataclass(frozen=True)
+class PhysicalExecutionSummary:
+    tensor_parallel_island_count: int
+    whole_expert_parallel_island_count: int
+    intra_expert_tensor_parallel_island_count: int
+    hybrid_island_count: int
+    selected_resource_placement_count: int
+
+    @property
+    def total_tensor_parallel_island_count(self) -> int:
+        return (
+            self.tensor_parallel_island_count
+            + self.intra_expert_tensor_parallel_island_count
+            + self.hybrid_island_count
+        )
 
 
 @dataclass(frozen=True)
@@ -105,6 +133,7 @@ class ConversationSeedReport:
     seed: int
     command: list[str]
     transcript_sha256: str
+    physical_execution: PhysicalExecutionSummary | None
     discarded_warmup_sets: list[ConversationSetReport]
     measured_set: ConversationSetReport
 
@@ -113,6 +142,7 @@ class ConversationSeedReport:
 class ConversationGateReport:
     ok: bool
     minimum_decode_tokens_per_second: float
+    minimum_tensor_parallel_islands: int
     require_thinking: bool
     warmup_conversation_sets: int
     package: dict[str, Any]
@@ -163,9 +193,7 @@ def _residency_metrics(
                     f"{value!r}"
                 )
             destination = (
-                counters
-                if group in _CUMULATIVE_RESIDENCY_COUNTER_GROUPS
-                else gauges
+                counters if group in _CUMULATIVE_RESIDENCY_COUNTER_GROUPS else gauges
             )
             destination[f"{group}.{label}"] = parsed
     return (
@@ -173,6 +201,70 @@ def _residency_metrics(
         counters or None,
         gauges or None,
     )
+
+
+def parse_physical_execution_summary(
+    transcript: str,
+    *,
+    minimum_tensor_parallel_islands: int = 0,
+) -> PhysicalExecutionSummary | None:
+    if minimum_tensor_parallel_islands < 0:
+        raise ConversationGateError(
+            "minimum tensor-parallel island count cannot be negative"
+        )
+    marker_count = transcript.count(_PHYSICAL_EXECUTION_SUMMARY_START)
+    if marker_count == 0:
+        if minimum_tensor_parallel_islands > 0:
+            raise ConversationGateError(
+                "runtime did not report mounted physical execution"
+            )
+        return None
+    if marker_count != 1:
+        raise ConversationGateError(
+            "runtime reported more than one physical execution summary"
+        )
+    match = _PHYSICAL_EXECUTION_SUMMARY.search(transcript)
+    if match is None:
+        raise ConversationGateError("runtime physical execution summary is malformed")
+
+    values: dict[str, int] = {}
+    for entry in match.group("body").split(","):
+        parts = entry.strip().split(":", 1)
+        if len(parts) != 2:
+            raise ConversationGateError(
+                "runtime physical execution summary is malformed"
+            )
+        key, raw_value = (part.strip() for part in parts)
+        if key not in _PHYSICAL_EXECUTION_FIELDS or key in values:
+            raise ConversationGateError(
+                "runtime physical execution summary has an unknown or duplicate field"
+            )
+        try:
+            value = int(raw_value)
+        except ValueError as error:
+            raise ConversationGateError(
+                f"runtime physical execution summary field {key!r} is not an integer"
+            ) from error
+        if value < 0:
+            raise ConversationGateError(
+                f"runtime physical execution summary field {key!r} is negative"
+            )
+        values[key] = value
+    missing = set(_PHYSICAL_EXECUTION_FIELDS).difference(values)
+    if missing:
+        raise ConversationGateError(
+            "runtime physical execution summary is missing field(s): "
+            + ", ".join(sorted(missing))
+        )
+
+    summary = PhysicalExecutionSummary(**values)
+    if summary.total_tensor_parallel_island_count < minimum_tensor_parallel_islands:
+        raise ConversationGateError(
+            "runtime mounted "
+            f"{summary.total_tensor_parallel_island_count} tensor-parallel island(s); "
+            f"required at least {minimum_tensor_parallel_islands}"
+        )
+    return summary
 
 
 def parse_conversation_transcript(
@@ -198,9 +290,7 @@ def parse_conversation_transcript(
         policy, counters, gauges = _residency_metrics(report)
         completed_sections.append((response.rstrip(), stats, policy, counters, gauges))
 
-    expected_prompts = CANONICAL_CONVERSATION_PROMPTS * (
-        warmup_conversation_sets + 1
-    )
+    expected_prompts = CANONICAL_CONVERSATION_PROMPTS * (warmup_conversation_sets + 1)
     if len(completed_sections) != len(expected_prompts):
         raise ConversationGateError(
             "chat transcript contains "
@@ -248,7 +338,9 @@ def _final_answer(response: str, require_thinking: bool) -> str:
             )
     else:
         if closing_count > 1 or opening_count > 1:
-            raise ConversationGateError("response contains malformed thinking boundaries")
+            raise ConversationGateError(
+                "response contains malformed thinking boundaries"
+            )
         answer = response.rsplit("</think>", 1)[-1].strip()
     if not answer:
         raise ConversationGateError("response terminated without a final answer")
@@ -283,7 +375,9 @@ def validate_conversation_turns(
     if "athens" not in answers[1].casefold():
         raise ConversationGateError("capital-of-Greece turn did not answer Athens")
     if "corinth" not in answers[2].casefold():
-        raise ConversationGateError("Corinth turn did not answer the question about Corinth")
+        raise ConversationGateError(
+            "Corinth turn did not answer the question about Corinth"
+        )
     if "greece" not in answers[4].casefold():
         raise ConversationGateError(
             "conversation-recall turn did not identify Greece from prior history"
@@ -330,7 +424,9 @@ def canonical_runtime_command(command: Sequence[str], seed: int) -> list[str]:
     if not command:
         raise ConversationGateError("runtime command must not be empty")
     if "--chat" not in command:
-        raise ConversationGateError("conversation gate requires the normal --chat runtime mode")
+        raise ConversationGateError(
+            "conversation gate requires the normal --chat runtime mode"
+        )
     if "--prompt" in command:
         raise ConversationGateError(
             "conversation gate owns the canonical warmup and measured prompts"
@@ -436,7 +532,9 @@ def run_resident_conversation(
                     elif _STATS_MARKER.encode() not in previous_output:
                         continue
                 if sent >= len(prompts):
-                    live_error = "runtime requested more chat turns than the gate supplied"
+                    live_error = (
+                        "runtime requested more chat turns than the gate supplied"
+                    )
                     break
                 process.stdin.write((prompts[sent] + "\n").encode())
                 process.stdin.flush()
@@ -459,9 +557,9 @@ def run_resident_conversation(
                 and stats_start < 0
                 and len(transcript) - checked_response_bytes >= 16_384
             ):
-                response = transcript[
-                    response_start + len(_RESPONSE_PREFIX) :
-                ].decode(errors="replace")
+                response = transcript[response_start + len(_RESPONSE_PREFIX) :].decode(
+                    errors="replace"
+                )
                 repeated = repeated_segment(response)
                 checked_response_bytes = len(transcript)
                 if repeated is not None:
@@ -535,6 +633,7 @@ def run_conversation_gate(
     seeds: Sequence[int],
     minimum_decode_tokens_per_second: float,
     require_thinking: bool,
+    minimum_tensor_parallel_islands: int = 0,
     warmup_conversation_sets: int = 0,
     transcript_dir: Path | None = None,
 ) -> ConversationGateReport:
@@ -547,6 +646,10 @@ def run_conversation_gate(
         )
     if warmup_conversation_sets < 0:
         raise ConversationGateError("warmup conversation set count cannot be negative")
+    if minimum_tensor_parallel_islands < 0:
+        raise ConversationGateError(
+            "minimum tensor-parallel island count cannot be negative"
+        )
     package = _package_metadata(command)
     runs = []
     for seed in seeds:
@@ -569,6 +672,10 @@ def run_conversation_gate(
         parsed = parse_conversation_transcript(
             transcript,
             warmup_conversation_sets=warmup_conversation_sets,
+        )
+        physical_execution = parse_physical_execution_summary(
+            transcript,
+            minimum_tensor_parallel_islands=minimum_tensor_parallel_islands,
         )
         conversation_sets = [
             parsed[index : index + len(CANONICAL_CONVERSATION_PROMPTS)]
@@ -639,6 +746,7 @@ def run_conversation_gate(
                 seed=seed,
                 command=seeded_command,
                 transcript_sha256=hashlib.sha256(transcript.encode()).hexdigest(),
+                physical_execution=physical_execution,
                 discarded_warmup_sets=reports[:-1],
                 measured_set=reports[-1],
             )
@@ -646,6 +754,7 @@ def run_conversation_gate(
     return ConversationGateReport(
         ok=True,
         minimum_decode_tokens_per_second=minimum_decode_tokens_per_second,
+        minimum_tensor_parallel_islands=minimum_tensor_parallel_islands,
         require_thinking=require_thinking,
         warmup_conversation_sets=warmup_conversation_sets,
         package=package,
@@ -657,7 +766,9 @@ def _parse_seeds(raw: str) -> tuple[int, ...]:
     try:
         seeds = tuple(int(value.strip()) for value in raw.split(",") if value.strip())
     except ValueError as error:
-        raise argparse.ArgumentTypeError("seeds must be comma-separated integers") from error
+        raise argparse.ArgumentTypeError(
+            "seeds must be comma-separated integers"
+        ) from error
     if not seeds or any(seed < 0 or seed > 0xFFFF_FFFF for seed in seeds):
         raise argparse.ArgumentTypeError("seeds must contain one or more U32 values")
     return seeds
@@ -696,6 +807,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--seeds", type=_parse_seeds, default=(0,))
     parser.add_argument("--minimum-decode-tps", type=float, default=0.0)
+    parser.add_argument("--minimum-tensor-parallel-islands", type=int, default=0)
     parser.add_argument("--require-thinking", action="store_true")
     parser.add_argument(
         "--warmup-conversation-sets",
@@ -716,6 +828,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             command,
             seeds=args.seeds,
             minimum_decode_tokens_per_second=args.minimum_decode_tps,
+            minimum_tensor_parallel_islands=args.minimum_tensor_parallel_islands,
             require_thinking=args.require_thinking,
             warmup_conversation_sets=args.warmup_conversation_sets,
             transcript_dir=args.transcript_dir,
