@@ -4049,7 +4049,47 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_exclude_a_tensor_still_used_by_a_canonical_dispatch() {
+    fn excludes_canonical_and_distinct_physical_layouts_for_replaced_dispatches() {
+        let mut execution_plan = fixture_plan("row_major");
+        for dispatch in &mut execution_plan.dispatches {
+            for shard in &mut dispatch.shards {
+                for parameter in &mut shard.parameters {
+                    parameter.tensor = format!("{}.physical", parameter.tensor);
+                }
+            }
+        }
+        let mut tensor_index = fixture_tensor_index("row_major");
+        for tensor in ["gate", "up"] {
+            tensor_index.tensors.insert(
+                format!("{tensor}.physical"),
+                tensor_index.tensors[tensor].clone(),
+            );
+        }
+
+        let exclusions =
+            VulkanDistributedParameterExclusionPlan::from_execution_and_prepared_plans(
+                &execution_plan,
+                &[("owner", &fixture_prepared_plan())],
+                &tensor_index,
+            )
+            .unwrap();
+
+        assert_eq!(exclusions.unique_tensor_count, 4);
+        assert_eq!(exclusions.excluded_full_allocation_count, 4);
+        assert_eq!(exclusions.excluded_full_byte_capacity, 384);
+        assert_eq!(
+            exclusions.tensors_for_device("owner"),
+            BTreeSet::from([
+                "gate".to_string(),
+                "gate.physical".to_string(),
+                "up".to_string(),
+                "up.physical".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn retains_a_tensor_still_used_by_a_canonical_dispatch() {
         let execution_plan = fixture_plan("row_major");
         let mut prepared_plan = fixture_prepared_plan();
         let mut canonical = prepared_plan.dispatches[0].clone();
@@ -4065,18 +4105,17 @@ mod tests {
         });
         prepared_plan.dispatches.push(canonical);
 
-        let error = VulkanDistributedParameterExclusionPlan::from_execution_and_prepared_plans(
-            &execution_plan,
-            &[("owner", &prepared_plan)],
-            &fixture_tensor_index("row_major"),
-        )
-        .unwrap_err();
+        let exclusions =
+            VulkanDistributedParameterExclusionPlan::from_execution_and_prepared_plans(
+                &execution_plan,
+                &[("owner", &prepared_plan)],
+                &fixture_tensor_index("row_major"),
+            )
+            .unwrap();
 
-        assert!(
-            error
-                .to_string()
-                .contains("canonical dispatch component.canonical-use still uses it")
-        );
+        assert_eq!(exclusions.excluded_full_allocation_count, 0);
+        assert_eq!(exclusions.excluded_full_byte_capacity, 0);
+        assert!(exclusions.tensors_for_device("owner").is_empty());
     }
 
     fn fixture_plan(layout: &str) -> VulkanDistributedExecutionPlan {

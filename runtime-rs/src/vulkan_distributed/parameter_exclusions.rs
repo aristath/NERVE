@@ -146,6 +146,7 @@ impl VulkanDistributedParameterExclusionPlan {
 
         let mut prepared_device_ids = BTreeSet::new();
         let mut matched_dispatches = BTreeSet::new();
+        let mut canonical_required_tensors = BTreeSet::<(String, String)>::new();
         for (device_id, prepared_plan) in prepared_plans {
             if !prepared_device_ids.insert(*device_id) {
                 return Err(VulkanDistributedPlanError(format!(
@@ -164,21 +165,23 @@ impl VulkanDistributedParameterExclusionPlan {
                         _ => None,
                     })
                     .collect::<BTreeSet<_>>();
-                if let Some(distributed_tensors) = distributed_dispatch_tensors.get(&key) {
-                    if &parameter_tensors != distributed_tensors {
-                        return Err(VulkanDistributedPlanError(format!(
-                            "distributed dispatch {}.{} parameter tensors changed between preparation and physical lowering",
-                            dispatch.component_id, dispatch.node_id
-                        )));
-                    }
+                if distributed_dispatch_tensors.contains_key(&key) {
+                    // Replacing this dispatch makes both its canonical source
+                    // layout and every distinct physical shard layout
+                    // redundant in the ordinary owner allocation. Physical
+                    // layouts are loaded through the shard allocator instead.
+                    target_tensors.extend(
+                        parameter_tensors
+                            .into_iter()
+                            .map(|tensor| ((*device_id).to_string(), tensor)),
+                    );
                     matched_dispatches.insert(key);
-                } else if let Some(tensor) = parameter_tensors.iter().find(|tensor| {
-                    target_tensors.contains(&((*device_id).to_string(), (*tensor).clone()))
-                }) {
-                    return Err(VulkanDistributedPlanError(format!(
-                        "cannot exclude distributed tensor {tensor:?} on {device_id:?}; canonical dispatch {}.{} still uses it",
-                        dispatch.component_id, dispatch.node_id
-                    )));
+                } else {
+                    canonical_required_tensors.extend(
+                        parameter_tensors
+                            .into_iter()
+                            .map(|tensor| ((*device_id).to_string(), tensor)),
+                    );
                 }
             }
         }
@@ -194,6 +197,7 @@ impl VulkanDistributedParameterExclusionPlan {
                 missing.owner_device_id
             )));
         }
+        target_tensors.retain(|tensor| !canonical_required_tensors.contains(tensor));
 
         let mut tensors_by_device = BTreeMap::<String, Vec<String>>::new();
         let mut excluded_full_byte_capacity = 0usize;
