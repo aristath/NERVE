@@ -13,6 +13,15 @@ pub struct VulkanRuntimeHybridPhaseSetPlacement {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct VulkanRuntimeHybridPhysicalExecutionResolution {
+    pub runtime_model: VulkanResidentRuntimeModel,
+    pub physical_execution_plan: VulkanRuntimePhysicalExecutionPlan,
+    pub decode_predicted_duration_ns_per_activation: u128,
+    pub prefill_activation_batch_width: Option<usize>,
+    pub prefill_predicted_duration_ns_per_activation: Option<u128>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct VulkanRuntimeHybridLoweredPhasePlacement {
     /// Stable logical model with only the selected backbone/coordinator owner
     /// of each component applied. Internal shard pools remain phase-specific.
@@ -89,6 +98,68 @@ pub fn plan_vulkan_runtime_hybrid_phase_set(
         );
     }
     Ok(phase_set)
+}
+
+/// Resolves exact measured physical execution for the ordinary runtime path.
+///
+/// Missing exact decode evidence or a capacity envelope that cannot admit a
+/// complete measured graph returns `None`; the caller may retain its validated
+/// scalar/serialized placement. Invalid or ambiguous evidence remains an
+/// error. Prefill is selected only from a complete common measured width no
+/// larger than the mounted context, while decode retains stable ownership.
+pub fn resolve_vulkan_runtime_hybrid_physical_execution(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    context_capacity_activations: usize,
+    logical_device_id_by_physical_device: &BTreeMap<String, String>,
+) -> Result<Option<VulkanRuntimeHybridPhysicalExecutionResolution>, VulkanRuntimeHybridPlacementError>
+{
+    if !vulkan_runtime_hybrid_phase_is_calibrated(
+        runtime_model,
+        catalog,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )? {
+        return Ok(None);
+    }
+    let prefill_activation_batch_width = vulkan_runtime_hybrid_calibrated_prefill_widths(
+        runtime_model,
+        catalog,
+    )?
+    .into_iter()
+    .filter(|width| *width <= context_capacity_activations)
+    .max();
+    let Some(placement) = try_plan_vulkan_runtime_hybrid_phase_set(
+        runtime_model,
+        catalog,
+        capacity,
+        prefill_activation_batch_width,
+    )?
+    else {
+        return Ok(None);
+    };
+    let decode_predicted_duration_ns_per_activation =
+        placement.decode.plan.predicted_duration_ns_per_activation;
+    let prefill_predicted_duration_ns_per_activation = placement
+        .prefill
+        .as_ref()
+        .map(|prefill| prefill.plan.predicted_duration_ns_per_activation);
+    let selected_prefill_activation_batch_width = placement
+        .prefill
+        .as_ref()
+        .map(|prefill| prefill.activation_batch_width);
+    let (runtime_model, physical_execution_plan) = lower_vulkan_runtime_hybrid_phase_set(
+        runtime_model,
+        &placement,
+        logical_device_id_by_physical_device,
+    )?;
+    Ok(Some(VulkanRuntimeHybridPhysicalExecutionResolution {
+        runtime_model,
+        physical_execution_plan,
+        decode_predicted_duration_ns_per_activation,
+        prefill_activation_batch_width: selected_prefill_activation_batch_width,
+        prefill_predicted_duration_ns_per_activation,
+    }))
 }
 
 /// Attempts to select exact phase-local physical execution without making the
@@ -332,6 +403,23 @@ pub fn vulkan_runtime_hybrid_calibrated_prefill_widths(
         .iter()
         .filter(|component| component.runtime_role.is_signal_processor())
     {
+        let execution = runtime_model
+            .component_executions
+            .iter()
+            .find(|execution| execution.component_id == component.component_id)
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(format!(
+                    "hybrid prefill calibration found no execution for component {:?}",
+                    component.component_id,
+                ))
+            })?;
+        if !execution
+            .kernels
+            .iter()
+            .any(|kernel| kernel.execution_domain.supports_prefill())
+        {
+            return Ok(Vec::new());
+        }
         let target = vulkan_runtime_placement_calibration_target_for_component(
             runtime_model,
             &component.component_id,

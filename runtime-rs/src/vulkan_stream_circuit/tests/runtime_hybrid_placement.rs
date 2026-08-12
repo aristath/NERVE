@@ -313,6 +313,44 @@ fn hybrid_test_catalog(model: &VulkanResidentRuntimeModel) -> VulkanPlacementCal
     catalog
 }
 
+fn hybrid_test_distributed_catalog(
+    model: &VulkanResidentRuntimeModel,
+) -> VulkanPlacementCalibrationCatalog {
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    let mut signatures = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| {
+            vulkan_runtime_placement_calibration_target_for_component(
+                model,
+                &component.component_id,
+                VulkanTargetedComponentExecutionPhase::Decode,
+            )
+            .unwrap()
+            .signature_id
+        })
+        .collect::<Vec<_>>();
+    signatures.sort();
+    signatures.dedup();
+    for signature in signatures {
+        let behavior = hybrid_test_behavior(&signature);
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: behavior.clone(),
+                output_digest: "output".to_string(),
+                output_artifact: None,
+                state_digest: "state".to_string(),
+            })
+            .unwrap();
+        catalog
+            .record_observation(hybrid_test_distributed_observation(behavior, 8))
+            .unwrap();
+    }
+    catalog
+}
+
 #[test]
 fn runtime_hybrid_planner_maps_compiler_signatures_to_every_component_instance() {
     let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
@@ -439,38 +477,7 @@ fn runtime_hybrid_planner_rejects_missing_or_ambiguous_behavior_evidence() {
 #[test]
 fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
     let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
-    let mut catalog = VulkanPlacementCalibrationCatalog::default();
-    let mut signatures = model
-        .circuit_graph
-        .components
-        .iter()
-        .filter(|component| component.runtime_role.is_signal_processor())
-        .map(|component| {
-            vulkan_runtime_placement_calibration_target_for_component(
-                &model,
-                &component.component_id,
-                VulkanTargetedComponentExecutionPhase::Decode,
-            )
-            .unwrap()
-            .signature_id
-        })
-        .collect::<Vec<_>>();
-    signatures.sort();
-    signatures.dedup();
-    for signature in signatures {
-        let behavior = hybrid_test_behavior(&signature);
-        catalog
-            .record_reference(VulkanPlacementCanonicalReference {
-                behavior: behavior.clone(),
-                output_digest: "output".to_string(),
-                output_artifact: None,
-                state_digest: "state".to_string(),
-            })
-            .unwrap();
-        catalog
-            .record_observation(hybrid_test_distributed_observation(behavior, 8))
-            .unwrap();
-    }
+    let catalog = hybrid_test_distributed_catalog(&model);
     let capacity = VulkanPlacementCapacityEnvelope {
         available_bytes_by_device: BTreeMap::from([
             (hybrid_test_device("gpu0"), 100),
@@ -578,6 +585,100 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
             )
             .unwrap(),
             &missing_binding,
+        )
+        .unwrap_err()
+        .0
+        .contains("unbound physical device")
+    );
+}
+
+#[test]
+fn runtime_hybrid_physical_resolution_carries_measured_tp_into_normal_execution() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let catalog = hybrid_test_distributed_catalog(&model);
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "logical-owner".to_string()),
+        ("gpu1".to_string(), "logical-helper".to_string()),
+    ]);
+
+    let resolution = resolve_vulkan_runtime_hybrid_physical_execution(
+        &model,
+        &catalog,
+        &capacity,
+        128,
+        &bindings,
+    )
+    .unwrap()
+    .expect("complete exact TP evidence must resolve");
+
+    assert_eq!(resolution.decode_predicted_duration_ns_per_activation, 24);
+    assert_eq!(resolution.prefill_activation_batch_width, None);
+    assert_eq!(resolution.prefill_predicted_duration_ns_per_activation, None);
+    assert_eq!(
+        resolution
+            .physical_execution_plan
+            .decode_execution_cases_by_component
+            .len(),
+        3,
+    );
+    assert!(
+        resolution
+            .physical_execution_plan
+            .decode_execution_cases_by_component
+            .values()
+            .all(|case| case.strategy == VulkanPlacementExecutionStrategy::TensorParallel)
+    );
+    assert!(
+        resolution
+            .physical_execution_plan
+            .component_device_pools
+            .decode
+            .values()
+            .all(|pool| pool == &["logical-owner", "logical-helper"])
+    );
+    assert!(
+        resolution
+            .runtime_model
+            .circuit_graph
+            .components
+            .iter()
+            .filter(|component| component.runtime_role.is_signal_processor())
+            .all(|component| resolution
+                .runtime_model
+                .placement
+                .device_for_component(&component.component_id)
+                == "logical-owner")
+    );
+
+    assert!(
+        resolve_vulkan_runtime_hybrid_physical_execution(
+            &model,
+            &VulkanPlacementCalibrationCatalog::default(),
+            &capacity,
+            128,
+            &bindings,
+        )
+        .unwrap()
+        .is_none()
+    );
+    let missing_helper = BTreeMap::from([(
+        "gpu0".to_string(),
+        "logical-owner".to_string(),
+    )]);
+    assert!(
+        resolve_vulkan_runtime_hybrid_physical_execution(
+            &model,
+            &catalog,
+            &capacity,
+            128,
+            &missing_helper,
         )
         .unwrap_err()
         .0
