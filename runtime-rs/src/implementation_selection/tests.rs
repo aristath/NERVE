@@ -769,6 +769,59 @@ fn selector_rejects_unknown_exact_baseline_incompatibility() {
 }
 
 #[test]
+fn selector_optimizes_only_over_sets_that_cover_incompatible_instances() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu-a", "gfx-fixture", "vulkan");
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        scopes: BTreeMap::new(),
+        implementations: vec![
+            loaded_implementation(
+                "fast_but_incomplete",
+                &["source0"],
+                &["scope0"],
+                predicate(&[&gpu], "local"),
+                1_000,
+                100,
+                0,
+            ),
+            loaded_implementation(
+                "complete_pair",
+                &["source0", "source1"],
+                &["scope0", "scope1"],
+                predicate(&[&gpu], "local"),
+                1_000,
+                500,
+                0,
+            ),
+        ],
+    };
+    let mut request = request(
+        vec![selection_device("gpu0", gpu)],
+        &[
+            ("layer0", "source0", &["gpu0"]),
+            ("layer1", "source1", &["gpu0"]),
+        ],
+        &[("layer0", "layer1")],
+    );
+    request.exact_baseline_incompatible_instance_ids =
+        BTreeSet::from(["layer0".to_string(), "layer1".to_string()]);
+
+    let report = catalog.select(&request).unwrap();
+
+    assert_eq!(report.selected.len(), 1);
+    assert_eq!(report.selected[0].implementation_id, "complete_pair");
+    assert_eq!(report.selected[0].instance_ids, ["layer0", "layer1"]);
+    assert!(report.exact_instance_ids.is_empty());
+}
+
+#[test]
 fn one_implementation_exposes_each_duplicate_source_instance_as_an_independent_application() {
     let gpu_a = profile(HardwareDeviceKind::Gpu, "gpu-a", "gfx-fixture", "vulkan");
     let gpu_b = profile(HardwareDeviceKind::Gpu, "gpu-b", "gfx-fixture", "vulkan");

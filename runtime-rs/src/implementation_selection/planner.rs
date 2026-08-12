@@ -21,7 +21,26 @@ impl RuntimeImplementationCatalog {
         request: &RuntimeSelectionRequest,
     ) -> io::Result<RuntimeImplementationSelectionReport> {
         let (eligible, mut rejected) = eligible_applications(self, request)?;
-        let selected_indices = optimal_nonoverlapping_applications(&eligible);
+        let coverable_instances = eligible
+            .iter()
+            .flat_map(|application| application.instance_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let individually_uncoverable = request
+            .exact_baseline_incompatible_instance_ids
+            .difference(&coverable_instances)
+            .collect::<Vec<_>>();
+        if !individually_uncoverable.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "no compatible implementation can cover runtime instances {individually_uncoverable:?}; their exact baselines are incompatible",
+                ),
+            ));
+        }
+        let selected_indices = optimal_nonoverlapping_applications(
+            &eligible,
+            &request.exact_baseline_incompatible_instance_ids,
+        );
         let selected_index_set = selected_indices.iter().copied().collect::<BTreeSet<_>>();
         let mut selected = selected_indices
             .into_iter()
@@ -661,7 +680,10 @@ fn application_order(left: &EligibleApplication<'_>, right: &EligibleApplication
         ))
 }
 
-fn optimal_nonoverlapping_applications(applications: &[EligibleApplication<'_>]) -> Vec<usize> {
+fn optimal_nonoverlapping_applications(
+    applications: &[EligibleApplication<'_>],
+    required_covered_instances: &BTreeSet<String>,
+) -> Vec<usize> {
     let suffix_savings = (0..applications.len())
         .rev()
         .scan(0u64, |total, index| {
@@ -680,6 +702,7 @@ fn optimal_nonoverlapping_applications(applications: &[EligibleApplication<'_>])
         &mut BTreeSet::new(),
         &mut SelectionSet::default(),
         &mut best,
+        required_covered_instances,
     );
     best.indices
 }
@@ -689,6 +712,7 @@ struct SelectionSet {
     indices: Vec<usize>,
     savings: u64,
     conversions: u64,
+    feasible: bool,
 }
 
 fn search_selection_sets(
@@ -698,14 +722,18 @@ fn search_selection_sets(
     occupied_instances: &mut BTreeSet<String>,
     current: &mut SelectionSet,
     best: &mut SelectionSet,
+    required_covered_instances: &BTreeSet<String>,
 ) {
     if index == applications.len() {
-        if selection_set_is_better(current, best, applications) {
+        if required_covered_instances.is_subset(occupied_instances)
+            && selection_set_is_better(current, best, applications)
+        {
             *best = current.clone();
+            best.feasible = true;
         }
         return;
     }
-    if current.savings.saturating_add(suffix_savings[index]) < best.savings {
+    if best.feasible && current.savings.saturating_add(suffix_savings[index]) < best.savings {
         return;
     }
     let application = &applications[index];
@@ -729,6 +757,7 @@ fn search_selection_sets(
             occupied_instances,
             current,
             best,
+            required_covered_instances,
         );
         current.indices.pop();
         current.savings = current
@@ -748,6 +777,7 @@ fn search_selection_sets(
         occupied_instances,
         current,
         best,
+        required_covered_instances,
     );
 }
 
@@ -756,6 +786,9 @@ fn selection_set_is_better(
     current: &SelectionSet,
     applications: &[EligibleApplication<'_>],
 ) -> bool {
+    if !current.feasible {
+        return true;
+    }
     if candidate.savings != current.savings {
         return candidate.savings > current.savings;
     }

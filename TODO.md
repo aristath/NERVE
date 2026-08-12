@@ -400,7 +400,10 @@ For every numbered item below:
   extensions, cooperative shapes, and every owner/shard hardware profile.
   Selection may therefore replace an incompatible instance while retaining
   compatible exact neighbors, and rejects unknown or uncovered incompatible
-  instances. Exhaustive targeted calibration deliberately exempts unrelated
+  instances. The non-overlapping application solver treats coverage as a hard
+  feasibility constraint before optimizing measured savings, so it cannot
+  choose a faster partial replacement and fail after overlooking a slower
+  complete one. Exhaustive targeted calibration deliberately exempts unrelated
   graph instances because it executes and validates one exact signature at a
   time. Representation-specific candidate compatibility still needs to become
   an input to the joint physical-island candidate graph.
