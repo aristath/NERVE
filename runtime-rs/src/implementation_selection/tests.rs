@@ -713,6 +713,75 @@ fn one_implementation_exposes_each_duplicate_source_instance_as_an_independent_a
 }
 
 #[test]
+fn calibration_can_mount_every_applicable_region_without_combinatorial_variants() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu", "gfx-fixture", "vulkan");
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        scopes: BTreeMap::new(),
+        implementations: vec![loaded_implementation(
+            "implementation_layer",
+            &["layer"],
+            &["scope_layer"],
+            predicate(&[&gpu], "local"),
+            1_000,
+            800,
+            0,
+        )],
+    };
+    let request = request(
+        vec![selection_device("gpu0", gpu)],
+        &[
+            ("layer_a", "layer", &["gpu0"]),
+            ("layer_b", "layer", &["gpu0"]),
+        ],
+        &[("layer_a", "layer_b")],
+    );
+
+    let variants = catalog
+        .independent_application_selections(&request)
+        .unwrap();
+
+    assert_eq!(variants.len(), 2);
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.selected[0].instance_ids.clone())
+            .collect::<Vec<_>>(),
+        vec![vec!["layer_a".to_string()], vec!["layer_b".to_string()]],
+    );
+    assert_eq!(variants[0].exact_instance_ids, ["layer_b"]);
+    assert_eq!(variants[1].exact_instance_ids, ["layer_a"]);
+    assert!(variants.iter().all(|variant| {
+        variant.total_estimated_saved_ns == variant.selected[0].estimated_saved_ns
+            && variant.total_conversion_ns == variant.selected[0].conversion_ns
+            && variant.total_conversion_bytes == variant.selected[0].conversion_bytes
+            && variant.total_boundary_count == variant.selected[0].boundary_count
+    }));
+
+    let complete = catalog.calibration_selections(&request).unwrap();
+    assert_eq!(complete.len(), 3);
+    assert_eq!(
+        complete
+            .iter()
+            .filter(|selection| selection.selected.len() == 1)
+            .count(),
+        2
+    );
+    assert!(
+        complete
+            .iter()
+            .any(|selection| selection.selected.len() == 2)
+    );
+}
+
+#[test]
 fn one_implementation_exposes_disconnected_semantic_regions_independently() {
     let gpu = profile(HardwareDeviceKind::Gpu, "gpu", "gfx-fixture", "vulkan");
     let mut implementation = loaded_implementation(

@@ -20,77 +20,7 @@ impl RuntimeImplementationCatalog {
         &self,
         request: &RuntimeSelectionRequest,
     ) -> io::Result<RuntimeImplementationSelectionReport> {
-        validate_request(request)?;
-        let devices = request
-            .devices
-            .iter()
-            .map(|device| (device.logical_device_id.as_str(), device))
-            .collect::<BTreeMap<_, _>>();
-        let mut eligible = Vec::new();
-        let mut rejected = Vec::new();
-
-        for loaded in &self.implementations {
-            let applications = independent_region_applications(
-                &loaded.mount_plan.regions,
-                &request.instances,
-                &request.edges,
-            );
-            if applications.is_empty() {
-                rejected.push(RuntimeRejectedImplementation {
-                    implementation_id: loaded.implementation.implementation_id.clone(),
-                    instance_ids: Vec::new(),
-                    reasons: vec![
-                        "runtime topology has no complete matching semantic region".to_string(),
-                    ],
-                });
-                continue;
-            }
-            for instance_ids in applications {
-                let physical_devices =
-                    application_devices(&instance_ids, &request.instances, &devices)?;
-                let reasons = loaded
-                    .implementation
-                    .runtime_predicate
-                    .mismatch_reasons(&request.execution, &physical_devices);
-                if !reasons.is_empty() {
-                    rejected.push(RuntimeRejectedImplementation {
-                        implementation_id: loaded.implementation.implementation_id.clone(),
-                        instance_ids,
-                        reasons,
-                    });
-                    continue;
-                }
-                let metrics = select_metrics(loaded, request)?;
-                eligible.push(EligibleApplication {
-                    loaded,
-                    instance_ids: instance_ids.clone(),
-                    selected: RuntimeSelectedImplementation {
-                        implementation_id: loaded.implementation.implementation_id.clone(),
-                        candidate_id: loaded.implementation.candidate_id.clone(),
-                        instance_ids,
-                        scope_ids: loaded.implementation.scope_ids.clone(),
-                        mount_adapter_id: loaded.mount_plan.adapter_id.clone(),
-                        predicate: loaded.implementation.runtime_predicate.clone(),
-                        representation: loaded.implementation.representation.clone(),
-                        provenance: loaded.implementation.provenance.clone(),
-                        benchmark_id: loaded.implementation.comparison.benchmark_id.clone(),
-                        validation_id: loaded.implementation.comparison.validation_id.clone(),
-                        validation_status: loaded
-                            .implementation
-                            .comparison
-                            .validation_status
-                            .clone(),
-                        speedup_ppm: metrics.speedup_ppm,
-                        estimated_saved_ns: metrics.estimated_saved_ns,
-                        conversion_ns: metrics.conversion_ns,
-                        conversion_bytes: metrics.conversion_bytes,
-                        boundary_count: metrics.boundary_count,
-                        decision_reason: loaded.implementation.decision_reason.clone(),
-                    },
-                });
-            }
-        }
-        eligible.sort_by(application_order);
+        let (eligible, mut rejected) = eligible_applications(self, request)?;
         let selected_indices = optimal_nonoverlapping_applications(&eligible);
         let selected_index_set = selected_indices.iter().copied().collect::<BTreeSet<_>>();
         let mut selected = selected_indices
@@ -184,6 +114,179 @@ impl RuntimeImplementationCatalog {
             rejected,
         })
     }
+
+    /// Returns one selection report for every independently applicable,
+    /// compiler-validated replacement region. Unlike `select`, this does not
+    /// choose a winning non-overlapping set. It is intended for exhaustive
+    /// artifact calibration: every representation that could participate in a
+    /// legal runtime selection can be mounted and measured in isolation while
+    /// all unrelated instances retain the exact baseline.
+    pub fn independent_application_selections(
+        &self,
+        request: &RuntimeSelectionRequest,
+    ) -> io::Result<Vec<RuntimeImplementationSelectionReport>> {
+        let (eligible, rejected) = eligible_applications(self, request)?;
+        eligible
+            .into_iter()
+            .map(|application| {
+                selection_report_for_independent_application(
+                    self,
+                    request,
+                    application.selected,
+                    rejected.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Returns the exact set of selections calibration must mount: every
+    /// independently applicable region plus the globally selected compatible
+    /// set. Equivalent selections are canonicalized so a one-region winner is
+    /// not measured twice.
+    pub fn calibration_selections(
+        &self,
+        request: &RuntimeSelectionRequest,
+    ) -> io::Result<Vec<RuntimeImplementationSelectionReport>> {
+        let mut reports = self.independent_application_selections(request)?;
+        let selected = self.select(request)?;
+        if !selected.selected.is_empty() {
+            reports.push(selected);
+        }
+        reports.sort_by(|left, right| selection_identity(left).cmp(&selection_identity(right)));
+        reports.dedup_by(|left, right| selection_identity(left) == selection_identity(right));
+        Ok(reports)
+    }
+}
+
+fn selection_identity(selection: &RuntimeImplementationSelectionReport) -> Vec<(&str, &[String])> {
+    selection
+        .selected
+        .iter()
+        .map(|selected| {
+            (
+                selected.implementation_id.as_str(),
+                selected.instance_ids.as_slice(),
+            )
+        })
+        .collect()
+}
+
+fn eligible_applications<'a>(
+    catalog: &'a RuntimeImplementationCatalog,
+    request: &RuntimeSelectionRequest,
+) -> io::Result<(
+    Vec<EligibleApplication<'a>>,
+    Vec<RuntimeRejectedImplementation>,
+)> {
+    validate_request(request)?;
+    let devices = request
+        .devices
+        .iter()
+        .map(|device| (device.logical_device_id.as_str(), device))
+        .collect::<BTreeMap<_, _>>();
+    let mut eligible = Vec::new();
+    let mut rejected = Vec::new();
+    for loaded in &catalog.implementations {
+        let applications = independent_region_applications(
+            &loaded.mount_plan.regions,
+            &request.instances,
+            &request.edges,
+        );
+        if applications.is_empty() {
+            rejected.push(RuntimeRejectedImplementation {
+                implementation_id: loaded.implementation.implementation_id.clone(),
+                instance_ids: Vec::new(),
+                reasons: vec![
+                    "runtime topology has no complete matching semantic region".to_string(),
+                ],
+            });
+            continue;
+        }
+        for instance_ids in applications {
+            let physical_devices =
+                application_devices(&instance_ids, &request.instances, &devices)?;
+            let reasons = loaded
+                .implementation
+                .runtime_predicate
+                .mismatch_reasons(&request.execution, &physical_devices);
+            if !reasons.is_empty() {
+                rejected.push(RuntimeRejectedImplementation {
+                    implementation_id: loaded.implementation.implementation_id.clone(),
+                    instance_ids,
+                    reasons,
+                });
+                continue;
+            }
+            let metrics = select_metrics(loaded, request)?;
+            eligible.push(EligibleApplication {
+                loaded,
+                instance_ids: instance_ids.clone(),
+                selected: RuntimeSelectedImplementation {
+                    implementation_id: loaded.implementation.implementation_id.clone(),
+                    candidate_id: loaded.implementation.candidate_id.clone(),
+                    instance_ids,
+                    scope_ids: loaded.implementation.scope_ids.clone(),
+                    mount_adapter_id: loaded.mount_plan.adapter_id.clone(),
+                    predicate: loaded.implementation.runtime_predicate.clone(),
+                    representation: loaded.implementation.representation.clone(),
+                    provenance: loaded.implementation.provenance.clone(),
+                    benchmark_id: loaded.implementation.comparison.benchmark_id.clone(),
+                    validation_id: loaded.implementation.comparison.validation_id.clone(),
+                    validation_status: loaded.implementation.comparison.validation_status.clone(),
+                    speedup_ppm: metrics.speedup_ppm,
+                    estimated_saved_ns: metrics.estimated_saved_ns,
+                    conversion_ns: metrics.conversion_ns,
+                    conversion_bytes: metrics.conversion_bytes,
+                    boundary_count: metrics.boundary_count,
+                    decision_reason: loaded.implementation.decision_reason.clone(),
+                },
+            });
+        }
+    }
+    eligible.sort_by(application_order);
+    rejected.sort_by(|left, right| {
+        (
+            left.implementation_id.as_str(),
+            left.instance_ids.as_slice(),
+        )
+            .cmp(&(
+                right.implementation_id.as_str(),
+                right.instance_ids.as_slice(),
+            ))
+    });
+    Ok((eligible, rejected))
+}
+
+fn selection_report_for_independent_application(
+    catalog: &RuntimeImplementationCatalog,
+    request: &RuntimeSelectionRequest,
+    selected: RuntimeSelectedImplementation,
+    rejected: Vec<RuntimeRejectedImplementation>,
+) -> io::Result<RuntimeImplementationSelectionReport> {
+    let covered_instances = selected.instance_ids.iter().collect::<BTreeSet<_>>();
+    let exact_instance_ids = request
+        .instances
+        .iter()
+        .map(|instance| instance.instance_id.clone())
+        .filter(|instance_id| !covered_instances.contains(instance_id))
+        .collect::<Vec<_>>();
+    if !request.exact_baseline_compatible && !exact_instance_ids.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "an independent implementation application leaves an incompatible exact region",
+        ));
+    }
+    Ok(RuntimeImplementationSelectionReport {
+        package_id: catalog.package_id.clone(),
+        execution: request.execution.clone(),
+        total_estimated_saved_ns: selected.estimated_saved_ns,
+        total_conversion_ns: selected.conversion_ns,
+        total_conversion_bytes: selected.conversion_bytes,
+        total_boundary_count: selected.boundary_count,
+        selected: vec![selected],
+        exact_instance_ids,
+        rejected,
+    })
 }
 
 /// Enumerates independently selectable applications of every declared mount

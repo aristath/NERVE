@@ -220,6 +220,56 @@ impl VulkanResidentRuntimeModel {
         Ok((mounted, selection))
     }
 
+    /// Mounts the exact baseline plus every independently applicable verified
+    /// implementation region for one concrete placement and execution
+    /// envelope. The globally selected winning set is included as well when it
+    /// is not already represented. This keeps exhaustive calibration linear in
+    /// selectable regions rather than enumerating the power set of unrelated
+    /// layer replacements.
+    pub fn applicable_runtime_implementation_variants(
+        &self,
+        package_root: impl AsRef<Path>,
+        profiles_by_logical_device: &BTreeMap<String, crate::HardwareProcessProfile>,
+        execution: crate::RuntimeExecutionEnvelope,
+    ) -> Result<Vec<Self>, VulkanResidentTokenModelPackageError> {
+        let package_root = package_root.as_ref().canonicalize().map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to resolve runtime package root: {error}"
+            ))
+        })?;
+        let catalog = self
+            .package
+            .implementation_catalog(&package_root)
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to load runtime implementation catalog: {error}"
+                ))
+            })?;
+        let request = crate::RuntimeSelectionRequest::from_vulkan_runtime_model(
+            self,
+            profiles_by_logical_device,
+            execution,
+            true,
+        )?;
+        let reports = catalog
+            .calibration_selections(&request)
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to enumerate runtime implementation variants: {error}"
+                ))
+            })?;
+        let mut variants = Vec::with_capacity(reports.len() + 1);
+        variants.push(self.clone());
+        for report in reports {
+            variants.push(self.clone().apply_runtime_implementation_catalog_selection(
+                &package_root,
+                &catalog,
+                report,
+            )?);
+        }
+        Ok(variants)
+    }
+
     fn apply_runtime_implementation_catalog_selection(
         mut self,
         package_root: &Path,
