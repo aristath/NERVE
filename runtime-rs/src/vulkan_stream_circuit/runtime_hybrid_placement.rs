@@ -21,6 +21,7 @@ pub struct VulkanRuntimeHybridLoweredPhasePlacement {
     pub activation_batch_width: usize,
     pub component_device_pools: BTreeMap<String, Vec<String>>,
     pub execution_cases_by_component: BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
+    pub boundary_executions: BTreeMap<usize, VulkanRuntimePhysicalBoundaryExecution>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -458,12 +459,14 @@ pub fn lower_vulkan_runtime_hybrid_phase_set(
             prefill: BTreeMap::new(),
         },
         decode_execution_cases_by_component: decode.execution_cases_by_component,
+        decode_boundary_executions: decode.boundary_executions,
         ..VulkanRuntimePhysicalExecutionPlan::default()
     };
     if let Some(prefill) = prefill {
         physical_execution_plan.component_device_pools.prefill = prefill.component_device_pools;
         physical_execution_plan.prefill_execution_cases_by_component =
             prefill.execution_cases_by_component;
+        physical_execution_plan.prefill_boundary_executions = prefill.boundary_executions;
     }
     physical_execution_plan.validate(&decode.runtime_model)?;
     Ok((decode.runtime_model, physical_execution_plan))
@@ -560,12 +563,117 @@ pub fn lower_vulkan_runtime_hybrid_phase_placement(
         &owner_by_component,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let graph_boundaries = vulkan_runtime_placement_boundaries(&runtime_model)
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let mut boundary_executions = BTreeMap::new();
+    for step in &placement.plan.steps {
+        let VulkanHybridScheduledStep::Boundary {
+            boundary_index,
+            execution_case,
+        } = step
+        else {
+            continue;
+        };
+        let graph_boundary = graph_boundaries.get(*boundary_index).ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(format!(
+                "hybrid physical boundary {boundary_index} is outside the mounted graph",
+            ))
+        })?;
+        let [transfer] = graph_boundary.transfers.as_slice() else {
+            return runtime_hybrid_error(format!(
+                "hybrid physical boundary {boundary_index} does not address one transfer",
+            ));
+        };
+        if !transfer.source_in_prefix {
+            return runtime_hybrid_error(format!(
+                "hybrid physical boundary {boundary_index} has reverse direction",
+            ));
+        }
+        let source_component_id = placement
+            .component_ids
+            .get(*boundary_index)
+            .cloned()
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(format!(
+                    "hybrid physical boundary {boundary_index} has no source component",
+                ))
+            })?;
+        let destination_component_id = placement
+            .component_ids
+            .get(boundary_index + 1)
+            .cloned()
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(format!(
+                    "hybrid physical boundary {boundary_index} has no destination component",
+                ))
+            })?;
+        let matching_edges = runtime_model
+            .circuit_graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| {
+                edge.source.component_id == source_component_id
+                    && edge.destination.component_id == destination_component_id
+            })
+            .collect::<Vec<_>>();
+        let [(edge_index, graph_edge)] = matching_edges.as_slice() else {
+            return runtime_hybrid_error(format!(
+                "hybrid physical boundary {boundary_index} does not identify exactly one mounted graph edge",
+            ));
+        };
+        let source_device_id = logical_device_id_by_physical_device
+            .get(&execution_case.input_physical_device_id)
+            .cloned()
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(format!(
+                    "hybrid boundary references unbound source physical device {:?}",
+                    execution_case.input_physical_device_id,
+                ))
+            })?;
+        let destination_device_id = logical_device_id_by_physical_device
+            .get(&execution_case.output_physical_device_id)
+            .cloned()
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(format!(
+                    "hybrid boundary references unbound destination physical device {:?}",
+                    execution_case.output_physical_device_id,
+                ))
+            })?;
+        let boundary = VulkanRuntimePhysicalBoundaryExecution {
+            boundary_index: *boundary_index,
+            edge_index: *edge_index,
+            source_component_id,
+            source_port_id: graph_edge.source.port_id.clone(),
+            destination_component_id,
+            destination_port_id: graph_edge.destination.port_id.clone(),
+            source_device_id,
+            destination_device_id,
+            frame_byte_count: transfer.byte_count,
+            execution_case: execution_case.clone(),
+        };
+        validate_runtime_hybrid_boundary_case(
+            placement.execution_phase,
+            (placement.execution_phase == nerve_execution_contracts::ExecutionPhase::Decode)
+                .then_some(1),
+            &boundary,
+        )?;
+        if boundary_executions
+            .insert(*boundary_index, boundary)
+            .is_some()
+        {
+            return runtime_hybrid_error(format!(
+                "hybrid physical boundary {boundary_index} is repeated",
+            ));
+        }
+    }
     Ok(VulkanRuntimeHybridLoweredPhasePlacement {
         runtime_model,
         execution_phase: placement.execution_phase,
         activation_batch_width: placement.activation_batch_width,
         component_device_pools,
         execution_cases_by_component,
+        boundary_executions,
     })
 }
 

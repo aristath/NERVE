@@ -482,6 +482,22 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, VulkanResidentInProcessPlacedRuntimeError>>()?;
+        physical_execution_plan
+            .validate_bound_boundary_device_identities(
+                &device_execution_identity_by_logical_device,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(error.to_string()),
+                )
+            })?;
+        let mounted_boundary_routes = physical_execution_plan
+            .mounted_boundary_routes()
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(error.to_string()),
+                )
+            })?;
         let mut distributed_execution_plans =
             VulkanDistributedExecutionPlanSet::from_prepared_plans_with_resource_contract_and_execution_cases(
                 &prepared_plans,
@@ -1389,6 +1405,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             distributed_parameter_allocation_plan,
             distributed_parameter_exclusion_plan,
             physical_execution_residency_plan,
+            mounted_boundary_routes,
             distributed_selected_resource_store_plan,
             distributed_loaded_manifest,
             distributed_parameter_buffers,
@@ -1583,6 +1600,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         } = create_placed_device_links(
             &self.device_slices,
             &mut distributed_activation_buffers,
+            &self.mounted_boundary_routes,
             &device_for,
         )?;
         let mut distributed_dispatch_indices = BTreeMap::<&str, BTreeSet<usize>>::new();

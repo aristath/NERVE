@@ -33,6 +33,7 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     distributed_parameter_allocation_plan: VulkanDistributedParameterAllocationPlan,
     distributed_parameter_exclusion_plan: VulkanDistributedParameterExclusionPlan,
     physical_execution_residency_plan: VulkanRuntimePhysicalExecutionResidencyPlan,
+    mounted_boundary_routes: BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
     distributed_selected_resource_store_plan: VulkanDistributedSelectedResourceStorePlan,
     distributed_loaded_manifest: VulkanLoadedKernelArtifactCatalog,
     distributed_parameter_buffers: Arc<VulkanDistributedParameterBuffers>,

@@ -994,6 +994,46 @@ struct VulkanPlacedProducedPortEdgeGroup {
     edges: Vec<(VulkanPlacedEdgeEndpoint, VulkanPlacedEdgeEndpoint)>,
 }
 
+fn required_vulkan_boundary_route_for_edge_group(
+    group: &VulkanPlacedProducedPortEdgeGroup,
+    selected_boundary_routes: &BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
+) -> Result<Option<VulkanPlacedEdgeTransferRoute>, VulkanError> {
+    let mut required = BTreeSet::new();
+    for (outgoing, incoming) in &group.edges {
+        let Some(selected) = selected_boundary_routes.get(&outgoing.edge_index) else {
+            continue;
+        };
+        if selected.edge_index != outgoing.edge_index
+            || selected.source_device_id != outgoing.local_device_id
+            || selected.destination_device_id != incoming.local_device_id
+            || selected.frame_byte_count != group.byte_capacity
+        {
+            return Err(VulkanError(format!(
+                "selected physical boundary for edge {} disagrees with its mounted endpoints or frame bytes",
+                outgoing.edge_index,
+            )));
+        }
+        if !matches!(
+            selected.route,
+            VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+                | VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+        ) {
+            return Err(VulkanError(format!(
+                "selected physical boundary for edge {} uses unsupported resident route {:?}",
+                outgoing.edge_index, selected.route,
+            )));
+        }
+        required.insert(selected.route);
+    }
+    if required.len() > 1 {
+        return Err(VulkanError(format!(
+            "produced port {}.{} selects incompatible physical boundary routes",
+            group.source_component_id, group.source_port_id,
+        )));
+    }
+    Ok(required.into_iter().next())
+}
+
 fn group_placed_edge_pairs_by_produced_port(
     edge_pairs: Vec<(VulkanPlacedEdgeEndpoint, VulkanPlacedEdgeEndpoint)>,
 ) -> Result<Vec<VulkanPlacedProducedPortEdgeGroup>, VulkanError> {
@@ -1355,6 +1395,7 @@ impl VulkanPlacedEdgeTimelineSynchronizations {
 fn create_placed_device_links<'a, F>(
     device_slices: &[Arc<VulkanResidentModelPackageDeviceSlice>],
     distributed_activation_buffers: &mut VulkanDistributedActivationBuffers,
+    selected_boundary_routes: &BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
     device_for: &F,
 ) -> Result<VulkanPlacedDeviceLinks, VulkanResidentInProcessPlacedRuntimeError>
 where
@@ -1386,7 +1427,20 @@ where
         BTreeMap::<String, Vec<VulkanPlacedEdgeEndpointBufferOverride>>::new();
     let mut synchronizations = BTreeMap::new();
     let mut every_edge_is_resident_replayable = true;
+    let mut mounted_selected_edges = BTreeSet::new();
     for group in edge_groups {
+        let required_route = required_vulkan_boundary_route_for_edge_group(
+            &group,
+            selected_boundary_routes,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        mounted_selected_edges.extend(
+            group
+                .edges
+                .iter()
+                .map(|(outgoing, _)| outgoing.edge_index)
+                .filter(|edge_index| selected_boundary_routes.contains_key(edge_index)),
+        );
         let source_device = device_for(&group.source_device_id)?;
         let matching_local_edges = plans
             .iter()
@@ -1465,6 +1519,14 @@ where
 
         let (physical_buffers, shared_route, staging_buffers, group_is_resident_replayable) =
             if peer_devices.is_empty() {
+                if required_route.is_some() {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "selected boundary route for {}.{} has no physical peer",
+                            group.source_component_id, group.source_port_id,
+                        )),
+                    ));
+                }
                 (
                     vec![Arc::new(
                         source_device
@@ -1475,6 +1537,63 @@ where
                     None,
                     true,
                 )
+            } else if required_route == Some(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal) {
+                if !supports_cross_queue_timeline {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "selected external-device-local boundary {}.{} lacks cross-device timeline support",
+                            group.source_component_id, group.source_port_id,
+                        )),
+                    ));
+                }
+                let shared = source_device
+                    .create_shared_resident_buffers(&peer_devices, group.byte_capacity)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                if shared.route != VulkanSharedResidentBufferRoute::ExternalDeviceLocal {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "selected external-device-local boundary {}.{} mounted as {:?}",
+                            group.source_component_id, group.source_port_id, shared.route,
+                        )),
+                    ));
+                }
+                (
+                    shared.buffers,
+                    Some(VulkanSharedResidentBufferRoute::ExternalDeviceLocal),
+                    None,
+                    true,
+                )
+            } else if required_route == Some(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging) {
+                if !supports_cross_queue_timeline {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "selected device-local-staging boundary {}.{} lacks cross-device timeline support",
+                            group.source_component_id, group.source_port_id,
+                        )),
+                    ));
+                }
+                let staging_allocation = source_device
+                    .create_shared_host_allocation(&peer_devices, group.byte_capacity)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                let staging = unique_devices
+                    .iter()
+                    .map(|(device, _)| {
+                        device
+                            .import_shared_host_buffer(Arc::clone(&staging_allocation))
+                            .map(Arc::new)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let device_local = unique_devices
+                    .iter()
+                    .map(|(device, _)| {
+                        device
+                            .create_resident_buffer(group.byte_capacity)
+                            .map(Arc::new)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                (device_local, None, Some(staging), true)
             } else if supports_cross_queue_timeline
                 && let Ok(shared) = source_device
                     .create_shared_resident_buffers(&peer_devices, group.byte_capacity)
@@ -1721,6 +1840,18 @@ where
                     buffer: incoming_buffer,
                 });
         }
+    }
+    if mounted_selected_edges.len() != selected_boundary_routes.len() {
+        let missing = selected_boundary_routes
+            .keys()
+            .filter(|edge_index| !mounted_selected_edges.contains(edge_index))
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!(
+                "selected physical boundaries were not mounted for graph edges {missing:?}",
+            )),
+        ));
     }
     let mut unique_devices = Vec::<(&VulkanComputeDevice, Vec<String>)>::new();
     for slice in device_slices {

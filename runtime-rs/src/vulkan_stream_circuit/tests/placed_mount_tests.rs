@@ -226,6 +226,65 @@ fn placed_edge_pairs_group_every_remote_consumer_by_produced_port() {
 }
 
 #[test]
+fn selected_boundary_route_must_match_mounted_edge_identity_and_fanout() {
+    let first = outgoing_fanout_endpoint(0, 5, "gpu1", "draft_01");
+    let second = outgoing_fanout_endpoint(1, 6, "gpu2", "draft_02");
+    let groups = group_placed_edge_pairs_by_produced_port(vec![
+        (first.clone(), incoming_fanout_endpoint(&first)),
+        (second.clone(), incoming_fanout_endpoint(&second)),
+    ])
+    .unwrap();
+    let group = &groups[0];
+    let selected = VulkanRuntimeMountedBoundaryRoute {
+        edge_index: first.edge_index,
+        source_device_id: "gpu0".to_string(),
+        destination_device_id: "gpu1".to_string(),
+        frame_byte_count: group.byte_capacity,
+        route: VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
+    };
+    assert_eq!(
+        required_vulkan_boundary_route_for_edge_group(
+            group,
+            &BTreeMap::from([(first.edge_index, selected.clone())]),
+        )
+        .unwrap(),
+        Some(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal),
+    );
+
+    let mut stale = selected.clone();
+    stale.frame_byte_count += 1;
+    assert!(
+        required_vulkan_boundary_route_for_edge_group(
+            group,
+            &BTreeMap::from([(first.edge_index, stale)]),
+        )
+        .unwrap_err()
+        .0
+        .contains("disagrees with its mounted endpoints or frame bytes")
+    );
+
+    let conflicting = VulkanRuntimeMountedBoundaryRoute {
+        edge_index: second.edge_index,
+        source_device_id: "gpu0".to_string(),
+        destination_device_id: "gpu2".to_string(),
+        frame_byte_count: group.byte_capacity,
+        route: VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+    };
+    assert!(
+        required_vulkan_boundary_route_for_edge_group(
+            group,
+            &BTreeMap::from([
+                (first.edge_index, selected),
+                (second.edge_index, conflicting),
+            ]),
+        )
+        .unwrap_err()
+        .0
+        .contains("incompatible physical boundary routes")
+    );
+}
+
+#[test]
 fn placed_edge_allocation_aliases_mixed_local_and_remote_fanout() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let buffers = mixed_fanout_edge_plan().allocate_buffers(&device).unwrap();
@@ -408,13 +467,18 @@ fn mounted_three_device_fanout_uses_one_physical_source_and_publishes_every_edge
             .ok_or_else(|| format!("missing fixture device {device_id}"))
     })
     .unwrap();
-    let links = create_placed_device_links(&slices, &mut distributed, &|device_id| {
-        devices.get(device_id).map(Rc::as_ref).ok_or_else(|| {
-            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                device_id: device_id.to_string(),
-            }
-        })
-    })
+    let links = create_placed_device_links(
+        &slices,
+        &mut distributed,
+        &BTreeMap::new(),
+        &|device_id| {
+            devices.get(device_id).map(Rc::as_ref).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: device_id.to_string(),
+                }
+            })
+        },
+    )
     .unwrap();
     let local = &links.local_edge_overrides["gpu0"];
     let outgoing = links.endpoint_overrides["gpu0"]

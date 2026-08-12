@@ -1,3 +1,26 @@
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanRuntimePhysicalBoundaryExecution {
+    pub boundary_index: usize,
+    pub edge_index: usize,
+    pub source_component_id: String,
+    pub source_port_id: String,
+    pub destination_component_id: String,
+    pub destination_port_id: String,
+    pub source_device_id: String,
+    pub destination_device_id: String,
+    pub frame_byte_count: usize,
+    pub execution_case: VulkanPlacementExecutionCaseIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanRuntimeMountedBoundaryRoute {
+    edge_index: usize,
+    source_device_id: String,
+    destination_device_id: String,
+    frame_byte_count: usize,
+    route: VulkanPlacedEdgeTransferRoute,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VulkanRuntimePhysicalExecutionPlan {
     pub component_device_pools: VulkanDistributedPhaseComponentDevicePools,
@@ -7,6 +30,12 @@ pub struct VulkanRuntimePhysicalExecutionPlan {
         BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
     pub prefill_execution_cases_by_component:
         BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
+    pub decode_boundary_executions:
+        BTreeMap<usize, VulkanRuntimePhysicalBoundaryExecution>,
+    pub decode_batch_boundary_executions:
+        BTreeMap<usize, VulkanRuntimePhysicalBoundaryExecution>,
+    pub prefill_boundary_executions:
+        BTreeMap<usize, VulkanRuntimePhysicalBoundaryExecution>,
 }
 
 impl VulkanRuntimePhysicalExecutionPlan {
@@ -84,6 +113,31 @@ impl VulkanRuntimePhysicalExecutionPlan {
             &self.component_device_pools.prefill,
             &self.prefill_execution_cases_by_component,
         )?;
+        self.validate_exact_boundary_executions(
+            runtime_model,
+            "decode",
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            Some(1),
+            &self.decode_execution_cases_by_component,
+            &self.decode_boundary_executions,
+        )?;
+        self.validate_exact_boundary_executions(
+            runtime_model,
+            "decode_batch",
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            None,
+            &self.decode_batch_execution_cases_by_component,
+            &self.decode_batch_boundary_executions,
+        )?;
+        self.validate_exact_boundary_executions(
+            runtime_model,
+            "prefill",
+            nerve_execution_contracts::ExecutionPhase::Prefill,
+            None,
+            &self.prefill_execution_cases_by_component,
+            &self.prefill_boundary_executions,
+        )?;
+        self.validate_stable_boundary_routes()?;
         Ok(())
     }
 
@@ -104,6 +158,93 @@ impl VulkanRuntimePhysicalExecutionPlan {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    fn mounted_boundary_routes(
+        &self,
+    ) -> Result<
+        BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
+        VulkanRuntimeHybridPlacementError,
+    > {
+        let mut mounted = BTreeMap::new();
+        for boundaries in [
+            &self.decode_boundary_executions,
+            &self.decode_batch_boundary_executions,
+            &self.prefill_boundary_executions,
+        ] {
+            for boundary in boundaries.values() {
+                let selected = VulkanRuntimeMountedBoundaryRoute {
+                    edge_index: boundary.edge_index,
+                    source_device_id: boundary.source_device_id.clone(),
+                    destination_device_id: boundary.destination_device_id.clone(),
+                    frame_byte_count: boundary.frame_byte_count,
+                    route: runtime_mounted_boundary_route(
+                        &boundary.execution_case.transports[0].route,
+                    )?,
+                };
+                if mounted
+                    .insert(boundary.edge_index, selected.clone())
+                    .is_some_and(|existing| existing != selected)
+                {
+                    return runtime_hybrid_error(format!(
+                        "phase-local physical plans require incompatible mounted routes for edge {}",
+                        boundary.edge_index,
+                    ));
+                }
+            }
+        }
+        Ok(mounted)
+    }
+
+    fn validate_bound_boundary_device_identities(
+        &self,
+        device_identity_by_logical_device: &BTreeMap<
+            String,
+            VulkanPlacementDeviceExecutionIdentity,
+        >,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        for boundaries in [
+            &self.decode_boundary_executions,
+            &self.decode_batch_boundary_executions,
+            &self.prefill_boundary_executions,
+        ] {
+            for boundary in boundaries.values() {
+                let source = device_identity_by_logical_device
+                    .get(&boundary.source_device_id)
+                    .ok_or_else(|| {
+                        VulkanRuntimeHybridPlacementError(format!(
+                            "exact physical boundary references unbound logical source {:?}",
+                            boundary.source_device_id,
+                        ))
+                    })?;
+                let destination = device_identity_by_logical_device
+                    .get(&boundary.destination_device_id)
+                    .ok_or_else(|| {
+                        VulkanRuntimeHybridPlacementError(format!(
+                            "exact physical boundary references unbound logical destination {:?}",
+                            boundary.destination_device_id,
+                        ))
+                    })?;
+                let selected = boundary
+                    .execution_case
+                    .devices
+                    .iter()
+                    .collect::<BTreeSet<_>>();
+                let bound = [source, destination].into_iter().collect::<BTreeSet<_>>();
+                if selected != bound
+                    || boundary.execution_case.input_physical_device_id
+                        != source.physical_device_id
+                    || boundary.execution_case.output_physical_device_id
+                        != destination.physical_device_id
+                {
+                    return runtime_hybrid_error(format!(
+                        "exact physical boundary {} was calibrated for different bound devices or drivers",
+                        boundary.boundary_index,
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn validate_phase_pools(
@@ -193,6 +334,183 @@ impl VulkanRuntimePhysicalExecutionPlan {
         }
         Ok(())
     }
+
+    fn validate_exact_boundary_executions(
+        &self,
+        runtime_model: &VulkanResidentRuntimeModel,
+        phase_name: &str,
+        execution_phase: nerve_execution_contracts::ExecutionPhase,
+        exact_batch_width: Option<usize>,
+        phase_cases: &BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
+        boundaries: &BTreeMap<usize, VulkanRuntimePhysicalBoundaryExecution>,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        let graph_boundaries = vulkan_runtime_placement_boundaries(runtime_model)
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let signal_processor_ids = runtime_model
+            .circuit_graph
+            .components
+            .iter()
+            .filter(|component| component.runtime_role.is_signal_processor())
+            .map(|component| component.component_id.as_str())
+            .collect::<Vec<_>>();
+        let required_boundaries = if phase_cases.is_empty() {
+            BTreeSet::new()
+        } else {
+            (0..graph_boundaries.len())
+                .filter(|boundary_index| {
+                    runtime_model
+                        .placement
+                        .device_for_component(signal_processor_ids[*boundary_index])
+                        != runtime_model
+                            .placement
+                            .device_for_component(signal_processor_ids[*boundary_index + 1])
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        if boundaries.keys().copied().collect::<BTreeSet<_>>() != required_boundaries {
+            return runtime_hybrid_error(format!(
+                "exact physical {phase_name} boundary plan must cover every and only cross-device component boundary",
+            ));
+        }
+        for (boundary_index, boundary) in boundaries {
+            if *boundary_index != boundary.boundary_index {
+                return runtime_hybrid_error(format!(
+                    "exact physical {phase_name} boundary key {boundary_index} disagrees with its payload index {}",
+                    boundary.boundary_index,
+                ));
+            }
+            let Some(graph_boundary) = graph_boundaries.get(*boundary_index) else {
+                return runtime_hybrid_error(format!(
+                    "exact physical {phase_name} boundary {boundary_index} is outside the mounted graph",
+                ));
+            };
+            let [graph_transfer] = graph_boundary.transfers.as_slice() else {
+                return runtime_hybrid_error(format!(
+                    "exact physical {phase_name} boundary {boundary_index} does not address one transfer",
+                ));
+            };
+            if !graph_transfer.source_in_prefix
+                || graph_transfer.byte_count != boundary.frame_byte_count
+            {
+                return runtime_hybrid_error(format!(
+                    "exact physical {phase_name} boundary {boundary_index} has stale direction or frame geometry",
+                ));
+            }
+            let graph_edge = runtime_model
+                .circuit_graph
+                .edges
+                .get(boundary.edge_index)
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(format!(
+                        "exact physical {phase_name} boundary {boundary_index} references missing graph edge {}",
+                        boundary.edge_index,
+                    ))
+                })?;
+            if graph_edge.source.component_id != boundary.source_component_id
+                || graph_edge.source.port_id != boundary.source_port_id
+                || graph_edge.destination.component_id != boundary.destination_component_id
+                || graph_edge.destination.port_id != boundary.destination_port_id
+            {
+                return runtime_hybrid_error(format!(
+                    "exact physical {phase_name} boundary {boundary_index} does not match mounted graph edge {}",
+                    boundary.edge_index,
+                ));
+            }
+            let source_owner = runtime_model
+                .placement
+                .device_for_component(&boundary.source_component_id);
+            let destination_owner = runtime_model
+                .placement
+                .device_for_component(&boundary.destination_component_id);
+            if source_owner != boundary.source_device_id
+                || destination_owner != boundary.destination_device_id
+                || source_owner == destination_owner
+            {
+                return runtime_hybrid_error(format!(
+                    "exact physical {phase_name} boundary {boundary_index} disagrees with mounted component ownership",
+                ));
+            }
+            validate_runtime_hybrid_boundary_case(
+                execution_phase,
+                exact_batch_width,
+                boundary,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_stable_boundary_routes(&self) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        self.mounted_boundary_routes().map(|_| ())
+    }
+}
+
+fn runtime_mounted_boundary_route(
+    route: &str,
+) -> Result<VulkanPlacedEdgeTransferRoute, VulkanRuntimeHybridPlacementError> {
+    match route {
+        "external_device_local" => Ok(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal),
+        "device_local_staging" => Ok(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging),
+        _ => runtime_hybrid_error(format!(
+            "exact physical boundary route {route:?} has no resident runtime implementation",
+        )),
+    }
+}
+
+fn validate_runtime_hybrid_boundary_case(
+    execution_phase: nerve_execution_contracts::ExecutionPhase,
+    exact_batch_width: Option<usize>,
+    boundary: &VulkanRuntimePhysicalBoundaryExecution,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    let case = &boundary.execution_case;
+    let batch_width = case.behavior.shape.activation_batch_width;
+    if case.strategy != VulkanPlacementExecutionStrategy::DirectedBoundary
+        || case.behavior.phase != execution_phase
+        || exact_batch_width.is_some_and(|expected| batch_width != expected)
+        || exact_batch_width.is_none() && batch_width < 2
+    {
+        return runtime_hybrid_error(
+            "exact physical boundary has incompatible strategy or phase geometry",
+        );
+    }
+    let byte_count = boundary
+        .frame_byte_count
+        .checked_mul(batch_width)
+        .ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(
+                "exact physical boundary byte geometry overflowed".to_string(),
+            )
+        })?;
+    let [transport] = case.transports.as_slice() else {
+        return runtime_hybrid_error("exact physical boundary requires one transport identity");
+    };
+    if transport.source_physical_device_id != case.input_physical_device_id
+        || transport.destination_physical_device_id != case.output_physical_device_id
+        || case.owner_physical_device_id != case.input_physical_device_id
+        || transport.byte_capacity != byte_count
+        || case.behavior.shape.input_byte_capacity != byte_count
+        || case.behavior.shape.output_byte_capacity != byte_count
+        || !matches!(
+            transport.route.as_str(),
+            "external_device_local" | "device_local_staging"
+        )
+    {
+        return runtime_hybrid_error(
+            "exact physical boundary has incompatible endpoints, bytes, or mounted route",
+        );
+    }
+    let [VulkanPlacementOperationGeometry::DirectedTransfer {
+        byte_count: operation_bytes,
+        ..
+    }] = case.operations.as_slice()
+    else {
+        return runtime_hybrid_error("exact physical boundary requires one directed transfer");
+    };
+    if *operation_bytes != byte_count {
+        return runtime_hybrid_error(
+            "exact physical boundary operation disagrees with its transport bytes",
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

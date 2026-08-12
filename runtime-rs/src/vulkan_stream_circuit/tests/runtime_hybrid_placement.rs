@@ -228,6 +228,52 @@ fn hybrid_test_serialized_observation(
     observation
 }
 
+fn hybrid_test_boundary_case(
+    source_device_id: &str,
+    destination_device_id: &str,
+    byte_count: usize,
+    route: &str,
+) -> VulkanPlacementExecutionCaseIdentity {
+    VulkanPlacementExecutionCaseIdentity {
+        behavior: VulkanPlacementBehaviorIdentity {
+            compiled_execution_signature: hybrid_test_digest('f'),
+            runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
+                .to_string(),
+            phase: nerve_execution_contracts::ExecutionPhase::Decode,
+            shape: VulkanPlacementShapeClass {
+                activation_batch_width: 1,
+                input_byte_capacity: byte_count,
+                output_byte_capacity: byte_count,
+            },
+            input_fixture_digest: hybrid_test_digest('1'),
+        },
+        contract_ids: vec!["boundary".to_string()],
+        implementation_digests: vec![hybrid_test_digest('2')],
+        artifact_digest: hybrid_test_digest('3'),
+        execution_graph_digest: hybrid_test_digest('f'),
+        operations: vec![VulkanPlacementOperationGeometry::DirectedTransfer {
+            contract_id: "boundary".to_string(),
+            byte_count,
+        }],
+        equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
+        strategy: VulkanPlacementExecutionStrategy::DirectedBoundary,
+        devices: vec![
+            hybrid_test_device(source_device_id),
+            hybrid_test_device(destination_device_id),
+        ],
+        shards: Vec::new(),
+        input_physical_device_id: source_device_id.to_string(),
+        output_physical_device_id: destination_device_id.to_string(),
+        owner_physical_device_id: source_device_id.to_string(),
+        transports: vec![VulkanPlacementTransportIdentity {
+            source_physical_device_id: source_device_id.to_string(),
+            destination_physical_device_id: destination_device_id.to_string(),
+            byte_capacity: byte_count,
+            route: route.to_string(),
+        }],
+    }
+}
+
 fn hybrid_test_catalog(model: &VulkanResidentRuntimeModel) -> VulkanPlacementCalibrationCatalog {
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     let mut signatures = model
@@ -536,6 +582,86 @@ fn runtime_hybrid_lowering_keeps_internal_shards_phase_local() {
         .unwrap_err()
         .0
         .contains("unbound physical device")
+    );
+}
+
+#[test]
+fn runtime_hybrid_lowering_preserves_exact_boundary_transport_for_mount() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let catalog = hybrid_test_catalog(&model);
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+    let mut placement = plan_vulkan_runtime_hybrid_ordered_graph(
+        &model,
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap();
+    for step in placement.plan.steps.iter_mut().skip(1) {
+        let VulkanHybridScheduledStep::Region { execution_case, .. } = step else {
+            panic!("fixture plan contains only component regions");
+        };
+        execution_case.devices = vec![hybrid_test_device("gpu1")];
+        execution_case.input_physical_device_id = "gpu1".to_string();
+        execution_case.output_physical_device_id = "gpu1".to_string();
+        execution_case.owner_physical_device_id = "gpu1".to_string();
+    }
+    let frame_byte_count = vulkan_runtime_placement_boundaries(&model).unwrap()[0].transfers[0]
+        .byte_count;
+    placement.plan.steps.insert(
+        1,
+        VulkanHybridScheduledStep::Boundary {
+            boundary_index: 0,
+            execution_case: hybrid_test_boundary_case(
+                "gpu0",
+                "gpu1",
+                frame_byte_count,
+                "external_device_local",
+            ),
+        },
+    );
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "logical0".to_string()),
+        ("gpu1".to_string(), "logical1".to_string()),
+    ]);
+
+    let lowered =
+        lower_vulkan_runtime_hybrid_phase_placement(&model, &placement, &bindings).unwrap();
+    let boundary = &lowered.boundary_executions[&0];
+    assert_eq!(boundary.source_device_id, "logical0");
+    assert_eq!(boundary.destination_device_id, "logical1");
+    assert_eq!(boundary.frame_byte_count, frame_byte_count);
+    assert_eq!(
+        boundary.execution_case.transports[0].route,
+        "external_device_local"
+    );
+
+    let physical_plan = VulkanRuntimePhysicalExecutionPlan {
+        component_device_pools: VulkanDistributedPhaseComponentDevicePools::uniform(
+            &lowered
+                .runtime_model
+                .placement
+                .component_shard_devices,
+        ),
+        decode_execution_cases_by_component: lowered.execution_cases_by_component,
+        decode_boundary_executions: lowered.boundary_executions,
+        ..VulkanRuntimePhysicalExecutionPlan::default()
+    };
+    physical_plan.validate(&lowered.runtime_model).unwrap();
+    let mut missing_boundary = physical_plan;
+    missing_boundary.decode_boundary_executions.clear();
+    assert!(
+        missing_boundary
+            .validate(&lowered.runtime_model)
+            .unwrap_err()
+            .0
+            .contains("must cover every and only cross-device component boundary")
     );
 }
 
