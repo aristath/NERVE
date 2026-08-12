@@ -437,6 +437,63 @@ impl VulkanPlacementCalibrationCatalog {
         self.observations_for_behavior(behavior)
     }
 
+    pub fn candidate_behaviors_for_compiled_execution(
+        &self,
+        compiled_execution_signature: &str,
+        phase: nerve_execution_contracts::ExecutionPhase,
+    ) -> Vec<&VulkanPlacementBehaviorIdentity> {
+        let mut behaviors = self
+            .observations
+            .iter()
+            .filter(|observation| {
+                matches!(
+                    observation.execution_case.strategy,
+                    VulkanPlacementExecutionStrategy::SingleDevice
+                        | VulkanPlacementExecutionStrategy::Serialized
+                        | VulkanPlacementExecutionStrategy::TensorParallel
+                        | VulkanPlacementExecutionStrategy::WholeExpertParallel
+                        | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
+                        | VulkanPlacementExecutionStrategy::Hybrid
+                ) && observation.execution_case.behavior.compiled_execution_signature
+                    == compiled_execution_signature
+                    && observation.execution_case.behavior.phase == phase
+            })
+            .map(|observation| &observation.execution_case.behavior)
+            .collect::<Vec<_>>();
+        behaviors.sort();
+        behaviors.dedup();
+        behaviors
+    }
+
+    pub fn directed_boundary_candidates(
+        &self,
+        phase: nerve_execution_contracts::ExecutionPhase,
+        activation_batch_width: usize,
+        byte_count: usize,
+    ) -> Vec<&VulkanPlacementCalibrationObservation> {
+        self.observations
+            .iter()
+            .filter(|observation| {
+                observation.execution_case.strategy
+                    == VulkanPlacementExecutionStrategy::DirectedBoundary
+                    && observation.execution_case.behavior.phase == phase
+                    && observation
+                        .execution_case
+                        .behavior
+                        .shape
+                        .activation_batch_width
+                        == activation_batch_width
+                    && matches!(
+                        observation.execution_case.behavior.shape.operations.as_slice(),
+                        [VulkanPlacementOperationGeometry::DirectedTransfer {
+                            byte_count: measured,
+                            ..
+                        }] if *measured == byte_count
+                    )
+            })
+            .collect()
+    }
+
     /// Returns every exact candidate that fits the current reservation-aware
     /// capacity envelope. Resident bytes and transient peak bytes coexist
     /// during the measured transaction and are therefore added, with overflow

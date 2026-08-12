@@ -1131,7 +1131,7 @@ fn fixture_model_runtime_model_with_dynamic_partition(
     runtime_model
 }
 
-fn fixture_model_runtime_model_with_three_layer_series(
+pub(super) fn fixture_model_runtime_model_with_three_layer_series(
     middle_device_id: &str,
 ) -> VulkanResidentRuntimeModel {
     let manifest = fixture_model_package_manifest();
