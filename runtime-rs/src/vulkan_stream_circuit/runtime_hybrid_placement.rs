@@ -445,6 +445,7 @@ fn runtime_hybrid_candidate_graph(
                 candidate_id: format!("component:{component_index}:case:{candidate_index}"),
                 component_start: component_index,
                 component_end: component_index + 1,
+                semantic_contract_id: target.signature_id.clone(),
                 execution_case: observation.execution_case.clone(),
             });
         }
@@ -530,6 +531,10 @@ fn runtime_hybrid_candidate_graph(
                 ),
                 component_start,
                 component_end,
+                semantic_contract_id: outer
+                    .behavior
+                    .compiled_execution_signature
+                    .clone(),
                 execution_case: outer.clone(),
             });
             region_executions_by_case.insert(outer.clone(), calibration.clone());

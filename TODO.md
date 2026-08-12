@@ -404,6 +404,13 @@ For every numbered item below:
   graph instances because it executes and validates one exact signature at a
   time. Representation-specific candidate compatibility still needs to become
   an input to the joint physical-island candidate graph.
+- The hybrid solver now separates a compiler-validated source-semantic
+  contract from a compiled execution signature. Native, converted, local, and
+  TP realizations may compete for the same graph range only when they carry the
+  same explicit semantic contract plus the same phase, shape, and input-fixture
+  cohort. A faster artifact cannot claim equivalence merely by sharing graph
+  geometry. Runtime implementation applications still need to supply these
+  identities and mount the winning representation set.
 - Preserve the native source representation whenever it is supported and wins
   on the assigned target.
 - Add alternative structured INT4, FP8, INT8, FP16, BF16, or other formats only

@@ -3,6 +3,10 @@ pub struct VulkanHybridRegionCandidate {
     pub candidate_id: String,
     pub component_start: usize,
     pub component_end: usize,
+    /// Explicit source-semantic equivalence class. Different compiled
+    /// signatures may compete for one graph range only when the compiler's
+    /// validated representation contract assigns them this same identity.
+    pub semantic_contract_id: String,
     pub execution_case: VulkanPlacementExecutionCaseIdentity,
 }
 
@@ -122,10 +126,11 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
 
     let mut candidate_ids = BTreeSet::new();
     let mut expected_phase = None;
-    let mut behavior_by_range = BTreeMap::new();
+    let mut semantic_cohort_by_range = BTreeMap::new();
     let mut regions_by_start = BTreeMap::<usize, Vec<VulkanHybridResolvedRegionCandidate>>::new();
     for candidate in region_candidates {
         if candidate.candidate_id.is_empty()
+            || candidate.semantic_contract_id.is_empty()
             || !candidate_ids.insert(candidate.candidate_id.as_str())
             || candidate.component_start >= candidate.component_end
             || candidate.component_end > component_count
@@ -155,18 +160,28 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
             )));
         }
         let range = (candidate.component_start, candidate.component_end);
-        if behavior_by_range
+        let semantic_cohort = (
+            candidate.semantic_contract_id.clone(),
+            observation.execution_case.behavior.phase,
+            observation.execution_case.behavior.shape.clone(),
+            observation
+                .execution_case
+                .behavior
+                .input_fixture_digest
+                .clone(),
+        );
+        if semantic_cohort_by_range
             .get(&range)
-            .is_some_and(|behavior| behavior != &observation.execution_case.behavior)
+            .is_some_and(|existing| existing != &semantic_cohort)
         {
             return Err(VulkanHybridPlacementError(format!(
-                "hybrid candidates for graph range {:?} do not share one exact behavior identity",
+                "hybrid candidates for graph range {:?} do not share one explicit semantic contract and exact execution cohort",
                 range,
             )));
         }
-        behavior_by_range
+        semantic_cohort_by_range
             .entry(range)
-            .or_insert_with(|| observation.execution_case.behavior.clone());
+            .or_insert(semantic_cohort);
         validate_hybrid_phase(
             &mut expected_phase,
             observation.execution_case.behavior.phase,
@@ -619,21 +634,25 @@ mod hybrid_placement_optimizer_tests {
             .iter()
             .map(|(id, _)| device(id, 2))
             .collect::<Vec<_>>();
-        let shards = devices
-            .iter()
-            .enumerate()
-            .map(|(index, (id, bytes))| VulkanPlacementShardIdentity {
-                dispatch_ordinal: 0,
-                participant_ordinal: index,
-                physical_device_id: (*id).to_string(),
-                distribution: "output_rows".to_string(),
-                logical_start: index,
-                logical_count: 1,
-                selected_resource_indices_by_partition: BTreeMap::new(),
-                selected_resource_fragments_by_partition: BTreeMap::new(),
-                parameter_bytes: (*bytes).max(1),
-            })
-            .collect::<Vec<_>>();
+        let shards = if strategy == VulkanPlacementExecutionStrategy::SingleDevice {
+            Vec::new()
+        } else {
+            devices
+                .iter()
+                .enumerate()
+                .map(|(index, (id, bytes))| VulkanPlacementShardIdentity {
+                    dispatch_ordinal: 0,
+                    participant_ordinal: index,
+                    physical_device_id: (*id).to_string(),
+                    distribution: "output_rows".to_string(),
+                    logical_start: index,
+                    logical_count: 1,
+                    selected_resource_indices_by_partition: BTreeMap::new(),
+                    selected_resource_fragments_by_partition: BTreeMap::new(),
+                    parameter_bytes: (*bytes).max(1),
+                })
+                .collect::<Vec<_>>()
+        };
         VulkanPlacementCalibrationObservation {
             execution_case: VulkanPlacementExecutionCaseIdentity {
                 behavior,
@@ -835,18 +854,21 @@ mod hybrid_placement_optimizer_tests {
                     candidate_id: "fast-remote".to_string(),
                     component_start: 0,
                     component_end: 1,
+                    semantic_contract_id: "first".to_string(),
                     execution_case: fast_remote,
                 },
                 VulkanHybridRegionCandidate {
                     candidate_id: "slower-local".to_string(),
                     component_start: 0,
                     component_end: 1,
+                    semantic_contract_id: "first".to_string(),
                     execution_case: slower_local,
                 },
                 VulkanHybridRegionCandidate {
                     candidate_id: "second".to_string(),
                     component_start: 1,
                     component_end: 2,
+                    semantic_contract_id: "second".to_string(),
                     execution_case: second,
                 },
             ],
@@ -917,18 +939,21 @@ mod hybrid_placement_optimizer_tests {
                     candidate_id: "fast-large".to_string(),
                     component_start: 0,
                     component_end: 1,
+                    semantic_contract_id: "first".to_string(),
                     execution_case: fast_large,
                 },
                 VulkanHybridRegionCandidate {
                     candidate_id: "slower-small".to_string(),
                     component_start: 0,
                     component_end: 1,
+                    semantic_contract_id: "first".to_string(),
                     execution_case: slower_small,
                 },
                 VulkanHybridRegionCandidate {
                     candidate_id: "second".to_string(),
                     component_start: 1,
                     component_end: 2,
+                    semantic_contract_id: "second".to_string(),
                     execution_case: second,
                 },
             ],
@@ -980,12 +1005,14 @@ mod hybrid_placement_optimizer_tests {
                     candidate_id: "one".to_string(),
                     component_start: 0,
                     component_end: 1,
+                    semantic_contract_id: "region".to_string(),
                     execution_case: one_activation,
                 },
                 VulkanHybridRegionCandidate {
                     candidate_id: "two".to_string(),
                     component_start: 0,
                     component_end: 1,
+                    semantic_contract_id: "region".to_string(),
                     execution_case: two_activations,
                 },
             ],
@@ -996,6 +1023,121 @@ mod hybrid_placement_optimizer_tests {
 
         assert_eq!(selected_region_ids(&plan), ["two"]);
         assert_eq!(plan.predicted_duration_ns_per_activation, 9);
+    }
+
+    #[test]
+    fn verified_representations_with_distinct_signatures_compete_by_source_semantics() {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let native = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("native-fp8"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 20)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                20,
+                1,
+            ),
+        );
+        let int4_tp = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("int4-tp"),
+                VulkanPlacementExecutionStrategy::TensorParallel,
+                &[("gpu0", 8), ("gpu1", 8)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                9,
+                1,
+            ),
+        );
+
+        let plan = plan_vulkan_hybrid_ordered_graph(
+            &catalog,
+            1,
+            &[
+                VulkanHybridRegionCandidate {
+                    candidate_id: "native".to_string(),
+                    component_start: 0,
+                    component_end: 1,
+                    semantic_contract_id: "source-contract".to_string(),
+                    execution_case: native,
+                },
+                VulkanHybridRegionCandidate {
+                    candidate_id: "int4-tp".to_string(),
+                    component_start: 0,
+                    component_end: 1,
+                    semantic_contract_id: "source-contract".to_string(),
+                    execution_case: int4_tp,
+                },
+            ],
+            &[],
+            &capacity(2, 100, 100),
+        )
+        .unwrap();
+
+        assert_eq!(selected_region_ids(&plan), ["int4-tp"]);
+        assert_eq!(plan.predicted_duration_ns_per_activation, 9);
+    }
+
+    #[test]
+    fn representations_cannot_claim_equivalence_across_source_contracts() {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let first = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("first"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 10)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                10,
+                1,
+            ),
+        );
+        let second = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("second"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 10)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                9,
+                1,
+            ),
+        );
+
+        let error = plan_vulkan_hybrid_ordered_graph(
+            &catalog,
+            1,
+            &[
+                VulkanHybridRegionCandidate {
+                    candidate_id: "first".to_string(),
+                    component_start: 0,
+                    component_end: 1,
+                    semantic_contract_id: "source-a".to_string(),
+                    execution_case: first,
+                },
+                VulkanHybridRegionCandidate {
+                    candidate_id: "second".to_string(),
+                    component_start: 0,
+                    component_end: 1,
+                    semantic_contract_id: "source-b".to_string(),
+                    execution_case: second,
+                },
+            ],
+            &[],
+            &capacity(1, 100, 100),
+        )
+        .unwrap_err();
+
+        assert!(error.0.contains("explicit semantic contract"));
     }
 
     #[test]
@@ -1032,12 +1174,14 @@ mod hybrid_placement_optimizer_tests {
                 candidate_id: "first".to_string(),
                 component_start: 0,
                 component_end: 1,
+                semantic_contract_id: "first".to_string(),
                 execution_case: first,
             },
             VulkanHybridRegionCandidate {
                 candidate_id: "second".to_string(),
                 component_start: 1,
                 component_end: 2,
+                semantic_contract_id: "second".to_string(),
                 execution_case: second,
             },
         ];
