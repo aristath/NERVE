@@ -2357,6 +2357,100 @@ impl VulkanCompiledResourceDeviceStore {
                 ))
             })
     }
+
+    fn selector_resource_group_id(
+        &self,
+        selector_id: &str,
+        resource_index: usize,
+    ) -> Result<String, VulkanCompiledResourceDeviceStoreError> {
+        let resolved = self.resolve_selector_resource(selector_id, resource_index)?;
+        DeviceResourceGroupDescriptor::from_resolved(&resolved)
+            .map(|descriptor| descriptor.id)
+            .map_err(|error| {
+                VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "compiled resource descriptor is invalid: {error}",
+                ))
+            })
+    }
+
+    fn absent_selector_resource_indices(
+        &self,
+        selector_id: &str,
+        resource_indices: &[usize],
+    ) -> Result<Vec<usize>, VulkanCompiledResourceDeviceStoreError> {
+        let directory = self
+            .manager
+            .directory()
+            .map_err(compiled_device_store_residency_error)?;
+        let state_by_group = directory
+            .into_iter()
+            .map(|entry| (entry.group_id, entry.state))
+            .collect::<BTreeMap<_, _>>();
+        resource_indices
+            .iter()
+            .copied()
+            .try_fold(Vec::new(), |mut absent, resource_index| {
+                let group_id = self.selector_resource_group_id(selector_id, resource_index)?;
+                if !state_by_group.contains_key(&group_id) {
+                    absent.push(resource_index);
+                }
+                Ok(absent)
+            })
+    }
+
+    fn rollback_absent_selector_resources(
+        &self,
+        selector_id: &str,
+        resource_indices: &[usize],
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        if resource_indices.is_empty() {
+            return Ok(());
+        }
+        let _mutation = self.residency_mutation.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource residency mutation lock was poisoned",
+            )
+        })?;
+        let group_ids = resource_indices
+            .iter()
+            .map(|resource_index| {
+                self.selector_resource_group_id(selector_id, *resource_index)
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let directory = self
+            .manager
+            .directory()
+            .map_err(compiled_device_store_residency_error)?;
+        let state_by_group = directory
+            .into_iter()
+            .map(|entry| (entry.group_id, entry.state))
+            .collect::<BTreeMap<_, _>>();
+        let resident = group_ids
+            .iter()
+            .filter(|group_id| {
+                state_by_group.get(*group_id) == Some(&ResourceResidencyState::Resident)
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !resident.is_empty() {
+            self.evict_exact_inactive_groups(&resident)?;
+        }
+        for group_id in group_ids {
+            match state_by_group.get(&group_id) {
+                Some(ResourceResidencyState::Failed) => self
+                    .manager
+                    .reset_failed_group(&group_id)
+                    .map_err(compiled_device_store_residency_error)?,
+                Some(ResourceResidencyState::Requested | ResourceResidencyState::Loading) => {
+                    return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                        "distributed residency rollback found group {group_id:?} still transitioning",
+                    )));
+                }
+                Some(ResourceResidencyState::Absent | ResourceResidencyState::Resident) | None => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for VulkanCompiledResourceStoreLoadGuard<'_> {

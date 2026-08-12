@@ -1,4 +1,5 @@
 pub(crate) struct VulkanDistributedSelectedResourceGate {
+    logical_device_id: String,
     selector_id: String,
     checkpoint_tag: u32,
     resource_count: usize,
@@ -17,10 +18,18 @@ pub(crate) struct VulkanDistributedSelectedResourceResolvedMiss {
     pub resource_indices: Vec<usize>,
 }
 
+struct VulkanDistributedSelectedResourcePendingMiss {
+    notification_epoch: u32,
+    published_count: u32,
+    request_count: usize,
+    resource_indices: Vec<usize>,
+}
+
 impl VulkanDistributedSelectedResourceGate {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         device: &VulkanComputeDevice,
+        logical_device_id: &str,
         execution_scope: &str,
         dispatch: &VulkanDistributedDispatchPlan,
         partition: &VulkanDistributedSelectedResourcePartitionPlan,
@@ -33,6 +42,17 @@ impl VulkanDistributedSelectedResourceGate {
         transaction_predicate: Arc<VulkanResidentBuffer>,
         checkpoint_tag: u32,
     ) -> Result<Self, VulkanDistributedDispatchRunnerError> {
+        if logical_device_id.is_empty()
+            || !store
+                .logical_device_ids()
+                .iter()
+                .any(|candidate| candidate == logical_device_id)
+        {
+            return Err(VulkanDistributedDispatchRunnerError(format!(
+                "distributed selected-resource gate {}.{} maps logical device {logical_device_id:?} outside its physical store",
+                dispatch.component_id, dispatch.node_id,
+            )));
+        }
         if lane_count == 0 || selection_lane_stride_bytes % size_of::<u32>() != 0 {
             return Err(VulkanDistributedDispatchRunnerError(format!(
                 "distributed selected-resource gate {}.{} has an invalid lane layout",
@@ -143,6 +163,7 @@ impl VulkanDistributedSelectedResourceGate {
         ))
         .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))?;
         Ok(Self {
+            logical_device_id: logical_device_id.to_string(),
             selector_id: selector.id.clone(),
             checkpoint_tag,
             resource_count: selector.resource_count,
@@ -201,18 +222,26 @@ impl VulkanDistributedSelectedResourceGate {
         self.resource_count
     }
 
-    pub(crate) fn ensure_execution_headroom(
-        &self,
-        device: &VulkanComputeDevice,
-    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
-        self.context
-            .store
-            .ensure_execution_headroom(device)
-            .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))
+    pub(crate) fn logical_device_id(&self) -> &str {
+        &self.logical_device_id
     }
 
-    pub(crate) fn store_identity(&self) -> usize {
-        Arc::as_ptr(&self.context.store) as usize
+    pub(crate) fn selector_id(&self) -> &str {
+        &self.selector_id
+    }
+
+    pub(crate) fn checkpoint_tag(&self) -> u32 {
+        self.checkpoint_tag
+    }
+
+    fn coordinator(
+        &self,
+    ) -> Result<Option<Arc<VulkanCompiledResourceDistributedCohortCoordinator>>, VulkanDistributedDispatchRunnerError>
+    {
+        self.context
+            .store
+            .distributed_cohort_coordinator()
+            .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))
     }
 
     pub(crate) fn dispatch(&self) -> &VulkanResidentKernelDispatch {
@@ -290,13 +319,10 @@ impl VulkanDistributedSelectedResourceGate {
             .map_err(VulkanDistributedDispatchRunnerError::from)
     }
 
-    pub(crate) fn resolve_completed_miss(
+    fn pending_miss(
         &self,
-        device: &VulkanComputeDevice,
-    ) -> Result<
-        Option<VulkanDistributedSelectedResourceResolvedMiss>,
-        VulkanDistributedDispatchRunnerError,
-    > {
+    ) -> Result<Option<VulkanDistributedSelectedResourcePendingMiss>, VulkanDistributedDispatchRunnerError>
+    {
         let notification_epoch = self.notification_epoch()?;
         if notification_epoch == self.observed_notification_epoch() {
             return Ok(None);
@@ -323,10 +349,19 @@ impl VulkanDistributedSelectedResourceGate {
         }
         let resource_indices = exact_demand_miss_resource_indices(&missing.requests)
             .map_err(VulkanDistributedDispatchRunnerError::from)?;
-        self.context
-            .store
-            .record_gpu_gate_misses(&self.selector_id, missing.requests.len())
-            .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))?;
+        Ok(Some(VulkanDistributedSelectedResourcePendingMiss {
+            notification_epoch,
+            published_count: missing.published_count,
+            request_count: missing.requests.len(),
+            resource_indices,
+        }))
+    }
+
+    fn load_pending_resources(
+        &self,
+        device: &VulkanComputeDevice,
+        resource_indices: &[usize],
+    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
         self.context
             .store
             .load_selector_resources_for_resume(
@@ -335,17 +370,161 @@ impl VulkanDistributedSelectedResourceGate {
                 &resource_indices,
                 self.context.owner.clone(),
             )
-            .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))?;
-        self.acknowledge_missing_through(missing.published_count)?;
-        self.observe_notification_epoch(notification_epoch);
+            .map(|_| ())
+            .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))
+    }
+
+    fn absent_resource_indices(
+        &self,
+        resource_indices: &[usize],
+    ) -> Result<Vec<usize>, VulkanDistributedDispatchRunnerError> {
+        self.context
+            .store
+            .absent_selector_resource_indices(&self.selector_id, resource_indices)
+            .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))
+    }
+
+    fn rollback_absent_resources(
+        &self,
+        resource_indices: &[usize],
+    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
+        self.context
+            .store
+            .rollback_absent_selector_resources(&self.selector_id, resource_indices)
+            .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))
+    }
+
+    fn commit_pending_miss(
+        &self,
+        pending: &VulkanDistributedSelectedResourcePendingMiss,
+    ) -> Result<VulkanDistributedSelectedResourceResolvedMiss, VulkanDistributedDispatchRunnerError>
+    {
+        self.acknowledge_missing_through(pending.published_count)?;
+        self.observe_notification_epoch(pending.notification_epoch);
         self.gate
             .continuation_predicate()
             .write_bytes(&1u32.to_le_bytes())
             .map_err(VulkanDistributedDispatchRunnerError::from)?;
-        Ok(Some(VulkanDistributedSelectedResourceResolvedMiss {
+        Ok(VulkanDistributedSelectedResourceResolvedMiss {
             selector_id: self.selector_id.clone(),
             checkpoint_tag: self.checkpoint_tag,
-            resource_indices,
-        }))
+            resource_indices: pending.resource_indices.clone(),
+        })
     }
+
+}
+pub(crate) fn resolve_distributed_selected_resource_misses<'a>(
+    gates: &[(&'a VulkanDistributedSelectedResourceGate, &'a VulkanComputeDevice)],
+) -> Result<Vec<(usize, VulkanDistributedSelectedResourceResolvedMiss)>, VulkanDistributedDispatchRunnerError>
+{
+    let mut coordinator = None::<Arc<VulkanCompiledResourceDistributedCohortCoordinator>>;
+    let mut pending = Vec::with_capacity(gates.len());
+    let mut observations = Vec::with_capacity(gates.len());
+    for (gate, _) in gates {
+        if let Some(candidate) = gate.coordinator()? {
+            match &coordinator {
+                Some(current) if !Arc::ptr_eq(current, &candidate) => {
+                    return Err(VulkanDistributedDispatchRunnerError(
+                        "distributed selected-resource gates belong to different residency coordinators"
+                            .to_string(),
+                    ));
+                }
+                Some(_) => {}
+                None => coordinator = Some(candidate),
+            }
+        }
+        let gate_pending = gate.pending_miss()?;
+        observations.push(VulkanCompiledResourceDistributedFaultObservation {
+            logical_device_id: gate.logical_device_id().to_string(),
+            selector_id: gate.selector_id().to_string(),
+            checkpoint_tag: gate.checkpoint_tag(),
+            pending_resource_indices: gate_pending
+                .as_ref()
+                .map(|pending| pending.resource_indices.clone())
+                .unwrap_or_default(),
+        });
+        pending.push(gate_pending);
+    }
+    let _mutation = coordinator
+        .as_ref()
+        .map(|coordinator| coordinator.begin_mutation())
+        .transpose()
+        .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))?;
+    let plan = if let Some(coordinator) = &coordinator {
+        coordinator
+            .plan_fault_resolution(&observations)
+            .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))?
+    } else {
+        VulkanCompiledResourceDistributedFaultPlan {
+            loads: pending
+                .iter()
+                .enumerate()
+                .filter_map(|(observation_index, pending)| {
+                    pending.as_ref().map(|pending| VulkanCompiledResourceDistributedFaultLoad {
+                        observation_index,
+                        resource_indices: pending.resource_indices.clone(),
+                    })
+                })
+                .collect(),
+            commit_observation_indices: pending
+                .iter()
+                .enumerate()
+                .filter_map(|(index, pending)| pending.as_ref().map(|_| index))
+                .collect(),
+        }
+    };
+    for (gate, pending) in gates.iter().map(|(gate, _)| *gate).zip(&pending) {
+        if let Some(pending) = pending {
+            gate.context
+                .store
+                .record_gpu_gate_misses(gate.selector_id(), pending.request_count)
+                .map_err(|error| VulkanDistributedDispatchRunnerError(error.to_string()))?;
+        }
+    }
+    let rollback = plan
+        .loads
+        .iter()
+        .map(|load| {
+            gates[load.observation_index]
+                .0
+                .absent_resource_indices(&load.resource_indices)
+                .map(|absent| (load.observation_index, absent))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for load in &plan.loads {
+        let (gate, device) = gates[load.observation_index];
+        if let Err(load_error) = gate.load_pending_resources(device, &load.resource_indices) {
+            let rollback_errors = rollback
+                .iter()
+                .rev()
+                .filter_map(|(observation_index, absent)| {
+                    gates[*observation_index]
+                        .0
+                        .rollback_absent_resources(absent)
+                        .err()
+                        .map(|error| error.to_string())
+                })
+                .collect::<Vec<_>>();
+            return if rollback_errors.is_empty() {
+                Err(load_error)
+            } else {
+                Err(VulkanDistributedDispatchRunnerError(format!(
+                    "{load_error}; distributed residency rollback also failed: {}",
+                    rollback_errors.join("; "),
+                )))
+            };
+        }
+    }
+    plan.commit_observation_indices
+        .into_iter()
+        .map(|observation_index| {
+            let pending = pending[observation_index]
+                .as_ref()
+                .expect("fault plan commits only pending observations");
+            gates[observation_index]
+                .0
+                .commit_pending_miss(pending)
+                .map(|miss| (observation_index, miss))
+        })
+        .collect()
 }

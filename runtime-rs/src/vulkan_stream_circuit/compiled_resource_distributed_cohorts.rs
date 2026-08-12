@@ -18,6 +18,26 @@ struct VulkanCompiledResourceDistributedCohortPlan {
     members: Vec<VulkanCompiledResourceDistributedCohortMember>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanCompiledResourceDistributedFaultObservation {
+    logical_device_id: String,
+    selector_id: String,
+    checkpoint_tag: u32,
+    pending_resource_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanCompiledResourceDistributedFaultLoad {
+    observation_index: usize,
+    resource_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanCompiledResourceDistributedFaultPlan {
+    loads: Vec<VulkanCompiledResourceDistributedFaultLoad>,
+    commit_observation_indices: Vec<usize>,
+}
+
 struct VulkanCompiledResourceDistributedCohortCoordinator {
     plans: BTreeMap<
         VulkanCompiledResourceDistributedCohortKey,
@@ -35,7 +55,6 @@ struct VulkanCompiledResourceDistributedCohortCoordinator {
 }
 
 struct VulkanCompiledResourceDistributedCohortMutation<'a> {
-    coordinator: &'a VulkanCompiledResourceDistributedCohortCoordinator,
     _guard: std::sync::MutexGuard<'a, ()>,
 }
 
@@ -147,7 +166,6 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
             )
         })?;
         Ok(VulkanCompiledResourceDistributedCohortMutation {
-            coordinator: self,
             _guard: guard,
         })
     }
@@ -226,11 +244,103 @@ impl VulkanCompiledResourceDistributedCohortCoordinator {
                 plan.key.selector_id == selector_id && plan.key.resource_index == resource_index
             })
     }
-}
 
-impl VulkanCompiledResourceDistributedCohortMutation<'_> {
-    fn coordinator(&self) -> &VulkanCompiledResourceDistributedCohortCoordinator {
-        self.coordinator
+    fn plan_fault_resolution(
+        &self,
+        observations: &[VulkanCompiledResourceDistributedFaultObservation],
+    ) -> Result<VulkanCompiledResourceDistributedFaultPlan, VulkanCompiledResourceDeviceStoreError>
+    {
+        let mut observation_indices = BTreeMap::<(&str, &str, u32), Vec<usize>>::new();
+        for (observation_index, observation) in observations.iter().enumerate() {
+            observation_indices
+                .entry((
+                    observation.logical_device_id.as_str(),
+                    observation.selector_id.as_str(),
+                    observation.checkpoint_tag,
+                ))
+                .or_default()
+                .push(observation_index);
+        }
+        let mut loads = BTreeMap::<usize, BTreeSet<usize>>::new();
+        let mut commits = Vec::new();
+        for (observation_index, observation) in observations.iter().enumerate() {
+            if observation.pending_resource_indices.is_empty() {
+                continue;
+            }
+            if observation
+                .pending_resource_indices
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            {
+                return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                    "distributed residency fault observation {observation_index} has duplicate or unsorted resources",
+                )));
+            }
+            commits.push(observation_index);
+            for resource_index in &observation.pending_resource_indices {
+                let Some(cohort) = self.cohort_for_selection(
+                    &observation.selector_id,
+                    *resource_index,
+                ) else {
+                    loads
+                        .entry(observation_index)
+                        .or_default()
+                        .insert(*resource_index);
+                    continue;
+                };
+                if !cohort.members.iter().any(|member| {
+                    member.logical_device_id == observation.logical_device_id
+                }) {
+                    return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                        "distributed selector {:?} resource {} faulted on logical device {:?} outside its residency cohort",
+                        observation.selector_id,
+                        resource_index,
+                        observation.logical_device_id,
+                    )));
+                }
+                for member in &cohort.members {
+                    let key = (
+                        member.logical_device_id.as_str(),
+                        observation.selector_id.as_str(),
+                        observation.checkpoint_tag,
+                    );
+                    let candidates = observation_indices.get(&key).ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "distributed selector {:?} resource {} has no residency gate for cohort member {:?} at checkpoint {}",
+                            observation.selector_id,
+                            resource_index,
+                            member.logical_device_id,
+                            observation.checkpoint_tag,
+                        ))
+                    })?;
+                    let [member_observation_index] = candidates.as_slice() else {
+                        return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "distributed selector {:?} resource {} has ambiguous residency gates for cohort member {:?} at checkpoint {}",
+                            observation.selector_id,
+                            resource_index,
+                            member.logical_device_id,
+                            observation.checkpoint_tag,
+                        )));
+                    };
+                    loads
+                        .entry(*member_observation_index)
+                        .or_default()
+                        .insert(*resource_index);
+                }
+            }
+        }
+        Ok(VulkanCompiledResourceDistributedFaultPlan {
+            loads: loads
+                .into_iter()
+                .map(|(observation_index, resource_indices)| {
+                    VulkanCompiledResourceDistributedFaultLoad {
+                        observation_index,
+                        resource_indices: resource_indices.into_iter().collect(),
+                    }
+                })
+                .collect(),
+            commit_observation_indices: commits,
+        })
     }
 }
 

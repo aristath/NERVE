@@ -1468,9 +1468,9 @@ impl VulkanDistributedComponentBatchRunners {
         }
 
         let mut resolved = BTreeMap::<(usize, usize), BTreeSet<usize>>::new();
-        let mut entered_stores = BTreeSet::new();
         for _ in 0..resolution_bound {
             let mut affected_shards = BTreeSet::new();
+            let mut gate_locations = Vec::new();
             for (shard_index, shard) in dispatch.shards.iter().enumerate() {
                 let device = devices.get(&shard.device_id).ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
@@ -1478,37 +1478,29 @@ impl VulkanDistributedComponentBatchRunners {
                     }
                 })?;
                 for (gate_index, gate) in shard.selected_resource_gates.iter().enumerate() {
-                    if gate.notification_epoch().map_err(|error| {
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                            error.to_string(),
-                        ))
-                    })? == gate.observed_notification_epoch()
-                    {
-                        continue;
-                    }
-                    if entered_stores.insert(gate.store_identity()) {
-                        gate.ensure_execution_headroom(device).map_err(|error| {
-                            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                                error.to_string(),
-                            ))
-                        })?;
-                    }
-                    let Some(miss) = gate.resolve_completed_miss(device).map_err(|error| {
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                            error.to_string(),
-                        ))
-                    })? else {
-                        continue;
-                    };
-                    record_distributed_component_batch_demand_resolution(
-                        &mut resolved,
-                        (shard_index, gate_index),
-                        &shard.device_id,
-                        &miss.resource_indices,
-                    )
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                    affected_shards.insert(shard_index);
+                    gate_locations.push((shard_index, gate_index, gate, device.as_ref()));
                 }
+            }
+            let gate_devices = gate_locations
+                .iter()
+                .map(|(_, _, gate, device)| (*gate, *device))
+                .collect::<Vec<_>>();
+            for (observation_index, miss) in
+                resolve_distributed_selected_resource_misses(&gate_devices).map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            error.to_string(),
+                        ))
+                    })?
+            {
+                let (shard_index, gate_index, _, _) = gate_locations[observation_index];
+                record_distributed_component_batch_demand_resolution(
+                    &mut resolved,
+                    (shard_index, gate_index),
+                    &dispatch.shards[shard_index].device_id,
+                    &miss.resource_indices,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                affected_shards.insert(shard_index);
             }
             if affected_shards.is_empty() {
                 if let Some(reduction) = &dispatch.reduction {
@@ -1740,6 +1732,7 @@ fn mount_distributed_component_batch_selected_resource_gates(
                     .clone();
                 VulkanDistributedSelectedResourceGate::new(
                     device,
+                    &planned_shard.device_id,
                     &partition.execution_scope,
                     leader,
                     partition,

@@ -51,6 +51,99 @@ where
 }
 
 impl VulkanCompiledResourceDeviceStore {
+    fn evict_exact_inactive_groups(
+        &self,
+        selected_group_ids: &BTreeSet<String>,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        if selected_group_ids.is_empty() {
+            return Ok(());
+        }
+        let candidates = self
+            .manager
+            .eviction_candidates(&BTreeSet::new())
+            .map_err(compiled_device_store_residency_error)?;
+        let candidate_ids = candidates
+            .into_iter()
+            .map(|candidate| candidate.group_id)
+            .collect::<BTreeSet<_>>();
+        if !selected_group_ids.is_subset(&candidate_ids) {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource exact eviction contains nonresident or active groups {:?}",
+                selected_group_ids.difference(&candidate_ids).collect::<Vec<_>>(),
+            )));
+        }
+        let mut address_state = self.address_state.lock().map_err(|_| {
+            VulkanCompiledResourceDeviceStoreError::new(
+                "compiled resource address state was poisoned",
+            )
+        })?;
+        let publications = selected_group_ids
+            .iter()
+            .map(|group_id| {
+                address_state
+                    .publications
+                    .get(group_id)
+                    .cloned()
+                    .filter(|publications| !publications.is_empty())
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(format!(
+                            "resident exact-eviction group {group_id:?} has no address publication",
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let eviction = self
+            .manager
+            .evict_inactive_groups(selected_group_ids.clone())
+            .map_err(compiled_device_store_residency_error)?;
+        {
+            let VulkanCompiledResourceDeviceAddressState {
+                transfer,
+                address_table,
+                ..
+            } = &mut *address_state;
+            address_table
+                .clear_group(transfer, &publications)
+                .map_err(compiled_device_store_vulkan_error)?;
+        }
+        for group_id in selected_group_ids {
+            address_state.promoted_representations.remove(group_id);
+            address_state.publications.remove(group_id);
+            let VulkanCompiledResourceDeviceAddressState {
+                group_chunks,
+                chunk_groups,
+                group_blocks,
+                block_groups,
+                ..
+            } = &mut *address_state;
+            detach_compiled_resource_group_cohorts(group_id, group_chunks, chunk_groups);
+            detach_compiled_resource_group_cohorts(group_id, group_blocks, block_groups);
+        }
+        let release = eviction.release();
+        drop(eviction);
+        if let Some(memory_plan) = &self.memory_plan {
+            memory_plan
+                .lock()
+                .map_err(|_| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource memory plan was poisoned",
+                    )
+                })?
+                .release_dynamic_groups(selected_group_ids)?;
+        }
+        if release.group_count != selected_group_ids.len() {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled resource exact eviction selected {} groups but released {}",
+                selected_group_ids.len(),
+                release.group_count,
+            )));
+        }
+        Ok(())
+    }
+
     fn load_compiled_resource_wave(
         &self,
         device: &VulkanComputeDevice,

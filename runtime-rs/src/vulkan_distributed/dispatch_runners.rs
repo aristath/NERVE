@@ -803,6 +803,7 @@ impl VulkanDistributedDispatchRunners {
                                     )?;
                                 VulkanDistributedSelectedResourceGate::new(
                                     device,
+                                    &planned_shard.device_id,
                                     execution_scope,
                                     planned_dispatch,
                                     partition,
@@ -1497,25 +1498,35 @@ impl VulkanDistributedDispatchRunners {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let gate_locations = resolved_shards
+            .iter()
+            .enumerate()
+            .flat_map(|(shard_index, (shard, device))| {
+                shard
+                    .selected_resource_gates
+                    .iter()
+                    .flatten()
+                    .enumerate()
+                    .map(move |(gate_index, gate)| (shard_index, gate_index, gate, *device))
+            })
+            .collect::<Vec<_>>();
+        let gate_devices = gate_locations
+            .iter()
+            .map(|(_, _, gate, device)| (*gate, *device))
+            .collect::<Vec<_>>();
+        let resolved = crate::resolve_distributed_selected_resource_misses(&gate_devices)?;
         let mut affected_shard_indices = BTreeSet::new();
         let mut misses = Vec::new();
-        for (shard_index, (shard, device)) in resolved_shards.iter().enumerate() {
-            let mut affected = false;
-            for (gate_index, gate) in shard.selected_resource_gates.iter().flatten().enumerate() {
-                if let Some(miss) = gate.resolve_completed_miss(device)? {
-                    affected = true;
-                    misses.push(VulkanDistributedResolvedResidencyMiss {
-                        shard_index,
-                        gate_index,
-                        selector_id: miss.selector_id,
-                        checkpoint_tag: miss.checkpoint_tag,
-                        resource_indices: miss.resource_indices,
-                    });
-                }
-            }
-            if affected {
-                affected_shard_indices.insert(shard_index);
-            }
+        for (observation_index, miss) in resolved {
+            let (shard_index, gate_index, _, _) = gate_locations[observation_index];
+            affected_shard_indices.insert(shard_index);
+            misses.push(VulkanDistributedResolvedResidencyMiss {
+                shard_index,
+                gate_index,
+                selector_id: miss.selector_id,
+                checkpoint_tag: miss.checkpoint_tag,
+                resource_indices: miss.resource_indices,
+            });
         }
         if affected_shard_indices.is_empty() {
             return Ok(None);
