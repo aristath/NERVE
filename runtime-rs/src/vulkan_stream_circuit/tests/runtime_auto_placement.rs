@@ -359,6 +359,10 @@ fn fixture_placement_costs(costs: &[(&str, &str, u64)]) -> VulkanRuntimePlacemen
             })
             .collect(),
         boundary_transfer_ns: BTreeMap::new(),
+        default_graph_compatible_devices: costs
+            .iter()
+            .map(|(device_id, _, _)| (*device_id).to_string())
+            .collect(),
     }
 }
 
@@ -415,6 +419,142 @@ fn cost_aware_contiguous_placement_jointly_selects_device_order_and_boundary() {
     assert_eq!(placed.placement["c"], "tail-fast");
     assert_eq!(placed.placement["d"], "tail-fast");
     assert_eq!(placed.predicted_execution_ns, 4);
+}
+
+#[test]
+fn cost_aware_placement_uses_a_sparse_component_compatibility_matrix() {
+    let components = ["a", "b", "c", "d"].map(|component_id| {
+        CapacityPackedPlacementComponent {
+            component_id: component_id.to_string(),
+            resident_weight_bytes: 1,
+        }
+    });
+    let candidates = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "head".to_string(),
+            safe_capacity_bytes: 4,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "tail".to_string(),
+            safe_capacity_bytes: 4,
+        },
+    ];
+    let mut costs = fixture_placement_costs(&[
+        ("head", "a", 1),
+        ("head", "b", 1),
+        ("tail", "c", 1),
+        ("tail", "d", 1),
+    ]);
+    costs.default_graph_compatible_devices = BTreeSet::from(["head".to_string()]);
+
+    let placed = cost_aware_contiguous_component_placement(
+        &components,
+        &candidates,
+        &costs,
+        &fixture_empty_placement_boundaries(components.len()),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(placed.ordered_device_ids, ["head", "tail"]);
+    assert_eq!(placed.placement["a"], "head");
+    assert_eq!(placed.placement["b"], "head");
+    assert_eq!(placed.placement["c"], "tail");
+    assert_eq!(placed.placement["d"], "tail");
+    assert_eq!(placed.predicted_execution_ns, 4);
+}
+
+#[test]
+fn cost_aware_placement_rejects_noncontiguous_partial_device_coverage() {
+    let components = ["a", "b", "c", "d"].map(|component_id| {
+        CapacityPackedPlacementComponent {
+            component_id: component_id.to_string(),
+            resident_weight_bytes: 1,
+        }
+    });
+    let candidates = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "alternating-a".to_string(),
+            safe_capacity_bytes: 4,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "alternating-b".to_string(),
+            safe_capacity_bytes: 4,
+        },
+    ];
+    let costs = fixture_placement_costs(&[
+        ("alternating-a", "a", 1),
+        ("alternating-a", "c", 1),
+        ("alternating-b", "b", 1),
+        ("alternating-b", "d", 1),
+    ]);
+
+    let error = cost_aware_contiguous_component_placement(
+        &components,
+        &candidates,
+        &costs,
+        &fixture_empty_placement_boundaries(components.len()),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("no cost-aware contiguous placement"));
+}
+
+#[test]
+fn normalized_device_cost_compares_partial_targets_by_mean_component_cost() {
+    let costs = fixture_placement_costs(&[
+        ("partial-fast", "a", 10),
+        ("partial-fast", "b", 20),
+        ("complete-slow", "a", 20),
+        ("complete-slow", "b", 20),
+        ("complete-slow", "c", 20),
+        ("complete-slow", "d", 20),
+    ]);
+
+    assert_eq!(
+        costs
+            .normalized_device_execution_ns("partial-fast", 4)
+            .unwrap(),
+        60,
+    );
+    assert_eq!(
+        costs
+            .normalized_device_execution_ns("complete-slow", 4)
+            .unwrap(),
+        80,
+    );
+}
+
+#[test]
+fn measured_candidate_subsets_include_nonprefix_combinations_once() {
+    let candidates = ["a", "b", "c"]
+        .map(|device_id| VulkanRuntimePlacementCandidate {
+            device_id: device_id.to_string(),
+            safe_capacity_bytes: 1,
+        });
+
+    let subsets = runtime_placement_candidate_subsets(&candidates, 2)
+        .unwrap()
+        .into_iter()
+        .map(|subset| {
+            subset
+                .into_iter()
+                .map(|candidate| candidate.device_id)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        subsets,
+        [
+            vec!["a".to_string(), "b".to_string()],
+            vec!["a".to_string(), "c".to_string()],
+            vec!["b".to_string(), "c".to_string()],
+        ],
+    );
+    assert!(runtime_placement_candidate_subsets(&candidates, 0).is_err());
+    assert!(runtime_placement_candidate_subsets(&candidates, 4).is_err());
 }
 
 #[test]
@@ -666,7 +806,7 @@ fn cost_aware_paged_placement_cannot_strand_material_retained_capacity() {
 }
 
 #[test]
-fn demand_paged_prefix_expands_while_another_device_can_reduce_paging() {
+fn demand_paged_subset_expands_while_another_device_can_reduce_paging() {
     const LAYER_BYTES: u128 = 843_498_240;
     const DEVICE_BYTES: usize = 27 * 1024 * 1024 * 1024;
     let balance = VulkanRuntimePagedPlacementBalance {
@@ -685,22 +825,20 @@ fn demand_paged_prefix_expands_while_another_device_can_reduce_paging() {
         },
     ];
 
-    assert!(demand_paged_prefix_has_avoidable_addressable_shortfall(
+    assert!(demand_paged_subset_has_addressable_shortfall(
         &balance,
         &candidates[..1],
-        candidates.len(),
     )
     .unwrap());
-    assert!(!demand_paged_prefix_has_avoidable_addressable_shortfall(
+    assert!(!demand_paged_subset_has_addressable_shortfall(
         &balance,
         &candidates,
-        candidates.len(),
     )
     .unwrap());
 }
 
 #[test]
-fn demand_paged_prefix_accounts_for_endpoint_auxiliary_residency() {
+fn demand_paged_subset_accounts_for_endpoint_auxiliary_residency() {
     let balance = VulkanRuntimePagedPlacementBalance {
         component_weights: vec![40, 40],
         input_auxiliary_weight_bytes: 15,
@@ -717,22 +855,20 @@ fn demand_paged_prefix_accounts_for_endpoint_auxiliary_residency() {
         },
     ];
 
-    assert!(demand_paged_prefix_has_avoidable_addressable_shortfall(
+    assert!(demand_paged_subset_has_addressable_shortfall(
         &balance,
         &candidates[..1],
-        candidates.len(),
     )
     .unwrap());
-    assert!(!demand_paged_prefix_has_avoidable_addressable_shortfall(
+    assert!(!demand_paged_subset_has_addressable_shortfall(
         &balance,
         &candidates,
-        candidates.len(),
     )
     .unwrap());
 }
 
 #[test]
-fn demand_paged_prefix_accepts_unavoidable_shortfall_at_the_last_device() {
+fn demand_paged_subset_reports_shortfall_even_when_no_larger_set_exists() {
     let balance = VulkanRuntimePagedPlacementBalance {
         component_weights: vec![100, 100],
         input_auxiliary_weight_bytes: 0,
@@ -743,10 +879,9 @@ fn demand_paged_prefix_accepts_unavoidable_shortfall_at_the_last_device() {
         safe_capacity_bytes: 100,
     };
 
-    assert!(!demand_paged_prefix_has_avoidable_addressable_shortfall(
+    assert!(demand_paged_subset_has_addressable_shortfall(
         &balance,
         &[candidate],
-        1,
     )
     .unwrap());
 }
@@ -837,6 +972,9 @@ fn observed_working_set_rebalance_moves_only_a_profitable_contiguous_boundary() 
     let targets = vulkan_runtime_placement_calibration_targets(&current).unwrap();
     let mut costs = VulkanRuntimePlacementCostModel::default();
     for candidate in &candidates {
+        costs
+            .record_default_graph_compatibility(&candidate.device_id)
+            .unwrap();
         for target in &targets {
             costs
                 .record_calibration(&candidate.device_id, target, 10)
@@ -945,6 +1083,9 @@ fn placement_cost_model_rejects_a_changed_compiled_execution_signature() {
         safe_capacity_bytes: 1,
     };
     let mut costs = VulkanRuntimePlacementCostModel::default();
+    costs
+        .record_default_graph_compatibility(&candidate.device_id)
+        .unwrap();
     for target in &targets {
         costs
             .record_calibration(&candidate.device_id, target, 1)
@@ -964,6 +1105,119 @@ fn placement_cost_model_rejects_a_changed_compiled_execution_signature() {
             .to_string()
             .contains("different compiled execution signature")
     );
+}
+
+#[test]
+fn placement_cost_model_accepts_exact_sparse_device_coverage() {
+    let runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
+    let targets = vulkan_runtime_placement_calibration_targets(&runtime_model).unwrap();
+    let candidates = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "first".to_string(),
+            safe_capacity_bytes: 1,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "second".to_string(),
+            safe_capacity_bytes: 1,
+        },
+    ];
+    let all_component_ids = targets
+        .iter()
+        .flat_map(|target| target.component_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    assert!(all_component_ids.len() >= 2);
+    let midpoint = all_component_ids.len() / 2;
+    let mut costs = VulkanRuntimePlacementCostModel::default();
+    costs
+        .record_default_graph_compatibility("first")
+        .unwrap();
+    for (device_id, selected_ids) in [
+        ("first", &all_component_ids[..midpoint]),
+        ("second", &all_component_ids[midpoint..]),
+    ] {
+        for component_id in selected_ids {
+            let target = targets
+                .iter()
+                .find(|target| target.component_ids.contains(component_id))
+                .unwrap();
+            let mut selected_target = target.clone();
+            selected_target.component_ids = vec![component_id.clone()];
+            costs
+                .record_calibration(device_id, &selected_target, 1)
+                .unwrap();
+        }
+    }
+    for byte_count in vulkan_runtime_placement_transfer_byte_counts(&runtime_model).unwrap() {
+        costs
+            .record_boundary_transfer_cost("first", "second", byte_count, 1)
+            .unwrap();
+        costs
+            .record_boundary_transfer_cost("second", "first", byte_count, 1)
+            .unwrap();
+    }
+
+    costs
+        .validate_runtime_model(&runtime_model, &candidates)
+        .unwrap();
+}
+
+#[test]
+fn placement_cost_model_rejects_a_component_uncovered_by_every_device() {
+    let runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
+    let targets = vulkan_runtime_placement_calibration_targets(&runtime_model).unwrap();
+    let candidate = VulkanRuntimePlacementCandidate {
+        device_id: "partial".to_string(),
+        safe_capacity_bytes: 1,
+    };
+    let all_component_ids = targets
+        .iter()
+        .flat_map(|target| target.component_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    assert!(all_component_ids.len() >= 2);
+    let mut costs = VulkanRuntimePlacementCostModel::default();
+    costs
+        .record_default_graph_compatibility(&candidate.device_id)
+        .unwrap();
+    for component_id in &all_component_ids[..all_component_ids.len() - 1] {
+        let target = targets
+            .iter()
+            .find(|target| target.component_ids.contains(component_id))
+            .unwrap();
+        let mut selected_target = target.clone();
+        selected_target.component_ids = vec![component_id.clone()];
+        costs
+            .record_calibration(&candidate.device_id, &selected_target, 1)
+            .unwrap();
+    }
+
+    let error = costs
+        .validate_runtime_model(&runtime_model, &[candidate])
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cannot execute components"));
+    assert!(error.to_string().contains(all_component_ids.last().unwrap()));
+}
+
+#[test]
+fn placement_cost_model_requires_a_default_graph_host() {
+    let runtime_model = fixture_model_runtime_model();
+    let candidate = VulkanRuntimePlacementCandidate {
+        device_id: "interior-only".to_string(),
+        safe_capacity_bytes: 1,
+    };
+    let mut costs = VulkanRuntimePlacementCostModel::default();
+    for target in vulkan_runtime_placement_calibration_targets(&runtime_model).unwrap() {
+        costs
+            .record_calibration(&candidate.device_id, &target, 1)
+            .unwrap();
+    }
+
+    let error = costs
+        .validate_runtime_model(&runtime_model, &[candidate])
+        .unwrap_err();
+
+    assert!(error.to_string().contains("no candidate compatible"));
+    assert!(error.to_string().contains("input/output graph"));
 }
 
 #[test]
@@ -1056,6 +1310,110 @@ fn runtime_auto_placement_spills_once_instead_of_balancing_across_extra_devices(
         })
         .collect::<Vec<_>>();
     assert_eq!(signal_devices, ["first", "first", "second"]);
+}
+
+#[test]
+fn measured_auto_placement_can_select_a_nonprefix_single_device() {
+    let runtime_model = fixture_model_runtime_model_with_colocated_three_layer_series();
+    let tensor_index = runtime_model
+        .load_runtime_tensor_index(tiny_model_dir())
+        .unwrap();
+    let baseline = plan_vulkan_runtime_residency(
+        tiny_model_dir(),
+        &runtime_model,
+        &tensor_index,
+        8,
+        0,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+    let required = maximum_resident_bytes(&baseline, "gpu0");
+    let candidates = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "ranked-first-partial".to_string(),
+            safe_capacity_bytes: required,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "ranked-second-partial".to_string(),
+            safe_capacity_bytes: required,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "complete".to_string(),
+            safe_capacity_bytes: required,
+        },
+    ];
+    let targets = vulkan_runtime_placement_calibration_targets(&runtime_model).unwrap();
+    let component_ids = targets
+        .iter()
+        .flat_map(|target| target.component_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    assert!(component_ids.len() >= 3);
+    let mut costs = VulkanRuntimePlacementCostModel::default();
+    for device_id in ["ranked-first-partial", "complete"] {
+        costs
+            .record_default_graph_compatibility(device_id)
+            .unwrap();
+    }
+    for (device_id, selected_component_ids) in [
+        (
+            "ranked-first-partial",
+            component_ids[..1].to_vec(),
+        ),
+        (
+            "ranked-second-partial",
+            component_ids[component_ids.len() - 1..].to_vec(),
+        ),
+        ("complete", component_ids.clone()),
+    ] {
+        for component_id in selected_component_ids {
+            let target = targets
+                .iter()
+                .find(|target| target.component_ids.contains(&component_id))
+                .unwrap();
+            let mut selected_target = target.clone();
+            selected_target.component_ids = vec![component_id];
+            costs
+                .record_calibration(device_id, &selected_target, 1)
+                .unwrap();
+        }
+    }
+    for byte_count in vulkan_runtime_placement_transfer_byte_counts(&runtime_model).unwrap() {
+        for source in &candidates {
+            for destination in &candidates {
+                if source.device_id != destination.device_id {
+                    costs
+                        .record_boundary_transfer_cost(
+                            &source.device_id,
+                            &destination.device_id,
+                            byte_count,
+                            1,
+                        )
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    let placed = capacity_pack_vulkan_runtime_model_with_costs(
+        tiny_model_dir(),
+        &runtime_model,
+        &tensor_index,
+        &candidates,
+        Some(&costs),
+        8,
+        0,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+
+    assert_eq!(placed.selected_device_ids, ["complete"]);
+    assert!(
+        placed
+            .runtime_model
+            .placement_device_ids()
+            .iter()
+            .all(|device_id| device_id == "complete")
+    );
 }
 
 #[test]

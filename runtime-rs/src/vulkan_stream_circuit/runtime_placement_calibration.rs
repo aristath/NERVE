@@ -139,7 +139,8 @@ pub struct VulkanRuntimePlacementCalibrationSuite {
     contract: Arc<CompiledResourceResidencyContract>,
     sources: Vec<VulkanRuntimePlacementCalibrationSource>,
     dynamic_state_capacity_activations: usize,
-    plans_by_capability_class: BTreeMap<String, Vec<VulkanRuntimePlacementCalibrationCachedPlan>>,
+    plans_by_capability_and_targets:
+        BTreeMap<(String, Vec<usize>), Vec<VulkanRuntimePlacementCalibrationCachedPlan>>,
     shared_prepare_ns: u64,
     shared_prepare_reported: bool,
 }
@@ -243,7 +244,7 @@ impl VulkanRuntimePlacementCalibrationSuite {
             contract,
             sources,
             dynamic_state_capacity_activations: capacity,
-            plans_by_capability_class: BTreeMap::new(),
+            plans_by_capability_and_targets: BTreeMap::new(),
             shared_prepare_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             shared_prepare_reported: false,
         })
@@ -258,6 +259,7 @@ impl VulkanRuntimePlacementCalibrationSuite {
         device: &VulkanComputeDevice,
         capability_class: &str,
         manifest_dir: &Path,
+        target_indices: &[usize],
     ) -> Result<
         (Vec<VulkanRuntimePlacementCalibrationCachedPlan>, u64, u64),
         VulkanResidentTokenModelPackageError,
@@ -273,15 +275,26 @@ impl VulkanRuntimePlacementCalibrationSuite {
             self.shared_prepare_reported = true;
             self.shared_prepare_ns
         };
-        if let Some(plans) = self.plans_by_capability_class.get(capability_class) {
+        if target_indices.is_empty()
+            || target_indices.windows(2).any(|pair| pair[0] >= pair[1])
+            || target_indices
+                .last()
+                .is_some_and(|index| *index >= self.targets.len())
+        {
+            return Err(VulkanResidentTokenModelPackageError::new(
+                "runtime placement calibration target subset is empty, unordered, or out of range",
+            ));
+        }
+        let cache_key = (capability_class.to_string(), target_indices.to_vec());
+        if let Some(plans) = self.plans_by_capability_and_targets.get(&cache_key) {
             return Ok((plans.clone(), shared_prepare_ns, 0));
         }
         let started = Instant::now();
-        let plans = self
-            .targets
+        let plans = target_indices
             .iter()
-            .zip(&self.sources)
-            .map(|(target, source)| {
+            .map(|target_index| {
+                let target = &self.targets[*target_index];
+                let source = &self.sources[*target_index];
                 VulkanResidentTargetedModelPackageDeviceSlicePlan::prepare(
                     device,
                     manifest_dir,
@@ -297,8 +310,8 @@ impl VulkanRuntimePlacementCalibrationSuite {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let prepare_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        self.plans_by_capability_class
-            .insert(capability_class.to_string(), plans.clone());
+        self.plans_by_capability_and_targets
+            .insert(cache_key, plans.clone());
         Ok((plans, shared_prepare_ns, prepare_ns))
     }
 }
@@ -525,6 +538,142 @@ pub fn calibrate_vulkan_runtime_placement_candidate(
     )
 }
 
+/// Measures only the exact execution signatures whose component occurrences
+/// are compatible with this physical target. A partially compatible target is
+/// therefore available to placement for the components it can execute instead
+/// of being discarded because an unrelated component needs another device.
+pub fn calibrate_vulkan_runtime_placement_candidate_components(
+    device: Rc<VulkanComputeDevice>,
+    manifest_dir: impl AsRef<Path>,
+    capability_class: &str,
+    suite: &mut VulkanRuntimePlacementCalibrationSuite,
+    compatible_component_ids: &BTreeSet<String>,
+) -> Result<Vec<VulkanRuntimePlacementCalibrationReport>, VulkanResidentTokenModelPackageError> {
+    calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
+        device,
+        manifest_dir.as_ref(),
+        capability_class,
+        suite,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        VulkanTargetedComponentExecutionScope::DecodeComponentPrefix,
+        VulkanRuntimePlacementCalibrationPolicy::default(),
+        Some(compatible_component_ids),
+    )
+}
+
+fn compatible_runtime_placement_calibration_target_indices(
+    targets: &[VulkanRuntimePlacementCalibrationTarget],
+    compatible_component_ids: &BTreeSet<String>,
+) -> Result<Vec<usize>, VulkanResidentTokenModelPackageError> {
+    if compatible_component_ids.is_empty() {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime placement calibration compatibility set is empty",
+        ));
+    }
+    let target_component_ids = targets
+        .iter()
+        .flat_map(|target| target.component_ids.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let unknown_component_ids = compatible_component_ids
+        .difference(&target_component_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown_component_ids.is_empty() {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "runtime placement calibration compatibility references unknown component instances {}",
+            unknown_component_ids
+                .iter()
+                .map(|component_id| format!("{component_id:?}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )));
+    }
+    let mut selected = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        let compatible_occurrences = target
+            .component_ids
+            .iter()
+            .filter(|component_id| compatible_component_ids.contains(*component_id))
+            .count();
+        if compatible_occurrences == 0 {
+            continue;
+        }
+        if compatible_occurrences != target.component_ids.len() {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "runtime placement calibration signature {} has mixed device compatibility across equivalent component instances",
+                target.signature_id,
+            )));
+        }
+        selected.push(index);
+    }
+    if selected.is_empty() {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime placement calibration target cannot execute any compiled component signature",
+        ));
+    }
+    Ok(selected)
+}
+
+#[cfg(test)]
+mod runtime_placement_compatibility_tests {
+    use super::*;
+
+    fn target(signature_id: &str, component_ids: &[&str]) -> VulkanRuntimePlacementCalibrationTarget {
+        VulkanRuntimePlacementCalibrationTarget {
+            signature_id: signature_id.to_string(),
+            component_id: component_ids[0].to_string(),
+            component_ids: component_ids
+                .iter()
+                .map(|component_id| (*component_id).to_string())
+                .collect(),
+            terminal_node_id: "terminal".to_string(),
+            implementation: "fixture".to_string(),
+            planned_resident_parameter_bytes: 1,
+        }
+    }
+
+    #[test]
+    fn calibration_compatibility_selects_only_complete_execution_signatures() {
+        let targets = [target("shared", &["a", "b"]), target("other", &["c"])];
+
+        assert_eq!(
+            compatible_runtime_placement_calibration_target_indices(
+                &targets,
+                &BTreeSet::from(["c".to_string()]),
+            )
+            .unwrap(),
+            [1],
+        );
+    }
+
+    #[test]
+    fn calibration_compatibility_rejects_mixed_equivalent_instances() {
+        let targets = [target("shared", &["a", "b"])];
+
+        let error = compatible_runtime_placement_calibration_target_indices(
+            &targets,
+            &BTreeSet::from(["a".to_string()]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("mixed device compatibility"));
+    }
+
+    #[test]
+    fn calibration_compatibility_rejects_source_ids_at_the_instance_boundary() {
+        let targets = [target("shared", &["layer_00_repeat"] )];
+
+        let error = compatible_runtime_placement_calibration_target_indices(
+            &targets,
+            &BTreeSet::from(["layer_00".to_string()]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown component instances"));
+        assert!(error.to_string().contains("layer_00"));
+    }
+}
+
 pub fn calibrate_vulkan_runtime_placement_candidate_with_policy(
     device: Rc<VulkanComputeDevice>,
     manifest_dir: impl AsRef<Path>,
@@ -540,6 +689,7 @@ pub fn calibrate_vulkan_runtime_placement_candidate_with_policy(
         VulkanTargetedComponentExecutionPhase::Decode,
         VulkanTargetedComponentExecutionScope::DecodeComponentPrefix,
         policy,
+        None,
     )
 }
 
@@ -566,6 +716,7 @@ pub fn calibrate_vulkan_runtime_prefill_placement_candidate_with_policy(
         },
         VulkanTargetedComponentExecutionScope::Component,
         policy,
+        None,
     )
 }
 
@@ -577,6 +728,7 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
     phase: VulkanTargetedComponentExecutionPhase,
     scope: VulkanTargetedComponentExecutionScope,
     policy: VulkanRuntimePlacementCalibrationPolicy,
+    compatible_component_ids: Option<&BTreeSet<String>>,
 ) -> Result<Vec<VulkanRuntimePlacementCalibrationReport>, VulkanResidentTokenModelPackageError> {
     if policy.warmup_units == 0
         || policy.measured_units == 0
@@ -592,9 +744,22 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
             "runtime placement calibration requires at least one execution signature",
         ));
     }
-    let (plans, shared_prepare_ns, slice_plan_prepare_ns) =
-        suite.plans_for_device(&device, capability_class, manifest_dir)?;
-    let targets = suite.targets.clone();
+    let target_indices = compatible_component_ids.map_or_else(
+        || Ok((0..suite.targets.len()).collect::<Vec<_>>()),
+        |compatible| {
+            compatible_runtime_placement_calibration_target_indices(&suite.targets, compatible)
+        },
+    )?;
+    let (plans, shared_prepare_ns, slice_plan_prepare_ns) = suite.plans_for_device(
+        &device,
+        capability_class,
+        manifest_dir,
+        &target_indices,
+    )?;
+    let targets = target_indices
+        .iter()
+        .map(|index| suite.targets[*index].clone())
+        .collect::<Vec<_>>();
     let physical_device_id = device.physical_device_id().to_string();
     let logical_device_id = VULKAN_RUNTIME_PLACEMENT_CALIBRATION_LOGICAL_DEVICE_ID.to_string();
     let parameter_pool = VulkanResidentBufferPool::default();

@@ -280,6 +280,21 @@ For every numbered item below:
   explicitly excludes it. Current allocations are reservations: inspect each
   target immediately before planning and use only its measured safe remaining
   capacity.
+- Per-component physical compatibility is complete for the serialized
+  backbone candidate graph. Runtime discovery now distinguishes source
+  components from mounted instances, calibrates only exact execution
+  signatures supported by each target, permits a signal-only target to serve
+  as an interior device without pretending it can host the input/output graph,
+  and requires the union of selected targets to cover every component.
+  Placement treats the measured execution matrix as sparse, rejects illegal
+  component/device assignments, compares every target subset instead of only
+  ranked prefixes, and retains a feasible demand-paged fallback when no larger
+  legal subset can remove its addressable-capacity shortfall. Partial targets
+  are ranked by normalized measured component cost so a device is not made to
+  look artificially fast merely because it supports fewer operations. The
+  remaining candidate enumeration must extend this exact compatibility model
+  to local TP, expert, replicated, and general hybrid islands rather than
+  reintroducing whole-model device assumptions.
 - Attach exact permanent, transient-peak, KV/state, cache-quota, and atomic
   load-wave byte vectors to every candidate.
 - Optimize **scheduled critical-path time**, not a simple sum of operation

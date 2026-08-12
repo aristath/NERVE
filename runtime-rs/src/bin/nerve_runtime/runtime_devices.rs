@@ -186,25 +186,89 @@ fn runtime_capacity_packed_model(
     let compatibility_editor =
         RuntimeModelEditor::load_with_available_devices(package_manifest, editor_devices)?;
     let mut incompatibilities = Vec::new();
-    eligible_devices.retain(|(device, _)| {
-        match compatibility_editor
-            .validate_all_instance_device_compatibility(&device.physical_device_id)
-        {
-            Ok(()) => true,
-            Err(error) => {
-                incompatibilities.push(format!(
-                    "{} ({}) cannot execute every runtime component: {error}",
-                    device.physical_device_id, device.device_name,
-                ));
-                false
+    let runtime_role_by_instance = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .map(|component| (component.component_id.as_str(), component.runtime_role))
+        .collect::<BTreeMap<_, _>>();
+    let mut partially_compatible_devices = Vec::with_capacity(eligible_devices.len());
+    for (device, profile) in eligible_devices {
+        let mut compatible_signal_components = BTreeSet::new();
+        let mut incompatible_signal_components = Vec::new();
+        let mut incompatible_default_components = Vec::new();
+        for instance in &runtime_model.runtime_graph.instances {
+            let runtime_role = runtime_role_by_instance
+                .get(instance.instance_id.as_str())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "runtime instance {:?} has no mounted circuit component",
+                            instance.instance_id,
+                        ),
+                    )
+                })?;
+            match compatibility_editor.validate_source_component_device_compatibility(
+                &instance.source_component_id,
+                &device.physical_device_id,
+            ) {
+                Ok(()) if runtime_role.is_signal_processor() => {
+                    compatible_signal_components.insert(instance.instance_id.clone());
+                }
+                Ok(()) => {}
+                Err(error) if runtime_role.is_signal_processor() => {
+                    incompatible_signal_components.push(format!(
+                        "{} (source {}): {error}",
+                        instance.instance_id, instance.source_component_id,
+                    ));
+                }
+                Err(error) => {
+                    incompatible_default_components.push(format!(
+                        "{} (source {}): {error}",
+                        instance.instance_id, instance.source_component_id,
+                    ));
+                }
             }
         }
-    });
+        if compatible_signal_components.is_empty() {
+            incompatibilities.push(format!(
+                "{} ({}) cannot execute any signal processor: {}",
+                device.physical_device_id,
+                device.device_name,
+                incompatible_signal_components.join("; "),
+            ));
+            continue;
+        }
+        if !incompatible_signal_components.is_empty() {
+            eprintln!(
+                "nerve runtime auto-placement: device={} remains eligible for {} signal processors; incompatible components={}",
+                device.physical_device_id,
+                compatible_signal_components.len(),
+                incompatible_signal_components.join("; "),
+            );
+        }
+        let can_host_default_graph = incompatible_default_components.is_empty();
+        if !can_host_default_graph {
+            eprintln!(
+                "nerve runtime auto-placement: device={} remains eligible only as an interior signal-processor target; incompatible default components={}",
+                device.physical_device_id,
+                incompatible_default_components.join("; "),
+            );
+        }
+        partially_compatible_devices.push((
+            device,
+            profile,
+            compatible_signal_components,
+            can_host_default_graph,
+        ));
+    }
+    let eligible_devices = partially_compatible_devices;
     if eligible_devices.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
-                "automatic placement found no device compatible with every runtime component: {}",
+                "automatic placement found no device compatible with any complete signal-processor placement: {}",
                 incompatibilities.join("; "),
             ),
         )
@@ -223,6 +287,11 @@ fn runtime_capacity_packed_model(
         "nerve runtime placement calibration: execution_signatures={}",
         calibration_suite.targets().len(),
     );
+    let total_signal_component_count = calibration_suite
+        .targets()
+        .iter()
+        .map(|target| target.component_ids.len())
+        .sum::<usize>();
     let mut calibration_evidence = BTreeMap::<String, (String, String)>::new();
     let mut placement_costs = VulkanRuntimePlacementCostModel::default();
     let mut exact_calibration_catalog =
@@ -230,7 +299,13 @@ fn runtime_capacity_packed_model(
     let mut runtime_transfer_calibration_catalog = VulkanPlacementCalibrationCatalog::default();
     let mut measured_candidates = Vec::with_capacity(eligible_devices.len());
     let mut opened_devices = BTreeMap::new();
-    for (device_info, profile) in eligible_devices {
+    for (
+        device_info,
+        profile,
+        compatible_signal_components,
+        can_host_default_graph,
+    ) in eligible_devices
+    {
         if calibration_started.elapsed() >= VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -257,12 +332,17 @@ fn runtime_capacity_packed_model(
             budget.reservable_bytes,
             budget.protected_headroom_bytes,
         );
-        let calibrations = calibrate_vulkan_runtime_placement_candidate(
+        let calibrations = calibrate_vulkan_runtime_placement_candidate_components(
             Rc::clone(&device),
             manifest_dir,
             &profile.capability_class,
             &mut calibration_suite,
+            &compatible_signal_components,
         )?;
+        if can_host_default_graph {
+            placement_costs
+                .record_default_graph_compatibility(&device_info.physical_device_id)?;
+        }
         let available_after = device.available_device_local_memory_bytes();
         for calibration in calibrations {
             if calibration.output_digest.is_empty() || calibration.state_digest.is_empty() {
@@ -316,8 +396,10 @@ fn runtime_capacity_packed_model(
                 available_after,
             );
         }
-        let aggregate_execution_ns =
-            placement_costs.aggregate_device_execution_ns(&device_info.physical_device_id)?;
+        let aggregate_execution_ns = placement_costs.normalized_device_execution_ns(
+            &device_info.physical_device_id,
+            total_signal_component_count,
+        )?;
         measured_candidates.push((
             aggregate_execution_ns,
             device_info.selected_by_default,

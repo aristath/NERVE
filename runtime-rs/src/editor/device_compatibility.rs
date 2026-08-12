@@ -210,6 +210,31 @@ impl RuntimeModelEditor {
                     "runtime graph has no node instance {instance_id:?}"
                 ))
             })?;
+        self.validate_source_component_device_compatibility(
+            &instance.source_component_id,
+            device_id,
+        )
+        .map_err(|error| {
+            RuntimeEditorError(format!(
+                "runtime device {device_id:?} cannot host instance {instance_id:?}: {error}"
+            ))
+        })
+    }
+
+    pub fn validate_source_component_device_compatibility(
+        &self,
+        source_component_id: &str,
+        device_id: &str,
+    ) -> Result<(), RuntimeEditorError> {
+        if !self
+            .source_components
+            .iter()
+            .any(|source| source.source_id == source_component_id)
+        {
+            return Err(RuntimeEditorError(format!(
+                "runtime graph has no source component {source_component_id:?}"
+            )));
+        }
         let device = self
             .available_devices
             .iter()
@@ -226,15 +251,8 @@ impl RuntimeModelEditor {
             return Ok(());
         };
         let capabilities = DeviceCapabilityView::from_profile(profile);
-        self.validate_source_shaders(
-            &instance.source_component_id,
-            &capabilities,
-        )
-        .map_err(|error| {
-            RuntimeEditorError(format!(
-                "runtime device {device_id:?} cannot host instance {instance_id:?}: {error}"
-            ))
-        })
+        self.validate_source_shaders(source_component_id, &capabilities)
+            .map_err(RuntimeEditorError)
     }
 
     fn validate_source_shaders(

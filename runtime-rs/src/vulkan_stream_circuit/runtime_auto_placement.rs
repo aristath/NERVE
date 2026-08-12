@@ -8,6 +8,7 @@ pub struct VulkanRuntimePlacementCandidate {
 pub struct VulkanRuntimePlacementCostModel {
     component_execution: BTreeMap<(String, String), (String, u64)>,
     boundary_transfer_ns: BTreeMap<(String, String, usize), u64>,
+    default_graph_compatible_devices: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +23,23 @@ struct VulkanRuntimePlacementBoundary {
 }
 
 impl VulkanRuntimePlacementCostModel {
+    pub fn record_default_graph_compatibility(
+        &mut self,
+        device_id: &str,
+    ) -> Result<(), VulkanRuntimeResidencyPlanError> {
+        if device_id.is_empty()
+            || !self
+                .default_graph_compatible_devices
+                .insert(device_id.to_string())
+        {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "runtime placement default-graph compatibility requires a unique nonempty device"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn record_calibration(
         &mut self,
         device_id: &str,
@@ -96,26 +114,68 @@ impl VulkanRuntimePlacementCostModel {
         candidates: &[VulkanRuntimePlacementCandidate],
     ) -> Result<(), VulkanRuntimeResidencyPlanError> {
         let targets = vulkan_runtime_placement_calibration_targets(runtime_model)?;
+        let expected_signatures = targets
+            .iter()
+            .flat_map(|target| {
+                target
+                    .component_ids
+                    .iter()
+                    .map(|component_id| (component_id.as_str(), target.signature_id.as_str()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut covered_components = BTreeSet::new();
         for candidate in candidates {
-            for target in &targets {
-                for component_id in &target.component_ids {
-                    let Some((signature_id, cost)) = self
-                        .component_execution
-                        .get(&(candidate.device_id.clone(), component_id.clone()))
-                    else {
-                        return Err(VulkanRuntimeResidencyPlanError(format!(
-                            "runtime placement has no measured execution cost for component {component_id:?} on device {:?}",
-                            candidate.device_id,
-                        )));
-                    };
-                    if signature_id != &target.signature_id || *cost == 0 {
-                        return Err(VulkanRuntimeResidencyPlanError(format!(
-                            "runtime placement cost for component {component_id:?} on device {:?} was measured for a different compiled execution signature",
-                            candidate.device_id,
-                        )));
-                    }
+            let mut candidate_component_count = 0usize;
+            for ((device_id, component_id), (signature_id, cost)) in &self.component_execution {
+                if device_id != &candidate.device_id {
+                    continue;
                 }
+                let Some(expected_signature) = expected_signatures.get(component_id.as_str())
+                else {
+                    return Err(VulkanRuntimeResidencyPlanError(format!(
+                        "runtime placement cost for device {:?} references unknown component {component_id:?}",
+                        candidate.device_id,
+                    )));
+                };
+                if signature_id != expected_signature || *cost == 0 {
+                    return Err(VulkanRuntimeResidencyPlanError(format!(
+                        "runtime placement cost for component {component_id:?} on device {:?} was measured for a different compiled execution signature",
+                        candidate.device_id,
+                    )));
+                }
+                candidate_component_count += 1;
+                covered_components.insert(component_id.as_str());
             }
+            if candidate_component_count == 0 {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "runtime placement has no measured compatible component on device {:?}",
+                    candidate.device_id,
+                )));
+            }
+        }
+        let uncovered_components = expected_signatures
+            .keys()
+            .copied()
+            .filter(|component_id| !covered_components.contains(component_id))
+            .collect::<Vec<_>>();
+        if !uncovered_components.is_empty() {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "runtime placement candidates cannot execute components {}",
+                uncovered_components
+                    .iter()
+                    .map(|component_id| format!("{component_id:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )));
+        }
+        if !candidates.iter().any(|candidate| {
+            self.default_graph_compatible_devices
+                .contains(&candidate.device_id)
+        }) {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "runtime placement has no candidate compatible with the default input/output graph"
+                    .to_string(),
+            ));
         }
         if candidates.len() > 1 {
             let boundary_bytes = vulkan_runtime_placement_boundary_byte_counts(runtime_model)?;
@@ -137,22 +197,48 @@ impl VulkanRuntimePlacementCostModel {
         Ok(())
     }
 
-    pub fn aggregate_device_execution_ns(
+    pub fn normalized_device_execution_ns(
         &self,
         device_id: &str,
+        total_component_count: usize,
     ) -> Result<u128, VulkanRuntimeResidencyPlanError> {
+        if total_component_count == 0 {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "runtime placement normalization requires a positive component count".to_string(),
+            ));
+        }
         let costs = self
             .component_execution
             .iter()
             .filter(|((candidate_device_id, _), _)| candidate_device_id == device_id)
             .map(|(_, (_, cost))| u128::from(*cost))
             .collect::<Vec<_>>();
-        if costs.is_empty() {
+        if costs.is_empty() || costs.len() > total_component_count {
             return Err(VulkanRuntimeResidencyPlanError(format!(
-                "runtime placement has no execution costs for device {device_id:?}",
+                "runtime placement has an invalid compatible-component count for device {device_id:?}",
             )));
         }
-        Ok(costs.into_iter().sum())
+        let measured_component_count = costs.len() as u128;
+        costs
+            .into_iter()
+            .sum::<u128>()
+            .checked_mul(total_component_count as u128)
+            .map(|scaled| scaled / measured_component_count)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "runtime placement normalized execution cost overflowed".to_string(),
+                )
+            })
+    }
+
+    fn can_host_default_graph(&self, device_id: &str) -> bool {
+        self.default_graph_compatible_devices.contains(device_id)
+    }
+
+    fn try_component_execution_ns(&self, device_id: &str, component_id: &str) -> Option<u64> {
+        self.component_execution
+            .get(&(device_id.to_string(), component_id.to_string()))
+            .map(|(_, cost)| *cost)
     }
 
     fn component_execution_ns(
@@ -160,9 +246,7 @@ impl VulkanRuntimePlacementCostModel {
         device_id: &str,
         component_id: &str,
     ) -> Result<u64, VulkanRuntimeResidencyPlanError> {
-        self.component_execution
-            .get(&(device_id.to_string(), component_id.to_string()))
-            .map(|(_, cost)| *cost)
+        self.try_component_execution_ns(device_id, component_id)
             .ok_or_else(|| {
                 VulkanRuntimeResidencyPlanError(format!(
                     "runtime placement has no execution cost for component {component_id:?} on device {device_id:?}",
@@ -610,47 +694,104 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
         })
         .transpose()?;
     let mut failures = Vec::new();
+    let mut paged_shortfall_fallbacks = Vec::new();
     for device_count in 1..=maximum_device_count {
-        let selected = &candidates[..device_count];
-        let attempt = if let Some(balance) = paged_balance.as_ref() {
-            if demand_paged_prefix_has_avoidable_addressable_shortfall(
-                balance,
-                selected,
-                maximum_device_count,
-            )? {
-                failures.push(format!(
-                    "{device_count} device(s): compatible capacity remains available to reduce demand paging",
-                ));
-                continue;
-            }
-            capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
-                manifest_dir,
-                runtime_model,
-                tensor_index,
-                &components,
-                selected,
-                placement_costs,
-                balance,
-                context_capacity_activations,
-                speculative_draft_tokens,
-            )
+        let selections = if placement_costs.is_some() {
+            runtime_placement_candidate_subsets(candidates, device_count)?
         } else {
-            capacity_pack_vulkan_runtime_model_on_devices(
-                manifest_dir,
-                runtime_model,
-                tensor_index,
-                &components,
-                selected,
-                placement_costs,
-                context_capacity_activations,
-                speculative_draft_tokens,
-                residency_policy,
-            )
+            vec![candidates[..device_count].to_vec()]
         };
-        match attempt {
-            Ok(placed) => return Ok(placed),
-            Err(error) => failures.push(format!("{device_count} device(s): {error}")),
+        let mut successful = Vec::new();
+        for selected in selections {
+            let selected_ids = selected
+                .iter()
+                .map(|candidate| candidate.device_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let attempt = if let Some(balance) = paged_balance.as_ref() {
+                capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
+                    manifest_dir,
+                    runtime_model,
+                    tensor_index,
+                    &components,
+                    &selected,
+                    placement_costs,
+                    balance,
+                    context_capacity_activations,
+                    speculative_draft_tokens,
+                )
+            } else {
+                capacity_pack_vulkan_runtime_model_on_devices(
+                    manifest_dir,
+                    runtime_model,
+                    tensor_index,
+                    &components,
+                    &selected,
+                    placement_costs,
+                    context_capacity_activations,
+                    speculative_draft_tokens,
+                    residency_policy,
+                )
+            };
+            match attempt {
+                Ok(placed) => {
+                    let predicted_ns = placement_costs.map_or(Ok(0), |costs| {
+                        predicted_runtime_placement_ns(
+                            &placed.runtime_model,
+                            &components,
+                            &vulkan_runtime_placement_boundaries(&placed.runtime_model)?,
+                            costs,
+                        )
+                    })?;
+                    let shortfall = paged_balance
+                        .as_ref()
+                        .map(|balance| {
+                            demand_paged_subset_has_addressable_shortfall(balance, &selected)
+                        })
+                        .transpose()?
+                        .unwrap_or(false);
+                    let selected_capacity =
+                        selected.iter().try_fold(0u128, |total, candidate| {
+                            total
+                                .checked_add(candidate.safe_capacity_bytes as u128)
+                                .ok_or_else(|| {
+                                    VulkanRuntimeResidencyPlanError(
+                                        "runtime placement selected capacity overflowed"
+                                            .to_string(),
+                                    )
+                                })
+                        })?;
+                    let outcome = (
+                        predicted_ns,
+                        placed.selected_device_ids.clone(),
+                        selected_capacity,
+                        placed,
+                    );
+                    if shortfall {
+                        paged_shortfall_fallbacks.push(outcome);
+                    } else {
+                        successful.push(outcome);
+                    }
+                }
+                Err(error) => failures.push(format!(
+                    "{device_count} device(s) [{selected_ids}]: {error}",
+                )),
+            }
         }
+        if let Some((_, _, _, placed)) = successful
+            .into_iter()
+            .min_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)))
+        {
+            return Ok(placed);
+        }
+    }
+    if let Some((_, _, _, placed)) = paged_shortfall_fallbacks.into_iter().min_by(
+        |left, right| {
+            (std::cmp::Reverse(left.2), left.0, &left.1)
+                .cmp(&(std::cmp::Reverse(right.2), right.0, &right.1))
+        },
+    ) {
+        return Ok(placed);
     }
     Err(VulkanRuntimeResidencyPlanError(format!(
         "no capacity-packed contiguous placement can admit the model working set: {}",
@@ -658,23 +799,51 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
     )))
 }
 
-/// A demand-paged package may execute inside a cache much smaller than its
-/// addressable resources, but that does not make the smaller cache the best
-/// placement. Keep extending the caller-ranked compatible prefix while doing
-/// so can eliminate an aggregate addressable-capacity shortfall. At the final
-/// prefix paging remains valid and unavoidable.
-fn demand_paged_prefix_has_avoidable_addressable_shortfall(
-    balance: &VulkanRuntimePagedPlacementBalance,
-    selected: &[VulkanRuntimePlacementCandidate],
-    maximum_device_count: usize,
-) -> Result<bool, VulkanRuntimeResidencyPlanError> {
-    if selected.is_empty() || maximum_device_count < selected.len() {
+fn runtime_placement_candidate_subsets(
+    candidates: &[VulkanRuntimePlacementCandidate],
+    subset_size: usize,
+) -> Result<Vec<Vec<VulkanRuntimePlacementCandidate>>, VulkanRuntimeResidencyPlanError> {
+    if subset_size == 0 || subset_size > candidates.len() {
         return Err(VulkanRuntimeResidencyPlanError(
-            "demand-paged prefix accounting requires a nonempty valid device prefix".to_string(),
+            "runtime placement candidate subset requires a valid positive size".to_string(),
         ));
     }
-    if selected.len() == maximum_device_count {
-        return Ok(false);
+    let mut indices = (0..subset_size).collect::<Vec<_>>();
+    let mut subsets = Vec::new();
+    loop {
+        subsets.push(
+            indices
+                .iter()
+                .map(|index| candidates[*index].clone())
+                .collect(),
+        );
+        let Some(position) = (0..subset_size)
+            .rev()
+            .find(|position| indices[*position] < candidates.len() - subset_size + *position)
+        else {
+            break;
+        };
+        indices[position] += 1;
+        for next in position + 1..subset_size {
+            indices[next] = indices[next - 1] + 1;
+        }
+    }
+    Ok(subsets)
+}
+
+/// A demand-paged package may execute inside a cache much smaller than its
+/// addressable resources, but that does not make the smaller cache the best
+/// placement. Keep increasing the selected device count while doing so can
+/// eliminate an aggregate addressable-capacity shortfall. At the largest
+/// legal set paging remains valid and unavoidable.
+fn demand_paged_subset_has_addressable_shortfall(
+    balance: &VulkanRuntimePagedPlacementBalance,
+    selected: &[VulkanRuntimePlacementCandidate],
+) -> Result<bool, VulkanRuntimeResidencyPlanError> {
+    if selected.is_empty() {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "demand-paged subset accounting requires a nonempty device set".to_string(),
+        ));
     }
     let addressable_bytes = balance
         .component_weights
@@ -889,6 +1058,11 @@ fn cost_aware_contiguous_component_placement(
                 if mask & device_bit != 0 {
                     continue;
                 }
+                if cursor == 0
+                    && !costs.can_host_default_graph(&candidates[device_index].device_id)
+                {
+                    continue;
+                }
                 let remaining_devices = candidates.len() - (mask.count_ones() as usize) - 1;
                 let maximum_cut = components.len().saturating_sub(remaining_devices);
                 let mut segment_weight = 0u128;
@@ -948,11 +1122,14 @@ fn cost_aware_contiguous_component_placement(
                     if segment_weight > maximum_weight {
                         break;
                     }
+                    let Some(component_execution_ns) = costs.try_component_execution_ns(
+                        &candidates[device_index].device_id,
+                        &components[cut - 1].component_id,
+                    ) else {
+                        break;
+                    };
                     segment_execution_ns = segment_execution_ns
-                        .checked_add(u128::from(costs.component_execution_ns(
-                            &candidates[device_index].device_id,
-                            &components[cut - 1].component_id,
-                        )?))
+                        .checked_add(u128::from(component_execution_ns))
                         .ok_or_else(|| {
                             VulkanRuntimeResidencyPlanError(
                                 "cost-aware predicted execution time overflowed".to_string(),

@@ -189,6 +189,7 @@ fn calibrate_vulkan_runtime_canonical_component(
         phase,
         scope,
         policy,
+        None,
     )?;
     let report = match reports.as_slice() {
         [] => return Ok(None),
@@ -210,7 +211,7 @@ fn calibrate_vulkan_runtime_canonical_component(
         );
     }
     let plans = suite
-        .plans_for_device(&device, physical_device_id, manifest_dir)?
+        .plans_for_device(&device, physical_device_id, manifest_dir, &[0])?
         .0;
     let [cached_plan] = plans.as_slice() else {
         return canonical_calibration_error(
