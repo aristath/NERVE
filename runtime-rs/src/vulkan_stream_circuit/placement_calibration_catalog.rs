@@ -115,7 +115,11 @@ pub struct VulkanPlacementShardIdentity {
     pub distribution: String,
     pub logical_start: usize,
     pub logical_count: usize,
-    pub selected_resource_indices: BTreeMap<String, Vec<usize>>,
+    /// Exact ownership by partition ordinal within this dispatch. Runtime
+    /// selector IDs contain component-instance identity and therefore cannot
+    /// be used to replay one equivalent compiled transaction at another
+    /// component instance.
+    pub selected_resource_indices_by_partition: BTreeMap<usize, Vec<usize>>,
     pub parameter_bytes: usize,
 }
 
@@ -688,14 +692,19 @@ fn validate_observation(
         || case.shards.iter().any(|shard| {
             !devices.contains(shard.physical_device_id.as_str())
                 || shard.logical_count == 0
-                || (shard.parameter_bytes == 0 && shard.selected_resource_indices.is_empty())
+                || (shard.parameter_bytes == 0
+                    && shard.selected_resource_indices_by_partition.is_empty())
                 || shard.distribution.is_empty()
+                || !shard
+                    .selected_resource_indices_by_partition
+                    .keys()
+                    .copied()
+                    .eq(0..shard.selected_resource_indices_by_partition.len())
                 || shard
-                    .selected_resource_indices
+                    .selected_resource_indices_by_partition
                     .iter()
-                    .any(|(selector_id, indices)| {
-                        selector_id.is_empty()
-                            || indices.is_empty()
+                    .any(|(_, indices)| {
+                        indices.is_empty()
                             || indices.windows(2).any(|pair| pair[0] >= pair[1])
                     })
         })
@@ -785,7 +794,7 @@ mod placement_calibration_catalog_tests {
                     distribution: "output_rows".to_string(),
                     logical_start: 0,
                     logical_count: 8,
-                    selected_resource_indices: BTreeMap::new(),
+                    selected_resource_indices_by_partition: BTreeMap::new(),
                     parameter_bytes: 16,
                 }],
                 input_physical_device_id: "gpu0".to_string(),
@@ -846,24 +855,34 @@ mod placement_calibration_catalog_tests {
         let mut selected = observation(behavior(), "gpu0", "gpu0", 100, 16);
         selected.execution_case.shards[0].distribution = "expert_range".to_string();
         selected.execution_case.shards[0].parameter_bytes = 0;
-        selected.execution_case.shards[0].selected_resource_indices =
-            BTreeMap::from([("selector".to_string(), vec![0, 2, 4, 6])]);
+        selected.execution_case.shards[0].selected_resource_indices_by_partition =
+            BTreeMap::from([(0, vec![0, 2, 4, 6])]);
         let mut catalog = catalog_with_reference();
         catalog.record_observation(selected.clone()).unwrap();
 
         let mut different_ownership = selected.clone();
         *different_ownership.execution_case.shards[0]
-            .selected_resource_indices
-            .get_mut("selector")
+            .selected_resource_indices_by_partition
+            .get_mut(&0)
             .unwrap() = vec![1, 3, 5, 7];
         assert_ne!(selected.execution_case, different_ownership.execution_case);
 
-        let mut malformed = selected;
+        let mut malformed = selected.clone();
         *malformed.execution_case.shards[0]
-            .selected_resource_indices
-            .get_mut("selector")
+            .selected_resource_indices_by_partition
+            .get_mut(&0)
             .unwrap() = vec![2, 1];
         assert!(catalog.record_observation(malformed).is_err());
+
+        let mut skipped_partition = selected;
+        let indices = skipped_partition.execution_case.shards[0]
+            .selected_resource_indices_by_partition
+            .remove(&0)
+            .unwrap();
+        skipped_partition.execution_case.shards[0]
+            .selected_resource_indices_by_partition
+            .insert(1, indices);
+        assert!(catalog.record_observation(skipped_partition).is_err());
     }
 
     #[test]

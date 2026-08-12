@@ -473,6 +473,15 @@ fn distributed_calibration_execution_case(
                             )
                         })
                     })?;
+            let selected_resource_indices_by_partition =
+                distributed_calibration_normalized_selected_resource_indices(
+                    dispatch
+                        .selected_resource_partitions
+                        .iter()
+                        .map(|partition| partition.selector_id.as_str()),
+                    &shard.selected_resource_indices,
+                    &shard.device_id,
+                )?;
             shards.push(VulkanPlacementShardIdentity {
                 dispatch_ordinal,
                 physical_device_id: physical_id(&shard.device_id)?,
@@ -480,7 +489,7 @@ fn distributed_calibration_execution_case(
                     .to_string(),
                 logical_start: shard.row_start,
                 logical_count: shard.row_count,
-                selected_resource_indices: shard.selected_resource_indices.clone(),
+                selected_resource_indices_by_partition,
                 parameter_bytes,
             });
         }
@@ -574,6 +583,28 @@ fn distributed_calibration_execution_case(
         owner_physical_device_id,
         transports,
     })
+}
+
+fn distributed_calibration_normalized_selected_resource_indices<'a>(
+    selector_ids: impl IntoIterator<Item = &'a str>,
+    selected_resource_indices: &BTreeMap<String, Vec<usize>>,
+    device_id: &str,
+) -> Result<BTreeMap<usize, Vec<usize>>, VulkanResidentTokenModelPackageError> {
+    selector_ids
+        .into_iter()
+        .enumerate()
+        .map(|(partition_ordinal, selector_id)| {
+            selected_resource_indices
+                .get(selector_id)
+                .cloned()
+                .map(|indices| (partition_ordinal, indices))
+                .ok_or_else(|| {
+                    distributed_calibration_error_value(format!(
+                        "distributed calibration shard on {device_id:?} has no ownership for partition ordinal {partition_ordinal}",
+                    ))
+                })
+        })
+        .collect()
 }
 
 fn distributed_calibration_equivalence(
@@ -2419,6 +2450,41 @@ mod runtime_distributed_placement_calibration_strategy_tests {
 
         assert_eq!(first, relabeled);
         assert_ne!(first, different_topology);
+    }
+
+    #[test]
+    fn selected_resource_identity_uses_partition_ordinals_not_runtime_selector_ids() {
+        let first = distributed_calibration_normalized_selected_resource_indices(
+            ["layer.0.router", "layer.0.shared"],
+            &BTreeMap::from([
+                ("layer.0.router".to_string(), vec![0, 2, 4]),
+                ("layer.0.shared".to_string(), vec![0]),
+            ]),
+            "gpu0",
+        )
+        .unwrap();
+        let relabeled = distributed_calibration_normalized_selected_resource_indices(
+            ["layer.19.router", "layer.19.shared"],
+            &BTreeMap::from([
+                ("layer.19.router".to_string(), vec![0, 2, 4]),
+                ("layer.19.shared".to_string(), vec![0]),
+            ]),
+            "gpu0",
+        )
+        .unwrap();
+
+        assert_eq!(first, relabeled);
+        assert_eq!(first[&0], [0, 2, 4]);
+        assert!(
+            distributed_calibration_normalized_selected_resource_indices(
+                ["layer.19.router", "layer.19.shared"],
+                &BTreeMap::from([("layer.19.router".to_string(), vec![0, 2, 4])]),
+                "gpu0",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("partition ordinal 1")
+        );
     }
 
     fn artifact_digest(artifact: &VulkanLoadedPhysicalKernelArtifact) -> String {
