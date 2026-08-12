@@ -3018,6 +3018,13 @@ mod tests {
         let mut mismatched = plan.clone();
         mismatched.dispatches[1].selected_resource_partitions[0].atomic_group_byte_counts[0] += 1;
         assert!(
+            mismatched
+                .selected_resource_execution_classes("routed-experts")
+                .unwrap_err()
+                .to_string()
+                .contains("disagree on transaction identity")
+        );
+        assert!(
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&mismatched)
                 .unwrap_err()
                 .to_string()

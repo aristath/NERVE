@@ -14,6 +14,14 @@ pub struct VulkanRuntimeSelectedResourceExecutionCalibrationTarget {
     pub selected_contract_ids: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanRuntimeSelectedResourceExecutionRequirementPlan {
+    pub component_id: String,
+    pub selector_id: String,
+    pub resource_execution_class_ids: Vec<String>,
+    pub requirements: Vec<VulkanPlacementSelectedResourceExecutionClassRequirement>,
+}
+
 struct VulkanRuntimeSelectedResourceExecutionBlueprint {
     logical_device_id: String,
     placed_model: VulkanResidentRuntimeModel,
@@ -210,6 +218,163 @@ pub fn vulkan_runtime_selected_resource_execution_calibration_targets(
         selected_contract_ids,
         &blueprint.resource_execution_class_ids,
     )
+}
+
+/// Rebuilds the selected-resource class requirements from the exact physical
+/// plan that production will mount. This is intentionally downstream of exact
+/// case replay: changing a contract, artifact, representation, phase, shape,
+/// or execution topology changes the requirement and prevents stale catalog
+/// evidence from being consumed.
+pub fn vulkan_runtime_selected_resource_execution_requirements(
+    runtime_model: &VulkanResidentRuntimeModel,
+    resource_contract: &CompiledResourceResidencyContract,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
+    execution_plan: &VulkanDistributedExecutionPlan,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<Vec<VulkanRuntimeSelectedResourceExecutionRequirementPlan>, VulkanResidentTokenModelPackageError>
+{
+    let selector_ids = execution_plan
+        .dispatches
+        .iter()
+        .flat_map(|dispatch| {
+            dispatch
+                .selected_resource_partitions
+                .iter()
+                .map(|partition| partition.selector_id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let (execution_phase, _) = distributed_contract_phase_and_shape(phase);
+    let mut plans = Vec::with_capacity(selector_ids.len());
+    for selector_id in selector_ids {
+        let selector = resource_contract
+            .selectors
+            .iter()
+            .find(|selector| selector.id == selector_id)
+            .ok_or_else(|| {
+                distributed_calibration_error_value(format!(
+                    "mounted selected-resource plan references unknown selector {selector_id:?}",
+                ))
+            })?;
+        let classes = execution_plan
+            .selected_resource_execution_classes(&selector_id)
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        if classes.component_id != selector.component_id {
+            return distributed_calibration_error(
+                "mounted selected-resource execution class belongs to a different component",
+            );
+        }
+        let component = vulkan_runtime_placement_calibration_target_for_component(
+            runtime_model,
+            &classes.component_id,
+            phase,
+        )
+        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        let owner_device_id = execution_plan
+            .dispatches
+            .iter()
+            .find(|dispatch| {
+                dispatch
+                    .selected_resource_partitions
+                    .iter()
+                    .any(|partition| partition.selector_id == selector_id)
+            })
+            .map(|dispatch| dispatch.owner_device_id.as_str())
+            .expect("selected-resource classes proved an executable dispatch");
+        let mut representative_by_class = BTreeMap::<String, usize>::new();
+        for (resource_index, class_id) in classes
+            .resource_execution_class_ids
+            .iter()
+            .enumerate()
+        {
+            representative_by_class
+                .entry(class_id.clone())
+                .or_insert(resource_index);
+        }
+        let requirements = representative_by_class
+            .into_iter()
+            .map(|(class_id, resource_index)| {
+                let isolated = execution_plan
+                    .isolated_selected_resource_transaction(
+                        &selector_id,
+                        resource_index,
+                        owner_device_id,
+                        execution_phase,
+                    )
+                    .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+                selected_resource_execution_requirement(
+                    &component.signature_id,
+                    selector,
+                    &class_id,
+                    &isolated,
+                    loaded_manifest,
+                    phase,
+                )
+            })
+            .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
+        plans.push(VulkanRuntimeSelectedResourceExecutionRequirementPlan {
+            component_id: classes.component_id,
+            selector_id,
+            resource_execution_class_ids: classes.resource_execution_class_ids,
+            requirements,
+        });
+    }
+    Ok(plans)
+}
+
+pub(crate) fn selected_resource_execution_requirement(
+    component_signature: &str,
+    selector: &CompiledResourceSelector,
+    resource_execution_class_id: &str,
+    isolated_execution_plan: &VulkanDistributedExecutionPlan,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<VulkanPlacementSelectedResourceExecutionClassRequirement, VulkanResidentTokenModelPackageError>
+{
+    let first_island = isolated_execution_plan
+        .execution_islands
+        .first()
+        .ok_or_else(|| {
+            distributed_calibration_error_value(
+                "selected-resource requirement has no physical execution island",
+            )
+        })?;
+    let last_island = isolated_execution_plan
+        .execution_islands
+        .last()
+        .expect("first selected-resource island was checked above");
+    Ok(VulkanPlacementSelectedResourceExecutionClassRequirement {
+        resource_execution_class_id: resource_execution_class_id.to_string(),
+        compiled_execution_signature: selected_resource_compiled_execution_signature(
+            component_signature,
+            selector,
+            resource_execution_class_id,
+            isolated_execution_plan,
+        )?,
+        runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.to_string(),
+        phase: match phase {
+            VulkanTargetedComponentExecutionPhase::Decode => {
+                nerve_execution_contracts::ExecutionPhase::Decode
+            }
+            VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+                nerve_execution_contracts::ExecutionPhase::Prefill
+            }
+        },
+        shape: VulkanPlacementShapeClass {
+            activation_batch_width: phase.activation_batch_width(),
+            input_byte_capacity: first_island.leader().input_byte_capacity,
+            output_byte_capacity: last_island.tail().output_byte_capacity,
+        },
+        artifact_digest: distributed_calibration_artifact_digest(
+            loaded_manifest,
+            isolated_execution_plan,
+        )?,
+        execution_graph_digest: selected_resource_execution_graph_digest(
+            component_signature,
+            selector,
+            resource_execution_class_id,
+            isolated_execution_plan,
+        ),
+    })
 }
 
 fn selected_resource_execution_calibration_targets_for_classes(

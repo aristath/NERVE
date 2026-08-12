@@ -690,28 +690,22 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
                 })
             })
             .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
-        let artifact_digest =
-            distributed_calibration_artifact_digest(&loaded_manifest, &execution_plan)?;
-        let execution_graph_digest = selected_resource_execution_graph_digest(
+        let requirement = selected_resource_execution_requirement(
             &target.component.signature_id,
             &selector,
             &resource_execution_class_id,
             &execution_plan,
-        );
-        let compiled_execution_signature = selected_resource_compiled_execution_signature(
-            &target.component.signature_id,
-            &selector,
-            &resource_execution_class_id,
-            &execution_plan,
+            &loaded_manifest,
+            target.phase,
         )?;
         let mut execution_case = distributed_calibration_execution_case(
             &[(physical_device_id.to_string(), Rc::clone(&device))],
             std::slice::from_ref(&logical_device_id),
             &execution_plan,
             &loaded_manifest,
-            compiled_execution_signature,
-            artifact_digest,
-            execution_graph_digest,
+            requirement.compiled_execution_signature,
+            requirement.artifact_digest,
+            requirement.execution_graph_digest,
             target.phase,
             &dispatch_work,
         )?;

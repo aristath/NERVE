@@ -36,7 +36,13 @@ impl VulkanDistributedExecutionPlan {
                 || partition.domain_id != first_partition.domain_id
                 || partition.selection_signal != first_partition.selection_signal
                 || partition.resource_count != first_partition.resource_count
+                || partition.selection_count_per_activation
+                    != first_partition.selection_count_per_activation
                 || partition.atomic_group_ids != first_partition.atomic_group_ids
+                || partition.atomic_group_byte_counts
+                    != first_partition.atomic_group_byte_counts
+                || partition.atomic_group_resource_ids
+                    != first_partition.atomic_group_resource_ids
                 || partition.resource_operation_class_ids.len() != partition.resource_count
                 || partition
                     .resource_operation_class_ids
