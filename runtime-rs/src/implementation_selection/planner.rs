@@ -183,6 +183,142 @@ impl RuntimeImplementationCatalog {
         reports.dedup_by(|left, right| selection_identity(left) == selection_identity(right));
         Ok(reports)
     }
+
+    /// Reconstructs one canonical, fully validated report from applications
+    /// selected by a measured physical planner. The physical planner may rank
+    /// representations differently from their isolated compiler benchmark,
+    /// but it may not invent, alter, overlap, or leave required applications
+    /// uncovered.
+    pub fn selection_report_for_applications(
+        &self,
+        request: &RuntimeSelectionRequest,
+        mut selected: Vec<RuntimeSelectedImplementation>,
+    ) -> io::Result<RuntimeImplementationSelectionReport> {
+        let (eligible, mut rejected) = eligible_applications(self, request)?;
+        selected.sort_by(|left, right| {
+            (
+                left.instance_ids.as_slice(),
+                left.implementation_id.as_str(),
+            )
+                .cmp(&(
+                    right.instance_ids.as_slice(),
+                    right.implementation_id.as_str(),
+                ))
+        });
+        if selected.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "runtime physical selection contains a duplicate implementation application",
+            ));
+        }
+
+        let mut covered_instances = BTreeSet::new();
+        for chosen in &selected {
+            if !eligible
+                .iter()
+                .any(|application| application.selected == *chosen)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "runtime physical selection contains an ineligible or altered application {:?} for instances {:?}",
+                        chosen.implementation_id, chosen.instance_ids,
+                    ),
+                ));
+            }
+            if chosen
+                .instance_ids
+                .iter()
+                .any(|instance_id| !covered_instances.insert(instance_id.clone()))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "runtime physical selection contains overlapping implementation applications",
+                ));
+            }
+        }
+
+        let exact_instance_ids = request
+            .instances
+            .iter()
+            .map(|instance| instance.instance_id.clone())
+            .filter(|instance_id| !covered_instances.contains(instance_id))
+            .collect::<Vec<_>>();
+        let uncovered_incompatible = exact_instance_ids
+            .iter()
+            .filter(|instance_id| {
+                request
+                    .exact_baseline_incompatible_instance_ids
+                    .contains(instance_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        if !uncovered_incompatible.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "runtime physical selection leaves incompatible exact runtime instances {uncovered_incompatible:?}",
+                ),
+            ));
+        }
+
+        for application in eligible.iter().filter(|application| {
+            !selected
+                .iter()
+                .any(|chosen| chosen == &application.selected)
+        }) {
+            rejected.push(RuntimeRejectedImplementation {
+                implementation_id: application.loaded.implementation.implementation_id.clone(),
+                instance_ids: application.instance_ids.clone(),
+                reasons: vec![
+                    "a measured physical execution plan selected another compatible representation"
+                        .to_string(),
+                ],
+            });
+        }
+        rejected.sort_by(|left, right| {
+            (
+                left.implementation_id.as_str(),
+                left.instance_ids.as_slice(),
+                left.reasons.as_slice(),
+            )
+                .cmp(&(
+                    right.implementation_id.as_str(),
+                    right.instance_ids.as_slice(),
+                    right.reasons.as_slice(),
+                ))
+        });
+        rejected.dedup();
+
+        Ok(RuntimeImplementationSelectionReport {
+            package_id: self.package_id.clone(),
+            execution: request.execution.clone(),
+            total_estimated_saved_ns: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.estimated_saved_ns),
+                "estimated saved time",
+            )?,
+            total_conversion_ns: checked_metric_sum(
+                selected.iter().map(|application| application.conversion_ns),
+                "conversion time",
+            )?,
+            total_conversion_bytes: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.conversion_bytes),
+                "conversion bytes",
+            )?,
+            total_boundary_count: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.boundary_count),
+                "representation boundary count",
+            )?,
+            selected,
+            exact_instance_ids,
+            rejected,
+        })
+    }
 }
 
 fn selection_identity(selection: &RuntimeImplementationSelectionReport) -> Vec<(&str, &[String])> {

@@ -954,6 +954,172 @@ fn calibration_can_mount_every_applicable_region_without_combinatorial_variants(
 }
 
 #[test]
+fn measured_physical_selection_rebuilds_one_canonical_complete_report() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu", "gfx-fixture", "vulkan");
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        scopes: BTreeMap::new(),
+        implementations: vec![
+            loaded_implementation(
+                "implementation_a",
+                &["source_a"],
+                &["scope_a"],
+                predicate(&[&gpu], "local"),
+                1_000,
+                700,
+                11,
+            ),
+            loaded_implementation(
+                "implementation_b",
+                &["source_b"],
+                &["scope_b"],
+                predicate(&[&gpu], "local"),
+                1_000,
+                600,
+                13,
+            ),
+        ],
+    };
+    let request = request(
+        vec![selection_device("gpu0", gpu)],
+        &[
+            ("layer_a", "source_a", &["gpu0"]),
+            ("layer_b", "source_b", &["gpu0"]),
+            ("output", "output", &["gpu0"]),
+        ],
+        &[("layer_a", "layer_b"), ("layer_b", "output")],
+    );
+    let applications = catalog
+        .independent_application_selections(&request)
+        .unwrap();
+    let chosen = applications
+        .into_iter()
+        .map(|application| application.selected.into_iter().next().unwrap())
+        .collect::<Vec<_>>();
+
+    let report = catalog
+        .selection_report_for_applications(&request, chosen)
+        .unwrap();
+
+    assert_eq!(
+        report
+            .selected
+            .iter()
+            .map(|selected| selected.implementation_id.as_str())
+            .collect::<Vec<_>>(),
+        ["implementation_a", "implementation_b"],
+    );
+    assert_eq!(report.exact_instance_ids, ["output"]);
+    assert_eq!(
+        report.total_estimated_saved_ns,
+        report
+            .selected
+            .iter()
+            .map(|selected| selected.estimated_saved_ns)
+            .sum::<u64>(),
+    );
+    assert_eq!(report.total_conversion_ns, 24);
+}
+
+#[test]
+fn measured_physical_selection_rejects_altered_or_overlapping_applications() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu", "gfx-fixture", "vulkan");
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        scopes: BTreeMap::new(),
+        implementations: vec![loaded_implementation(
+            "implementation",
+            &["source"],
+            &["scope"],
+            predicate(&[&gpu], "local"),
+            1_000,
+            700,
+            0,
+        )],
+    };
+    let request = request(
+        vec![selection_device("gpu0", gpu)],
+        &[("layer", "source", &["gpu0"])],
+        &[],
+    );
+    let selected = catalog
+        .independent_application_selections(&request)
+        .unwrap()
+        .remove(0)
+        .selected
+        .remove(0);
+    let mut altered = selected.clone();
+    altered.estimated_saved_ns += 1;
+
+    let altered_error = catalog
+        .selection_report_for_applications(&request, vec![altered])
+        .unwrap_err();
+    assert!(altered_error.to_string().contains("ineligible or altered"));
+
+    let overlap_error = catalog
+        .selection_report_for_applications(&request, vec![selected.clone(), selected])
+        .unwrap_err();
+    assert!(
+        overlap_error.to_string().contains("duplicate")
+            || overlap_error.to_string().contains("overlapping")
+    );
+}
+
+#[test]
+fn measured_physical_selection_cannot_leave_an_incompatible_exact_instance() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu", "gfx-fixture", "vulkan");
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        scopes: BTreeMap::new(),
+        implementations: vec![loaded_implementation(
+            "implementation",
+            &["source"],
+            &["scope"],
+            predicate(&[&gpu], "local"),
+            1_000,
+            700,
+            0,
+        )],
+    };
+    let mut request = request(
+        vec![selection_device("gpu0", gpu)],
+        &[("layer", "source", &["gpu0"])],
+        &[],
+    );
+    request
+        .exact_baseline_incompatible_instance_ids
+        .insert("layer".to_string());
+
+    let error = catalog
+        .selection_report_for_applications(&request, Vec::new())
+        .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(error.to_string().contains("incompatible exact"));
+}
+
+#[test]
 fn one_implementation_exposes_disconnected_semantic_regions_independently() {
     let gpu = profile(HardwareDeviceKind::Gpu, "gpu", "gfx-fixture", "vulkan");
     let mut implementation = loaded_implementation(
