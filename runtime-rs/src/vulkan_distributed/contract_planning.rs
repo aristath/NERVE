@@ -212,6 +212,7 @@ fn plan_contract_dispatch(
     validate_contract_descriptor_coverage(dispatch, contract)?;
     let selected_resource_partitions = resolve_selected_resource_partitions(
         dispatch,
+        artifact,
         contract,
         resource_context,
     )?;
@@ -689,6 +690,7 @@ fn plan_contract_dispatch(
 
 fn resolve_selected_resource_partitions(
     dispatch: &VulkanPreparedDispatch,
+    artifact: &crate::vulkan_stream_circuit::VulkanPhysicalKernelArtifact,
     contract: &PhysicalExecutionContract,
     resource_context: Option<(&str, &CompiledResourceResidencyContract)>,
 ) -> Result<Vec<VulkanDistributedSelectedResourcePartitionPlan>, VulkanDistributedPlanError> {
@@ -867,6 +869,8 @@ fn resolve_selected_resource_partitions(
                 ));
             }
             let mut atomic_group_byte_counts = Vec::with_capacity(atomic_group_ids.len());
+            let mut resource_execution_class_ids =
+                Vec::with_capacity(atomic_group_ids.len());
             let mut atomic_group_resource_ids = Vec::with_capacity(atomic_group_ids.len());
             let mut parameter_resource_ids = Vec::with_capacity(atomic_group_ids.len());
             let mut parameter_resource_byte_counts =
@@ -935,6 +939,16 @@ fn resolve_selected_resource_partitions(
                     })
                 })?;
                 atomic_group_byte_counts.push(group_bytes);
+                resource_execution_class_ids.push(selected_resource_execution_class_id(
+                    dispatch,
+                    artifact,
+                    contract,
+                    selector_index,
+                    selector.resource_count,
+                    group,
+                    &resources,
+                    &slot_resource_ids,
+                )?);
                 atomic_group_resource_ids.push(group.resource_ids.clone());
                 parameter_resource_ids.push(slot_resource_ids);
                 parameter_resource_byte_counts.push(slot_resource_byte_counts);
@@ -955,6 +969,7 @@ fn resolve_selected_resource_partitions(
                 selection_count_per_activation: selector
                     .encoding
                     .selection_count_per_activation,
+                resource_execution_class_ids,
                 atomic_group_ids: atomic_group_ids.clone(),
                 atomic_group_byte_counts,
                 atomic_group_resource_ids,
@@ -963,6 +978,123 @@ fn resolve_selected_resource_partitions(
             })
         })
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_resource_execution_class_id(
+    dispatch: &VulkanPreparedDispatch,
+    artifact: &crate::vulkan_stream_circuit::VulkanPhysicalKernelArtifact,
+    contract: &PhysicalExecutionContract,
+    resource_index: usize,
+    resource_count: usize,
+    group: &CompiledAtomicResidencyGroup,
+    resources: &BTreeMap<&str, &CompiledImmutableResource>,
+    parameter_resource_ids: &[String],
+) -> Result<String, VulkanDistributedPlanError> {
+    let source_representation = selected_resource_source_representation(
+        dispatch,
+        contract,
+        resource_index,
+        resource_count,
+    )?;
+    let resource_descriptor = |resource_id: &str| {
+        let resource = resources.get(resource_id).ok_or_else(|| {
+            dispatch_error(
+                dispatch,
+                format!("selected execution class references missing resource {resource_id:?}"),
+            )
+        })?;
+        let ranges = resource
+            .ranges
+            .iter()
+            .map(|range| {
+                serde_json::json!({
+                    "byte_count": range.byte_count,
+                    "alignment_bytes": range.alignment_bytes,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::json!({
+            "ranges": ranges,
+            "dependency_count": resource.dependencies.len(),
+            "compatibility": &resource.compatibility,
+            "resident_derivation": &resource.resident_derivation,
+        }))
+    };
+    let parameter_resources = parameter_resource_ids
+        .iter()
+        .map(|resource_id| resource_descriptor(resource_id))
+        .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
+    let mut atomic_resources = group
+        .resource_ids
+        .iter()
+        .map(|resource_id| resource_descriptor(resource_id))
+        .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
+    atomic_resources.sort_by_key(Value::to_string);
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "schema": "nerve.selected_resource_execution_class.v1",
+        "implementation_digest": &contract.implementation_digest,
+        "operation_family": &contract.operation_family,
+        "artifact": {
+            "op": &artifact.op,
+            "path": &artifact.path,
+            "entry_point": &artifact.entry_point,
+            "local_size_x": artifact.local_size_x,
+            "workgroup_count_x": artifact.workgroup_count_x,
+            "descriptor_signature": &artifact.descriptor_signature,
+            "push_constants": &artifact.push_constants,
+            "stream_control_binding": artifact.stream_control_binding,
+        },
+        "source_representation": source_representation,
+        "parameter_resources": parameter_resources,
+        "atomic_resources": atomic_resources,
+    }))
+    .map_err(|error| {
+        dispatch_error(
+            dispatch,
+            format!("could not encode selected-resource execution class: {error}"),
+        )
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(payload)))
+}
+
+fn selected_resource_source_representation(
+    dispatch: &VulkanPreparedDispatch,
+    contract: &PhysicalExecutionContract,
+    resource_index: usize,
+    resource_count: usize,
+) -> Result<String, VulkanDistributedPlanError> {
+    let Some(representation) = &dispatch.resource_representation_dispatch else {
+        return Ok(format!("contract_storage:{}", contract.formats.storage));
+    };
+    representation.validate().map_err(|error| {
+        dispatch_error(
+            dispatch,
+            format!("has an invalid resource representation dispatch: {error}"),
+        )
+    })?;
+    match representation.source_representation {
+        VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32 => {
+            Ok("mxfp4_e2m1_g32".to_string())
+        }
+        VulkanResidentKernelSourceResourceRepresentation::SelectorMappedMxfp4OrNativeFp8 => {
+            let boundary = representation
+                .compact_mxfp4_resource_count(resource_count)
+                .ok_or_else(|| {
+                    dispatch_error(
+                        dispatch,
+                        "resource representation boundary does not partition the selected resources"
+                            .to_string(),
+                    )
+                })?;
+            Ok(if resource_index < boundary {
+                "mxfp4_e2m1_g32"
+            } else {
+                "fp8_e4m3_e8m0_b128"
+            }
+            .to_string())
+        }
+    }
 }
 
 fn selected_resource_fragments_for_shard(

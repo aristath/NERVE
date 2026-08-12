@@ -75,6 +75,7 @@ impl VulkanPreparedDispatchPlan {
                 push_constants: command.push_constants.clone(),
                 stream_control_binding: command.stream_control_binding,
                 physical_execution_contracts: Vec::new(),
+                resource_representation_dispatch: None,
             });
         }
         let total_descriptor_count = dispatches
@@ -132,6 +133,8 @@ pub struct VulkanPreparedDispatch {
     pub stream_control_binding: Option<u32>,
     pub physical_execution_contracts:
         Vec<nerve_execution_contracts::PhysicalExecutionContract>,
+    pub resource_representation_dispatch:
+        Option<VulkanResidentKernelResourceRepresentationDispatchSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

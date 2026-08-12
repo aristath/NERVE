@@ -101,6 +101,9 @@ fn resident_package_component_kernel_shader_refs(
                     local_size_x: kernel.local_size_x,
                     workgroup_count_x: kernel.workgroup_count_x,
                     physical_execution_contracts: kernel.physical_execution_contracts.clone(),
+                    resource_representation_dispatch: kernel
+                        .resource_representation_dispatch
+                        .clone(),
                 })
         })
         .collect()
@@ -128,7 +131,13 @@ fn attach_resident_package_physical_execution_contracts(
     for shader in dispatch_shaders {
         let key = (shader.component_id.as_str(), shader.node_id.as_str());
         if contracts_by_dispatch
-            .insert(key, shader.physical_execution_contracts.as_slice())
+            .insert(
+                key,
+                (
+                    shader.physical_execution_contracts.as_slice(),
+                    shader.resource_representation_dispatch.as_ref(),
+                ),
+            )
             .is_some()
         {
             return Err(VulkanResidentTokenModelPackageError::new(format!(
@@ -138,7 +147,7 @@ fn attach_resident_package_physical_execution_contracts(
         }
     }
     for dispatch in &mut prepared_plan.dispatches {
-        let contracts = contracts_by_dispatch
+        let (contracts, representation_dispatch) = contracts_by_dispatch
             .get(&(dispatch.component_id.as_str(), dispatch.node_id.as_str()))
             .ok_or_else(|| {
                 VulkanResidentTokenModelPackageError::new(format!(
@@ -153,6 +162,7 @@ fn attach_resident_package_physical_execution_contracts(
             )));
         }
         dispatch.physical_execution_contracts = contracts.to_vec();
+        dispatch.resource_representation_dispatch = representation_dispatch.cloned();
     }
     Ok(())
 }

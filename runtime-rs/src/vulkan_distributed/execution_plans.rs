@@ -4,6 +4,9 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
 use crate::stream_circuit::ComponentEdgePlacement;
 use crate::stream_plan::TensorIndex;
 use crate::tensor_storage::{TensorStorage, TensorStorageRange};
@@ -16,15 +19,22 @@ use crate::vulkan_compute::{
     VulkanTimelineSemaphorePoint, VulkanTimelineSemaphoreReplayState,
 };
 use crate::vulkan_stream_circuit::{
-    CompiledResourceBindingMapping, CompiledResourceLifetime, CompiledResourceResidencyContract,
-    CompiledResourceSelectorMapping, VulkanActivationSlotBufferOverride,
+    CompiledAtomicResidencyGroup, CompiledImmutableResource, CompiledResourceBindingMapping,
+    CompiledResourceLifetime, CompiledResourceResidencyContract, CompiledResourceSelectorMapping,
+    VulkanActivationSlotBufferOverride,
     VulkanCompiledResourceDeviceStore, VulkanDescriptorResourceAddress,
     VulkanDistributedSelectedResourceGate, VulkanDynamicResourceBuffers,
     VulkanKernelDescriptorUsage, VulkanKernelScalarBinding, VulkanKernelScalarSource,
     VulkanLoadedKernelArtifactCatalog, VulkanLoadedPhysicalKernelArtifact,
     VulkanModelBoundaryBufferOverride, VulkanModelBoundaryDirection,
     VulkanPhysicalKernelArtifactManifest, VulkanPreparedDispatch, VulkanPreparedDispatchPlan,
-    VulkanResidentFeedbackControlPlane,
+    VulkanResidentFeedbackControlPlane, VulkanResidentKernelSourceResourceRepresentation,
+};
+#[cfg(test)]
+use crate::vulkan_stream_circuit::{
+    KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA,
+    VulkanResidentKernelResourceRepresentationDispatchSpec,
+    VulkanResidentKernelResourceRepresentationSelection,
 };
 
 const BF16_BYTE_COUNT: usize = 2;
@@ -2130,11 +2140,25 @@ pub struct VulkanDistributedSelectedResourcePartitionPlan {
     pub parameters_per_resource: usize,
     pub parameter_partitions: Vec<VulkanDistributedSelectedResourceParameterPartitionPlan>,
     pub selection_count_per_activation: usize,
+    /// Stable structural execution class for each selector index. Content and
+    /// model identities are intentionally excluded so equivalent experts can
+    /// share one exact calibration observation.
+    pub resource_execution_class_ids: Vec<String>,
     pub atomic_group_ids: Vec<String>,
     pub atomic_group_byte_counts: Vec<usize>,
     pub atomic_group_resource_ids: Vec<Vec<String>>,
     pub parameter_resource_ids: Vec<Vec<String>>,
     pub parameter_resource_byte_counts: Vec<Vec<usize>>,
+}
+
+fn valid_selected_resource_execution_class_id(value: &str) -> bool {
+    let Some(digest) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

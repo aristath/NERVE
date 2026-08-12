@@ -128,6 +128,7 @@ fn contract_attachment_test_dispatch(
         push_constants: Vec::new(),
         stream_control_binding: None,
         physical_execution_contracts: Vec::new(),
+        resource_representation_dispatch: None,
     }
 }
 
@@ -165,6 +166,16 @@ fn contract_attachment_test_shader(
         local_size_x: DEFAULT_COMPUTE_LOCAL_SIZE_X,
         workgroup_count_x: 1,
         physical_execution_contracts: vec![contract],
+        resource_representation_dispatch: Some(
+            VulkanResidentKernelResourceRepresentationDispatchSpec {
+                schema: KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA.to_string(),
+                source_representation:
+                    VulkanResidentKernelSourceResourceRepresentation::Mxfp4E2m1G32,
+                source_representation_boundary: None,
+                resident_derivation: None,
+                selection: VulkanResidentKernelResourceRepresentationSelection::FixedSource,
+            },
+        ),
     }
 }
 
@@ -189,6 +200,14 @@ fn prepared_dispatches_share_code_without_sharing_instance_contracts() {
     assert_eq!(
         plan.dispatches[1].physical_execution_contracts[0].contract_id,
         format!("sha256:{}", "b".repeat(64))
+    );
+    assert_eq!(
+        plan.dispatches[0].resource_representation_dispatch,
+        shaders[0].resource_representation_dispatch
+    );
+    assert_eq!(
+        plan.dispatches[1].resource_representation_dispatch,
+        shaders[1].resource_representation_dispatch
     );
 }
 

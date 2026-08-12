@@ -864,6 +864,11 @@ fn validate_selected_resource_partition(
         })
         || partition.selection_count_per_activation == 0
         || partition.selection_count_per_activation > partition.resource_count
+        || partition.resource_execution_class_ids.len() != partition.resource_count
+        || partition
+            .resource_execution_class_ids
+            .iter()
+            .any(|class_id| !valid_selected_resource_execution_class_id(class_id))
         || partition.atomic_group_ids.len() != partition.resource_count
         || partition.atomic_group_byte_counts.len() != partition.resource_count
         || partition.atomic_group_resource_ids.len() != partition.resource_count

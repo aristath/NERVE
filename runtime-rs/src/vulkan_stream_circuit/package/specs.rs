@@ -649,4 +649,6 @@ pub struct VulkanResidentComponentKernelShaderRef {
     pub workgroup_count_x: u32,
     pub physical_execution_contracts:
         Vec<nerve_execution_contracts::PhysicalExecutionContract>,
+    pub resource_representation_dispatch:
+        Option<VulkanResidentKernelResourceRepresentationDispatchSpec>,
 }

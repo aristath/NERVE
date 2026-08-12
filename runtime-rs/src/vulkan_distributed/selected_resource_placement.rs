@@ -551,13 +551,18 @@ fn validate_selected_resource_placement_problem(
         )));
     }
     if partition.atomic_group_byte_counts.len() != partition.resource_count
+        || partition.resource_execution_class_ids.len() != partition.resource_count
+        || partition
+            .resource_execution_class_ids
+            .iter()
+            .any(|class_id| !valid_selected_resource_execution_class_id(class_id))
         || partition
             .atomic_group_byte_counts
             .iter()
             .any(|bytes| *bytes == 0)
     {
         return Err(VulkanDistributedPlanError(format!(
-            "selector {:?} has invalid atomic resource byte counts",
+            "selector {:?} has invalid resource execution classes or atomic byte counts",
             partition.selector_id,
         )));
     }
@@ -603,6 +608,10 @@ mod selected_resource_placement_tests {
             parameters_per_resource: 2,
             parameter_partitions: Vec::new(),
             selection_count_per_activation: selected,
+            resource_execution_class_ids: vec![
+                format!("sha256:{}", "a".repeat(64));
+                resource_count
+            ],
             atomic_group_ids: (0..resource_count)
                 .map(|index| format!("expert_{index}"))
                 .collect(),
@@ -773,5 +782,16 @@ mod selected_resource_placement_tests {
             )
             .is_err()
         );
+        let mut malformed_class = partition(4, 2);
+        malformed_class.resource_execution_class_ids[2] = "expert-2".to_string();
+        let error = plan_selected_resource_placement(
+            "layer",
+            &malformed_class,
+            &telemetry(vec![1; 4], vec![0; 6]),
+            &devices(4, 40),
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("resource execution classes"));
     }
 }

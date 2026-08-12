@@ -601,6 +601,10 @@ mod exact_case_replay_tests {
                 parameters_per_resource: 2,
                 parameter_partitions: Vec::new(),
                 selection_count_per_activation: 2,
+                resource_execution_class_ids: vec![
+                    format!("sha256:{}", "a".repeat(64));
+                    4
+                ],
                 atomic_group_ids: (0..4).map(|index| format!("expert-{index}")).collect(),
                 atomic_group_byte_counts: vec![8; 4],
                 atomic_group_resource_ids: (0..4)

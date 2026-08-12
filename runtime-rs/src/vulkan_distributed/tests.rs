@@ -850,6 +850,10 @@ mod tests {
                     },
                 ],
                 selection_count_per_activation: 1,
+                resource_execution_class_ids: vec![format!(
+                    "sha256:{}",
+                    "a".repeat(64)
+                )],
                 atomic_group_ids: vec!["expert-0".to_string()],
                 atomic_group_byte_counts: vec![128],
                 atomic_group_resource_ids: vec![vec![
@@ -1202,6 +1206,7 @@ mod tests {
             ],
             stream_control_binding: None,
             physical_execution_contracts: vec![contract.clone()],
+            resource_representation_dispatch: None,
         };
         let prepared = VulkanPreparedDispatchPlan {
             backend_id: "vulkan_stream_circuit".to_string(),
@@ -1662,6 +1667,7 @@ mod tests {
                     ],
                     test_output(2, OutputCollection::Routed, Some(1)),
                 )],
+                resource_representation_dispatch: None,
             }],
             total_descriptor_count: 5,
         };
@@ -2015,6 +2021,17 @@ mod tests {
                 ],
                 stream_control_binding: None,
                 physical_execution_contracts: vec![contract],
+                resource_representation_dispatch: Some(
+                    VulkanResidentKernelResourceRepresentationDispatchSpec {
+                        schema: KERNEL_RESOURCE_REPRESENTATION_DISPATCH_SCHEMA.to_string(),
+                        source_representation:
+                            VulkanResidentKernelSourceResourceRepresentation::SelectorMappedMxfp4OrNativeFp8,
+                        source_representation_boundary: Some(4),
+                        resident_derivation: None,
+                        selection:
+                            VulkanResidentKernelResourceRepresentationSelection::FixedSource,
+                    },
+                ),
             }],
             total_descriptor_count: 5,
         };
@@ -2155,6 +2172,15 @@ mod tests {
             dispatch.selected_resource_partitions[0].atomic_group_byte_counts,
             vec![8; 8]
         );
+        let classes = &dispatch.selected_resource_partitions[0]
+            .resource_execution_class_ids;
+        assert_eq!(classes.len(), 8);
+        assert!(classes.iter().all(|class_id| {
+            valid_selected_resource_execution_class_id(class_id)
+        }));
+        assert!(classes[..4].iter().all(|class_id| class_id == &classes[0]));
+        assert!(classes[4..].iter().all(|class_id| class_id == &classes[4]));
+        assert_ne!(classes[0], classes[4]);
         assert_eq!(dispatch.shards.len(), 2);
         assert!(
             dispatch
@@ -2247,6 +2273,19 @@ mod tests {
             (0..8).collect::<Vec<_>>(),
         );
 
+        let mut malformed_class = plans.clone();
+        malformed_class.decode.dispatches[0].selected_resource_partitions[0]
+            .resource_execution_class_ids
+            .pop();
+        assert!(
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(
+                &malformed_class,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("invalid selected resource partition")
+        );
+
         let mut identity_mismatch = plans.clone();
         identity_mismatch.decode_batch.dispatches[0].selected_resource_partitions[0].domain_id =
             "different-domain".to_string();
@@ -2330,6 +2369,10 @@ mod tests {
                 },
             ],
             selection_count_per_activation: 1,
+            resource_execution_class_ids: vec![
+                format!("sha256:{}", "a".repeat(64));
+                2
+            ],
             atomic_group_ids: vec!["expert-0".to_string(), "expert-1".to_string()],
             atomic_group_byte_counts: vec![1568, 1568],
             atomic_group_resource_ids: (0..2)
@@ -2535,6 +2578,10 @@ mod tests {
                 parameters_per_resource: 2,
                 parameter_partitions: Vec::new(),
                 selection_count_per_activation: 2,
+                resource_execution_class_ids: vec![
+                    format!("sha256:{}", "a".repeat(64));
+                    4
+                ],
                 atomic_group_ids: (0..4).map(|index| format!("expert-{index}")).collect(),
                 atomic_group_byte_counts: vec![1024; 4],
                 atomic_group_resource_ids: (0..4)
@@ -2710,6 +2757,10 @@ mod tests {
                     },
                 ],
                 selection_count_per_activation: 1,
+                resource_execution_class_ids: vec![format!(
+                    "sha256:{}",
+                    "a".repeat(64)
+                )],
                 atomic_group_ids: vec!["expert-0".to_string()],
                 atomic_group_byte_counts: vec![288],
                 atomic_group_resource_ids: vec![vec![
@@ -3739,6 +3790,7 @@ mod tests {
                 ],
                 push_constants: Vec::new(),
                 stream_control_binding: None,
+                resource_representation_dispatch: None,
                 physical_execution_contracts: vec![test_physical_contract(
                     "linear_residual",
                     "residual",
@@ -4224,6 +4276,7 @@ mod tests {
                     vec![test_input(0, InputDistribution::Replicated, None)],
                     test_output(1, OutputCollection::Concatenated, Some(2)),
                 )],
+                resource_representation_dispatch: None,
             }],
             total_descriptor_count: 4,
         }
