@@ -82,6 +82,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
+            None,
             dynamic_state_capacity_activations,
             1,
             ResourceResidencyPolicy::Eager,
@@ -101,6 +102,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
+            None,
             dynamic_state_capacity_activations,
             speculative_draft_tokens,
             ResourceResidencyPolicy::Eager,
@@ -130,6 +132,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
+            None,
             dynamic_state_capacity_activations,
             speculative_draft_tokens,
             resource_residency_policy,
@@ -165,6 +168,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
+            None,
             dynamic_state_capacity_activations,
             speculative_draft_tokens,
             resource_residency_policy,
@@ -202,6 +206,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         Self::from_runtime_model_for_device_resolver(
             manifest_dir,
             runtime_model,
+            None,
             dynamic_state_capacity_activations,
             speculative_draft_tokens,
             resource_residency_policy,
@@ -220,9 +225,49 @@ impl VulkanResidentInProcessPlacedModelPackage {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_runtime_model_for_bound_devices_with_physical_execution_plan(
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        manifest_dir: impl AsRef<Path>,
+        runtime_model: VulkanResidentRuntimeModel,
+        physical_execution_plan: VulkanRuntimePhysicalExecutionPlan,
+        dynamic_state_capacity_activations: Option<usize>,
+        speculative_draft_tokens: usize,
+        resource_residency_policy: ResourceResidencyPolicy,
+        parameter_pool: &VulkanResidentBufferPool,
+        retained_stores: Option<&VulkanRetainedCompiledResourceStores>,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        for (device_id, device) in devices {
+            parameter_pool
+                .register_device(device_id, device.clone())
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        }
+        Self::from_runtime_model_for_device_resolver(
+            manifest_dir,
+            runtime_model,
+            Some(physical_execution_plan),
+            dynamic_state_capacity_activations,
+            speculative_draft_tokens,
+            resource_residency_policy,
+            Some(parameter_pool),
+            retained_stores,
+            |device_id| {
+                devices
+                    .get(device_id)
+                    .map(|device| device.as_ref())
+                    .ok_or_else(
+                        || VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                            device_id: device_id.to_string(),
+                        },
+                    )
+            },
+        )
+    }
+
     fn from_runtime_model_for_device_resolver<'a, F>(
         manifest_dir: impl AsRef<Path>,
         runtime_model: VulkanResidentRuntimeModel,
+        physical_execution_plan: Option<VulkanRuntimePhysicalExecutionPlan>,
         dynamic_state_capacity_activations: Option<usize>,
         speculative_draft_tokens: usize,
         resource_residency_policy: ResourceResidencyPolicy,
@@ -265,7 +310,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 ),
             ));
         }
-        let physical_execution_plan = VulkanRuntimePhysicalExecutionPlan::uniform(&runtime_model);
+        let physical_execution_plan = physical_execution_plan
+            .unwrap_or_else(|| VulkanRuntimePhysicalExecutionPlan::uniform(&runtime_model));
         physical_execution_plan
             .validate(&runtime_model)
             .map_err(|error| {
@@ -410,9 +456,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         )?;
         let sampler_kernels =
             load_resident_sampler_kernels(manifest_dir, &runtime_model.package.sampler)?;
-        let device_ids = runtime_model
-            .circuit_graph
-            .signal_processor_device_ids(&runtime_model.placement);
+        let device_ids = physical_execution_plan.device_ids(&runtime_model);
         let owner_device_ids = runtime_model
             .circuit_graph
             .signal_processor_owner_device_ids(&runtime_model.placement);

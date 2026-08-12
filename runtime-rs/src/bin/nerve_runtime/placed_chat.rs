@@ -7,33 +7,26 @@ fn mount_placed_chat_stream(
     mut runtime_model: VulkanResidentRuntimeModel,
     capacity: usize,
     speculative_draft_tokens: usize,
+    physical_execution_plan: Option<VulkanRuntimePhysicalExecutionPlan>,
     retained_stores: Option<&VulkanRetainedCompiledResourceStores>,
 ) -> Result<VulkanResidentInProcessPlacedPromptStream, Box<dyn Error>> {
     runtime_model.package.sampler.spec = sampler_runtime_config(args)
         .apply_to(&runtime_model.package.sampler.spec)?;
-    let package = Arc::new(match retained_stores {
-        Some(retained_stores) => {
-            VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_parameter_pool_and_retained_stores(
-                devices,
-                manifest_dir,
-                runtime_model,
-                Some(capacity),
-                speculative_draft_tokens,
-                args.resource_residency_policy,
-                parameter_pool,
-                retained_stores,
-            )?
-        }
-        None => VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_parameter_pool(
+    let physical_execution_plan = physical_execution_plan
+        .unwrap_or_else(|| VulkanRuntimePhysicalExecutionPlan::uniform(&runtime_model));
+    let package = Arc::new(
+        VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_physical_execution_plan(
             devices,
             manifest_dir,
             runtime_model,
+            physical_execution_plan,
             Some(capacity),
             speculative_draft_tokens,
             args.resource_residency_policy,
             parameter_pool,
+            retained_stores,
         )?,
-    });
+    );
     Ok(VulkanResidentInProcessPlacedPromptStream::new(
         package,
         devices.clone(),
@@ -109,6 +102,7 @@ fn run_placed_chat(
         runtime_model.clone(),
         capacity,
         speculative_draft_tokens,
+        None,
         None,
     )?;
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
@@ -534,6 +528,7 @@ fn run_placed_chat(
                             new_runtime_model.clone(),
                             capacity,
                             speculative_draft_tokens,
+                            None,
                             Some(&release.retained_stores),
                         )?;
                         engine.add_stream("main", stream)?;

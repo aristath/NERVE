@@ -86,7 +86,8 @@ impl VulkanRuntimePhysicalExecutionPlan {
 
     pub fn device_ids(&self, runtime_model: &VulkanResidentRuntimeModel) -> Vec<String> {
         runtime_model
-            .placement_device_ids()
+            .circuit_graph
+            .signal_processor_device_ids(&runtime_model.placement)
             .into_iter()
             .chain(
                 [

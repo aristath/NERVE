@@ -35,6 +35,7 @@ use nerve_runtime::{
     VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
     VulkanResidentTokenTextCodec, VulkanRetainedCompiledResourceStores,
     VulkanReusableKernelArtifactManifest, VulkanPlacementCalibrationCatalog,
+    VulkanRuntimePhysicalExecutionPlan,
     VulkanRuntimePlacementCalibrationSuite, VulkanRuntimePlacementCandidate,
     VulkanRuntimePlacementCostModel, VulkanSpeculativeCycleTrace, VulkanSpeculativeWindowStats,
     calibrate_vulkan_runtime_placement_candidate,
