@@ -2,8 +2,7 @@
 pub struct VulkanDistributedActivationBufferPlan {
     pub allocations: Vec<VulkanDistributedActivationBufferAllocation>,
     pub reduction_allocations: Vec<VulkanDistributedReductionBufferAllocation>,
-    pub private_intermediate_allocations:
-        Vec<VulkanDistributedPrivateIntermediateBufferAllocation>,
+    pub private_intermediate_allocations: Vec<VulkanDistributedPrivateIntermediateBufferAllocation>,
     pub allocation_count: usize,
     pub import_count: usize,
     pub reference_count: usize,
@@ -51,12 +50,64 @@ impl VulkanDistributedActivationBufferPlan {
                 "distributed activation alternatives must not be empty".to_string(),
             ));
         };
-        for candidate in &plans[1..] {
-            if !first.has_same_shared_activation_interface(candidate) {
-                return Err(VulkanDistributedPlanError(
-                    "single-lane decode, multi-lane decode, and multi-lane prefill require different shared activation interfaces"
-                        .to_string(),
-                ));
+        if plans.iter().any(|candidate| candidate.route != first.route) {
+            return Err(VulkanDistributedPlanError(
+                "distributed activation alternatives require different transport routes"
+                    .to_string(),
+            ));
+        }
+        let mut allocations = BTreeMap::<
+            VulkanDistributedActivationBufferAllocationKey,
+            VulkanDistributedActivationBufferAllocation,
+        >::new();
+        for plan in plans {
+            for candidate in &plan.allocations {
+                let key = distributed_activation_buffer_allocation_key(candidate)?;
+                if candidate.byte_capacity == 0
+                    || candidate.signal_ids.is_empty()
+                    || candidate.device_ids.is_empty()
+                    || candidate
+                        .signal_ids
+                        .windows(2)
+                        .any(|pair| pair[0] >= pair[1])
+                    || candidate
+                        .device_ids
+                        .windows(2)
+                        .any(|pair| pair[0] >= pair[1])
+                    || !candidate.device_ids.contains(&candidate.owner_device_id)
+                {
+                    return Err(VulkanDistributedPlanError(
+                        "distributed alternative has an invalid shared activation allocation"
+                            .to_string(),
+                    ));
+                }
+                let Some(merged) = allocations.get_mut(&key) else {
+                    allocations.insert(key, candidate.clone());
+                    continue;
+                };
+                if merged.storage != candidate.storage
+                    || merged.owner_device_id != candidate.owner_device_id
+                    || merged.component_id != candidate.component_id
+                    || merged.slot != candidate.slot
+                    || merged.byte_capacity != candidate.byte_capacity
+                {
+                    return Err(VulkanDistributedPlanError(
+                        "distributed alternatives disagree on one shared activation identity"
+                            .to_string(),
+                    ));
+                }
+                merged
+                    .signal_ids
+                    .extend(candidate.signal_ids.iter().cloned());
+                merged.signal_ids.sort();
+                merged.signal_ids.dedup();
+                merged
+                    .device_ids
+                    .extend(candidate.device_ids.iter().cloned());
+                merged.device_ids.sort();
+                merged.device_ids.dedup();
+                merged.input_use_count = merged.input_use_count.max(candidate.input_use_count);
+                merged.output_use_count = merged.output_use_count.max(candidate.output_use_count);
             }
         }
 
@@ -72,9 +123,7 @@ impl VulkanDistributedActivationBufferPlan {
             (String, usize, String, String),
             VulkanDistributedReductionBufferAllocation,
         >::new();
-        let mut expected_reduction_keys = None;
         for plan in plans {
-            let mut plan_keys = BTreeSet::new();
             for allocation in &plan.reduction_allocations {
                 let expected_bytes = allocation
                     .plane_byte_capacity
@@ -89,27 +138,22 @@ impl VulkanDistributedActivationBufferPlan {
                     || allocation.byte_capacity != expected_bytes
                     || allocation.device_ids.iter().collect::<BTreeSet<_>>().len()
                         != allocation.device_ids.len()
+                    || !allocation.device_ids.contains(&allocation.owner_device_id)
                 {
                     return Err(VulkanDistributedPlanError(
                         "distributed alternative has an invalid reduction allocation".to_string(),
                     ));
                 }
                 let key = reduction_key(allocation);
-                if !plan_keys.insert(key.clone()) {
-                    return Err(VulkanDistributedPlanError(
-                        "distributed alternative repeats a reduction allocation".to_string(),
-                    ));
-                }
                 if let Some(merged) = reduction_allocations.get_mut(&key) {
-                    if merged.device_ids != allocation.device_ids {
-                        return Err(VulkanDistributedPlanError(
-                            "distributed alternatives use different reduction participants"
-                                .to_string(),
-                        ));
-                    }
                     merged.plane_byte_capacity = merged
                         .plane_byte_capacity
                         .max(allocation.plane_byte_capacity);
+                    merged
+                        .device_ids
+                        .extend(allocation.device_ids.iter().cloned());
+                    merged.device_ids.sort();
+                    merged.device_ids.dedup();
                     merged.byte_capacity = merged
                         .plane_byte_capacity
                         .checked_mul(merged.device_ids.len())
@@ -122,16 +166,6 @@ impl VulkanDistributedActivationBufferPlan {
                     reduction_allocations.insert(key, allocation.clone());
                 }
             }
-            if let Some(expected) = &expected_reduction_keys {
-                if expected != &plan_keys {
-                    return Err(VulkanDistributedPlanError(
-                        "distributed alternatives require different reduction allocations"
-                            .to_string(),
-                    ));
-                }
-            } else {
-                expected_reduction_keys = Some(plan_keys);
-            }
         }
 
         let private_key = |allocation: &VulkanDistributedPrivateIntermediateBufferAllocation| {
@@ -142,19 +176,14 @@ impl VulkanDistributedActivationBufferPlan {
                 allocation.signal_id.clone(),
             )
         };
-        let mut private_capacities = BTreeMap::<
-            (usize, usize, String, String),
-            BTreeMap<String, usize>,
-        >::new();
-        let mut expected_private_keys = None;
+        let mut private_capacities =
+            BTreeMap::<(usize, usize, String, String), BTreeMap<String, usize>>::new();
         for plan in plans {
-            let mut plan_keys = BTreeSet::new();
             for allocation in &plan.private_intermediate_allocations {
                 let key = private_key(allocation);
-                if allocation.devices.is_empty() || !plan_keys.insert(key.clone()) {
+                if allocation.devices.is_empty() {
                     return Err(VulkanDistributedPlanError(
-                        "distributed alternative has an empty or repeated private intermediate"
-                            .to_string(),
+                        "distributed alternative has an empty private intermediate".to_string(),
                     ));
                 }
                 let candidate_devices = allocation
@@ -163,57 +192,29 @@ impl VulkanDistributedActivationBufferPlan {
                     .map(|device| (device.device_id.clone(), device.byte_capacity))
                     .collect::<BTreeMap<_, _>>();
                 if candidate_devices.len() != allocation.devices.len()
-                    || candidate_devices
-                        .iter()
-                        .any(|(device_id, byte_capacity)| {
-                            device_id.is_empty() || *byte_capacity == 0
-                        })
+                    || candidate_devices.iter().any(|(device_id, byte_capacity)| {
+                        device_id.is_empty() || *byte_capacity == 0
+                    })
                 {
                     return Err(VulkanDistributedPlanError(
                         "distributed alternative has an invalid private intermediate allocation"
                             .to_string(),
                     ));
                 }
-                if let Some(merged_devices) = private_capacities.get_mut(&key) {
-                    if merged_devices.keys().collect::<BTreeSet<_>>()
-                        != candidate_devices.keys().collect::<BTreeSet<_>>()
-                    {
-                        return Err(VulkanDistributedPlanError(
-                            "distributed alternatives use different private intermediate devices"
-                                .to_string(),
-                        ));
-                    }
-                    for (device_id, byte_capacity) in candidate_devices {
-                        let merged = merged_devices
-                            .get_mut(&device_id)
-                            .expect("private device sets were checked above");
-                        *merged = (*merged).max(byte_capacity);
-                    }
-                } else {
-                    private_capacities.insert(key, candidate_devices);
+                let merged_devices = private_capacities.entry(key).or_default();
+                for (device_id, byte_capacity) in candidate_devices {
+                    merged_devices
+                        .entry(device_id)
+                        .and_modify(|merged| *merged = (*merged).max(byte_capacity))
+                        .or_insert(byte_capacity);
                 }
-            }
-            if let Some(expected) = &expected_private_keys {
-                if expected != &plan_keys {
-                    return Err(VulkanDistributedPlanError(
-                        "distributed alternatives require different private intermediates"
-                            .to_string(),
-                    ));
-                }
-            } else {
-                expected_private_keys = Some(plan_keys);
             }
         }
         let private_intermediate_allocations = private_capacities
             .into_iter()
             .map(
                 |(
-                    (
-                        producer_dispatch_index,
-                        consumer_dispatch_index,
-                        component_id,
-                        signal_id,
-                    ),
+                    (producer_dispatch_index, consumer_dispatch_index, component_id, signal_id),
                     devices,
                 )| VulkanDistributedPrivateIntermediateBufferAllocation {
                     producer_dispatch_index,
@@ -232,9 +233,9 @@ impl VulkanDistributedActivationBufferPlan {
                 },
             )
             .collect::<Vec<_>>();
+        let allocations = allocations.into_values().collect::<Vec<_>>();
         let reduction_allocations = reduction_allocations.into_values().collect::<Vec<_>>();
-        let import_count = first
-            .allocations
+        let import_count = allocations
             .iter()
             .map(|allocation| allocation.device_ids.len())
             .chain(
@@ -248,8 +249,7 @@ impl VulkanDistributedActivationBufferPlan {
                     "merged distributed activation import count overflowed".to_string(),
                 )
             })?;
-        let total_shared_byte_capacity = first
-            .allocations
+        let total_shared_byte_capacity = allocations
             .iter()
             .map(|allocation| allocation.byte_capacity)
             .chain(
@@ -284,8 +284,7 @@ impl VulkanDistributedActivationBufferPlan {
                     "merged distributed activation allocation count overflowed".to_string(),
                 )
             })?;
-        let allocation_count = first
-            .allocations
+        let allocation_count = allocations
             .len()
             .checked_add(reduction_allocations.len())
             .and_then(|count| count.checked_add(private_allocation_count))
@@ -294,18 +293,46 @@ impl VulkanDistributedActivationBufferPlan {
                     "merged distributed activation allocation count overflowed".to_string(),
                 )
             })?;
+        let reference_count = allocations
+            .iter()
+            .try_fold(0usize, |total, allocation| {
+                total
+                    .checked_add(allocation.input_use_count)
+                    .and_then(|count| count.checked_add(allocation.output_use_count))
+            })
+            .and_then(|count| {
+                reduction_allocations
+                    .iter()
+                    .try_fold(count, |total, allocation| {
+                        total
+                            .checked_add(allocation.device_ids.len())
+                            .and_then(|count| count.checked_add(1))
+                    })
+            })
+            .and_then(|count| {
+                private_intermediate_allocations
+                    .iter()
+                    .try_fold(count, |total, allocation| {
+                        allocation
+                            .devices
+                            .len()
+                            .checked_mul(2)
+                            .and_then(|references| total.checked_add(references))
+                    })
+            })
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "merged distributed activation reference count overflowed".to_string(),
+                )
+            })?;
 
         Ok(Self {
-            allocations: first.allocations.clone(),
+            allocations,
             reduction_allocations,
             private_intermediate_allocations,
             allocation_count,
             import_count,
-            reference_count: plans
-                .iter()
-                .map(|plan| plan.reference_count)
-                .max()
-                .unwrap_or(0),
+            reference_count,
             total_shared_byte_capacity,
             total_private_byte_capacity,
             route: first.route,
@@ -340,8 +367,7 @@ impl VulkanDistributedActivationBufferPlan {
                     || !private_consumer_dispatches.insert(consumer.dispatch_index)
                 {
                     return Err(VulkanDistributedPlanError(
-                        "distributed private intermediate dispatch is not one-to-one"
-                            .to_string(),
+                        "distributed private intermediate dispatch is not one-to-one".to_string(),
                     ));
                 }
                 let devices = producer
@@ -366,7 +392,11 @@ impl VulkanDistributedActivationBufferPlan {
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                if devices.iter().map(|device| device.device_id.as_str()).collect::<BTreeSet<_>>().len()
+                if devices
+                    .iter()
+                    .map(|device| device.device_id.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len()
                     != devices.len()
                 {
                     return Err(VulkanDistributedPlanError(format!(
@@ -447,10 +477,9 @@ impl VulkanDistributedActivationBufferPlan {
                 )?;
             }
             if let Some(reduction) = &dispatch.reduction {
-                if !reduction_keys.insert((
-                    dispatch.owner_device_id.as_str(),
-                    dispatch.dispatch_index,
-                )) {
+                if !reduction_keys
+                    .insert((dispatch.owner_device_id.as_str(), dispatch.dispatch_index))
+                {
                     return Err(VulkanDistributedPlanError(format!(
                         "distributed reduction repeats dispatch {} owned by {:?}",
                         dispatch.dispatch_index, dispatch.owner_device_id
@@ -502,18 +531,18 @@ impl VulkanDistributedActivationBufferPlan {
             reduction_allocations
                 .iter()
                 .try_fold(0usize, |total, allocation| {
-                    total.checked_add(allocation.device_ids.len()).ok_or_else(|| {
-                        VulkanDistributedPlanError(
-                            "distributed reduction import count overflowed".to_string(),
-                        )
-                    })
+                    total
+                        .checked_add(allocation.device_ids.len())
+                        .ok_or_else(|| {
+                            VulkanDistributedPlanError(
+                                "distributed reduction import count overflowed".to_string(),
+                            )
+                        })
                 })?;
         let import_count = activation_import_count
             .checked_add(reduction_import_count)
             .ok_or_else(|| {
-                VulkanDistributedPlanError(
-                    "distributed buffer import count overflowed".to_string(),
-                )
+                VulkanDistributedPlanError("distributed buffer import count overflowed".to_string())
             })?;
         let activation_reference_count =
             allocations.values().try_fold(0usize, |total, allocation| {
@@ -526,19 +555,19 @@ impl VulkanDistributedActivationBufferPlan {
                         )
                     })
             })?;
-        let reduction_reference_count = reduction_allocations.iter().try_fold(
-            0usize,
-            |total, allocation| {
-                total
-                    .checked_add(allocation.device_ids.len())
-                    .and_then(|count| count.checked_add(1))
-                    .ok_or_else(|| {
-                        VulkanDistributedPlanError(
-                            "distributed reduction reference count overflowed".to_string(),
-                        )
-                    })
-            },
-        )?;
+        let reduction_reference_count =
+            reduction_allocations
+                .iter()
+                .try_fold(0usize, |total, allocation| {
+                    total
+                        .checked_add(allocation.device_ids.len())
+                        .and_then(|count| count.checked_add(1))
+                        .ok_or_else(|| {
+                            VulkanDistributedPlanError(
+                                "distributed reduction reference count overflowed".to_string(),
+                            )
+                        })
+                })?;
         let reference_count = activation_reference_count
             .checked_add(reduction_reference_count)
             .and_then(|count| {
@@ -588,8 +617,7 @@ impl VulkanDistributedActivationBufferPlan {
             .try_fold(0usize, |total, device| {
                 total.checked_add(device.byte_capacity).ok_or_else(|| {
                     VulkanDistributedPlanError(
-                        "distributed private intermediate byte capacity overflowed"
-                            .to_string(),
+                        "distributed private intermediate byte capacity overflowed".to_string(),
                     )
                 })
             })?;
@@ -863,17 +891,14 @@ impl VulkanDistributedActivationBuffers {
                     .checked_add(byte_capacity)
                     .ok_or_else(|| {
                         VulkanDistributedActivationBufferError(
-                            "distributed private intermediate allocation overflowed"
-                                .to_string(),
+                            "distributed private intermediate allocation overflowed".to_string(),
                         )
                     })?;
             }
-            private_intermediate_allocations.push(
-                VulkanDistributedPrivateIntermediateBuffer {
-                    planned: planned.clone(),
-                    device_buffers,
-                },
-            );
+            private_intermediate_allocations.push(VulkanDistributedPrivateIntermediateBuffer {
+                planned: planned.clone(),
+                device_buffers,
+            });
         }
         let expected_private_byte_capacity = plan
             .total_private_byte_capacity
@@ -927,8 +952,7 @@ impl VulkanDistributedActivationBuffers {
         self.allocations
             .iter()
             .filter(|allocation| {
-                allocation.planned.storage
-                    == VulkanDistributedActivationStorage::ActivationSlot
+                allocation.planned.storage == VulkanDistributedActivationStorage::ActivationSlot
                     && allocation.planned.owner_device_id == owner_device_id
             })
             .filter_map(|allocation| {
@@ -961,14 +985,17 @@ impl VulkanDistributedActivationBuffers {
                     }
                     _ => return None,
                 };
-                allocation.device_buffers.get(owner_device_id).and_then(|buffer| {
-                    Some(VulkanModelBoundaryBufferOverride {
-                        direction,
-                        component_id: allocation.planned.component_id.clone(),
-                        signal_id: allocation.planned.signal_ids.first()?.clone(),
-                        buffer: Arc::clone(buffer),
+                allocation
+                    .device_buffers
+                    .get(owner_device_id)
+                    .and_then(|buffer| {
+                        Some(VulkanModelBoundaryBufferOverride {
+                            direction,
+                            component_id: allocation.planned.component_id.clone(),
+                            signal_id: allocation.planned.signal_ids.first()?.clone(),
+                            buffer: Arc::clone(buffer),
+                        })
                     })
-                })
             })
             .collect()
     }
@@ -1007,8 +1034,7 @@ impl VulkanDistributedActivationBuffers {
             .iter()
             .find(|allocation| {
                 allocation.planned.producer_dispatch_index == producer_dispatch_index
-                    && allocation.planned.consumer_dispatch_index
-                        == consumer_dispatch_index
+                    && allocation.planned.consumer_dispatch_index == consumer_dispatch_index
             })
             .and_then(|allocation| allocation.device_buffers.get(device_id))
     }
@@ -1153,6 +1179,64 @@ enum VulkanDistributedActivationBufferAllocationKey {
         edge_index: usize,
         owner_device_id: String,
     },
+}
+
+fn distributed_activation_buffer_allocation_key(
+    allocation: &VulkanDistributedActivationBufferAllocation,
+) -> Result<VulkanDistributedActivationBufferAllocationKey, VulkanDistributedPlanError> {
+    match &allocation.storage {
+        VulkanDistributedActivationStorage::ActivationSlot => Ok(
+            VulkanDistributedActivationBufferAllocationKey::ActivationSlot {
+                owner_device_id: allocation.owner_device_id.clone(),
+                component_id: allocation.component_id.clone(),
+                slot: allocation.slot,
+            },
+        ),
+        VulkanDistributedActivationStorage::BoundaryInput => {
+            let [signal_id] = allocation.signal_ids.as_slice() else {
+                return Err(VulkanDistributedPlanError(
+                    "distributed boundary-input allocation requires exactly one signal identity"
+                        .to_string(),
+                ));
+            };
+            Ok(
+                VulkanDistributedActivationBufferAllocationKey::BoundaryInput {
+                    owner_device_id: allocation.owner_device_id.clone(),
+                    component_id: allocation.component_id.clone(),
+                    signal_id: signal_id.clone(),
+                },
+            )
+        }
+        VulkanDistributedActivationStorage::BoundaryOutput => {
+            let [signal_id] = allocation.signal_ids.as_slice() else {
+                return Err(VulkanDistributedPlanError(
+                    "distributed boundary-output allocation requires exactly one signal identity"
+                        .to_string(),
+                ));
+            };
+            Ok(
+                VulkanDistributedActivationBufferAllocationKey::BoundaryOutput {
+                    owner_device_id: allocation.owner_device_id.clone(),
+                    component_id: allocation.component_id.clone(),
+                    signal_id: signal_id.clone(),
+                },
+            )
+        }
+        VulkanDistributedActivationStorage::Edge {
+            edge_index,
+            owner_device_id,
+        } => {
+            if owner_device_id != &allocation.owner_device_id {
+                return Err(VulkanDistributedPlanError(
+                    "distributed edge allocation disagrees with its embedded owner".to_string(),
+                ));
+            }
+            Ok(VulkanDistributedActivationBufferAllocationKey::Edge {
+                edge_index: *edge_index,
+                owner_device_id: owner_device_id.clone(),
+            })
+        }
+    }
 }
 
 fn distributed_activation_allocation_key(

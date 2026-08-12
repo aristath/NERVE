@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_activation_plan_union_rejects_a_different_private_device_set() {
+    fn phase_activation_plans_union_distinct_private_device_sets() {
         let private = |device_id: &str| VulkanDistributedActivationBufferPlan {
             allocations: Vec::new(),
             reduction_allocations: Vec::new(),
@@ -268,16 +268,21 @@ mod tests {
             route: VulkanSharedResidentBufferRoute::SharedHost,
         };
 
-        let error = VulkanDistributedActivationBufferPlan::merged_for_alternatives(&[
+        let merged = VulkanDistributedActivationBufferPlan::merged_for_alternatives(&[
             private("owner"),
             private("helper"),
         ])
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            error
-                .to_string()
-                .contains("different private intermediate devices")
+        assert_eq!(merged.allocation_count, 2);
+        assert_eq!(merged.total_private_byte_capacity, 128);
+        assert_eq!(
+            merged.private_intermediate_allocations[0]
+                .devices
+                .iter()
+                .map(|device| device.device_id.as_str())
+                .collect::<Vec<_>>(),
+            ["helper", "owner"],
         );
     }
 
@@ -319,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_activation_plan_union_rejects_different_reduction_participants() {
+    fn phase_activation_plans_union_distinct_reduction_participants() {
         let plan = |device_ids: &[&str]| VulkanDistributedActivationBufferPlan {
             allocations: Vec::new(),
             reduction_allocations: vec![VulkanDistributedReductionBufferAllocation {
@@ -340,16 +345,18 @@ mod tests {
             route: VulkanSharedResidentBufferRoute::SharedHost,
         };
 
-        let error = VulkanDistributedActivationBufferPlan::merged_for_alternatives(&[
+        let merged = VulkanDistributedActivationBufferPlan::merged_for_alternatives(&[
             plan(&["owner", "helper"]),
             plan(&["owner", "other"]),
         ])
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            error
-                .to_string()
-                .contains("different reduction participants")
+        assert_eq!(merged.allocation_count, 1);
+        assert_eq!(merged.import_count, 3);
+        assert_eq!(merged.total_shared_byte_capacity, 144);
+        assert_eq!(
+            merged.reduction_allocations[0].device_ids,
+            ["helper", "other", "owner"],
         );
     }
 
@@ -436,6 +443,45 @@ mod tests {
         assert_eq!(
             phase_specific.prefill.dispatches[0].shards[1].device_id,
             "prefill-helper"
+        );
+        let phase_specific_buffers =
+            VulkanDistributedActivationBufferPlan::from_execution_plan_set(&phase_specific)
+                .unwrap();
+        assert!(phase_specific_buffers.allocations.iter().all(|allocation| {
+            allocation.device_ids
+                == ["batch-helper", "decode-helper", "owner", "prefill-helper"]
+        }));
+
+        let decode_only = VulkanDistributedExecutionPlanSet::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &tensor_index,
+            &fixture_artifact_manifest(),
+            &VulkanDistributedPhaseComponentDevicePools {
+                decode: component_device_pools("component", &["owner", "decode-helper"]),
+                decode_batch: BTreeMap::new(),
+                prefill: BTreeMap::new(),
+            },
+            &[],
+            4,
+        )
+        .unwrap();
+        let decode_only_exclusions =
+            VulkanDistributedParameterExclusionPlan::from_execution_plan_set(
+                &decode_only,
+                &[("owner", &prepared_plan)],
+                &tensor_index,
+            )
+            .unwrap();
+        assert_eq!(decode_only_exclusions.excluded_full_allocation_count, 0);
+        assert_eq!(decode_only_exclusions.excluded_full_byte_capacity, 0);
+        assert!(
+            VulkanDistributedParameterAllocationPlan::from_execution_plan_set(
+                &decode_only,
+                &tensor_index,
+            )
+            .unwrap()
+            .total_byte_capacity
+                > 0
         );
     }
 
@@ -2005,13 +2051,30 @@ mod tests {
         phase_mismatch.decode_batch.dispatches[0].shards.swap(0, 1);
         phase_mismatch.decode_batch.dispatches[0].shards[0].device_id = "owner".to_string();
         phase_mismatch.decode_batch.dispatches[0].shards[1].device_id = "helper".to_string();
-        let phase_error =
+        let replicated =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&phase_mismatch)
-                .unwrap_err();
+                .unwrap();
+        assert_eq!(replicated.unique_atomic_group_count, 8);
+        assert_eq!(replicated.total_addressable_bytes, 128);
+        assert_eq!(
+            replicated.device("owner").unwrap().selectors[0].owned_resource_indices,
+            (0..8).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            replicated.device("helper").unwrap().selectors[0].owned_resource_indices,
+            (0..8).collect::<Vec<_>>(),
+        );
+
+        let mut identity_mismatch = plans.clone();
+        identity_mismatch.decode_batch.dispatches[0].selected_resource_partitions[0].domain_id =
+            "different-domain".to_string();
         assert!(
-            phase_error
-                .to_string()
-                .contains("assign different selected resources")
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(
+                &identity_mismatch,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("changes identity between execution alternatives")
         );
 
         let mut incomplete = plan.clone();

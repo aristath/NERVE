@@ -13,25 +13,94 @@ impl VulkanDistributedParameterExclusionPlan {
         prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
         tensor_index: &TensorIndex,
     ) -> Result<Self, VulkanDistributedPlanError> {
-        let decode = Self::from_execution_and_prepared_plans(
-            &plans.decode,
-            prepared_plans,
-            tensor_index,
-        )?;
-        for plan in [&plans.decode_batch, &plans.prefill] {
-            let candidate = Self::from_execution_and_prepared_plans(
-                plan,
-                prepared_plans,
-                tensor_index,
-            )?;
-            if candidate != decode {
-                return Err(VulkanDistributedPlanError(
-                    "single-lane decode, multi-lane decode, and multi-lane prefill replace different canonical parameter tensors"
-                        .to_string(),
-                ));
-            }
+        let phase_plans = plans
+            .all()
+            .into_iter()
+            .map(|plan| Self::from_execution_and_prepared_plans(plan, prepared_plans, tensor_index))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut common = phase_plans[0]
+            .devices
+            .iter()
+            .flat_map(|device| {
+                device
+                    .tensors
+                    .iter()
+                    .map(|tensor| (device.device_id.clone(), tensor.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+        for phase in &phase_plans[1..] {
+            let candidate = phase
+                .devices
+                .iter()
+                .flat_map(|device| {
+                    device
+                        .tensors
+                        .iter()
+                        .map(|tensor| (device.device_id.clone(), tensor.clone()))
+                })
+                .collect::<BTreeSet<_>>();
+            common.retain(|entry| candidate.contains(entry));
         }
-        Ok(decode)
+        let mut tensors_by_device = BTreeMap::<String, Vec<String>>::new();
+        let mut excluded_full_byte_capacity = 0usize;
+        for (device_id, tensor) in &common {
+            excluded_full_byte_capacity = excluded_full_byte_capacity
+                .checked_add(
+                    tensor_index
+                        .tensors
+                        .get(tensor)
+                        .and_then(|metadata| metadata.byte_count)
+                        .ok_or_else(|| {
+                            VulkanDistributedPlanError(format!(
+                                "distributed exclusion tensor {tensor:?} has no byte count"
+                            ))
+                        })?,
+                )
+                .ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "distributed exclusion byte capacity overflowed".to_string(),
+                    )
+                })?;
+            tensors_by_device
+                .entry(device_id.clone())
+                .or_default()
+                .push(tensor.clone());
+        }
+        let devices = tensors_by_device
+            .into_iter()
+            .map(|(device_id, tensors)| {
+                let total_byte_capacity = tensors
+                    .iter()
+                    .try_fold(0usize, |total, tensor| {
+                        total.checked_add(
+                            tensor_index.tensors[tensor]
+                                .byte_count
+                                .expect("intersection tensors were validated above"),
+                        )
+                    })
+                    .ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "distributed device exclusion byte capacity overflowed".to_string(),
+                        )
+                    })?;
+                Ok(VulkanDistributedDeviceParameterExclusions {
+                    device_id,
+                    tensors,
+                    total_byte_capacity,
+                })
+            })
+            .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
+        Ok(Self {
+            device_count: devices.len(),
+            devices,
+            unique_tensor_count: common
+                .iter()
+                .map(|(_, tensor)| tensor.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            excluded_full_allocation_count: common.len(),
+            excluded_full_byte_capacity,
+        })
     }
 
     pub fn from_execution_and_prepared_plans(
@@ -119,7 +188,10 @@ impl VulkanDistributedParameterExclusionPlan {
         {
             return Err(VulkanDistributedPlanError(format!(
                 "distributed dispatch {}.{} at index {} on {:?} is absent from prepared plans",
-                missing.component_id, missing.node_id, missing.dispatch_index, missing.owner_device_id
+                missing.component_id,
+                missing.node_id,
+                missing.dispatch_index,
+                missing.owner_device_id
             )));
         }
 

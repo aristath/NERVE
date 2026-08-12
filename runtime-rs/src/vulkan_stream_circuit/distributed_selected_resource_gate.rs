@@ -50,6 +50,8 @@ impl VulkanDistributedSelectedResourceGate {
             })?;
         if selector.execution_scope != execution_scope
             || selector.component_id != dispatch.component_id
+            || selector.node_id != partition.node_id
+            || selector.domain_id != partition.domain_id
             || selector.selection_signal != partition.selection_signal
             || selector.resource_count != partition.resource_count
             || selector.encoding.selection_count_per_activation
@@ -120,9 +122,7 @@ impl VulkanDistributedSelectedResourceGate {
             None,
             VulkanGpuResidencyGateConfig {
                 maximum_selection_count: selection_count,
-                selection_count_per_lane: selector
-                    .encoding
-                    .selection_count_per_activation,
+                selection_count_per_lane: selector.encoding.selection_count_per_activation,
                 selection_lane_stride_words: selection_lane_stride_bytes / size_of::<u32>(),
                 selection_index_shift: selector.encoding.index_shift,
                 selection_index_mask: selector.encoding.index_mask,
@@ -161,12 +161,7 @@ impl VulkanDistributedSelectedResourceGate {
         &self,
     ) -> Result<VulkanResidentKernelSequenceStep<'_>, VulkanDistributedDispatchRunnerError> {
         VulkanResidentKernelSequenceStep::new(self.gate.dispatch(), &self.gate_push_constants)
-            .with_condition(
-                &self.pipeline_predicate,
-                0,
-                false,
-                self.checkpoint_tag,
-            )
+            .with_condition(&self.pipeline_predicate, 0, false, self.checkpoint_tag)
             .map_err(VulkanDistributedDispatchRunnerError::from)
     }
 
@@ -186,12 +181,7 @@ impl VulkanDistributedSelectedResourceGate {
             byte_offset,
         )
         .map_err(VulkanDistributedDispatchRunnerError::from)?
-        .with_condition(
-            &self.pipeline_predicate,
-            0,
-            false,
-            self.checkpoint_tag,
-        )
+        .with_condition(&self.pipeline_predicate, 0, false, self.checkpoint_tag)
         .map_err(VulkanDistributedDispatchRunnerError::from)
     }
 
@@ -200,13 +190,8 @@ impl VulkanDistributedSelectedResourceGate {
         step: VulkanResidentKernelSequenceStep<'a>,
         region_id: u32,
     ) -> Result<VulkanResidentKernelSequenceStep<'a>, VulkanDistributedDispatchRunnerError> {
-        step.with_condition(
-            self.gate.continuation_predicate(),
-            0,
-            false,
-            region_id,
-        )
-        .map_err(VulkanDistributedDispatchRunnerError::from)
+        step.with_condition(self.gate.continuation_predicate(), 0, false, region_id)
+            .map_err(VulkanDistributedDispatchRunnerError::from)
     }
 
     pub(crate) fn notification_epoch(&self) -> Result<u32, VulkanDistributedDispatchRunnerError> {
@@ -223,9 +208,7 @@ impl VulkanDistributedSelectedResourceGate {
         self.observed_notification_epoch.set(epoch);
     }
 
-    pub(crate) fn reset_local_predicate(
-        &self,
-    ) -> Result<(), VulkanDistributedDispatchRunnerError> {
+    pub(crate) fn reset_local_predicate(&self) -> Result<(), VulkanDistributedDispatchRunnerError> {
         self.gate
             .continuation_predicate()
             .write_bytes(&1u32.to_le_bytes())

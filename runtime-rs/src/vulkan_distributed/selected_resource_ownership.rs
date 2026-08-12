@@ -23,6 +23,8 @@ pub struct VulkanDistributedSelectedResourceOwnership {
     pub execution_scope: String,
     pub selector_id: String,
     pub component_id: String,
+    pub node_id: String,
+    pub domain_id: String,
     pub selection_signal: String,
     pub resource_count: usize,
     pub selection_count_per_activation: usize,
@@ -48,17 +50,127 @@ impl VulkanDistributedSelectedResourceStorePlan {
     pub fn from_execution_plan_set(
         plans: &VulkanDistributedExecutionPlanSet,
     ) -> Result<Self, VulkanDistributedPlanError> {
-        let decode = Self::from_execution_plan(&plans.decode)?;
-        for candidate in [&plans.decode_batch, &plans.prefill] {
-            let candidate = Self::from_execution_plan(candidate)?;
-            if candidate != decode {
-                return Err(VulkanDistributedPlanError(
-                    "single-lane decode, multi-lane decode, and multi-lane prefill assign different selected resources"
-                        .to_string(),
-                ));
+        let alternatives = plans
+            .all()
+            .into_iter()
+            .map(Self::from_execution_plan)
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::merged_for_alternatives(&alternatives)
+    }
+
+    fn merged_for_alternatives(
+        plans: &[VulkanDistributedSelectedResourceStorePlan],
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        let mut selector_identities =
+            BTreeMap::<String, (String, String, String, String, String, usize, usize)>::new();
+        let mut canonical_resources = BTreeMap::<(String, usize), (String, usize)>::new();
+        let mut resources_by_device_selector =
+            BTreeMap::<(String, String), BTreeMap<usize, (String, usize)>>::new();
+        for plan in plans {
+            for device in &plan.devices {
+                for selector in &device.selectors {
+                    if selector.owned_resource_indices.len() != selector.atomic_group_ids.len()
+                        || selector.owned_resource_indices.len()
+                            != selector.atomic_group_byte_counts.len()
+                        || selector
+                            .owned_resource_indices
+                            .windows(2)
+                            .any(|pair| pair[0] >= pair[1])
+                        || selector
+                            .owned_resource_indices
+                            .iter()
+                            .any(|index| *index >= selector.resource_count)
+                    {
+                        return Err(VulkanDistributedPlanError(
+                            "selected-resource alternative contains invalid ownership".to_string(),
+                        ));
+                    }
+                    let identity = (
+                        selector.execution_scope.clone(),
+                        selector.component_id.clone(),
+                        selector.node_id.clone(),
+                        selector.domain_id.clone(),
+                        selector.selection_signal.clone(),
+                        selector.resource_count,
+                        selector.selection_count_per_activation,
+                    );
+                    if let Some(existing) =
+                        selector_identities.insert(selector.selector_id.clone(), identity.clone())
+                        && existing != identity
+                    {
+                        return Err(VulkanDistributedPlanError(format!(
+                            "selected-resource selector {:?} changes identity between execution alternatives",
+                            selector.selector_id,
+                        )));
+                    }
+                    let device_resources = resources_by_device_selector
+                        .entry((device.device_id.clone(), selector.selector_id.clone()))
+                        .or_default();
+                    for ((resource_index, group_id), byte_count) in selector
+                        .owned_resource_indices
+                        .iter()
+                        .copied()
+                        .zip(selector.atomic_group_ids.iter().cloned())
+                        .zip(selector.atomic_group_byte_counts.iter().copied())
+                    {
+                        let resource = (group_id, byte_count);
+                        if let Some(existing) = canonical_resources.insert(
+                            (selector.selector_id.clone(), resource_index),
+                            resource.clone(),
+                        ) && existing != resource
+                        {
+                            return Err(VulkanDistributedPlanError(format!(
+                                "selected-resource selector {:?} resource {resource_index} changes atomic identity between execution alternatives",
+                                selector.selector_id,
+                            )));
+                        }
+                        if let Some(existing) =
+                            device_resources.insert(resource_index, resource.clone())
+                            && existing != resource
+                        {
+                            return Err(VulkanDistributedPlanError(format!(
+                                "selected-resource selector {:?} resource {resource_index} conflicts on device {:?}",
+                                selector.selector_id, device.device_id,
+                            )));
+                        }
+                    }
+                }
             }
         }
-        Ok(decode)
+        let mut device_selectors =
+            BTreeMap::<String, Vec<VulkanDistributedSelectedResourceOwnership>>::new();
+        for ((device_id, selector_id), resources) in resources_by_device_selector {
+            let identity = selector_identities
+                .get(&selector_id)
+                .expect("alternative resource ownership has a selector identity");
+            let mut owned_resource_indices = Vec::with_capacity(resources.len());
+            let mut atomic_group_ids = Vec::with_capacity(resources.len());
+            let mut atomic_group_byte_counts = Vec::with_capacity(resources.len());
+            for (resource_index, (group_id, byte_count)) in resources {
+                owned_resource_indices.push(resource_index);
+                atomic_group_ids.push(group_id);
+                atomic_group_byte_counts.push(byte_count);
+            }
+            device_selectors.entry(device_id).or_default().push(
+                VulkanDistributedSelectedResourceOwnership {
+                    execution_scope: identity.0.clone(),
+                    selector_id,
+                    component_id: identity.1.clone(),
+                    node_id: identity.2.clone(),
+                    domain_id: identity.3.clone(),
+                    selection_signal: identity.4.clone(),
+                    resource_count: identity.5,
+                    selection_count_per_activation: identity.6,
+                    owned_resource_indices,
+                    atomic_group_ids,
+                    atomic_group_byte_counts,
+                },
+            );
+        }
+        selected_resource_store_plan_from_device_selectors(
+            device_selectors,
+            selector_identities.len(),
+        )
     }
 
     pub fn from_execution_plan(
@@ -69,13 +181,10 @@ impl VulkanDistributedSelectedResourceStorePlan {
             .iter()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
-        let mut identities = BTreeMap::<
-            String,
-            VulkanDistributedSelectedResourceSelectorIdentity,
-        >::new();
+        let mut identities =
+            BTreeMap::<String, VulkanDistributedSelectedResourceSelectorIdentity>::new();
         let mut group_devices = BTreeMap::<(String, String), String>::new();
-        let mut resources_by_device_selector =
-            BTreeMap::<(String, String), BTreeSet<usize>>::new();
+        let mut resources_by_device_selector = BTreeMap::<(String, String), BTreeSet<usize>>::new();
 
         for dispatch in &plan.dispatches {
             for partition in &dispatch.selected_resource_partitions {
@@ -91,7 +200,8 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     atomic_group_ids: partition.atomic_group_ids.clone(),
                     atomic_group_byte_counts: partition.atomic_group_byte_counts.clone(),
                 };
-                if let Some(existing) = identities.insert(partition.selector_id.clone(), identity.clone())
+                if let Some(existing) =
+                    identities.insert(partition.selector_id.clone(), identity.clone())
                     && existing != identity
                 {
                     return Err(VulkanDistributedPlanError(format!(
@@ -132,9 +242,8 @@ impl VulkanDistributedSelectedResourceStorePlan {
                         .entry((shard.device_id.clone(), partition.selector_id.clone()))
                         .or_default();
                     for resource_index in resource_indices {
-                        coverage[*resource_index] = coverage[*resource_index]
-                            .checked_add(1)
-                            .ok_or_else(|| {
+                        coverage[*resource_index] =
+                            coverage[*resource_index].checked_add(1).ok_or_else(|| {
                                 VulkanDistributedPlanError(
                                     "selected resource coverage count overflowed".to_string(),
                                 )
@@ -162,10 +271,8 @@ impl VulkanDistributedSelectedResourceStorePlan {
             }
         }
 
-        let mut device_selectors = BTreeMap::<
-            String,
-            Vec<VulkanDistributedSelectedResourceOwnership>,
-        >::new();
+        let mut device_selectors =
+            BTreeMap::<String, Vec<VulkanDistributedSelectedResourceOwnership>>::new();
         for ((device_id, selector_id), indices) in resources_by_device_selector {
             let identity = identities.get(&selector_id).expect(
                 "selected resource ownership was created from a validated selector identity",
@@ -184,6 +291,8 @@ impl VulkanDistributedSelectedResourceStorePlan {
                     execution_scope: identity.execution_scope.clone(),
                     selector_id,
                     component_id: identity.component_id.clone(),
+                    node_id: identity.node_id.clone(),
+                    domain_id: identity.domain_id.clone(),
                     selection_signal: identity.selection_signal.clone(),
                     resource_count: identity.resource_count,
                     selection_count_per_activation: identity.selection_count_per_activation,
@@ -194,86 +303,93 @@ impl VulkanDistributedSelectedResourceStorePlan {
             );
         }
 
-        let mut devices = Vec::with_capacity(device_selectors.len());
-        let mut global_groups = BTreeMap::<String, usize>::new();
-        let selector_count = identities.len();
-        let mut selector_placement_count = 0usize;
-        let mut total_addressable_bytes = 0usize;
-        for (device_id, mut selectors) in device_selectors {
-            selectors.sort_by(|left, right| left.selector_id.cmp(&right.selector_id));
-            selector_placement_count = selector_placement_count.checked_add(selectors.len()).ok_or_else(|| {
+        selected_resource_store_plan_from_device_selectors(device_selectors, identities.len())
+    }
+
+    pub fn device(&self, device_id: &str) -> Option<&VulkanDistributedSelectedResourceDevicePlan> {
+        self.devices
+            .iter()
+            .find(|device| device.device_id == device_id)
+    }
+}
+
+fn selected_resource_store_plan_from_device_selectors(
+    device_selectors: BTreeMap<String, Vec<VulkanDistributedSelectedResourceOwnership>>,
+    selector_count: usize,
+) -> Result<VulkanDistributedSelectedResourceStorePlan, VulkanDistributedPlanError> {
+    let mut devices = Vec::with_capacity(device_selectors.len());
+    let mut global_groups = BTreeMap::<String, usize>::new();
+    let mut selector_placement_count = 0usize;
+    let mut total_addressable_bytes = 0usize;
+    for (device_id, mut selectors) in device_selectors {
+        selectors.sort_by(|left, right| left.selector_id.cmp(&right.selector_id));
+        selector_placement_count = selector_placement_count
+            .checked_add(selectors.len())
+            .ok_or_else(|| {
                 VulkanDistributedPlanError(
                     "selected resource selector count overflowed".to_string(),
                 )
             })?;
-            let mut device_groups = BTreeMap::<String, usize>::new();
-            let mut maximum_load_wave_bytes = 0usize;
-            for selector in &selectors {
-                let mut selector_group_bytes = selector
-                    .atomic_group_ids
-                    .iter()
-                    .cloned()
-                    .zip(selector.atomic_group_byte_counts.iter().copied())
-                    .collect::<Vec<_>>();
-                selector_group_bytes.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
-                let selection_count = selector
-                    .selection_count_per_activation
-                    .min(selector_group_bytes.len());
-                let load_wave_bytes = selector_group_bytes
-                    .iter()
-                    .take(selection_count)
-                    .try_fold(0usize, |total, (_, bytes)| total.checked_add(*bytes))
-                    .ok_or_else(|| {
-                        VulkanDistributedPlanError(
-                            "selected resource load-wave capacity overflowed".to_string(),
-                        )
-                    })?;
-                maximum_load_wave_bytes = maximum_load_wave_bytes.max(load_wave_bytes);
-                for (group_id, bytes) in selector_group_bytes {
-                    insert_group_bytes(&mut device_groups, &group_id, bytes)?;
-                    insert_group_bytes(&mut global_groups, &group_id, bytes)?;
-                }
+        let mut device_groups = BTreeMap::<String, usize>::new();
+        let mut maximum_load_wave_bytes = 0usize;
+        for selector in &selectors {
+            let mut selector_group_bytes = selector
+                .atomic_group_ids
+                .iter()
+                .cloned()
+                .zip(selector.atomic_group_byte_counts.iter().copied())
+                .collect::<Vec<_>>();
+            selector_group_bytes.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+            let selection_count = selector
+                .selection_count_per_activation
+                .min(selector_group_bytes.len());
+            let load_wave_bytes = selector_group_bytes
+                .iter()
+                .take(selection_count)
+                .try_fold(0usize, |total, (_, bytes)| total.checked_add(*bytes))
+                .ok_or_else(|| {
+                    VulkanDistributedPlanError(
+                        "selected resource load-wave capacity overflowed".to_string(),
+                    )
+                })?;
+            maximum_load_wave_bytes = maximum_load_wave_bytes.max(load_wave_bytes);
+            for (group_id, bytes) in selector_group_bytes {
+                insert_group_bytes(&mut device_groups, &group_id, bytes)?;
+                insert_group_bytes(&mut global_groups, &group_id, bytes)?;
             }
-            let device_addressable_bytes = device_groups.values().try_fold(
-                0usize,
-                |total, bytes| total.checked_add(*bytes),
-            ).ok_or_else(|| {
+        }
+        let device_addressable_bytes = device_groups
+            .values()
+            .try_fold(0usize, |total, bytes| total.checked_add(*bytes))
+            .ok_or_else(|| {
                 VulkanDistributedPlanError(
                     "selected resource device capacity overflowed".to_string(),
                 )
             })?;
-            total_addressable_bytes = total_addressable_bytes
-                .checked_add(device_addressable_bytes)
-                .ok_or_else(|| {
-                    VulkanDistributedPlanError(
-                        "selected resource total capacity overflowed".to_string(),
-                    )
-                })?;
-            devices.push(VulkanDistributedSelectedResourceDevicePlan {
-                device_id,
-                unique_atomic_group_count: device_groups.len(),
-                maximum_atomic_group_bytes: device_groups.values().copied().max().unwrap_or(0),
-                maximum_load_wave_bytes,
-                total_addressable_bytes: device_addressable_bytes,
-                selectors,
-            });
-        }
-        Ok(Self {
-            device_count: devices.len(),
-            selector_count,
-            selector_placement_count,
-            unique_atomic_group_count: global_groups.len(),
-            total_addressable_bytes,
-            devices,
-        })
+        total_addressable_bytes = total_addressable_bytes
+            .checked_add(device_addressable_bytes)
+            .ok_or_else(|| {
+                VulkanDistributedPlanError(
+                    "selected resource total capacity overflowed".to_string(),
+                )
+            })?;
+        devices.push(VulkanDistributedSelectedResourceDevicePlan {
+            device_id,
+            unique_atomic_group_count: device_groups.len(),
+            maximum_atomic_group_bytes: device_groups.values().copied().max().unwrap_or(0),
+            maximum_load_wave_bytes,
+            total_addressable_bytes: device_addressable_bytes,
+            selectors,
+        });
     }
-
-    pub fn device(
-        &self,
-        device_id: &str,
-    ) -> Option<&VulkanDistributedSelectedResourceDevicePlan> {
-        self.devices.iter().find(|device| device.device_id == device_id)
-    }
+    Ok(VulkanDistributedSelectedResourceStorePlan {
+        device_count: devices.len(),
+        selector_count,
+        selector_placement_count,
+        unique_atomic_group_count: global_groups.len(),
+        total_addressable_bytes,
+        devices,
+    })
 }
 
 fn validate_selected_resource_partition(
@@ -289,8 +405,14 @@ fn validate_selected_resource_partition(
         || partition.selection_count_per_activation > partition.resource_count
         || partition.atomic_group_ids.len() != partition.resource_count
         || partition.atomic_group_byte_counts.len() != partition.resource_count
-        || partition.atomic_group_ids.iter().any(|id| id.trim().is_empty())
-        || partition.atomic_group_byte_counts.iter().any(|bytes| *bytes == 0)
+        || partition
+            .atomic_group_ids
+            .iter()
+            .any(|id| id.trim().is_empty())
+        || partition
+            .atomic_group_byte_counts
+            .iter()
+            .any(|bytes| *bytes == 0)
     {
         return Err(VulkanDistributedPlanError(format!(
             "distributed dispatch {}.{} has an invalid selected resource partition",
