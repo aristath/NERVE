@@ -33,7 +33,7 @@ impl crate::RuntimeSelectionRequest {
             crate::HardwareProcessProfile,
         >,
         execution: crate::RuntimeExecutionEnvelope,
-        exact_baseline_compatible: bool,
+        exact_baseline_incompatible_instance_ids: BTreeSet<String>,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
         let source_roles = runtime_model
             .package
@@ -136,7 +136,7 @@ impl crate::RuntimeSelectionRequest {
             devices,
             instances,
             edges,
-            exact_baseline_compatible,
+            exact_baseline_incompatible_instance_ids,
         })
     }
 }
@@ -151,15 +151,23 @@ impl VulkanResidentRuntimeModel {
         >,
         execution: crate::RuntimeExecutionEnvelope,
     ) -> io::Result<crate::RuntimeImplementationSelectionReport> {
+        let package_root = package_root.as_ref();
         let catalog = self
             .package
             .implementation_catalog(package_root)?;
+        let exact_baseline_incompatible_instance_ids =
+            vulkan_runtime_exact_baseline_incompatible_instance_ids(
+                self,
+                package_root,
+                profiles_by_logical_device,
+            )
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         let request =
             crate::RuntimeSelectionRequest::from_vulkan_runtime_model(
                 self,
                 profiles_by_logical_device,
                 execution,
-                true,
+                exact_baseline_incompatible_instance_ids,
             )
             .map_err(|error| {
                 io::Error::new(
@@ -201,11 +209,17 @@ impl VulkanResidentRuntimeModel {
                     "failed to load runtime implementation catalog: {error}"
                 ))
             })?;
+        let exact_baseline_incompatible_instance_ids =
+            vulkan_runtime_exact_baseline_incompatible_instance_ids(
+                &self,
+                &package_root,
+                profiles_by_logical_device,
+            )?;
         let request = crate::RuntimeSelectionRequest::from_vulkan_runtime_model(
             &self,
             profiles_by_logical_device,
             execution,
-            true,
+            exact_baseline_incompatible_instance_ids,
         )?;
         let selection = catalog.select(&request).map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(
@@ -245,11 +259,16 @@ impl VulkanResidentRuntimeModel {
                     "failed to load runtime implementation catalog: {error}"
                 ))
             })?;
+        // Exhaustive component calibration mounts one candidate region at a
+        // time and executes only its targeted signature. Unrelated exact
+        // components are deliberately not required to execute on this owner;
+        // the targeted calibration path validates the mounted signature before
+        // submitting it.
         let request = crate::RuntimeSelectionRequest::from_vulkan_runtime_model(
             self,
             profiles_by_logical_device,
             execution,
-            true,
+            BTreeSet::new(),
         )?;
         let reports = catalog
             .calibration_selections(&request)

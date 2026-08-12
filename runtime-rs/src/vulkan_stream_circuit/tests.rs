@@ -11,6 +11,7 @@ include!("tests/speculative_catch_up.rs");
 include!("tests/parallel_speculative_state.rs");
 include!("tests/feedback_control.rs");
 include!("tests/fixture_model_helpers.rs");
+include!("tests/runtime_device_compatibility.rs");
 include!("tests/causal_state_snapshot_tests.rs");
 include!("tests/physical_representation_equivalence.rs");
 include!("tests/package_contracts.rs");

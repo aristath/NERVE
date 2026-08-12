@@ -1,7 +1,7 @@
 use crate::HardwareProcessProfile;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 pub const IMPLEMENTATION_REGISTRY_SCHEMA: &str = "nerve.optimizer.implementation_registry.v1";
@@ -338,7 +338,11 @@ pub struct RuntimeSelectionRequest {
     pub devices: Vec<RuntimeSelectionDevice>,
     pub instances: Vec<RuntimeSelectionInstance>,
     pub edges: Vec<RuntimeSelectionEdge>,
-    pub exact_baseline_compatible: bool,
+    /// Runtime instances whose exact compiled implementation cannot execute on
+    /// their current physical placement. A selected alternative must cover
+    /// every member; unrelated compatible instances may retain the exact
+    /// baseline.
+    pub exact_baseline_incompatible_instance_ids: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

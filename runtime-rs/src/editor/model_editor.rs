@@ -168,6 +168,13 @@ impl RuntimeModelEditor {
             )?;
             profiles.insert(logical_device_id, profile);
         }
+        let exact_baseline_incompatible_instance_ids =
+            crate::vulkan_runtime_exact_baseline_incompatible_instance_ids(
+                &runtime_model,
+                &self.package_root,
+                &profiles,
+            )
+            .map_err(|error| RuntimeEditorError(error.to_string()))?;
         let request =
             crate::RuntimeSelectionRequest::from_vulkan_runtime_model(
                 &runtime_model,
@@ -201,7 +208,7 @@ impl RuntimeModelEditor {
                     speculative_draft_tokens: 0,
                     residency_policy: "eager".to_string(),
                 },
-                true,
+                exact_baseline_incompatible_instance_ids,
             )
             .map_err(|error| {
                 RuntimeEditorError(error.to_string())

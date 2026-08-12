@@ -292,9 +292,15 @@ For every numbered item below:
   legal subset can remove its addressable-capacity shortfall. Partial targets
   are ranked by normalized measured component cost so a device is not made to
   look artificially fast merely because it supports fewer operations. The
-  remaining candidate enumeration must extend this exact compatibility model
-  to local TP, expert, replicated, and general hybrid islands rather than
-  reintroducing whole-model device assumptions.
+  same compatibility boundary now feeds representation selection per mounted
+  runtime instance: an alternative needs to cover only the exact instances
+  whose baselines cannot execute on their assigned targets, while compatible
+  neighbors retain their exact implementation. The editor and production
+  runtime use one shared shader/capability validator and require a profile for
+  every assigned owner or shard. The remaining candidate enumeration must
+  combine representation-specific compatibility with local TP, expert,
+  replicated, and general hybrid islands rather than reintroducing whole-model
+  device assumptions.
 - Attach exact permanent, transient-peak, KV/state, cache-quota, and atomic
   load-wave byte vectors to every candidate.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
@@ -388,6 +394,16 @@ For every numbered item below:
 
 ### 11. Complete capability-driven representation selection
 
+- Exact-baseline compatibility is now an instance set rather than a global
+  boolean. Normal mounted selection derives it from the concrete execution
+  shaders, prefill implementations, workgroup limits, subgroup capabilities,
+  extensions, cooperative shapes, and every owner/shard hardware profile.
+  Selection may therefore replace an incompatible instance while retaining
+  compatible exact neighbors, and rejects unknown or uncovered incompatible
+  instances. Exhaustive targeted calibration deliberately exempts unrelated
+  graph instances because it executes and validates one exact signature at a
+  time. Representation-specific candidate compatibility still needs to become
+  an input to the joint physical-island candidate graph.
 - Preserve the native source representation whenever it is supported and wins
   on the assigned target.
 - Add alternative structured INT4, FP8, INT8, FP16, BF16, or other formats only

@@ -75,12 +75,20 @@ impl RuntimeImplementationCatalog {
             .map(|instance| instance.instance_id.clone())
             .filter(|instance_id| !covered_instances.contains(instance_id))
             .collect::<Vec<_>>();
-        if !request.exact_baseline_compatible && !exact_instance_ids.is_empty() {
+        let uncovered_incompatible = exact_instance_ids
+            .iter()
+            .filter(|instance_id| {
+                request
+                    .exact_baseline_incompatible_instance_ids
+                    .contains(instance_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        if !uncovered_incompatible.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
-                    "no compatible implementation covers runtime instances {:?}; exact baseline is incompatible",
-                    exact_instance_ids
+                    "no compatible implementation covers runtime instances {:?}; their exact baselines are incompatible",
+                    uncovered_incompatible
                 ),
             ));
         }
@@ -270,10 +278,20 @@ fn selection_report_for_independent_application(
         .map(|instance| instance.instance_id.clone())
         .filter(|instance_id| !covered_instances.contains(instance_id))
         .collect::<Vec<_>>();
-    if !request.exact_baseline_compatible && !exact_instance_ids.is_empty() {
+    let uncovered_incompatible = exact_instance_ids
+        .iter()
+        .filter(|instance_id| {
+            request
+                .exact_baseline_incompatible_instance_ids
+                .contains(instance_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    if !uncovered_incompatible.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "an independent implementation application leaves an incompatible exact region",
+            format!(
+                "an independent implementation application leaves incompatible exact runtime instances {uncovered_incompatible:?}",
+            ),
         ));
     }
     Ok(RuntimeImplementationSelectionReport {
@@ -381,6 +399,16 @@ fn validate_request(request: &RuntimeSelectionRequest) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "runtime selection instances must be sorted and unique",
+        ));
+    }
+    if request
+        .exact_baseline_incompatible_instance_ids
+        .iter()
+        .any(|instance_id| !instance_ids.contains(&instance_id.as_str()))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "runtime selection exact-baseline incompatibility references an unknown instance",
         ));
     }
     let known_devices = logical_devices.into_iter().collect::<BTreeSet<_>>();
