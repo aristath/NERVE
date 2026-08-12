@@ -697,7 +697,23 @@ fn validate_observation(
         .keys()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
+    let distributed_shard_coverage_valid = if matches!(
+        case.strategy,
+        VulkanPlacementExecutionStrategy::TensorParallel
+            | VulkanPlacementExecutionStrategy::WholeExpertParallel
+            | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
+            | VulkanPlacementExecutionStrategy::Hybrid
+    ) {
+        case.shards
+            .iter()
+            .map(|shard| shard.physical_device_id.as_str())
+            .collect::<BTreeSet<_>>()
+            == devices
+    } else {
+        true
+    };
     if !participant_count_valid
+        || !distributed_shard_coverage_valid
         || !devices.contains(case.input_physical_device_id.as_str())
         || !devices.contains(case.output_physical_device_id.as_str())
         || resident_devices != devices
@@ -850,17 +866,23 @@ mod placement_calibration_catalog_tests {
                 equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
                 strategy: VulkanPlacementExecutionStrategy::TensorParallel,
                 devices,
-                shards: vec![VulkanPlacementShardIdentity {
-                    dispatch_ordinal: 0,
-                    participant_ordinal: 0,
-                    physical_device_id: owner.to_string(),
-                    distribution: "output_rows".to_string(),
-                    logical_start: 0,
-                    logical_count: 8,
-                    selected_resource_indices_by_partition: BTreeMap::new(),
-                    selected_resource_fragments_by_partition: BTreeMap::new(),
-                    parameter_bytes: 16,
-                }],
+                shards: ["gpu0", "gpu1"]
+                    .into_iter()
+                    .enumerate()
+                    .map(
+                        |(participant_ordinal, physical_device_id)| VulkanPlacementShardIdentity {
+                            dispatch_ordinal: 0,
+                            participant_ordinal,
+                            physical_device_id: physical_device_id.to_string(),
+                            distribution: "output_rows".to_string(),
+                            logical_start: participant_ordinal * 4,
+                            logical_count: 4,
+                            selected_resource_indices_by_partition: BTreeMap::new(),
+                            selected_resource_fragments_by_partition: BTreeMap::new(),
+                            parameter_bytes: 8,
+                        },
+                    )
+                    .collect(),
                 input_physical_device_id: "gpu0".to_string(),
                 output_physical_device_id: output.to_string(),
                 owner_physical_device_id: owner.to_string(),
@@ -1106,6 +1128,24 @@ mod placement_calibration_catalog_tests {
             .transient_peak_bytes_by_physical_device
             .retain(|device, _| device == "gpu0");
         invalid.execution_case.transports.clear();
+
+        assert!(
+            catalog
+                .record_observation(invalid)
+                .unwrap_err()
+                .0
+                .contains("physical route or shard")
+        );
+    }
+
+    #[test]
+    fn distributed_evidence_must_cover_every_declared_participant() {
+        let mut catalog = catalog_with_reference();
+        let mut invalid = observation(behavior(), "gpu0", "gpu0", 10, 16);
+        invalid
+            .execution_case
+            .shards
+            .retain(|shard| shard.physical_device_id == "gpu0");
 
         assert!(
             catalog
