@@ -150,6 +150,7 @@ pub fn calibrate_vulkan_runtime_distributed_placement_candidate_with_policy(
         target,
         VulkanTargetedComponentExecutionPhase::Decode,
         None,
+        None,
         policy,
     )
 }
@@ -179,6 +180,36 @@ pub fn calibrate_vulkan_runtime_distributed_prefill_placement_candidate_with_pol
             activation_batch_width,
         },
         None,
+        None,
+        policy,
+    )
+}
+
+pub fn calibrate_vulkan_runtime_distributed_contract_candidate_with_policy(
+    devices: Vec<(String, Rc<VulkanComputeDevice>)>,
+    manifest_dir: impl AsRef<Path>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    target: &VulkanRuntimePlacementCalibrationTarget,
+    phase: VulkanTargetedComponentExecutionPhase,
+    selected_contract_ids: &BTreeSet<String>,
+    policy: VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<
+    Option<VulkanRuntimeDistributedPlacementCalibrationReport>,
+    VulkanResidentTokenModelPackageError,
+> {
+    if selected_contract_ids.is_empty() {
+        return distributed_calibration_error(
+            "distributed contract calibration requires selected contract IDs",
+        );
+    }
+    calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
+        devices,
+        manifest_dir.as_ref(),
+        runtime_model,
+        target,
+        phase,
+        Some(selected_contract_ids),
+        None,
         policy,
     )
 }
@@ -189,6 +220,7 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
     runtime_model: &VulkanResidentRuntimeModel,
     target: &VulkanRuntimePlacementCalibrationTarget,
     phase: VulkanTargetedComponentExecutionPhase,
+    selected_contract_ids: Option<&BTreeSet<String>>,
     required_sample_fraction_millionths: Option<usize>,
     policy: VulkanRuntimePlacementCalibrationPolicy,
 ) -> Result<
@@ -246,6 +278,7 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
         runtime_model,
         target,
         phase,
+        selected_contract_ids,
         required_sample_fraction_millionths,
         maximum_total_resident_parameter_bytes,
         &logical_parameter_capacities,
@@ -1031,6 +1064,7 @@ impl VulkanRuntimeDistributedPlacementSession {
         runtime_model: &VulkanResidentRuntimeModel,
         target: &VulkanRuntimePlacementCalibrationTarget,
         phase: VulkanTargetedComponentExecutionPhase,
+        selected_contract_ids: Option<&BTreeSet<String>>,
         required_sample_fraction_millionths: Option<usize>,
         maximum_total_resident_parameter_bytes: usize,
         maximum_resident_parameter_bytes_by_logical_device: &BTreeMap<String, usize>,
@@ -1119,7 +1153,26 @@ impl VulkanRuntimeDistributedPlacementSession {
             .max()
             .unwrap_or(1);
         let (contract_phase, execution_shape) = distributed_contract_phase_and_shape(phase);
-        let full_distributed_execution_plan =
+        let full_distributed_execution_plan = if let Some(selected_contract_ids) =
+            selected_contract_ids
+        {
+            VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_with_resource_contract_and_contracts(
+                &[(
+                    owner_device_id.as_str(),
+                    &targeted_plan.slice_plan.prepared_plan,
+                )],
+                &tensor_index,
+                &artifact_manifest,
+                &BTreeMap::from([(target.component_id.clone(), planning_device_ids)]),
+                &placement_plan.edges,
+                alignment,
+                contract_phase,
+                execution_shape,
+                &placed_model.execution_scope,
+                &contract,
+                selected_contract_ids,
+            )
+        } else {
             VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_with_resource_contract(
                 &[(
                     owner_device_id.as_str(),
@@ -1135,7 +1188,8 @@ impl VulkanRuntimeDistributedPlacementSession {
                 &placed_model.execution_scope,
                 &contract,
             )
-            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        }
+        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         if full_distributed_execution_plan.dispatches.is_empty() {
             return Ok(None);
         }

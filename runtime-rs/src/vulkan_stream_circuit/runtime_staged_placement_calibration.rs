@@ -20,6 +20,7 @@ pub fn calibrate_vulkan_runtime_staged_placement_candidate_with_policy(
         runtime_model,
         target,
         VulkanTargetedComponentExecutionPhase::Decode,
+        None,
         catalog,
         policy,
     )
@@ -49,6 +50,37 @@ pub fn calibrate_vulkan_runtime_staged_prefill_placement_candidate_with_policy(
         VulkanTargetedComponentExecutionPhase::Prefill {
             activation_batch_width,
         },
+        None,
+        catalog,
+        policy,
+    )
+}
+
+pub fn calibrate_vulkan_runtime_staged_contract_candidate_with_policy(
+    devices: &[(String, Rc<VulkanComputeDevice>)],
+    manifest_dir: impl AsRef<Path>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    target: &VulkanRuntimePlacementCalibrationTarget,
+    phase: VulkanTargetedComponentExecutionPhase,
+    selected_contract_ids: &BTreeSet<String>,
+    catalog: &mut VulkanPlacementCalibrationCatalog,
+    policy: VulkanRuntimePlacementCalibrationPolicy,
+) -> Result<
+    Option<VulkanRuntimeDistributedPlacementCalibrationReport>,
+    VulkanResidentTokenModelPackageError,
+> {
+    if selected_contract_ids.is_empty() {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "staged contract calibration requires selected contract IDs",
+        ));
+    }
+    calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
+        devices,
+        manifest_dir.as_ref(),
+        runtime_model,
+        target,
+        phase,
+        Some(selected_contract_ids),
         catalog,
         policy,
     )
@@ -60,6 +92,7 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
     runtime_model: &VulkanResidentRuntimeModel,
     target: &VulkanRuntimePlacementCalibrationTarget,
     phase: VulkanTargetedComponentExecutionPhase,
+    selected_contract_ids: Option<&BTreeSet<String>>,
     catalog: &mut VulkanPlacementCalibrationCatalog,
     policy: VulkanRuntimePlacementCalibrationPolicy,
 ) -> Result<
@@ -99,6 +132,7 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
             runtime_model,
             target,
             phase,
+            selected_contract_ids,
             sample_fraction_millionths,
             stage_policy,
         )?;
