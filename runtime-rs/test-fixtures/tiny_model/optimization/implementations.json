@@ -1,10 +1,10 @@
 {
   "schema": "nerve.optimizer.implementation_registry.v1",
-  "registry_id": "implementation_registry_5a4f9ff9d88a633c790f60b94d028e79",
+  "registry_id": "implementation_registry_e3d89fcd8091871ed96dd13136cab43b",
   "package_id": "model_d119caf1_vulkan_resident",
   "exact_baseline": {
     "artifact_ref": "lowered/execution_graph.circuits.json",
-    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:62529abe6d1b1ccd2deb31912658ed34fe37d6628b0937c7c2cc5306c0b92eda",
+    "contract_digest": "nerve.optimizer.canonical_json_sha256.v1:867f66343e24423586f8ce9d0c676a9ec698fa24e8651da2100b976b4a104408",
     "mutable": false
   },
   "implementations": []

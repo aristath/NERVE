@@ -3,7 +3,7 @@
   "hardware_profiles": [
     {
       "schema": "nerve.optimizer.hardware_process_profile.v1",
-      "profile_id": "hardware_profile_9b75ea741e45b1ec169778014a1530e4",
+      "profile_id": "hardware_profile_8c7cf9a9cbc74957502380151f47eaa5",
       "hardware_identity": {
         "device_kind": "gpu",
         "stable_device_id": "test-device-0",
@@ -13,7 +13,7 @@
         "architecture": "synthetic_vendor_0000_device_0000",
         "physical_location": "test-device-0"
       },
-      "capability_class": "hardware_capability_ca4c2c93116b35239e1e7a86efdc53e2",
+      "capability_class": "hardware_capability_4d7eeac437bc0bdc36fc1f777ddee06d",
       "processes": [
         {
           "name": "shader_arithmetic",
@@ -79,7 +79,8 @@
           "max_compute_work_group_size_x": 1024,
           "cooperative_float16_shapes": [],
           "cooperative_bfloat16_shapes": [],
-          "cooperative_float8_e4m3_shapes": []
+          "cooperative_float8_e4m3_shapes": [],
+          "cooperative_sint8_shapes": []
         }
       },
       "identity_extensions": {},
@@ -115,7 +116,8 @@
       "max_compute_work_group_size_x": 1024,
       "cooperative_float16_shapes": [],
       "cooperative_bfloat16_shapes": [],
-      "cooperative_float8_e4m3_shapes": []
+      "cooperative_float8_e4m3_shapes": [],
+      "cooperative_sint8_shapes": []
     }
   ]
 }

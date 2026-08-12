@@ -4,7 +4,7 @@
   "source_layer_index": 0,
   "type": "node_instance",
   "runtime_role": "signal_processor",
-  "component_class": "gqa_attention_layer_h16_q2_kv1_d8_ffn32_v1",
+  "component_class": "gqa_attention_layer_h16_q2_kv1_d8_ffn256_v1",
   "operator_type": "full_attention",
   "operator": {
     "id": "operator",
@@ -91,7 +91,7 @@
   "feed_forward": {
     "type": "dense_swiglu",
     "hidden_size": 16,
-    "intermediate_size": 32,
+    "intermediate_size": 256,
     "activation": "silu"
   },
   "numerics": {
@@ -119,7 +119,8 @@
     "token_embedding_scale": 1.0,
     "per_layer_embedding_scale": null,
     "per_layer_model_projection_scale": 0.25,
-    "per_layer_input_scale": 0.7071067811865476
+    "per_layer_input_scale": 0.7071067811865476,
+    "activation_quantization": null
   },
   "ports": {
     "inputs": [
@@ -340,7 +341,7 @@
       {
         "id": "feed_forward",
         "type": "swiglu_feed_forward",
-        "circuit_template": "swiglu_ffn_16_32_v1",
+        "circuit_template": "swiglu_ffn_16_256_v1",
         "input": "ffn_norm.output",
         "output": "ffn.output",
         "activation": "silu",

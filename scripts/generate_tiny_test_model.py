@@ -39,7 +39,10 @@ def write_source_model(source: Path) -> None:
         "dtype": "bfloat16",
         "torch_dtype": "bfloat16",
         "hidden_size": 16,
-        "intermediate_size": 32,
+        # The physical dense FFN down projection shards inputs in blocks of
+        # 128 columns. Keep the checked-in fixture wide enough to exercise the
+        # complete gate/up-to-down tensor-parallel island.
+        "intermediate_size": 256,
         "num_hidden_layers": 1,
         "num_attention_heads": 2,
         "num_key_value_heads": 1,
@@ -87,13 +90,13 @@ def write_source_model(source: Path) -> None:
         "model.layers.0.self_attn.o_proj.weight": tensor((16, 16), 1024).to(
             torch.bfloat16
         ),
-        "model.layers.0.mlp.gate_proj.weight": tensor((32, 16), 1280).to(
+        "model.layers.0.mlp.gate_proj.weight": tensor((256, 16), 1280).to(
             torch.bfloat16
         ),
-        "model.layers.0.mlp.up_proj.weight": tensor((32, 16), 1792).to(
+        "model.layers.0.mlp.up_proj.weight": tensor((256, 16), 5376).to(
             torch.bfloat16
         ),
-        "model.layers.0.mlp.down_proj.weight": tensor((16, 32), 2304).to(
+        "model.layers.0.mlp.down_proj.weight": tensor((16, 256), 9472).to(
             torch.bfloat16
         ),
     }

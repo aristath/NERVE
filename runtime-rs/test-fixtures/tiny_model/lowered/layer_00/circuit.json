@@ -636,7 +636,7 @@
         "ffn_gate_activated"
       ],
       "attrs": {
-        "element_count": 32
+        "element_count": 256
       }
     },
     {
@@ -904,7 +904,7 @@
         "ffn_gate_activated"
       ],
       "attrs": {
-        "element_count": 32
+        "element_count": 256
       }
     },
     {

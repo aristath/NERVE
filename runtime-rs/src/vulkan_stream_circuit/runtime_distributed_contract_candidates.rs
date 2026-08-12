@@ -266,6 +266,103 @@ mod runtime_distributed_contract_candidate_tests {
     }
 
     #[test]
+    fn compiled_dense_ffn_handoff_is_an_atomic_decode_and_prefill_candidate() {
+        let model = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let target = vulkan_runtime_placement_calibration_targets(&model)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let contracts = model
+            .component_executions
+            .iter()
+            .flat_map(|execution| &execution.kernels)
+            .flat_map(|kernel| &kernel.physical_execution_contracts)
+            .filter(|contract| {
+                contract.strategy.is_distributed()
+                    && contract
+                        .local_intermediates
+                        .iter()
+                        .any(|local| local.signal == "ffn_hidden" && local.format == "bf16")
+            })
+            .collect::<Vec<_>>();
+        let gate_contract_ids = contracts
+            .iter()
+            .filter(|contract| {
+                contract.operation_family == "parallel_linear_silu_multiply"
+            })
+            .map(|contract| contract.contract_id.clone())
+            .collect::<BTreeSet<_>>();
+        let down_contract_ids = contracts
+            .iter()
+            .filter(|contract| contract.operation_family == "linear_residual")
+            .map(|contract| contract.contract_id.clone())
+            .collect::<BTreeSet<_>>();
+
+        assert!(!gate_contract_ids.is_empty());
+        assert_eq!(down_contract_ids.len(), 1);
+        let down = contracts
+            .iter()
+            .find(|contract| contract.operation_family == "linear_residual")
+            .unwrap();
+        assert!(matches!(
+            down.execution_form,
+            nerve_execution_contracts::ExecutionForm::PartitionedInputPartialOutput
+        ));
+        assert_eq!(down.formats.accumulation, "f32");
+        let reduction = down.outputs[0]
+            .reduction
+            .as_ref()
+            .expect("dense down contract must publish F32 partials");
+        assert!(matches!(
+            reduction.operation,
+            nerve_execution_contracts::ReductionOperation::SumF32
+        ));
+        assert!(matches!(
+            reduction.finalization,
+            nerve_execution_contracts::ReductionFinalization::AddBf16ResidualToBf16 {
+                residual_binding: 1
+            }
+        ));
+
+        for phase in [
+            VulkanTargetedComponentExecutionPhase::Decode,
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width: 4,
+            },
+        ] {
+            let candidates = vulkan_runtime_distributed_contract_candidates(
+                &model,
+                &target,
+                phase,
+            )
+            .unwrap();
+            let mut complete_island_found = false;
+            for candidate in candidates {
+                let has_gate = candidate
+                    .contract_ids
+                    .iter()
+                    .any(|contract_id| gate_contract_ids.contains(contract_id));
+                let has_down = candidate
+                    .contract_ids
+                    .iter()
+                    .any(|contract_id| down_contract_ids.contains(contract_id));
+                assert_eq!(
+                    has_gate, has_down,
+                    "private dense FFN handoff cannot select only one side"
+                );
+                complete_island_found |= has_gate;
+            }
+            assert!(
+                complete_island_found,
+                "compiled package must expose the complete dense FFN island for {phase:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_zero_width_prefill_before_enumerating_contracts() {
         let model = tests::tiny_fixture_model_runtime_model_with_placement(
             StreamCircuitPlacementSpec::new("gpu0"),

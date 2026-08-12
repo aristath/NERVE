@@ -5,10 +5,10 @@
   "candidate_contract_digest_algorithm": "nerve.json_tree_sha256.v1",
   "source_oracle": {
     "kind": "source_checkpoint_contract",
-    "model_contract_digest": "f5c96b7b59a8fe67e9addeb556222cbe9e1095425bbe5dbf8d01f8ec2f7c869f",
-    "tensor_count": 11,
-    "parameter_count": 2864,
-    "byte_count": 5728
+    "model_contract_digest": "4fc3db258c8f82480fab3d1e0fea599f9d40ecf1c08d66fd3650413bd7a05b35",
+    "tensor_count": 12,
+    "parameter_count": 17712,
+    "byte_count": 35424
   },
   "admission_gate": {
     "exact_candidates": "proof_carrying_rewrite",
@@ -44,7 +44,7 @@
       "status": "passed",
       "source_node_count": 17,
       "candidate_node_count": 10,
-      "candidate_contract_digest": "30263f5887039c6e1c22081c7dd056a1ecbbd8ff6a8fb9b0ff22213717b230c5",
+      "candidate_contract_digest": "1d8e3fb77325f447a8576c67a16a4a73597307c0c70b01626516cee2fb13c79e",
       "covered_source_node_count": 17,
       "rewrite_count": 5,
       "physical_representation_count": 1,

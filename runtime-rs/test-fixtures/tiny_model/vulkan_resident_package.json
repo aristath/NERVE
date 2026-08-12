@@ -6,7 +6,7 @@
     "hardware_profiles": [
       {
         "schema": "nerve.optimizer.hardware_process_profile.v1",
-        "profile_id": "hardware_profile_9b75ea741e45b1ec169778014a1530e4",
+        "profile_id": "hardware_profile_8c7cf9a9cbc74957502380151f47eaa5",
         "hardware_identity": {
           "device_kind": "gpu",
           "stable_device_id": "test-device-0",
@@ -16,7 +16,7 @@
           "architecture": "synthetic_vendor_0000_device_0000",
           "physical_location": "test-device-0"
         },
-        "capability_class": "hardware_capability_ca4c2c93116b35239e1e7a86efdc53e2",
+        "capability_class": "hardware_capability_4d7eeac437bc0bdc36fc1f777ddee06d",
         "processes": [
           {
             "name": "shader_arithmetic",
@@ -82,7 +82,8 @@
             "max_compute_work_group_size_x": 1024,
             "cooperative_float16_shapes": [],
             "cooperative_bfloat16_shapes": [],
-            "cooperative_float8_e4m3_shapes": []
+            "cooperative_float8_e4m3_shapes": [],
+            "cooperative_sint8_shapes": []
           }
         },
         "identity_extensions": {},
@@ -118,7 +119,8 @@
         "max_compute_work_group_size_x": 1024,
         "cooperative_float16_shapes": [],
         "cooperative_bfloat16_shapes": [],
-        "cooperative_float8_e4m3_shapes": []
+        "cooperative_float8_e4m3_shapes": [],
+        "cooperative_sint8_shapes": []
       }
     ]
   },
@@ -221,7 +223,7 @@
     "dimensions": {
       "hidden_size": 16,
       "intermediate_sizes": [
-        32
+        256
       ],
       "num_hidden_layers": 1,
       "num_attention_heads": 2,
@@ -1048,7 +1050,7 @@
                 "ffn_gate_activated"
               ],
               "attrs": {
-                "element_count": 32
+                "element_count": 256
               }
             },
             {
@@ -1272,6 +1274,10 @@
                 "current_kv_source": "direct_bf16_input",
                 "physical_input_contract": "bf16_attention_partition_partials_f32.v1",
                 "physical_input_provider_id": "kv_memory_append__attention_read__partition_partials",
+                "physical_input_source_node_ids": [
+                  "kv_memory_append",
+                  "attention_read"
+                ],
                 "physical_logical_inputs": [
                   "q_positioned",
                   "k_positioned",
@@ -1355,7 +1361,7 @@
                 ],
                 "branch_count": 2,
                 "intermediate_rounding": "BF16",
-                "element_count": 32,
+                "element_count": 256,
                 "output_element_bytes": [
                   2
                 ]
@@ -2048,13 +2054,15 @@
                 {
                   "path": "shaders/rms_norm_bf16_h16_eps1e-05_offset0.spv",
                   "sha256": "sha256:a4fe854f416cff773cdf5e41cd5092c047434e70ef649098a1081d051c863914",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:e2d4d827c0698f892b813d92b2f677029479a5a3d2a1e29fa42bba542c54f757",
+              "implementation_digest": "sha256:85d7bb4145c4f3b4ab43232426997393892ae653753eeade95450afabd38cfae",
               "phases": [
                 "decode"
               ],
+              "execution_shape": "single_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -2100,8 +2108,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "execution_shape": "single_lane",
-              "contract_id": "sha256:45cc724749172da610a9df1d6fb6bba35b01b25d5a9e4ccc7abce3c66fbbe711"
+              "contract_id": "sha256:0cf87bb0177531eb52025c0b0de507eda418234d60b30faa7b82a723f9a17cf6"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -2113,14 +2120,16 @@
                 {
                   "path": "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:2a08dcef66809b1d580c293fdf48f78d9fce477ab0c314dc36eba4345a3fe291",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:fd21a8f3c0dd692057444b98cd6d772136e371d6269b84720785aa87d980ce9c",
+              "implementation_digest": "sha256:6f03d343df3d06fd9c3c2ebc5283c6be84d5d9c8a669a425cd00a967ef2e14b6",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -2169,8 +2178,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:9d427633be15be963dad5b20630f1669455c3e9e0d911e0d906757fed362df06"
+              "contract_id": "sha256:e0e986abe7268476ce7069c2154ff2d794d178240dbf84086143040fd951b0a3"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -2182,14 +2190,16 @@
                 {
                   "path": "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:7db81fec5799fb670dd55bb229a3456e3b17dbe5be4951bc9793ee9dbfa32de4",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:2f5e7aa3028cba9f2e87cebd42e2fb2f1c7b8ebad72c48a57cead60a327dc73a",
+              "implementation_digest": "sha256:1c59b3286ec8b2ec2c04cba9f0cf52e05c6e75deccab6ad73ebe476c48fd84b4",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -2238,8 +2248,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:0503e7cdf93e46f9fe35299628e972b0fab19ae57c85f58e62116997799c3f54"
+              "contract_id": "sha256:74c873717e3b16650abb6710046ffd6c62bdf2c9dcef8cfa7554042174e791bd"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -2251,14 +2260,16 @@
                 {
                   "path": "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:f503fede10871c40cf398826001d8a7736a0871eef44b16c55c2f3e1f5755b72",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:6332a4eb1f81dbf8c076acda10d8db1283b8d5d74de114d86e340c3cbace945e",
+              "implementation_digest": "sha256:7c084f7aade8e93fcaacc40462786867a60c070deeced50be2edbbfbc9356afa",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -2307,8 +2318,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:43fe5e3cb0fd9095cdb971ca95985b986028c3fddcf2987b9a258f013c19a0e5"
+              "contract_id": "sha256:5b2dbedab89a0948e233f4c641c509e6e66ed233815fd40600be44b040c385d6"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -2320,14 +2330,16 @@
                 {
                   "path": "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:0ba38e569b68e2600b14acbf20fe4f37120da8c45937561a1b849172c5579d57",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:d592365a91aa3fc1b5587f92c9ec4eb85aace6e1385e6ba970000ef957865f04",
+              "implementation_digest": "sha256:742f52454a14020a226f2c0f6b0d82b1c49d14416f00ae55eba59cd651cb8acc",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -2376,8 +2388,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:29ea9612d7dd19b094c722a86b73681464a32773926618c2f0ebfa13c33977dd"
+              "contract_id": "sha256:e98867527190526ec4767e235a190598137e11066711d3e6e3a6b69a3d99bc8a"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -2389,14 +2400,16 @@
                 {
                   "path": "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:9d177024bca652695f2ccb661ac8833153ea8845cf0a2b052d855655e208da69",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:87c5649fd3159934835be42deaef0b088fefb8346a77227c3be4774b871f638f",
+              "implementation_digest": "sha256:868550f90210259bb5069acda401a123f4a5293771348d5b0a96d95925ce01b8",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -2445,8 +2458,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:f929e0fd428be959af3473fcff1eeb1915cacbdbd8a0538e67051643c30ef70c"
+              "contract_id": "sha256:b324c0f2533ffd4516f5b123543b742054178ed94bf671f9d3ff8af4812ec8b8"
             }
           ]
         },
@@ -2644,13 +2656,15 @@
                 {
                   "path": "shaders/parallel_linear_3way_bf16_16x16_8_8.spv",
                   "sha256": "sha256:172cabeb8fede222f8e498b585241ea4e5f763470c2ec235415c2bba9446f654",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:a7208a19c8b83870f32546c2c502681b65ee570d709daf9be25a08a971cb9b18",
+              "implementation_digest": "sha256:226734d8311606abf0df807511c31a65d06cee13e02ea85feb21e43c9bd34356",
               "phases": [
                 "decode"
               ],
+              "execution_shape": "single_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -2723,8 +2737,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "execution_shape": "single_lane",
-              "contract_id": "sha256:6320c89038cee122cacfcd90018d8eb4d7e46458d7d755d4db16d5b04f828d19"
+              "contract_id": "sha256:d8e565290e07eb146f5b0877af1f893b68f0e5b991965b9fb7a69077db27a623"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -2739,13 +2752,15 @@
                 {
                   "path": "shaders/parallel_linear_batch64_cooperative_3way_bf16_16x16_8_8__pbc31.spv",
                   "sha256": "sha256:f3ba599b7ca0003ce13e14081c1494496bab132332cddd7f295affc1f4394b55",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:d7ab7b7f49017e5d34081447a37d2964722561960fbf2a35990581bee3c2a60d",
+              "implementation_digest": "sha256:e90fa85920dd4074902628feb9f814db298265cdc371f25b3f46ad7e962909bb",
               "phases": [
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -2821,8 +2836,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:527e3d1a88a09795cf055d022bad38dc8fd61947ad5549e0f674abd073fb0a87"
+              "contract_id": "sha256:5374f63ca6858692191e8115e703409d68f4192ddaa2b78b9f03fc0a261d9c3d"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -2837,14 +2851,16 @@
                 {
                   "path": "shaders/parallel_linear_batch2_3way_bf16_16x16_8_8__pbc31.spv",
                   "sha256": "sha256:ac4e3392b0febcdf7abbe888d591710d092eba020c637d58df330f1d64807977",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:cbb89f20693658d781a14b6a9e2e0c4942b44005d1c3166e7f27ddf1c5ec9e3a",
+              "implementation_digest": "sha256:9d60e09e1cb884dad9dc6bc43e54bb3227725403b883d46d18fd6badf7e9901a",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -2920,8 +2936,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:24c23b2710194e304593743a0b8c5bdbd0f6da598adfef7dcc1c62c968536ee7"
+              "contract_id": "sha256:1b8626a1cbf5f29728744a433341ecc299b16cb4507cf03fd2d928fd31da831c"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -2936,14 +2951,16 @@
                 {
                   "path": "shaders/parallel_linear_batch4_3way_bf16_16x16_8_8__pbc31.spv",
                   "sha256": "sha256:b787b22fbe87ea1c3e180c7fc3bc56a65bdf5001de7fee110ddc88602ff81078",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:0deb0066436597514e3633b43e2517db454f29a1a8bb521a8e9cb3ef833376ca",
+              "implementation_digest": "sha256:a366e2c7a90177e54fc7415603f240341a7b82648a444d542ffdc8312005abec",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -3019,8 +3036,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:a769ca18e9da100083dc2c2c4d916f45040f206250ce230247d51333a57f45fd"
+              "contract_id": "sha256:456220e7ec94d7978f760e497e8327d2588ef837fed6911d060c63e621288b08"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -3035,14 +3051,16 @@
                 {
                   "path": "shaders/parallel_linear_batch8_3way_bf16_16x16_8_8__pbc31.spv",
                   "sha256": "sha256:04f53bde53db1393b9248a750e015a84ee62836aa4d4206c45a8991d84e7d6b3",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:3b54a9b222040e7ca38a55d9fd933da17e0b0b86a9b7945427da726be9f006de",
+              "implementation_digest": "sha256:18b9791b7b4212d8ef2c41699279d9b67239d9be5a39bdd10f3f2a347ffe7c7f",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -3118,8 +3136,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:0485a9967ad0497f924a4a8a5f023d4de08acd0abdc4b6de548b558fb3157316"
+              "contract_id": "sha256:11c195b0ab72ca902a3f585e83b0b7b89452e9a22111ac75c89026769ab29411"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -3134,14 +3151,16 @@
                 {
                   "path": "shaders/parallel_linear_batch16_3way_bf16_16x16_8_8__pbc31.spv",
                   "sha256": "sha256:a84f76c70473fa5f4ceabd4b42f791c80d4b990a7eba1ac4a4d670da4a81b459",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:b359951437f9ac06d059132fd238d22aaa192f092133fbc66da41e747ce172aa",
+              "implementation_digest": "sha256:8346e58073c53a61714e0dabc92b0d56a93d8efeb2a02fe1304f2815f80d5a48",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -3217,8 +3236,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.input_projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:4dbdc42d03fe0e5c0ae12578cd03e5108d23c4438f0a3a7d99641e064154c091"
+              "contract_id": "sha256:04dd0f2bfcf4683c390f11175bc11f77047e7ca4d558ca87e9afdd847b57983b"
             }
           ]
         },
@@ -3276,14 +3294,16 @@
               "artifacts": [
                 {
                   "path": "shaders/rotary_bf16_2x8_r8_theta10000_half__sc2.spv",
-                  "sha256": "sha256:e5841b402d3d30eecacd315e6af1fa3beebef6df93f9b049fb6d297fc8ccaf8b",
-                  "entry_point": "main"
+                  "sha256": "sha256:c59a89f1f0a15ce9673091c2dea6bb1f21d9ecb91ea0eb2ad8032b271bee5af6",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:25748f7d4ba363213e21740113f11197f62a2c708130a38c04bd402aa6b3fa4a",
+              "implementation_digest": "sha256:052cc55800a2790f61b2aa72a2ea8bc064ba3e67d3be0ab40564de0bf1f803b4",
               "phases": [
                 "decode"
               ],
+              "execution_shape": "single_lane",
               "formats": {
                 "storage": "activation_only",
                 "compute": "bf16",
@@ -3320,8 +3340,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.position",
-              "execution_shape": "single_lane",
-              "contract_id": "sha256:b520d19554546793621d89f270e018e1f4254a62d9dba2cb8feebe8b05fcb20f"
+              "contract_id": "sha256:3814141ff575eab195efd19469d972b68e3083cb528d3a7e3acff23ba21df800"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -3332,14 +3351,16 @@
               "artifacts": [
                 {
                   "path": "shaders/rotary_temporal_bf16_2x8_r8_theta10000_half__pbc2.spv",
-                  "sha256": "sha256:b3d9cbecd59df0eeab466fe901b966c30c04327cf7397f40670c352e9b60d081",
-                  "entry_point": "main"
+                  "sha256": "sha256:a99233d4d6c706930b2cf93481500ba8796650b69cdb8563c37aaa125930b657",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:d36c834e86205844696fb53d2161f99fb47314680813edfa78e9ff1c208b164a",
+              "implementation_digest": "sha256:681aac5da41af5907161d2e2794a14d23625d52043b2ee7af964784f3339bd87",
               "phases": [
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "activation_only",
                 "compute": "bf16",
@@ -3379,8 +3400,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.position",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:b54f2942e3b71257ffb4c47a21a103256e50cb1ecddebd76feaa476f6e01e217"
+              "contract_id": "sha256:33ee6f235106aef3df84712aad09e974bdd6746fad5650e18de5e8d4391f14ac"
             }
           ]
         },
@@ -3438,14 +3458,16 @@
               "artifacts": [
                 {
                   "path": "shaders/rotary_bf16_1x8_r8_theta10000_half__sc2.spv",
-                  "sha256": "sha256:9ef0fb8c2e6f67954c98b41a7972972edc3c244f185cff7f7f53fb922f874ddb",
-                  "entry_point": "main"
+                  "sha256": "sha256:c0133b137b92d0db052e0f39cb5fe14809e5fd9cabe9276fea84ec0747474ba3",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:72d88872a1e54e8d19d4bda7dce9e234459e6d76d7a4e723307a97b3e194c622",
+              "implementation_digest": "sha256:e8661cac2e01ece58324084426eacdf3a61f04ca3eebfe7f7eb21e2438bf5bc1",
               "phases": [
                 "decode"
               ],
+              "execution_shape": "single_lane",
               "formats": {
                 "storage": "activation_only",
                 "compute": "bf16",
@@ -3482,8 +3504,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.position",
-              "execution_shape": "single_lane",
-              "contract_id": "sha256:85c9461b9e0c0671cab746e5bf0f38afa77e5521424df179594b1a3144cefa9a"
+              "contract_id": "sha256:fb2570fecac04a6b18ae799b1084abf9a0fae44a07d0f478c3d85fbaf218b7d5"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -3494,14 +3515,16 @@
               "artifacts": [
                 {
                   "path": "shaders/rotary_temporal_bf16_1x8_r8_theta10000_half__pbc2.spv",
-                  "sha256": "sha256:add1a8e000b32fc6012e3f7718fdaae63ee39535284713b9333a7acb1dbbdea8",
-                  "entry_point": "main"
+                  "sha256": "sha256:f26c9a9a5a30d95b34cb5aedb7c3d17fa82934be7799005e4da3b520ad968c91",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:32233c66a04471f4dfe8b7ed60c2f378d2ea556af1a9ce778a3520fe8b81f5f3",
+              "implementation_digest": "sha256:bb4a7e4e40f7fca4b7a1d5327aec50941be4540c6cad767e4645c1839ea70077",
               "phases": [
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "activation_only",
                 "compute": "bf16",
@@ -3541,8 +3564,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.position",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:858947c5c2a1527381d441d5e814b7e9c96acb6b9217258243efb94ce95fef74"
+              "contract_id": "sha256:f39f4fe7ff87f00a0e8d47361bd7242e84437da29cffde8773044a9610cf2463"
             }
           ]
         },
@@ -3608,13 +3630,15 @@
                 {
                   "path": "shaders/attention_partition_partials_bf16_q2_kv1_d8_s8_scale0.353553391__sc6.spv",
                   "sha256": "sha256:22cda283c06984a1ce6e53a3941841d0549847ef7e6081f3c506cd3c0a0b284c",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:919590dfe16f9ee9e9784dd5c4297b9764a3e09235dafb1ebaa383d94c6d48dd",
+              "implementation_digest": "sha256:76ad87201982426901f9ba82c1c0485554545595370879ec6382d5701b1e2cd1",
               "phases": [
                 "decode"
               ],
+              "execution_shape": "single_lane",
               "formats": {
                 "storage": "activation_only",
                 "compute": "bf16",
@@ -3670,8 +3694,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.attention_state",
-              "execution_shape": "single_lane",
-              "contract_id": "sha256:49867ddb54357e40b218088c5b1a967293988d1eb818bb1e36b364ba17e4c1ee"
+              "contract_id": "sha256:be9cd31f55a9180a674c28b511b902af34e51c88a244a3567e2c292dc4937dd0"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -3685,13 +3708,15 @@
                 {
                   "path": "shaders/attention_partition_partials_temporal_bf16_q2_kv1_d8_s8_scale0.353553391__pbc6.spv",
                   "sha256": "sha256:3c7672a853bb47dbbe2f2b18c8534b2c6e7219a5f6f3e6aa62cad576043019bf",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:1b890ff9c00f10391e9bd8f3a49c3a47380c53ca41f06813220d1343bae42214",
+              "implementation_digest": "sha256:039a25157d24f5c30e39fd8397b05b61aee5f000b5b50e08ae1072e5111a5066",
               "phases": [
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "activation_only",
                 "compute": "bf16",
@@ -3750,8 +3775,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.attention_state",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:d0430eb527357f4ac4be288addf0d8ef2f288679033f0c8b4d4a36da66acca33"
+              "contract_id": "sha256:6545b5cdc6ac3065d977ad22a546a2a9d7cabdf12df96bc827401a1cfc5de512"
             }
           ]
         },
@@ -3825,13 +3849,15 @@
                 {
                   "path": "shaders/append_gqa_attention_partition_reduce_bf16_q2_kv1_d8_s8_scale0.353553391__sc7.spv",
                   "sha256": "sha256:3ed9ff9c9e35aa98cc84f6283d6b46894927c86aff47af15028959f125a4965e",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:e924d3c8d9162fa65a285604d71b3da1eccd2679d762557b3899e22016305e6b",
+              "implementation_digest": "sha256:c8a81860f14c5a29c8aa685d5e91be36017ded3e0e7a15304c7da02920cf23bf",
               "phases": [
                 "decode"
               ],
+              "execution_shape": "single_lane",
               "formats": {
                 "storage": "activation_only",
                 "compute": "bf16",
@@ -3887,8 +3913,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.attention_state",
-              "execution_shape": "single_lane",
-              "contract_id": "sha256:c96bf556e6018295b351d60593c42fb2c2f6a646c66846a2eae878fa162cc1b4"
+              "contract_id": "sha256:a8548c0195767626b470679204ddba00a8aa797e81250d8e34bf752c353f18f4"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -3902,18 +3927,21 @@
                 {
                   "path": "shaders/append_gqa_attention_partition_reduce_temporal_bf16_q2_kv1_d8_s8_scale0.353553391__pbc7.spv",
                   "sha256": "sha256:6823e0e3aeb2610605665e691e7473d74461946dfa60f83dc6690b763bb2b704",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "preparation"
                 },
                 {
                   "path": "shaders/append_kv_temporal_commit_bf16_kv1_d8_w0__pbc7.spv",
                   "sha256": "sha256:cec62f75e93ab9d993d1851118dcd2dab86cc7458e39fb7e30257ad8c8882d7d",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:bbe408c6fca16e9f679bb6ad6979f01a6f8c727e6f7d93df4c12fe5a8d17f83c",
+              "implementation_digest": "sha256:20bd7c82f8d72345ee8a90618093c9d2d42f5c92c7b65969bd9d02b73255576a",
               "phases": [
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "activation_only",
                 "compute": "bf16",
@@ -3972,8 +4000,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.attention_state",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:12816305a5c95899767487929601b3d1c6171084bbec1eb38889788ec7ccac0c"
+              "contract_id": "sha256:8e0298e2b2c3704c2c4382e71b1b8a8e825f5d9031dbd56b568d448242e77455"
             }
           ]
         },
@@ -4170,13 +4197,15 @@
                 {
                   "path": "shaders/linear_residual_bf16_16x16.spv",
                   "sha256": "sha256:acce0ae2c63ae45db19a89bbc4ffb42e11ce9cb4915031bac3262690167cf1c9",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:bae92f34929d18384956dbfb51c19da0d92abc9ebf104e82a6d60f08cc676d06",
+              "implementation_digest": "sha256:6abd732cc8a15b0ace356e715991e38ba83884417fbfbfbfef8d25afca9fef41",
               "phases": [
                 "decode"
               ],
+              "execution_shape": "single_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -4227,8 +4256,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "execution_shape": "single_lane",
-              "contract_id": "sha256:9c76c7faa66927115d2027ded1787847920cb7cb4496b09276b7ec5a76fa6ae5"
+              "contract_id": "sha256:a03d0385096d9584e76f419d838cb86fce83ce532a8d49044087149255f3dc1f"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -4242,13 +4270,15 @@
                 {
                   "path": "shaders/linear_residual_batch64_cooperative_bf16_16x16__pbc31.spv",
                   "sha256": "sha256:9824ca17c8f2c8a17614d1aabdb1a45991c5e90390a7cb915d2c696113af01dd",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:7182591e0e74c11e47cf980e9c7d7fbcbb2e80684f6b4cc3c59846234ed90346",
+              "implementation_digest": "sha256:261f21aab3cff2ff6041eecd4f0e113f7ae81c752054608cda11e731b723b1f3",
               "phases": [
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -4302,8 +4332,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:34de91ed135e6012fc4969e33f1e8610afb191c8affda5413e82aa72035286dd"
+              "contract_id": "sha256:d6635a948a39f20e8b397a555060f357876426de11091fcdd19d961b221f4e50"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -4317,14 +4346,16 @@
                 {
                   "path": "shaders/linear_residual_batch2_bf16_16x16__pbc31.spv",
                   "sha256": "sha256:b3b9574ff5ca08d2ae5e75d0e864f2d37b1ba923588d4c5c6b10701740ca711d",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:b6b04954e982ee75c9bb2c7d359f06563d879c76258c3963f06fa91b6d4e62e7",
+              "implementation_digest": "sha256:ecec4ddaaf11c4dff5cd2a4b244a2144c03bb59df3ad55054683d34a8d681ef5",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -4378,8 +4409,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:6028a777c055f464826a6d0d640b37b2f6aa6b0b4dcad8d75d0d941ac7d23eb9"
+              "contract_id": "sha256:5572c83cdcdfc4bf3c8c987addb59c917f697691d009927bbad8b83b548de5be"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -4393,14 +4423,16 @@
                 {
                   "path": "shaders/linear_residual_batch4_bf16_16x16__pbc31.spv",
                   "sha256": "sha256:0f399102ac0bb62d32d16ef50850bd5c9c3498773d5cdcda8f8b5b8f2aa9a18f",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:bfbd591b7606e0456c1a2076e63315d11b098b2fe7268aa4e7dea8900f551809",
+              "implementation_digest": "sha256:3f26d9874e865d86cb933d2c4dc2ff6d598f9724944c9eb719a10b94e7dc9d11",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -4454,8 +4486,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:7e321a0ebe29e6cdfa8eac412f73acdbd3ec72f811ccb5aafb175573f44b78fe"
+              "contract_id": "sha256:b80e064c23c3b3dc93b262acd9e21fc40b362031d8ca288e6731385c6aba778b"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -4469,14 +4500,16 @@
                 {
                   "path": "shaders/linear_residual_batch8_bf16_16x16__pbc31.spv",
                   "sha256": "sha256:11d1558042ec907eed9e8513c3a3b24ead32f994b4c5a336c71d3556e4b1bc23",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:590a249f07f1df492e76ba204d50aed0707f61770f9fd15cec8ec58c9d193263",
+              "implementation_digest": "sha256:a669236421da132bdbedfb793a73ec28af2381be2b6e5d1c227057089c4a3d67",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -4530,8 +4563,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:68829afb55023c06374758c777cc0174ed88757b4e716c061c3c43809af289c0"
+              "contract_id": "sha256:87d8508afd2ebe25ef8d2ca3720d4438e89f6f3d875daaf1108d5fccd084c71f"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -4545,14 +4577,16 @@
                 {
                   "path": "shaders/linear_residual_batch16_bf16_16x16__pbc31.spv",
                   "sha256": "sha256:8d12df36e5fd99e152c975958a0dc59b019c503472f95a89316ecb1fe0f23fb6",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:af5ab3613970d1db3cd3ee1a15bb6dad73d60cb07d9f2eefa3f5de7559176fcd",
+              "implementation_digest": "sha256:7f26d603dd7630f9712c4eb03d3987650f33492de21feb82d9016d3725536bf5",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -4606,8 +4640,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.token_mixer.output_projection+layer.token_mixer.residual",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:cae41d364f6da18dfd4a3af1ce7295eb77d52197bf32896ac8b0ee8f2319881c"
+              "contract_id": "sha256:949ae2f0bb2c68ef6ac86d73ad8f2df4a57df2711ad8a7195bccb781088cb726"
             }
           ]
         },
@@ -4787,13 +4820,15 @@
                 {
                   "path": "shaders/rms_norm_bf16_h16_eps1e-05_offset0.spv",
                   "sha256": "sha256:a4fe854f416cff773cdf5e41cd5092c047434e70ef649098a1081d051c863914",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:e2d4d827c0698f892b813d92b2f677029479a5a3d2a1e29fa42bba542c54f757",
+              "implementation_digest": "sha256:85d7bb4145c4f3b4ab43232426997393892ae653753eeade95450afabd38cfae",
               "phases": [
                 "decode"
               ],
+              "execution_shape": "single_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -4839,8 +4874,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "execution_shape": "single_lane",
-              "contract_id": "sha256:8e4536a0ec10f5b80f87246cf7553bc93c865c3c2f8c755e0cfc414c86017399"
+              "contract_id": "sha256:ba5fb7dcd0dbba671c3ba2b144404e040c4c783055fb9296a640ce37e72d13c0"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -4852,14 +4886,16 @@
                 {
                   "path": "shaders/rms_norm_batch1_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:2a08dcef66809b1d580c293fdf48f78d9fce477ab0c314dc36eba4345a3fe291",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:fd21a8f3c0dd692057444b98cd6d772136e371d6269b84720785aa87d980ce9c",
+              "implementation_digest": "sha256:6f03d343df3d06fd9c3c2ebc5283c6be84d5d9c8a669a425cd00a967ef2e14b6",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -4908,8 +4944,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:9e6247fb6db3e5de16a4e7ddeb39fb8ae12140af086833a5eeae10bee9aa4b5b"
+              "contract_id": "sha256:ca4e343b423fb182dbbcf708d928c83fe4e2e75fb930452551ae1bbdab29cb90"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -4921,14 +4956,16 @@
                 {
                   "path": "shaders/rms_norm_batch2_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:7db81fec5799fb670dd55bb229a3456e3b17dbe5be4951bc9793ee9dbfa32de4",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:2f5e7aa3028cba9f2e87cebd42e2fb2f1c7b8ebad72c48a57cead60a327dc73a",
+              "implementation_digest": "sha256:1c59b3286ec8b2ec2c04cba9f0cf52e05c6e75deccab6ad73ebe476c48fd84b4",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -4977,8 +5014,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:7cb4e73e79e3fb2d73d43ac611460ae6ebf22a6536643cd0c01543aca146601b"
+              "contract_id": "sha256:0dd30f68918140447df9b0a2f17c4d0e72c55ce5c0e178589403c0854e49d76a"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -4990,14 +5026,16 @@
                 {
                   "path": "shaders/rms_norm_batch4_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:f503fede10871c40cf398826001d8a7736a0871eef44b16c55c2f3e1f5755b72",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:6332a4eb1f81dbf8c076acda10d8db1283b8d5d74de114d86e340c3cbace945e",
+              "implementation_digest": "sha256:7c084f7aade8e93fcaacc40462786867a60c070deeced50be2edbbfbc9356afa",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -5046,8 +5084,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:22062936fc2b4edc2e631f745d547da7497cf3c28b2900283e3b41101c9a5590"
+              "contract_id": "sha256:35452c7c3584c113fefbec6fce818d855371ee42a099f4cabc8559fcacd0ec7b"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -5059,14 +5096,16 @@
                 {
                   "path": "shaders/rms_norm_batch8_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:0ba38e569b68e2600b14acbf20fe4f37120da8c45937561a1b849172c5579d57",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:d592365a91aa3fc1b5587f92c9ec4eb85aace6e1385e6ba970000ef957865f04",
+              "implementation_digest": "sha256:742f52454a14020a226f2c0f6b0d82b1c49d14416f00ae55eba59cd651cb8acc",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -5115,8 +5154,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:f092dfab5514a4eeadf89fa79f7c8373011a0581e401097976f07dafc69d49b6"
+              "contract_id": "sha256:531820912db3eddc03762bfe0b34baac5b5f1399161bd06457c13325334a6702"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -5128,14 +5166,16 @@
                 {
                   "path": "shaders/rms_norm_batch16_bf16_h16_eps1e-05_offset0__pbc31.spv",
                   "sha256": "sha256:9d177024bca652695f2ccb661ac8833153ea8845cf0a2b052d855655e208da69",
-                  "entry_point": "main"
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:87c5649fd3159934835be42deaef0b088fefb8346a77227c3be4774b871f638f",
+              "implementation_digest": "sha256:868550f90210259bb5069acda401a123f4a5293771348d5b0a96d95925ce01b8",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
@@ -5184,8 +5224,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.normalization",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:e4cf9106864f10b71f68df2a75178013131a446257ba557a3c1cdbd534d03162"
+              "contract_id": "sha256:05ac9afb6e0278acbcf29ffd1c0e66d0e007a23880ec47bfa7c67616c16b8a94"
             }
           ]
         },
@@ -5205,9 +5244,9 @@
           ],
           "execution_domain": "decode",
           "stream_control_binding": null,
-          "shader_path": "shaders/parallel_linear_silu_multiply_bf16_16x32.spv",
+          "shader_path": "shaders/parallel_linear_silu_multiply_bf16_16x256.spv",
           "local_size_x": 64,
-          "workgroup_count_x": 16,
+          "workgroup_count_x": 128,
           "batch_mode": "weight_shared",
           "batch_implementations": [
             {
@@ -5243,9 +5282,9 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x32__pbc31.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x256__pbc31.spv",
                   "local_size_x": 256,
-                  "workgroup_count_x": 1,
+                  "workgroup_count_x": 4,
                   "control": {
                     "kind": "storage_buffer",
                     "byte_count": 4,
@@ -5272,9 +5311,9 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch2_bf16_16x32__pbc31.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch2_bf16_16x256__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
+                  "workgroup_count_x": 128,
                   "control": {
                     "kind": "storage_buffer",
                     "byte_count": 4,
@@ -5301,9 +5340,9 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch4_bf16_16x32__pbc31.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch4_bf16_16x256__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
+                  "workgroup_count_x": 128,
                   "control": {
                     "kind": "storage_buffer",
                     "byte_count": 4,
@@ -5330,9 +5369,9 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch8_bf16_16x32__pbc31.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch8_bf16_16x256__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
+                  "workgroup_count_x": 128,
                   "control": {
                     "kind": "storage_buffer",
                     "byte_count": 4,
@@ -5359,9 +5398,9 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32__pbc31.spv",
+                  "shader_path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x256__pbc31.spv",
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
+                  "workgroup_count_x": 128,
                   "control": {
                     "kind": "storage_buffer",
                     "byte_count": 4,
@@ -5385,12 +5424,13 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/parallel_linear_silu_multiply_bf16_16x32.spv",
-                  "sha256": "sha256:9c7024c3a8831b0155518a4a68f59b6565dffad82fe67c6595deb1070636e79a",
-                  "entry_point": "main"
+                  "path": "shaders/parallel_linear_silu_multiply_bf16_16x256.spv",
+                  "sha256": "sha256:b3142766800e4a6f12a7079fdfeef20dff6b7d705d30a72fe2af26b728d96031",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:6c2ef18215bd3b87fc795d6af7c1b402da037f153b88177e3520778afda79c9c",
+              "implementation_digest": "sha256:937f552bbc8710e1a090b50407d0c7ac1ad49bbff559443303d7d3503023cc59",
               "phases": [
                 "decode"
               ],
@@ -5401,13 +5441,13 @@
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:64b6782fd824dd10e43fc8a4",
+                "shape_class": "shape:b351036686d40dda767c4dc1",
                 "dimensions": {
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
-                  "parameter_0_dimension_0": 32,
+                  "workgroup_count_x": 128,
+                  "parameter_0_dimension_0": 256,
                   "parameter_0_dimension_1": 16,
-                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_0": 256,
                   "parameter_1_dimension_1": 16
                 },
                 "dynamic_dimensions": []
@@ -5450,7 +5490,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:c0f035dc13cad4a444b16c259c5290101089e39af7d60a2aa5689fbb5f9d7f0e"
+              "contract_id": "sha256:3d5f09f2d79123c7042175834fce087d1c2949fb94b8936557fbae9098a7a1b3"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -5464,12 +5504,13 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/parallel_linear_silu_multiply_bf16_16x32.spv",
-                  "sha256": "sha256:9c7024c3a8831b0155518a4a68f59b6565dffad82fe67c6595deb1070636e79a",
-                  "entry_point": "main"
+                  "path": "shaders/parallel_linear_silu_multiply_bf16_16x256.spv",
+                  "sha256": "sha256:b3142766800e4a6f12a7079fdfeef20dff6b7d705d30a72fe2af26b728d96031",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:6223654fb6838d3f462ce0ae7c6a95e0121bad2eda6ab619bda3a10c9eb20650",
+              "implementation_digest": "sha256:88420cf2591553190422ffe0bf48d6208546e2e22f16c74d6688545a6e39b3af",
               "phases": [
                 "decode"
               ],
@@ -5480,13 +5521,13 @@
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:64b6782fd824dd10e43fc8a4",
+                "shape_class": "shape:b351036686d40dda767c4dc1",
                 "dimensions": {
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
-                  "parameter_0_dimension_0": 32,
+                  "workgroup_count_x": 128,
+                  "parameter_0_dimension_0": 256,
                   "parameter_0_dimension_1": 16,
-                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_0": 256,
                   "parameter_1_dimension_1": 16
                 },
                 "dynamic_dimensions": []
@@ -5526,7 +5567,14 @@
                   "alignment_elements": 2
                 }
               ],
-              "local_intermediates": [],
+              "local_intermediates": [
+                {
+                  "signal": "ffn_hidden",
+                  "producer_binding": 1,
+                  "consumer_binding": 0,
+                  "format": "bf16"
+                }
+              ],
               "resources": [
                 {
                   "resource": "model.layers.0.mlp.gate_proj.weight",
@@ -5549,7 +5597,7 @@
               },
               "partition_extent": {
                 "dimension_name": "parameter_0_dimension_0",
-                "elements": 32,
+                "elements": 256,
                 "alignment_elements": 2
               },
               "partition_launch": {
@@ -5557,7 +5605,7 @@
                 "origin": "local_zero"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:b01b207037fc77011d35dc288eb0d3946237e751f4649938ab26abf479d4aa7d"
+              "contract_id": "sha256:71586d5becb89f1d066bd1faeb32b368a6ff7d8759400cb2e49fe32bd65cbd63"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -5571,12 +5619,13 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x32__pbc31.spv",
-                  "sha256": "sha256:aa75fecde2d4f8893d373bf4a1325d697307ec088438346d4e23199fd9aefb85",
-                  "entry_point": "main"
+                  "path": "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x256__pbc31.spv",
+                  "sha256": "sha256:2d294c7cfde530f1561e707a8481f0a64224cbca3c9ff3cb38f3cdd02b07532a",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:c39e422484e55710978fb932fc6c55b4078713c9a02c1c895d600e9ca0436357",
+              "implementation_digest": "sha256:42a8b70563c32f0d5fd708e45d240ac9593126dc2aad602f775be907ef535eee",
               "phases": [
                 "prefill"
               ],
@@ -5587,13 +5636,13 @@
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:8fc55fb139ac018fe8f7ce88",
+                "shape_class": "shape:3b0f8554096ae075c66fe81c",
                 "dimensions": {
                   "local_size_x": 256,
-                  "workgroup_count_x": 1,
-                  "parameter_0_dimension_0": 32,
+                  "workgroup_count_x": 4,
+                  "parameter_0_dimension_0": 256,
                   "parameter_0_dimension_1": 16,
-                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_0": 256,
                   "parameter_1_dimension_1": 16,
                   "batch_width": 64
                 },
@@ -5639,7 +5688,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:5017079d8e3bcd9f271f728f8760eea62c6b154fcdb7cdd0951e5320a6134b11"
+              "contract_id": "sha256:84319854852313c2f5e96ca43e06401119b37abf497e7c3ae315b976cdea814e"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -5653,12 +5702,13 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/parallel_linear_silu_multiply_batch2_bf16_16x32__pbc31.spv",
-                  "sha256": "sha256:0bc6293d2aa08f62646d659291908aab61e1b033d1d3705cde10376430e578fc",
-                  "entry_point": "main"
+                  "path": "shaders/parallel_linear_silu_multiply_batch2_bf16_16x256__pbc31.spv",
+                  "sha256": "sha256:26bf8e538f3a1454fd3db6c24ca5f4810043543412c34ccfab5c2e35c3afbad0",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:f396a9f26e5ba31a8643bd631b8d7209698228a29d0fb1df783f558dcce1412a",
+              "implementation_digest": "sha256:bae4f3892a64aa91ec92d41d94d82e40598cc7102180202be4d22fcec1c4a2b6",
               "phases": [
                 "decode",
                 "prefill"
@@ -5670,13 +5720,13 @@
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:1c45fed2187b8ec995e0bf1f",
+                "shape_class": "shape:0f11e705042c7fda2059e970",
                 "dimensions": {
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
-                  "parameter_0_dimension_0": 32,
+                  "workgroup_count_x": 128,
+                  "parameter_0_dimension_0": 256,
                   "parameter_0_dimension_1": 16,
-                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_0": 256,
                   "parameter_1_dimension_1": 16,
                   "batch_width": 2
                 },
@@ -5722,7 +5772,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:32a06fff9548e4debd83502dc533976a10195d36d11156bec4255546106df04b"
+              "contract_id": "sha256:5775c0bdc1e983a1aaef59a87c10f370908831c03d03df591a446e1606333299"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -5736,12 +5786,13 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/parallel_linear_silu_multiply_batch4_bf16_16x32__pbc31.spv",
-                  "sha256": "sha256:403afdca62da64341e33a27c0ce9622e71205f96f3976b0c426c36dda3002165",
-                  "entry_point": "main"
+                  "path": "shaders/parallel_linear_silu_multiply_batch4_bf16_16x256__pbc31.spv",
+                  "sha256": "sha256:2a60fdd6e57e8cbfac27c96387ad53c5b11efedd032e2c1f3be98bd18e0b6093",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:92ce9afdcffc799dac414459f5d7a82ba05ec4c7becb426f1c502972e2b4a3cb",
+              "implementation_digest": "sha256:d90cffdefef5e5eaeb697fc9c7cf1855ebe8994453e11a26e57c580b94577625",
               "phases": [
                 "decode",
                 "prefill"
@@ -5753,13 +5804,13 @@
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:188692cda7c3a19e69cc6645",
+                "shape_class": "shape:08ffe6533a8acea7b104a166",
                 "dimensions": {
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
-                  "parameter_0_dimension_0": 32,
+                  "workgroup_count_x": 128,
+                  "parameter_0_dimension_0": 256,
                   "parameter_0_dimension_1": 16,
-                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_0": 256,
                   "parameter_1_dimension_1": 16,
                   "batch_width": 4
                 },
@@ -5805,7 +5856,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:78e5c47295281f9283f5fe395edd640b2840c1412cf5168daed513b569d49aae"
+              "contract_id": "sha256:97481c4a6ee514122fcb21853c2a115adccee89af4769170972a2cafe3ad14ab"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -5819,12 +5870,13 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/parallel_linear_silu_multiply_batch8_bf16_16x32__pbc31.spv",
-                  "sha256": "sha256:56bbce846ead3aa202c473346881460ccc90e3b3e9467e78cf40cb5374e973c4",
-                  "entry_point": "main"
+                  "path": "shaders/parallel_linear_silu_multiply_batch8_bf16_16x256__pbc31.spv",
+                  "sha256": "sha256:61e86887cb70706dd9529c97ae4e8c110b39f9c9a9eb3bf752e8bfe168aa9ddc",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:a44fe21a2a359d709145ca4def98df8ba7adf4f19ee3d11a85997fceaa4195e2",
+              "implementation_digest": "sha256:c7ea8632f761e68bb1d97820986b51cd6d04f807eb8af68372cee131770637c3",
               "phases": [
                 "decode",
                 "prefill"
@@ -5836,13 +5888,13 @@
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:18eab53294c30e80c06270af",
+                "shape_class": "shape:417469de35bbf8d4d6497f4c",
                 "dimensions": {
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
-                  "parameter_0_dimension_0": 32,
+                  "workgroup_count_x": 128,
+                  "parameter_0_dimension_0": 256,
                   "parameter_0_dimension_1": 16,
-                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_0": 256,
                   "parameter_1_dimension_1": 16,
                   "batch_width": 8
                 },
@@ -5888,7 +5940,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:c3dd4255ab6354d89cc83577e338963db28163ae00e32f38c66f4c2eb2fdcf1e"
+              "contract_id": "sha256:9ce5f83861fe9cb5ce2ca9385d952dea31a7fa2ca056644209ab4c70dbde04de"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -5902,12 +5954,13 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32__pbc31.spv",
-                  "sha256": "sha256:3f8a832732c08b4a3c0ae5fef9315cff4d283782e6611361ccbe21dc22b794c4",
-                  "entry_point": "main"
+                  "path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x256__pbc31.spv",
+                  "sha256": "sha256:e54f799bc422640d72225dd0c7124d572e3fed8a4a0aeeed32306126c1d7752f",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:a2babb6009425bb0e25436c74ecf7925455d9907700381632226d769c9ad3703",
+              "implementation_digest": "sha256:890b89dd46046a6b9312b975545c28797a803931bf0b6621cf3aa749dd16873d",
               "phases": [
                 "decode",
                 "prefill"
@@ -5919,13 +5972,13 @@
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:23ca5c5431b7f1f3b12d527b",
+                "shape_class": "shape:72f414a6bdc0dc66c2f3a1a9",
                 "dimensions": {
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
-                  "parameter_0_dimension_0": 32,
+                  "workgroup_count_x": 128,
+                  "parameter_0_dimension_0": 256,
                   "parameter_0_dimension_1": 16,
-                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_0": 256,
                   "parameter_1_dimension_1": 16,
                   "batch_width": 16
                 },
@@ -5971,7 +6024,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:b2f0f0fcc50d682ec8fcd929fdc7a9eee524a926f2bf385c23cbf288f97de435"
+              "contract_id": "sha256:1d7f0a26ec7699d6032a085a836efec6a3a01543abfb4b98a9b54273a4aa1eef"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -5985,12 +6038,13 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32__pbc31.spv",
-                  "sha256": "sha256:3f8a832732c08b4a3c0ae5fef9315cff4d283782e6611361ccbe21dc22b794c4",
-                  "entry_point": "main"
+                  "path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x256__pbc31.spv",
+                  "sha256": "sha256:e54f799bc422640d72225dd0c7124d572e3fed8a4a0aeeed32306126c1d7752f",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:7e69b400889ba9fed4d6f10bf7ddcdbc9ccad2dc6b30871140a9a3ce6a313da1",
+              "implementation_digest": "sha256:75ecddf3f152e7be1892453f0935e3e0730eee6900938094fc4c109127da93c1",
               "phases": [
                 "decode"
               ],
@@ -6001,13 +6055,13 @@
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:23ca5c5431b7f1f3b12d527b",
+                "shape_class": "shape:72f414a6bdc0dc66c2f3a1a9",
                 "dimensions": {
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
-                  "parameter_0_dimension_0": 32,
+                  "workgroup_count_x": 128,
+                  "parameter_0_dimension_0": 256,
                   "parameter_0_dimension_1": 16,
-                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_0": 256,
                   "parameter_1_dimension_1": 16,
                   "batch_width": 16
                 },
@@ -6050,7 +6104,14 @@
                   "alignment_elements": 2
                 }
               ],
-              "local_intermediates": [],
+              "local_intermediates": [
+                {
+                  "signal": "ffn_hidden",
+                  "producer_binding": 1,
+                  "consumer_binding": 0,
+                  "format": "bf16"
+                }
+              ],
               "resources": [
                 {
                   "resource": "model.layers.0.mlp.gate_proj.weight",
@@ -6073,7 +6134,7 @@
               },
               "partition_extent": {
                 "dimension_name": "parameter_0_dimension_0",
-                "elements": 32,
+                "elements": 256,
                 "alignment_elements": 2
               },
               "partition_launch": {
@@ -6081,7 +6142,7 @@
                 "origin": "local_zero"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:7d6b9f5dcba19ed84ce17d53b70955aeb72ef1d2b2f1ab6e432f98cd32d573dd"
+              "contract_id": "sha256:6e8abed9fe15490fd4b8915849c13ecb628c4fe6670a56e4c05ed975488e5465"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -6095,12 +6156,13 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32__pbc31.spv",
-                  "sha256": "sha256:3f8a832732c08b4a3c0ae5fef9315cff4d283782e6611361ccbe21dc22b794c4",
-                  "entry_point": "main"
+                  "path": "shaders/parallel_linear_silu_multiply_batch16_bf16_16x256__pbc31.spv",
+                  "sha256": "sha256:e54f799bc422640d72225dd0c7124d572e3fed8a4a0aeeed32306126c1d7752f",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:0d33ca233e4083bb3e2eb9b8d0556f750eb8a1d1251f2d0873bae4cf27d31af3",
+              "implementation_digest": "sha256:4d8e900d004401443680ebb8331327070e970ac32b00a73572a8791b51705bb4",
               "phases": [
                 "prefill"
               ],
@@ -6111,13 +6173,13 @@
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:23ca5c5431b7f1f3b12d527b",
+                "shape_class": "shape:72f414a6bdc0dc66c2f3a1a9",
                 "dimensions": {
                   "local_size_x": 64,
-                  "workgroup_count_x": 16,
-                  "parameter_0_dimension_0": 32,
+                  "workgroup_count_x": 128,
+                  "parameter_0_dimension_0": 256,
                   "parameter_0_dimension_1": 16,
-                  "parameter_1_dimension_0": 32,
+                  "parameter_1_dimension_0": 256,
                   "parameter_1_dimension_1": 16,
                   "batch_width": 16
                 },
@@ -6160,7 +6222,14 @@
                   "alignment_elements": 2
                 }
               ],
-              "local_intermediates": [],
+              "local_intermediates": [
+                {
+                  "signal": "ffn_hidden",
+                  "producer_binding": 1,
+                  "consumer_binding": 0,
+                  "format": "bf16"
+                }
+              ],
               "resources": [
                 {
                   "resource": "model.layers.0.mlp.gate_proj.weight",
@@ -6183,7 +6252,7 @@
               },
               "partition_extent": {
                 "dimension_name": "parameter_0_dimension_0",
-                "elements": 32,
+                "elements": 256,
                 "alignment_elements": 2
               },
               "partition_launch": {
@@ -6191,7 +6260,7 @@
                 "origin": "local_zero"
               },
               "region_family": "layer.feature_transform.projections+layer.feature_transform.gate",
-              "contract_id": "sha256:6162b40bb148aaf373a0234ead054d639fddc3a41cbd14bff457fa929caadbc7"
+              "contract_id": "sha256:fe4117a9058151980c554ddcafb9f8ebfbf5dd055b69530640813db885b2603d"
             }
           ]
         },
@@ -6209,7 +6278,7 @@
           ],
           "execution_domain": "decode",
           "stream_control_binding": null,
-          "shader_path": "shaders/linear_residual_bf16_32x16.spv",
+          "shader_path": "shaders/linear_residual_bf16_256x16.spv",
           "local_size_x": 64,
           "workgroup_count_x": 8,
           "batch_mode": "weight_shared",
@@ -6246,7 +6315,7 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch64_cooperative_bf16_32x16__pbc31.spv",
+                  "shader_path": "shaders/linear_residual_batch64_cooperative_bf16_256x16__pbc31.spv",
                   "local_size_x": 256,
                   "workgroup_count_x": 1,
                   "control": {
@@ -6275,7 +6344,7 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch2_bf16_32x16__pbc31.spv",
+                  "shader_path": "shaders/linear_residual_batch2_bf16_256x16__pbc31.spv",
                   "local_size_x": 64,
                   "workgroup_count_x": 8,
                   "control": {
@@ -6304,7 +6373,7 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch4_bf16_32x16__pbc31.spv",
+                  "shader_path": "shaders/linear_residual_batch4_bf16_256x16__pbc31.spv",
                   "local_size_x": 64,
                   "workgroup_count_x": 8,
                   "control": {
@@ -6333,7 +6402,7 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch8_bf16_32x16__pbc31.spv",
+                  "shader_path": "shaders/linear_residual_batch8_bf16_256x16__pbc31.spv",
                   "local_size_x": 64,
                   "workgroup_count_x": 8,
                   "control": {
@@ -6362,7 +6431,7 @@
               },
               "stages": [
                 {
-                  "shader_path": "shaders/linear_residual_batch16_bf16_32x16__pbc31.spv",
+                  "shader_path": "shaders/linear_residual_batch16_bf16_256x16__pbc31.spv",
                   "local_size_x": 64,
                   "workgroup_count_x": 8,
                   "control": {
@@ -6386,27 +6455,29 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/linear_residual_bf16_32x16.spv",
-                  "sha256": "sha256:58867cc5a9e799ddc07f788564c821044e8f374c9ef9358c2030026deb396434",
-                  "entry_point": "main"
+                  "path": "shaders/linear_residual_bf16_256x16.spv",
+                  "sha256": "sha256:e124c69b234af516cd2641763f8c1886d07caf384fa1e207e47738eb255c64ad",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:981682a62b674519c56e2b497389cab7c6cc5c48e388f9600396c00eebe29584",
+              "implementation_digest": "sha256:ca8eac185686ef4b123d024f00592a81dae5c193fe1975462bfe1c39d5ec54fe",
               "phases": [
                 "decode"
               ],
+              "execution_shape": "single_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:27959a60c809efb8fd370977",
+                "shape_class": "shape:d7fff87bae80dc48e1aa22c6",
                 "dimensions": {
                   "local_size_x": 64,
                   "workgroup_count_x": 8,
                   "parameter_0_dimension_0": 16,
-                  "parameter_0_dimension_1": 32
+                  "parameter_0_dimension_1": 256
                 },
                 "dynamic_dimensions": []
               },
@@ -6445,8 +6516,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "execution_shape": "single_lane",
-              "contract_id": "sha256:963d9e598f6ae05f2b7fea3e89d70e7584762a816fe9a70ab8f07e1b82c2b720"
+              "contract_id": "sha256:f9c2e805022fd92e6539b3f0a725ae40d91a5811bfae8814b6c6d99ba83457f5"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -6458,27 +6528,142 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/linear_residual_batch64_cooperative_bf16_32x16__pbc31.spv",
-                  "sha256": "sha256:94ca6cca1700fb8a0450c9e7aa30b12d891276521e7043076c2d644966c9d765",
-                  "entry_point": "main"
+                  "path": "shaders/linear_residual_input_columns_bf16_b128_256x16.spv",
+                  "sha256": "sha256:513dd797032df374d138092994cf8f7bd65baa9a2de020629aa2150fe21976b0",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:a6c2357fe93f327daf6c32771cd619f907463909de88acb18c568f42f189075a",
+              "implementation_digest": "sha256:d9fe6ff24ff2c7adde5096a3efc80b4989548e9b0e1ca2e24d3d9b12c5b3f5f0",
+              "phases": [
+                "decode",
+                "prefill"
+              ],
+              "execution_shape": "single_and_multi_lane",
+              "formats": {
+                "storage": "bf16:input_block_major",
+                "compute": "bf16",
+                "accumulation": "f32"
+              },
+              "geometry": {
+                "shape_class": "shape:f9ac97b8522a90d39bbae90b",
+                "dimensions": {
+                  "local_size_x": 64,
+                  "workgroup_count_x": 8,
+                  "input_columns": 256,
+                  "output_rows": 16
+                },
+                "dynamic_dimensions": []
+              },
+              "strategy": "tensor_parallel",
+              "execution_form": "partitioned_input_partial_output",
+              "parameter_partitions": [
+                {
+                  "binding": 3,
+                  "resource": "model.layers.0.mlp.down_proj.weight.__nerve_input_block_major_b128",
+                  "dimension": 0,
+                  "kind": "contiguous",
+                  "alignment_elements": 1,
+                  "logical_elements_per_index": 128
+                }
+              ],
+              "selected_resource_partitions": [],
+              "inputs": [
+                {
+                  "binding": 0,
+                  "distribution": "sharded",
+                  "dimension": 0,
+                  "alignment_elements": 128
+                },
+                {
+                  "binding": 1,
+                  "distribution": "replicated"
+                }
+              ],
+              "outputs": [
+                {
+                  "binding": 2,
+                  "collection": "reduced",
+                  "reduction": {
+                    "operation": "sum_f32",
+                    "dimension_name": "output_rows",
+                    "finalization": {
+                      "kind": "add_bf16_residual_to_bf16",
+                      "residual_binding": 1
+                    }
+                  }
+                }
+              ],
+              "local_intermediates": [
+                {
+                  "signal": "ffn_hidden",
+                  "producer_binding": 1,
+                  "consumer_binding": 0,
+                  "format": "bf16"
+                }
+              ],
+              "resources": [
+                {
+                  "resource": "model.layers.0.mlp.down_proj.weight.__nerve_input_block_major_b128",
+                  "kind": "persistent_parameter",
+                  "residency": "permanent",
+                  "access": "read",
+                  "binding": 3
+                }
+              ],
+              "equivalence": {
+                "output": "absolute_relative_tolerance",
+                "state": "bit_exact",
+                "absolute_tolerance": 0.01,
+                "relative_tolerance": 0.01
+              },
+              "partition_extent": {
+                "dimension_name": "input_columns",
+                "elements": 256,
+                "alignment_elements": 128
+              },
+              "partition_launch": {
+                "workgroup_x": "repeated",
+                "origin": "push_constant_u32",
+                "origin_push_constant": "input_start",
+                "count_push_constant": "input_count"
+              },
+              "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
+              "contract_id": "sha256:93174f909c8a14f7a8f6be6270d663dc883c025b86ddaf58d6f325249c44bb20"
+            },
+            {
+              "schema": "nerve.physical_execution_contract.v4",
+              "operation_family": "linear_residual",
+              "member_node_ids": [
+                "ffn_down_projection__ffn_residual",
+                "ffn_down_projection",
+                "ffn_residual"
+              ],
+              "artifacts": [
+                {
+                  "path": "shaders/linear_residual_batch64_cooperative_bf16_256x16__pbc31.spv",
+                  "sha256": "sha256:d39408005e97810901ee098492f0defa5db6f0c72905e91b2c75259c9e51ef9b",
+                  "entry_point": "main",
+                  "role": "primary"
+                }
+              ],
+              "implementation_digest": "sha256:eacd9b136f1b2f13ef2ec31d7dce4dfad99cac9f8be91a6187b4b2fccfbb242e",
               "phases": [
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:802cf37ab6c1d7bfb91013c2",
+                "shape_class": "shape:4e41b695a360b59f16f58b9c",
                 "dimensions": {
                   "local_size_x": 256,
                   "workgroup_count_x": 1,
                   "parameter_0_dimension_0": 16,
-                  "parameter_0_dimension_1": 32,
+                  "parameter_0_dimension_1": 256,
                   "batch_width": 64
                 },
                 "dynamic_dimensions": [
@@ -6520,8 +6705,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:2e84594c980c90a84c6bc7e2f3076b7b28f8e8ddc4a9df6401fe35377df64dee"
+              "contract_id": "sha256:0a71bc7df3489df860ce26de2616debfb9971863bef5cf6bf71ca6b4979ff04a"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -6533,28 +6717,30 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/linear_residual_batch2_bf16_32x16__pbc31.spv",
-                  "sha256": "sha256:8beb81a96d4d86944003e89cc4c87f80b5c08bce9b0ff99c0ace7c5cf50b7d44",
-                  "entry_point": "main"
+                  "path": "shaders/linear_residual_batch2_bf16_256x16__pbc31.spv",
+                  "sha256": "sha256:7137c16b6d40798b88be59e28b3e39de1f21ab37ee10c96605abcb5c204312c2",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:ae8b5125882695df0f643fa888e76ec831b44633c89772a5832472bc059fc2a9",
+              "implementation_digest": "sha256:6f066ba609ca8e5f1a71031a5bbeb52cf0d72fda4465d84c999bb790470d90c7",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:a306dfddf1716c9ec962b2a2",
+                "shape_class": "shape:120da724895cc30a04f3367c",
                 "dimensions": {
                   "local_size_x": 64,
                   "workgroup_count_x": 8,
                   "parameter_0_dimension_0": 16,
-                  "parameter_0_dimension_1": 32,
+                  "parameter_0_dimension_1": 256,
                   "batch_width": 2
                 },
                 "dynamic_dimensions": [
@@ -6596,8 +6782,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:940923cbc3040d3dc65aa02bfa475025162582e5498f1670986dc452f71e4746"
+              "contract_id": "sha256:cf9fdf0c7834d19e0b15ac15f99c516dfd32d2c33e9e62e974291e552e2cf631"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -6609,28 +6794,30 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/linear_residual_batch4_bf16_32x16__pbc31.spv",
-                  "sha256": "sha256:fe33d011631a30a193d5ded3ceb988e2570f4cb1584a48973e37011195f45142",
-                  "entry_point": "main"
+                  "path": "shaders/linear_residual_batch4_bf16_256x16__pbc31.spv",
+                  "sha256": "sha256:cc5229e035087d86bc9079fa0059a5db52d8afe9705177d59bb5dea6792cda69",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:7175ecb650b37691aacba53fb2d381ee9e31c09453e398b6dff86e1c43f050b2",
+              "implementation_digest": "sha256:a7f290bc8c18beb4e58d4d881cf6cda07fa61bd3fcecb46ab7403ed4acea8886",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:6484f185433b1e4ec38a5149",
+                "shape_class": "shape:34ee7eb74d03fc42f5cbe314",
                 "dimensions": {
                   "local_size_x": 64,
                   "workgroup_count_x": 8,
                   "parameter_0_dimension_0": 16,
-                  "parameter_0_dimension_1": 32,
+                  "parameter_0_dimension_1": 256,
                   "batch_width": 4
                 },
                 "dynamic_dimensions": [
@@ -6672,8 +6859,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:9bc290f31ce06b8eedc2670f5d459c30ee5ca2668d15a59b2a27284afb7eb8b4"
+              "contract_id": "sha256:e1cb27bcccb14bebea3174c09fadb2dc6fee9a00d00a26b2462573c16e8ba375"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -6685,28 +6871,30 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/linear_residual_batch8_bf16_32x16__pbc31.spv",
-                  "sha256": "sha256:1e5123cdfe951e75afc2cb96fa6982de259b9bca167449c46cf97d8ba2d2600f",
-                  "entry_point": "main"
+                  "path": "shaders/linear_residual_batch8_bf16_256x16__pbc31.spv",
+                  "sha256": "sha256:d3f9d1fcf5b9eb44c54254ec054d818ed448a6931b9ad58f8e75f64ad8ebde10",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:12c6e8cd89e6bb26d3c6fc6658a411cc4b8111a5dfefe0d9f7aaa83bf3b32999",
+              "implementation_digest": "sha256:f28c99b4b1de1b2e829a38717af5c2b86e904153045ae79ddaee9c8a758f5484",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:4538a05a9a84caa611dc61fc",
+                "shape_class": "shape:e9aec7bf87e175cc46bfe88d",
                 "dimensions": {
                   "local_size_x": 64,
                   "workgroup_count_x": 8,
                   "parameter_0_dimension_0": 16,
-                  "parameter_0_dimension_1": 32,
+                  "parameter_0_dimension_1": 256,
                   "batch_width": 8
                 },
                 "dynamic_dimensions": [
@@ -6748,8 +6936,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:9a573dd407510768517c5e285438bd4886621e4c5c2654d70a9f9bab813c9b38"
+              "contract_id": "sha256:ef11da0f746d6cd08bb1d791726c21e9f8cc065436ff19db4dfa5642cec47e67"
             },
             {
               "schema": "nerve.physical_execution_contract.v4",
@@ -6761,28 +6948,30 @@
               ],
               "artifacts": [
                 {
-                  "path": "shaders/linear_residual_batch16_bf16_32x16__pbc31.spv",
-                  "sha256": "sha256:c69b9452af5d573db1083279b80a34604a24b6ee342118968957723d63a39138",
-                  "entry_point": "main"
+                  "path": "shaders/linear_residual_batch16_bf16_256x16__pbc31.spv",
+                  "sha256": "sha256:a315e8c79077260e079e4761892a2b457e568742aba1101e5d3d529413202286",
+                  "entry_point": "main",
+                  "role": "primary"
                 }
               ],
-              "implementation_digest": "sha256:5e1b7e5aff70ebeb9c6dc4300bfa04e284af845c184f31199e264684ec812691",
+              "implementation_digest": "sha256:7abfab58ac2560c393ad8f6316624b1a28d734f6614fa9680bee3d67d832453c",
               "phases": [
                 "decode",
                 "prefill"
               ],
+              "execution_shape": "multi_lane",
               "formats": {
                 "storage": "bf16:row_major",
                 "compute": "bf16",
                 "accumulation": "f32"
               },
               "geometry": {
-                "shape_class": "shape:16838bf22183be87bebc771b",
+                "shape_class": "shape:190890398c10b723cb72493c",
                 "dimensions": {
                   "local_size_x": 64,
                   "workgroup_count_x": 8,
                   "parameter_0_dimension_0": 16,
-                  "parameter_0_dimension_1": 32,
+                  "parameter_0_dimension_1": 256,
                   "batch_width": 16
                 },
                 "dynamic_dimensions": [
@@ -6824,8 +7013,7 @@
                 "state": "bit_exact"
               },
               "region_family": "layer.feature_transform.residual+layer.feature_transform.projections",
-              "execution_shape": "multi_lane",
-              "contract_id": "sha256:698248062c951a4be24baa31baf0cd8a5a1436332088a771b0b9a3f628922022"
+              "contract_id": "sha256:ff62a073db28da43ee3d847865988ec7e360aebc15ffc34ea0b7bd27cf4c8c2b"
             }
           ]
         }
@@ -6843,17 +7031,17 @@
     ],
     "resources": [
       {
-        "id": "sha256:08b60245a66a9f83a73ac2289bd1fcb16e0ccad05883152f5bde134d7d650b2b",
+        "id": "sha256:148428aeece64d459001b4f5d3bc95a2ee65285bf4fae5e8c3ff7f4da931b6c4",
         "lifetime": "always_resident",
         "ranges": [
           {
-            "artifact_path": "weights/tensor_fa1fdc5e3fc3f0ff.safetensors",
-            "byte_offset": 160,
-            "byte_count": 1024,
-            "alignment_bytes": 32,
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 2240,
+            "byte_count": 8192,
+            "alignment_bytes": 64,
             "integrity": {
               "algorithm": "sha256",
-              "digest": "d2eb40a7a757bc8f911247d93c50ad60e4c6b50dc94189f7eea0624ee1c76f55"
+              "digest": "ad3bea6e7a4cc9aa85650b2562090d327eb2f8ea19e19d6908c3737a77340a19"
             }
           }
         ],
@@ -6866,14 +7054,14 @@
         }
       },
       {
-        "id": "sha256:1915cd136eae4937428471abfd3fe6616d6faa3fdfb27bde7ac2ea9ca2c2537e",
+        "id": "sha256:2f92134fedee3152a056c5010fe6632e5075d26bc24afe59c75a2248da45bf75",
         "lifetime": "always_resident",
         "ranges": [
           {
-            "artifact_path": "weights/tensor_efc64374061622ae.safetensors",
-            "byte_offset": 136,
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 26816,
             "byte_count": 32,
-            "alignment_bytes": 8,
+            "alignment_bytes": 64,
             "integrity": {
               "algorithm": "sha256",
               "digest": "a214ae5c03e0c56b5540a2f2e924a30f3a059d4d38c2b8c62b9182a78e8afb24"
@@ -6889,40 +7077,17 @@
         }
       },
       {
-        "id": "sha256:40dafeef4d9829a0e6325d3d5057f7bba7b04d9bf45f560c7df84071adf3a614",
+        "id": "sha256:38b8f688866ae6d8b336903b2ce04511f4c8876564e840940e89576343bdab97",
         "lifetime": "always_resident",
         "ranges": [
           {
-            "artifact_path": "weights/tensor_28ad2efe9634c02a.safetensors",
-            "byte_offset": 168,
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 27616,
             "byte_count": 512,
-            "alignment_bytes": 8,
-            "integrity": {
-              "algorithm": "sha256",
-              "digest": "59bae099aa5a74a8db89ee2183b75ecff83ed06c424240b99970a600e6de5a55"
-            }
-          }
-        ],
-        "dependencies": [],
-        "compatibility": {
-          "device_api": "vulkan",
-          "storage_class": "storage_buffer",
-          "read_only": true,
-          "required_features": []
-        }
-      },
-      {
-        "id": "sha256:4591336179dc76ab2a9490844577cbc43d1652361257569fe28891de25106d00",
-        "lifetime": "always_resident",
-        "ranges": [
-          {
-            "artifact_path": "weights/tensor_0951c6e9b5e5bcb3.safetensors",
-            "byte_offset": 160,
-            "byte_count": 1024,
             "alignment_bytes": 32,
             "integrity": {
               "algorithm": "sha256",
-              "digest": "1ee1319f10203ee91cb6a21eae03cbdd29696323db49f09f890f17259a196cd7"
+              "digest": "803be95acff5a379b460490e836ed53d84fc073988d309a9444770ea7e06d99a"
             }
           }
         ],
@@ -6939,8 +7104,8 @@
         "lifetime": "always_resident",
         "ranges": [
           {
-            "artifact_path": "weights/tensor_407e2a3a0399d043.safetensors",
-            "byte_offset": 160,
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 26848,
             "byte_count": 256,
             "alignment_bytes": 32,
             "integrity": {
@@ -6962,8 +7127,8 @@
         "lifetime": "always_resident",
         "ranges": [
           {
-            "artifact_path": "weights/tensor_308a709a8ae7ddb2.safetensors",
-            "byte_offset": 160,
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 28384,
             "byte_count": 32,
             "alignment_bytes": 32,
             "integrity": {
@@ -6981,14 +7146,14 @@
         }
       },
       {
-        "id": "sha256:9c1eebe9320fa6090a0f09c1ec8a73a57260e353c148ae531f0d667e0166e519",
+        "id": "sha256:66c86c33bc6abc89e30ddce4e47e303c48abd86adb16436c5f1361752e6567f4",
         "lifetime": "always_resident",
         "ranges": [
           {
-            "artifact_path": "weights/tensor_60800b5c9d5cc40f.safetensors",
-            "byte_offset": 152,
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 1184,
             "byte_count": 1024,
-            "alignment_bytes": 8,
+            "alignment_bytes": 32,
             "integrity": {
               "algorithm": "sha256",
               "digest": "355249d7232b4e6ef8fa7bb9d5f4ca8ef057e9b69bd5526758c763be006927c3"
@@ -7004,17 +7169,63 @@
         }
       },
       {
-        "id": "sha256:de5166097d7fccf0e0a1cb78108128371e3ac4865e0c223bc32b9a5e08e01f2e",
+        "id": "sha256:a4a2d20144e302f912c916337935583635e4683a419cfac89aeba2c70dcba76a",
         "lifetime": "always_resident",
         "ranges": [
           {
-            "artifact_path": "weights/tensor_7de186429d1774aa.safetensors",
-            "byte_offset": 160,
-            "byte_count": 1024,
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 18624,
+            "byte_count": 8192,
+            "alignment_bytes": 64,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "4738f4082be6aac2b46d779b6f1082ec7f82a0fc6707fa9dd1241a6a3d3ca87c"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:c236fa70c6f1577bfe8d1497f88ade4e74dc23849fee61e9af6172adc60c0a7f",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 10432,
+            "byte_count": 8192,
+            "alignment_bytes": 64,
+            "integrity": {
+              "algorithm": "sha256",
+              "digest": "f6cee5e423d0ccbb6d9666b99a8bad23e898b7cfe678cc5ec807e7db32829183"
+            }
+          }
+        ],
+        "dependencies": [],
+        "compatibility": {
+          "device_api": "vulkan",
+          "storage_class": "storage_buffer",
+          "read_only": true,
+          "required_features": []
+        }
+      },
+      {
+        "id": "sha256:c6d657e962ba280e65264cc0c75da7027b9cc66a1cf676f36a069af7056768bc",
+        "lifetime": "always_resident",
+        "ranges": [
+          {
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 27104,
+            "byte_count": 512,
             "alignment_bytes": 32,
             "integrity": {
               "algorithm": "sha256",
-              "digest": "ef375c3406f567b86f95c94f6338283ce3c8c987bd4714badcd2b93b4069576d"
+              "digest": "59bae099aa5a74a8db89ee2183b75ecff83ed06c424240b99970a600e6de5a55"
             }
           }
         ],
@@ -7031,8 +7242,8 @@
         "lifetime": "always_resident",
         "ranges": [
           {
-            "artifact_path": "weights/tensor_9a45043a6625d9b5.safetensors",
-            "byte_offset": 160,
+            "artifact_path": "weights/bank_cff971df72349b3de9688217.safetensors",
+            "byte_offset": 28128,
             "byte_count": 256,
             "alignment_bytes": 32,
             "integrity": {
@@ -7048,46 +7259,23 @@
           "read_only": true,
           "required_features": []
         }
-      },
-      {
-        "id": "sha256:f8e6368d1caad174d020c80dfaa4147e898617dee10cf54abeb24a9809d9a708",
-        "lifetime": "always_resident",
-        "ranges": [
-          {
-            "artifact_path": "weights/tensor_b9045f5429005d09.safetensors",
-            "byte_offset": 168,
-            "byte_count": 512,
-            "alignment_bytes": 8,
-            "integrity": {
-              "algorithm": "sha256",
-              "digest": "803be95acff5a379b460490e836ed53d84fc073988d309a9444770ea7e06d99a"
-            }
-          }
-        ],
-        "dependencies": [],
-        "compatibility": {
-          "device_api": "vulkan",
-          "storage_class": "storage_buffer",
-          "read_only": true,
-          "required_features": []
-        }
       }
     ],
     "atomic_groups": [
       {
-        "id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+        "id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
         "lifetime": "always_resident",
         "resource_ids": [
-          "sha256:08b60245a66a9f83a73ac2289bd1fcb16e0ccad05883152f5bde134d7d650b2b",
-          "sha256:1915cd136eae4937428471abfd3fe6616d6faa3fdfb27bde7ac2ea9ca2c2537e",
-          "sha256:40dafeef4d9829a0e6325d3d5057f7bba7b04d9bf45f560c7df84071adf3a614",
-          "sha256:4591336179dc76ab2a9490844577cbc43d1652361257569fe28891de25106d00",
+          "sha256:148428aeece64d459001b4f5d3bc95a2ee65285bf4fae5e8c3ff7f4da931b6c4",
+          "sha256:2f92134fedee3152a056c5010fe6632e5075d26bc24afe59c75a2248da45bf75",
+          "sha256:38b8f688866ae6d8b336903b2ce04511f4c8876564e840940e89576343bdab97",
           "sha256:4a197b5dd8da61db455ec1b968f14c5c27f6a852cbfa811031cc3be201a2051e",
           "sha256:4f9374da773ab08c5cd129685801d1258d2c04166dd8d3f7495f6fc142345bca",
-          "sha256:9c1eebe9320fa6090a0f09c1ec8a73a57260e353c148ae531f0d667e0166e519",
-          "sha256:de5166097d7fccf0e0a1cb78108128371e3ac4865e0c223bc32b9a5e08e01f2e",
-          "sha256:f2ecc615c26894b6d24a4678035ee31f706f3f4f7cdf41500890ad58784c2704",
-          "sha256:f8e6368d1caad174d020c80dfaa4147e898617dee10cf54abeb24a9809d9a708"
+          "sha256:66c86c33bc6abc89e30ddce4e47e303c48abd86adb16436c5f1361752e6567f4",
+          "sha256:a4a2d20144e302f912c916337935583635e4683a419cfac89aeba2c70dcba76a",
+          "sha256:c236fa70c6f1577bfe8d1497f88ade4e74dc23849fee61e9af6172adc60c0a7f",
+          "sha256:c6d657e962ba280e65264cc0c75da7027b9cc66a1cf676f36a069af7056768bc",
+          "sha256:f2ecc615c26894b6d24a4678035ee31f706f3f4f7cdf41500890ad58784c2704"
         ],
         "dependencies": []
       }
@@ -7101,8 +7289,8 @@
         "parameter_id": "weight",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
-          "resource_id": "sha256:9c1eebe9320fa6090a0f09c1ec8a73a57260e353c148ae531f0d667e0166e519"
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
+          "resource_id": "sha256:66c86c33bc6abc89e30ddce4e47e303c48abd86adb16436c5f1361752e6567f4"
         }
       },
       {
@@ -7112,8 +7300,8 @@
         "parameter_id": "attention_out_projection",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
-          "resource_id": "sha256:40dafeef4d9829a0e6325d3d5057f7bba7b04d9bf45f560c7df84071adf3a614"
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
+          "resource_id": "sha256:c6d657e962ba280e65264cc0c75da7027b9cc66a1cf676f36a069af7056768bc"
         }
       },
       {
@@ -7123,8 +7311,8 @@
         "parameter_id": "ffn_down",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
-          "resource_id": "sha256:de5166097d7fccf0e0a1cb78108128371e3ac4865e0c223bc32b9a5e08e01f2e"
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
+          "resource_id": "sha256:148428aeece64d459001b4f5d3bc95a2ee65285bf4fae5e8c3ff7f4da931b6c4"
         }
       },
       {
@@ -7134,8 +7322,8 @@
         "parameter_id": "ffn_gate",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
-          "resource_id": "sha256:4591336179dc76ab2a9490844577cbc43d1652361257569fe28891de25106d00"
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
+          "resource_id": "sha256:c236fa70c6f1577bfe8d1497f88ade4e74dc23849fee61e9af6172adc60c0a7f"
         }
       },
       {
@@ -7145,8 +7333,8 @@
         "parameter_id": "ffn_up",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
-          "resource_id": "sha256:08b60245a66a9f83a73ac2289bd1fcb16e0ccad05883152f5bde134d7d650b2b"
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
+          "resource_id": "sha256:a4a2d20144e302f912c916337935583635e4683a419cfac89aeba2c70dcba76a"
         }
       },
       {
@@ -7156,8 +7344,8 @@
         "parameter_id": "ffn_norm",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
-          "resource_id": "sha256:1915cd136eae4937428471abfd3fe6616d6faa3fdfb27bde7ac2ea9ca2c2537e"
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
+          "resource_id": "sha256:2f92134fedee3152a056c5010fe6632e5075d26bc24afe59c75a2248da45bf75"
         }
       },
       {
@@ -7167,7 +7355,7 @@
         "parameter_id": "operator_norm",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
           "resource_id": "sha256:4f9374da773ab08c5cd129685801d1258d2c04166dd8d3f7495f6fc142345bca"
         }
       },
@@ -7178,7 +7366,7 @@
         "parameter_id": "k_projection",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
           "resource_id": "sha256:4a197b5dd8da61db455ec1b968f14c5c27f6a852cbfa811031cc3be201a2051e"
         }
       },
@@ -7189,8 +7377,8 @@
         "parameter_id": "q_projection",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
-          "resource_id": "sha256:f8e6368d1caad174d020c80dfaa4147e898617dee10cf54abeb24a9809d9a708"
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
+          "resource_id": "sha256:38b8f688866ae6d8b336903b2ce04511f4c8876564e840940e89576343bdab97"
         }
       },
       {
@@ -7200,7 +7388,7 @@
         "parameter_id": "v_projection",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
           "resource_id": "sha256:f2ecc615c26894b6d24a4678035ee31f706f3f4f7cdf41500890ad58784c2704"
         }
       },
@@ -7211,8 +7399,8 @@
         "parameter_id": "output_norm.weight",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
-          "resource_id": "sha256:1915cd136eae4937428471abfd3fe6616d6faa3fdfb27bde7ac2ea9ca2c2537e"
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
+          "resource_id": "sha256:4f9374da773ab08c5cd129685801d1258d2c04166dd8d3f7495f6fc142345bca"
         }
       },
       {
@@ -7222,8 +7410,8 @@
         "parameter_id": "output_projection.weight",
         "mapping": {
           "kind": "atomic_group",
-          "atomic_group_id": "sha256:a2a9f1a42353862cec4410dae9ce5f3ab4a94d452345f0793c172c72e590b505",
-          "resource_id": "sha256:9c1eebe9320fa6090a0f09c1ec8a73a57260e353c148ae531f0d667e0166e519"
+          "atomic_group_id": "sha256:c0f3d94cd070b64022034a95760062a8834316abd4f606a5c84d9277c2d29f50",
+          "resource_id": "sha256:66c86c33bc6abc89e30ddce4e47e303c48abd86adb16436c5f1361752e6567f4"
         }
       }
     ],
@@ -7236,20 +7424,20 @@
     "algorithm": "sha256",
     "files": {
       "behavioral_validation.json": {
-        "byte_count": 4595,
-        "sha256": "1c6458557265b4508196a8190a7833570e6f71b052d9b2f8086e4a0967806e77"
+        "byte_count": 4597,
+        "sha256": "d5e6b6e4c04efc95a2255b58aac13c6742973e5cdc6d455cc9bc0cd2cae6b8af"
       },
       "compiler_target.json": {
-        "byte_count": 3588,
-        "sha256": "9864c2fbf1639c3d75e83ac27e00723e1a579dd61f5a2395476b823ee0f192ac"
+        "byte_count": 3668,
+        "sha256": "63368a0ed5a56871fbaabfe5df310463d5a4a4eeb43392db66964b2fff43b4fc"
       },
       "config.json": {
-        "byte_count": 1080,
-        "sha256": "74dce23747cf262fe673693d0d0eace143d3f917f4b8261e45565c1eaabe2896"
+        "byte_count": 1081,
+        "sha256": "0f3d9aae9e8d9234b03308b45879de137a0d769ba6a00e1833328e749de7f689"
       },
       "lowered/execution_graph.circuits.json": {
-        "byte_count": 6663,
-        "sha256": "ad759df2080fec2f04db0cd303ad846b6ad1a3bdb71ceb6c34e1d79771a462d9"
+        "byte_count": 6664,
+        "sha256": "676ab1187f93f65b596002cb05a4e17e0afd01590ebf02d2a8d9c5bc4b735fce"
       },
       "lowered/input_transducer/circuit.json": {
         "byte_count": 1800,
@@ -7264,8 +7452,8 @@
         "sha256": "4d6fe7bc704b29f261f5deccc38ad53fbd44da8840ad9a241ba1389bc3043d20"
       },
       "lowered/layer_00/circuit.json": {
-        "byte_count": 22028,
-        "sha256": "b834570d261713d12a54aa2afb648f85427238134b3682a6fb1a29fbf2157385"
+        "byte_count": 22030,
+        "sha256": "370df029bdb669de98d5dafb516ceea4c9541a19ef17268272ffc17fd26a0d80"
       },
       "lowered/layer_00/params.json": {
         "byte_count": 1382,
@@ -7301,7 +7489,7 @@
       },
       "optimization/implementations.json": {
         "byte_count": 454,
-        "sha256": "ec14874f7ccbc6cbab5dbd2c068363f4d8bb2d212fd036f91f93f327785e81ee"
+        "sha256": "fe7dc2f1fcddc60939833aa670751770ac17eb2d1097dd9d50cb94c343656006"
       },
       "optimization/scopes.json": {
         "byte_count": 305806,
@@ -7309,7 +7497,7 @@
       },
       "optimization/stage.json": {
         "byte_count": 3017,
-        "sha256": "ccc6fa7a0eb84c9d120423dc1fb10b261edfb64ba07447cd2d3a1f5ebdbc2703"
+        "sha256": "c80fe469d735ed788d00cca4c8653b114433d256b64b3329b7329025f3404831"
       },
       "shaders/append_gqa_attention_partition_reduce_bf16_q2_kv1_d8_s8_scale0.353553391__sc7.spv": {
         "byte_count": 9976,
@@ -7351,49 +7539,53 @@
         "byte_count": 11752,
         "sha256": "8d12df36e5fd99e152c975958a0dc59b019c503472f95a89316ecb1fe0f23fb6"
       },
-      "shaders/linear_residual_batch16_bf16_32x16__pbc31.spv": {
-        "byte_count": 11768,
-        "sha256": "c69b9452af5d573db1083279b80a34604a24b6ee342118968957723d63a39138"
+      "shaders/linear_residual_batch16_bf16_256x16__pbc31.spv": {
+        "byte_count": 11784,
+        "sha256": "a315e8c79077260e079e4761892a2b457e568742aba1101e5d3d529413202286"
       },
       "shaders/linear_residual_batch2_bf16_16x16__pbc31.spv": {
         "byte_count": 11752,
         "sha256": "b3b9574ff5ca08d2ae5e75d0e864f2d37b1ba923588d4c5c6b10701740ca711d"
       },
-      "shaders/linear_residual_batch2_bf16_32x16__pbc31.spv": {
-        "byte_count": 11768,
-        "sha256": "8beb81a96d4d86944003e89cc4c87f80b5c08bce9b0ff99c0ace7c5cf50b7d44"
+      "shaders/linear_residual_batch2_bf16_256x16__pbc31.spv": {
+        "byte_count": 11784,
+        "sha256": "7137c16b6d40798b88be59e28b3e39de1f21ab37ee10c96605abcb5c204312c2"
       },
       "shaders/linear_residual_batch4_bf16_16x16__pbc31.spv": {
         "byte_count": 11768,
         "sha256": "0f399102ac0bb62d32d16ef50850bd5c9c3498773d5cdcda8f8b5b8f2aa9a18f"
       },
-      "shaders/linear_residual_batch4_bf16_32x16__pbc31.spv": {
-        "byte_count": 11784,
-        "sha256": "fe33d011631a30a193d5ded3ceb988e2570f4cb1584a48973e37011195f45142"
+      "shaders/linear_residual_batch4_bf16_256x16__pbc31.spv": {
+        "byte_count": 11800,
+        "sha256": "cc5229e035087d86bc9079fa0059a5db52d8afe9705177d59bb5dea6792cda69"
       },
       "shaders/linear_residual_batch64_cooperative_bf16_16x16__pbc31.spv": {
         "byte_count": 12676,
         "sha256": "9824ca17c8f2c8a17614d1aabdb1a45991c5e90390a7cb915d2c696113af01dd"
       },
-      "shaders/linear_residual_batch64_cooperative_bf16_32x16__pbc31.spv": {
-        "byte_count": 12692,
-        "sha256": "94ca6cca1700fb8a0450c9e7aa30b12d891276521e7043076c2d644966c9d765"
+      "shaders/linear_residual_batch64_cooperative_bf16_256x16__pbc31.spv": {
+        "byte_count": 12676,
+        "sha256": "d39408005e97810901ee098492f0defa5db6f0c72905e91b2c75259c9e51ef9b"
       },
       "shaders/linear_residual_batch8_bf16_16x16__pbc31.spv": {
         "byte_count": 11752,
         "sha256": "11d1558042ec907eed9e8513c3a3b24ead32f994b4c5a336c71d3556e4b1bc23"
       },
-      "shaders/linear_residual_batch8_bf16_32x16__pbc31.spv": {
-        "byte_count": 11768,
-        "sha256": "1e5123cdfe951e75afc2cb96fa6982de259b9bca167449c46cf97d8ba2d2600f"
+      "shaders/linear_residual_batch8_bf16_256x16__pbc31.spv": {
+        "byte_count": 11784,
+        "sha256": "d3f9d1fcf5b9eb44c54254ec054d818ed448a6931b9ad58f8e75f64ad8ebde10"
       },
       "shaders/linear_residual_bf16_16x16.spv": {
         "byte_count": 8336,
         "sha256": "acce0ae2c63ae45db19a89bbc4ffb42e11ce9cb4915031bac3262690167cf1c9"
       },
-      "shaders/linear_residual_bf16_32x16.spv": {
-        "byte_count": 8352,
-        "sha256": "58867cc5a9e799ddc07f788564c821044e8f374c9ef9358c2030026deb396434"
+      "shaders/linear_residual_bf16_256x16.spv": {
+        "byte_count": 8368,
+        "sha256": "e124c69b234af516cd2641763f8c1886d07caf384fa1e207e47738eb255c64ad"
+      },
+      "shaders/linear_residual_input_columns_bf16_b128_256x16.spv": {
+        "byte_count": 6620,
+        "sha256": "513dd797032df374d138092994cf8f7bd65baa9a2de020629aa2150fe21976b0"
       },
       "shaders/parallel_linear_3way_bf16_16x16_8_8.spv": {
         "byte_count": 9440,
@@ -7419,29 +7611,29 @@
         "byte_count": 13220,
         "sha256": "04f53bde53db1393b9248a750e015a84ee62836aa4d4206c45a8991d84e7d6b3"
       },
-      "shaders/parallel_linear_silu_multiply_batch16_bf16_16x32__pbc31.spv": {
-        "byte_count": 14716,
-        "sha256": "3f8a832732c08b4a3c0ae5fef9315cff4d283782e6611361ccbe21dc22b794c4"
-      },
-      "shaders/parallel_linear_silu_multiply_batch2_bf16_16x32__pbc31.spv": {
-        "byte_count": 14716,
-        "sha256": "0bc6293d2aa08f62646d659291908aab61e1b033d1d3705cde10376430e578fc"
-      },
-      "shaders/parallel_linear_silu_multiply_batch4_bf16_16x32__pbc31.spv": {
+      "shaders/parallel_linear_silu_multiply_batch16_bf16_16x256__pbc31.spv": {
         "byte_count": 14732,
-        "sha256": "403afdca62da64341e33a27c0ce9622e71205f96f3976b0c426c36dda3002165"
+        "sha256": "e54f799bc422640d72225dd0c7124d572e3fed8a4a0aeeed32306126c1d7752f"
       },
-      "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x32__pbc31.spv": {
-        "byte_count": 13004,
-        "sha256": "aa75fecde2d4f8893d373bf4a1325d697307ec088438346d4e23199fd9aefb85"
+      "shaders/parallel_linear_silu_multiply_batch2_bf16_16x256__pbc31.spv": {
+        "byte_count": 14732,
+        "sha256": "26bf8e538f3a1454fd3db6c24ca5f4810043543412c34ccfab5c2e35c3afbad0"
       },
-      "shaders/parallel_linear_silu_multiply_batch8_bf16_16x32__pbc31.spv": {
-        "byte_count": 14716,
-        "sha256": "56bbce846ead3aa202c473346881460ccc90e3b3e9467e78cf40cb5374e973c4"
+      "shaders/parallel_linear_silu_multiply_batch4_bf16_16x256__pbc31.spv": {
+        "byte_count": 14748,
+        "sha256": "2a60fdd6e57e8cbfac27c96387ad53c5b11efedd032e2c1f3be98bd18e0b6093"
       },
-      "shaders/parallel_linear_silu_multiply_bf16_16x32.spv": {
-        "byte_count": 10768,
-        "sha256": "9c7024c3a8831b0155518a4a68f59b6565dffad82fe67c6595deb1070636e79a"
+      "shaders/parallel_linear_silu_multiply_batch64_cooperative_bf16_16x256__pbc31.spv": {
+        "byte_count": 12988,
+        "sha256": "2d294c7cfde530f1561e707a8481f0a64224cbca3c9ff3cb38f3cdd02b07532a"
+      },
+      "shaders/parallel_linear_silu_multiply_batch8_bf16_16x256__pbc31.spv": {
+        "byte_count": 14732,
+        "sha256": "61e86887cb70706dd9529c97ae4e8c110b39f9c9a9eb3bf752e8bfe168aa9ddc"
+      },
+      "shaders/parallel_linear_silu_multiply_bf16_16x256.spv": {
+        "byte_count": 10784,
+        "sha256": "b3142766800e4a6f12a7079fdfeef20dff6b7d705d30a72fe2af26b728d96031"
       },
       "shaders/record_seen_token_32.spv": {
         "byte_count": 1156,
@@ -7484,28 +7676,28 @@
         "sha256": "a4fe854f416cff773cdf5e41cd5092c047434e70ef649098a1081d051c863914"
       },
       "shaders/rotary_bf16_1x8_r8_theta10000_half__sc2.spv": {
-        "byte_count": 9252,
-        "sha256": "9ef0fb8c2e6f67954c98b41a7972972edc3c244f185cff7f7f53fb922f874ddb"
+        "byte_count": 9616,
+        "sha256": "c0133b137b92d0db052e0f39cb5fe14809e5fd9cabe9276fea84ec0747474ba3"
       },
       "shaders/rotary_bf16_2x8_r8_theta10000_half__sc2.spv": {
-        "byte_count": 9252,
-        "sha256": "e5841b402d3d30eecacd315e6af1fa3beebef6df93f9b049fb6d297fc8ccaf8b"
+        "byte_count": 9616,
+        "sha256": "c59a89f1f0a15ce9673091c2dea6bb1f21d9ecb91ea0eb2ad8032b271bee5af6"
       },
       "shaders/rotary_temporal_bf16_1x8_r8_theta10000_half__pbc2.spv": {
-        "byte_count": 10832,
-        "sha256": "add1a8e000b32fc6012e3f7718fdaae63ee39535284713b9333a7acb1dbbdea8"
+        "byte_count": 11276,
+        "sha256": "f26c9a9a5a30d95b34cb5aedb7c3d17fa82934be7799005e4da3b520ad968c91"
       },
       "shaders/rotary_temporal_bf16_2x8_r8_theta10000_half__pbc2.spv": {
-        "byte_count": 10848,
-        "sha256": "b3d9cbecd59df0eeab466fe901b966c30c04327cf7397f40670c352e9b60d081"
+        "byte_count": 11292,
+        "sha256": "a99233d4d6c706930b2cf93481500ba8796650b69cdb8563c37aaa125930b657"
       },
       "shaders/temperature_top_k_candidates_runtime_f32_32_kc32_g128_l256.spv": {
         "byte_count": 8480,
         "sha256": "ffadd5395ecfb060b163206164fbe71202ebb1ca1eb36e37288ac613dca7d181"
       },
       "shaders/temperature_top_k_top_p_sampler_runtime_f32_kc32_g128_l256.spv": {
-        "byte_count": 14208,
-        "sha256": "ccc7e05d722646777c6b18acbe81971519a622ab81073851f819085ace375589"
+        "byte_count": 14280,
+        "sha256": "928505d1527c6af38e6cb763cc9824416e9b45480aa5d965dd2439f0a5ce143a"
       },
       "shaders/tied_output_projection_batch4_bf16_32x16_scale1_to_f32.spv": {
         "byte_count": 10576,
@@ -7516,8 +7708,8 @@
         "sha256": "24641bf75bb74ff97a65dc9880e0d69ff4699bd205aa8fea3b3c0f658154144a"
       },
       "tensors.json": {
-        "byte_count": 7701,
-        "sha256": "d12d289a6b1bef01f6d4f5090d1dc132838603644a949ddba17a83b7e29cb0a4"
+        "byte_count": 6683,
+        "sha256": "4e6219d28388fce8cb14bc8f3672e277659dbe0dd476b022bec2bfddfef94060"
       },
       "tokenizer/chat_codec.json": {
         "byte_count": 169,
@@ -7536,16 +7728,16 @@
         "sha256": "fdd1575e8bd811652f3708f5d70495fd581ca5b59111e6edaa903e43783ce944"
       },
       "transpiled/layers/layer_00.json": {
-        "byte_count": 10324,
-        "sha256": "21f4b57e33ecdca600573a3bb30607e052d79b49d89b4dc37794ed0cf36f545e"
+        "byte_count": 10364,
+        "sha256": "1d2a352d48a2b1c06605d1edfd24d8346ff05d3f5e3253e2e1551fbe00bb9794"
       },
       "transpiled/model.json": {
-        "byte_count": 3751,
-        "sha256": "fe11668c59c43ae8107f4fa192c51b53d37f534fb94d564d59ae57c3bbf95d14"
+        "byte_count": 3753,
+        "sha256": "82819694d4a48322bcdd0984d05a72540626b673d6a986baf44f2b0a7c1a83dc"
       },
       "transpiled/tensors.json": {
-        "byte_count": 7701,
-        "sha256": "d12d289a6b1bef01f6d4f5090d1dc132838603644a949ddba17a83b7e29cb0a4"
+        "byte_count": 6683,
+        "sha256": "4e6219d28388fce8cb14bc8f3672e277659dbe0dd476b022bec2bfddfef94060"
       }
     }
   }

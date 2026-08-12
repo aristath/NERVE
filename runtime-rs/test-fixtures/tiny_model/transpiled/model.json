@@ -6,7 +6,7 @@
     "weights_files": [
       {
         "path": "/tmp/nerve-tiny-test-source/source/model.safetensors",
-        "safetensors_header_bytes": 1064,
+        "safetensors_header_bytes": 1080,
         "metadata": {}
       }
     ]
@@ -22,7 +22,7 @@
   "dimensions": {
     "hidden_size": 16,
     "intermediate_sizes": [
-      32
+      256
     ],
     "num_hidden_layers": 1,
     "num_attention_heads": 2,
@@ -98,7 +98,7 @@
         {
           "id": "layer_00",
           "type": "node_instance",
-          "component_class": "gqa_attention_layer_h16_q2_kv1_d8_ffn32_v1",
+          "component_class": "gqa_attention_layer_h16_q2_kv1_d8_ffn256_v1",
           "operator_type": "full_attention",
           "file": "layers/layer_00.json"
         }
