@@ -108,6 +108,21 @@ the local placement calibration, and the mounted graph.
   physical-execution summary, and the conversation gate can require a nonzero
   TP-island proof. This path is covered hardware-neutrally; its first real-model
   proof remains blocked by the live inference quarantine above.
+- Representation and physical-island selection now terminate in the same
+  production mount transaction. Auto-placement preserves the untouched exact
+  model at its converged logical placement, the hybrid solver compares exact
+  and independently compiler-validated signal representations using their
+  source-semantic identities and exact measured physical cases, and the
+  implementation catalog reconstructs and validates one non-overlapping,
+  complete selection report before any overlay is mounted. Endpoint
+  implementations join that same report. Prefill is planned only against the
+  representation selected for decode, so phase switching cannot silently
+  remount another format. Normal chat consumes this joint result directly and
+  binds every eligible auto-placement target before resolving physical
+  islands. Hardware-neutral tests cover the complete selection, overlay mount,
+  physical-plan validation, duplicate/altered/overlapping application
+  rejection, and incompatible-baseline coverage. Real-model TP execution is
+  still awaiting the explicitly authorized live gate.
 - The calibration suite now produces canonical serialized and predicted
   mixed-hybrid region evidence from bounded, complete mounted transactions.
   It measures compute, synchronization, transfers, collectives, output, state,
@@ -297,10 +312,11 @@ For every numbered item below:
   whose baselines cannot execute on their assigned targets, while compatible
   neighbors retain their exact implementation. The editor and production
   runtime use one shared shader/capability validator and require a profile for
-  every assigned owner or shard. The remaining candidate enumeration must
-  combine representation-specific compatibility with local TP, expert,
-  replicated, and general hybrid islands rather than reintroducing whole-model
-  device assumptions.
+  every assigned owner or shard. Representation candidates and local measured
+  TP/serialized/hybrid physical cases now share one semantic candidate graph
+  and one canonical mount transaction. Whole-expert, replicated-resource, and
+  general DAG candidate families remain to be incorporated into that same
+  solve without reintroducing whole-model device assumptions.
 - Attach exact permanent, transient-peak, KV/state, cache-quota, and atomic
   load-wave byte vectors to every candidate.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
@@ -394,39 +410,18 @@ For every numbered item below:
 
 ### 11. Complete capability-driven representation selection
 
-- Exact-baseline compatibility is now an instance set rather than a global
-  boolean. Normal mounted selection derives it from the concrete execution
-  shaders, prefill implementations, workgroup limits, subgroup capabilities,
-  extensions, cooperative shapes, and every owner/shard hardware profile.
-  Selection may therefore replace an incompatible instance while retaining
-  compatible exact neighbors, and rejects unknown or uncovered incompatible
-  instances. The non-overlapping application solver treats coverage as a hard
-  feasibility constraint before optimizing measured savings, so it cannot
-  choose a faster partial replacement and fail after overlooking a slower
-  complete one. Exhaustive targeted calibration deliberately exempts unrelated
-  graph instances because it executes and validates one exact signature at a
-  time. Representation-specific candidate compatibility still needs to become
-  an input to the joint physical-island candidate graph.
-- The hybrid solver now separates a compiler-validated source-semantic
-  contract from a compiled execution signature. Native, converted, local, and
-  TP realizations may compete for the same graph range only when they carry the
-  same explicit semantic contract plus the same phase, shape, and input-fixture
-  cohort. A faster artifact cannot claim equivalence merely by sharing graph
-  geometry. Runtime implementation applications now carry their immutable
-  source-contract digests into the physical planner. The joint candidate graph
-  mounts each independently validated signal application, preserves
-  multi-component applications as indivisible contiguous regions, removes an
-  incompatible exact baseline, and selects the fastest complete measured
-  representation/placement route. The winning representation set still needs
-  to be composed into one validated mount transaction before normal chat.
 - Preserve the native source representation whenever it is supported and wins
-  on the assigned target.
+  on the assigned target; prove this and incompatible-baseline replacement on
+  real mounted Qwen and DeepSeek components once live validation is authorized.
 - Add alternative structured INT4, FP8, INT8, FP16, BF16, or other formats only
   through compiler-emitted legal contracts and behavioral-equivalence evidence.
 - Select representation and placement together. Account for whole-island
   execution, conversion boundaries, resident footprint, lazy reload traffic,
   transient peak, and current headroom—not an isolated kernel or advertised
-  TOPS figure.
+  TOPS figure. The current joint candidate graph uses measured complete-region
+  execution and capacity vectors; conversion/lazy-reload costs and
+  representation-dependent steady-state cache quotas must still become direct
+  optimizer resources rather than remaining only compiler-selection metrics.
 - Reuse the mechanism for unseen compatible models; no DeepSeek, Qwen, vendor,
   or device-name branches belong in runtime selection.
 

@@ -45,12 +45,11 @@ use nerve_runtime::{
     execute_vulkan_resident_chat_transaction, load_vulkan_package_placement_calibration_catalog,
     rebalance_demand_paged_vulkan_runtime_model_from_working_set,
     record_vulkan_runtime_transfer_calibration_report, reset_runtime_critical_path_counters,
-    resolve_vulkan_runtime_hybrid_physical_execution,
+    resolve_vulkan_runtime_hybrid_physical_execution_with_representations,
     reset_vulkan_resident_execution_counters, runtime_critical_path_report,
     runtime_critical_path_span, runtime_devices_from_compute_devices,
     vulkan_resident_execution_counters,
     vulkan_runtime_device_capacity_admission_bytes,
-    vulkan_runtime_hybrid_phase_is_calibrated,
     vulkan_runtime_placement_transfer_byte_counts, vulkan_safe_host_available_bytes,
 };
 

@@ -37,7 +37,9 @@ fn mount_placed_chat_stream(
 }
 
 fn resolve_runtime_hybrid_physical_execution(
+    manifest_dir: &Path,
     runtime_model: VulkanResidentRuntimeModel,
+    execution: RuntimeExecutionEnvelope,
     auto_placement: Option<&RuntimeAutoPlacementContext>,
     bound_devices: &RuntimeBoundVulkanDevices,
     context_capacity_activations: usize,
@@ -51,13 +53,6 @@ fn resolve_runtime_hybrid_physical_execution(
     let Some(auto_placement) = auto_placement else {
         return Ok((runtime_model, None));
     };
-    if !vulkan_runtime_hybrid_phase_is_calibrated(
-        &runtime_model,
-        &auto_placement.calibration_catalog,
-        VulkanTargetedComponentExecutionPhase::Decode,
-    )? {
-        return Ok((runtime_model, None));
-    }
     let mut available_bytes_by_device = BTreeMap::new();
     for candidate in &auto_placement.candidates {
         let device = bound_devices
@@ -109,8 +104,11 @@ fn resolve_runtime_hybrid_physical_execution(
         )
         .into());
     }
-    let Some(resolution) = resolve_vulkan_runtime_hybrid_physical_execution(
-        &runtime_model,
+    let Some(resolution) = resolve_vulkan_runtime_hybrid_physical_execution_with_representations(
+        manifest_dir,
+        &auto_placement.exact_runtime_model,
+        &bound_devices.hardware_profiles,
+        execution,
         &auto_placement.calibration_catalog,
         &capacity,
         context_capacity_activations,
@@ -159,18 +157,7 @@ fn run_placed_chat(
     )?;
     let transcript_codec = chat_transcript_codec(tokenizer_dir)?;
     let mut logical_device_ids = runtime_model.placement_device_ids();
-    let exact_decode_available = auto_placement
-        .as_ref()
-        .map(|placement| {
-            vulkan_runtime_hybrid_phase_is_calibrated(
-                &runtime_model,
-                &placement.calibration_catalog,
-                VulkanTargetedComponentExecutionPhase::Decode,
-            )
-        })
-        .transpose()?
-        .unwrap_or(false);
-    if exact_decode_available {
+    if auto_placement.is_some() {
         logical_device_ids.extend(
             auto_placement
                 .as_ref()
@@ -183,41 +170,50 @@ fn run_placed_chat(
         logical_device_ids.dedup();
     }
     let bound_devices = runtime_bound_vulkan_devices(args, &logical_device_ids)?;
-    let (runtime_model, implementation_selection) =
-        if let Some(selection) = runtime_model.implementation_selection.clone() {
-            (runtime_model, selection)
+    let execution = RuntimeExecutionEnvelope {
+        phases: vec!["decode".to_string(), "prefill".to_string()],
+        activation_batch: RuntimeInclusiveRange {
+            minimum: 1,
+            maximum: capacity.max(1),
+        },
+        context_activations: RuntimeInclusiveRange {
+            minimum: 0,
+            maximum: capacity,
+        },
+        state_activations: RuntimeInclusiveRange {
+            minimum: 0,
+            maximum: capacity,
+        },
+        speculative_draft_tokens,
+        residency_policy: args
+            .resource_residency_policy
+            .as_runtime_name()
+            .replace('-', "_"),
+    };
+    let runtime_model =
+        if runtime_model.implementation_selection.is_some() {
+            runtime_model
         } else {
-            runtime_model.select_and_apply_runtime_implementations(
-                manifest_dir,
-                &bound_devices.hardware_profiles,
-                RuntimeExecutionEnvelope {
-                    phases: vec!["decode".to_string(), "prefill".to_string()],
-                    activation_batch: RuntimeInclusiveRange {
-                        minimum: 1,
-                        maximum: capacity.max(1),
-                    },
-                    context_activations: RuntimeInclusiveRange {
-                        minimum: 0,
-                        maximum: capacity,
-                    },
-                    state_activations: RuntimeInclusiveRange {
-                        minimum: 0,
-                        maximum: capacity,
-                    },
-                    speculative_draft_tokens,
-                    residency_policy: args
-                        .resource_residency_policy
-                        .as_runtime_name()
-                        .replace('-', "_"),
-                },
-            )?
+            runtime_model
+                .select_and_apply_runtime_implementations(
+                    manifest_dir,
+                    &bound_devices.hardware_profiles,
+                    execution.clone(),
+                )?
+                .0
         };
     let (runtime_model, physical_execution_plan) = resolve_runtime_hybrid_physical_execution(
+        manifest_dir,
         runtime_model,
+        execution,
         auto_placement.as_ref(),
         &bound_devices,
         capacity,
     )?;
+    let implementation_selection = runtime_model
+        .implementation_selection
+        .clone()
+        .ok_or_else(|| io::Error::other("placed runtime has no implementation selection"))?;
     let sparse_moe_contract = runtime_model.sparse_moe_execution_contract()?;
     let parameter_pool = VulkanResidentBufferPool::default();
     let stream = mount_placed_chat_stream(

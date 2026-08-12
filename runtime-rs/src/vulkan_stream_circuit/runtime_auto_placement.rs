@@ -450,6 +450,11 @@ struct VulkanRuntimePagedPlacementBalance {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VulkanRuntimeAutoPlacement {
+    /// Exact compiled model at the converged logical placement. Representation
+    /// selection may produce a smaller/faster `runtime_model`, but later
+    /// measured physical planning must start here so it can choose a different
+    /// validated representation without layering overlays on overlays.
+    pub exact_runtime_model: VulkanResidentRuntimeModel,
     pub runtime_model: VulkanResidentRuntimeModel,
     pub residency_plan: VulkanRuntimeResidencyPlan,
     pub selected_device_ids: Vec<String>,
@@ -562,7 +567,10 @@ pub fn capacity_pack_and_select_vulkan_runtime_model(
         )?;
         let selected_signature = runtime_model_placement_signature(&selected.runtime_model);
         if selected_signature == placement_signature {
-            return Ok(selected);
+            return Ok(VulkanRuntimeAutoPlacement {
+                exact_runtime_model: exact_placed_model,
+                ..selected
+            });
         }
 
         let selected_placement = selected_signature.into_iter().collect::<BTreeMap<_, _>>();
@@ -1431,6 +1439,7 @@ fn admit_fixed_vulkan_runtime_placement(
         }
     }
     Ok(VulkanRuntimeAutoPlacement {
+        exact_runtime_model: placed_model.clone(),
         runtime_model: placed_model,
         residency_plan,
         selected_device_ids: candidates
@@ -1574,6 +1583,7 @@ fn capacity_pack_vulkan_runtime_model_on_devices(
         }
         if fits {
             return Ok(VulkanRuntimeAutoPlacement {
+                exact_runtime_model: placed_model.clone(),
                 runtime_model: placed_model,
                 residency_plan,
                 selected_device_ids: ordered_device_ids,

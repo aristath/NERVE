@@ -619,6 +619,185 @@ fn hybrid_test_representation_application(
     }
 }
 
+fn hybrid_test_predicate_for_profile(
+    profile: &crate::HardwareProcessProfile,
+) -> crate::RuntimeImplementationPredicate {
+    crate::RuntimeImplementationPredicate {
+        schema: crate::RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA.to_string(),
+        predicate_id: "hybrid_fixture".to_string(),
+        hardware: crate::RuntimeHardwarePredicate {
+            measured_profile_ids: vec![profile.profile_id.clone()],
+            capability_classes: vec![profile.capability_class.clone()],
+            device_kinds: vec![profile.hardware_identity.device_kind.as_str().to_string()],
+            apis: vec![profile.provenance.api.clone()],
+            required_processes: Vec::new(),
+            required_features: Vec::new(),
+        },
+        execution: crate::RuntimeExecutionPredicate {
+            phases: vec!["decode".to_string()],
+            alternative_phases: vec!["decode".to_string()],
+            source_retained_phases: Vec::new(),
+            activation_batch: crate::RuntimeInclusiveRange {
+                minimum: 1,
+                maximum: 1,
+            },
+            context_activations: crate::RuntimeInclusiveRange {
+                minimum: 0,
+                maximum: 128,
+            },
+            state_activations: crate::RuntimeInclusiveRange {
+                minimum: 0,
+                maximum: 128,
+            },
+            speculative_draft_token_counts: vec![0],
+            residency_policies: vec!["eager".to_string()],
+        },
+        placement: crate::RuntimePlacementPredicate {
+            mode: "local".to_string(),
+            minimum_device_count: 1,
+            maximum_device_count: 1,
+            required_interconnects: Vec::new(),
+        },
+    }
+}
+
+fn hybrid_test_implementation_catalog(
+    package_root: &Path,
+    runtime_model: &VulkanResidentRuntimeModel,
+    profile: &crate::HardwareProcessProfile,
+) -> (crate::RuntimeImplementationCatalog, String) {
+    let source_component = runtime_model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let source_execution = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let candidate_root = package_root.join("optimization/hybrid-fixture/candidate");
+    let candidate_shader_ref = "kernels/alternative.spv";
+    let candidate_shader = candidate_root.join(candidate_shader_ref);
+    std::fs::create_dir_all(candidate_shader.parent().unwrap()).unwrap();
+    let source_shader = Path::new(&source_execution.kernels[0].shader_path);
+    let source_shader = if source_shader.is_absolute() {
+        source_shader.to_path_buf()
+    } else {
+        package_root.join(source_shader)
+    };
+    std::fs::copy(source_shader, &candidate_shader).unwrap();
+    let mut component = source_component;
+    component.implementation = "hybrid_alternative".to_string();
+    component.circuit.implementation = "hybrid_alternative".to_string();
+    let mut execution = source_execution;
+    execution.implementation = "hybrid_alternative".to_string();
+    execution.kernels[0].shader_path = candidate_shader_ref.to_string();
+    let overlay_ref = "overlays/layer_00.json";
+    let overlay_path = candidate_root.join(overlay_ref);
+    std::fs::create_dir_all(overlay_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &overlay_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": crate::VULKAN_COMPONENT_OVERLAY_SCHEMA,
+            "source_component_id": "layer_00",
+            "component": component,
+            "execution": execution,
+            "resident_derivations": [],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let predicate = hybrid_test_predicate_for_profile(profile);
+    let implementation = crate::RuntimeImplementation {
+        implementation_id: "hybrid_implementation".to_string(),
+        candidate_id: "hybrid_candidate".to_string(),
+        scope_ids: vec!["layer_scope".to_string()],
+        source_contract_digests: vec!["layer_source_contract".to_string()],
+        representation: serde_json::json!({"kind": "hybrid_fixture"}),
+        behavioral_contract: serde_json::json!({"mode": "exact"}),
+        runtime_predicate: predicate,
+        artifact_bundle: crate::RuntimeImplementationArtifactBundle {
+            root_ref: "optimization/hybrid-fixture".to_string(),
+            candidate_integrity_ref: "unused".to_string(),
+            mount_plan_ref: "unused".to_string(),
+            candidate_integrity_digest: "fixture".to_string(),
+            artifact_count: 1,
+        },
+        evidence: crate::RuntimeImplementationEvidence {
+            promotion_decision_ref: "promotion".to_string(),
+            candidate_contract_ref: "candidate".to_string(),
+            construction_record_ref: "construction".to_string(),
+            prebenchmark_record_ref: "prebenchmark".to_string(),
+            benchmark_record_ref: "benchmark".to_string(),
+            validation_record_ref: "validation".to_string(),
+            analysis_run_refs: Vec::new(),
+            hardware_profile_refs: Vec::new(),
+        },
+        provenance: serde_json::json!({"fixture": true}),
+        comparison: crate::RuntimeImplementationComparison {
+            exact_implementation_id: "exact".to_string(),
+            exact_contract_digest: "exact".to_string(),
+            benchmark_id: "benchmark".to_string(),
+            benchmark_decision: "materially_faster".to_string(),
+            workloads: Vec::new(),
+            validation_id: "validation".to_string(),
+            validation_status: "passed".to_string(),
+            behavioral_contract: serde_json::json!({"mode": "exact"}),
+        },
+        decision_reason: "measured faster fixture".to_string(),
+    };
+    let loaded = crate::LoadedRuntimeImplementation {
+        source_component_ids: vec!["layer_00".to_string()],
+        workload_metrics: vec![crate::RuntimeImplementationWorkloadMetrics {
+            workload_id: "decode".to_string(),
+            phase: "decode".to_string(),
+            activation_batch_width: 1,
+            context_activations: 128,
+            state_activations: 128,
+            reference_latency_ns: 10,
+            candidate_latency_ns: 4,
+            conversion_ns: 0,
+            conversion_bytes: 0,
+            boundary_count: 0,
+            speedup_ppm: 600_000,
+        }],
+        candidate_root,
+        mount_plan: crate::RuntimeMountPlan {
+            schema: crate::RUNTIME_MOUNT_PLAN_SCHEMA.to_string(),
+            candidate_id: implementation.candidate_id.clone(),
+            adapter_id: crate::VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER.to_string(),
+            regions: vec![crate::RuntimeMountRegion {
+                replacements: vec![crate::RuntimeReplacement::Component {
+                    source_component_id: "layer_00".to_string(),
+                    overlay_ref: overlay_ref.to_string(),
+                }],
+            }],
+            tensor_index_refs: Vec::new(),
+        },
+        implementation,
+    };
+    (
+        crate::RuntimeImplementationCatalog {
+            package_id: runtime_model.package.package_id.clone(),
+            package_root: package_root.to_path_buf(),
+            stage_status: "optimized".to_string(),
+            exact_baseline: crate::RuntimeExactImplementation {
+                artifact_ref: "lowered/execution_graph.circuits.json".to_string(),
+                contract_digest: "exact".to_string(),
+                mutable: false,
+            },
+            scopes: BTreeMap::new(),
+            implementations: vec![loaded],
+        },
+        "hybrid_alternative".to_string(),
+    )
+}
+
 fn hybrid_test_distributed_catalog(
     model: &VulkanResidentRuntimeModel,
 ) -> VulkanPlacementCalibrationCatalog {
@@ -1250,6 +1429,157 @@ fn runtime_hybrid_jointly_selects_a_faster_compatible_representation() {
         VulkanHybridScheduledStep::Region { candidate_id, .. }
             if candidate_id.starts_with("representation:0:")
     ));
+}
+
+#[test]
+fn runtime_hybrid_mounts_the_jointly_selected_representation_and_physical_plan_once() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "nerve-runtime-hybrid-mount-{}-{unique}",
+        std::process::id(),
+    ));
+    let package_root = root.join("package");
+    copy_runtime_implementation_fixture_tree(&tiny_model_dir(), &package_root);
+    let runtime_model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let profile = runtime_compatibility_hardware_profile("gpu0", true);
+    let (implementation_catalog, alternative_implementation) =
+        hybrid_test_implementation_catalog(&package_root, &runtime_model, &profile);
+    let execution = crate::RuntimeExecutionEnvelope {
+        phases: vec!["decode".to_string()],
+        activation_batch: crate::RuntimeInclusiveRange {
+            minimum: 1,
+            maximum: 1,
+        },
+        context_activations: crate::RuntimeInclusiveRange {
+            minimum: 0,
+            maximum: 128,
+        },
+        state_activations: crate::RuntimeInclusiveRange {
+            minimum: 0,
+            maximum: 128,
+        },
+        speculative_draft_tokens: 0,
+        residency_policy: "eager".to_string(),
+    };
+    let request = crate::RuntimeSelectionRequest::from_vulkan_runtime_model(
+        &runtime_model,
+        &BTreeMap::from([("gpu0".to_string(), profile.clone())]),
+        execution.clone(),
+        BTreeSet::new(),
+    )
+    .unwrap();
+    let mut independently_coverable_request = request.clone();
+    independently_coverable_request.exact_baseline_incompatible_instance_ids = BTreeSet::from([
+        "layer_00".to_string(),
+        "layer_00_remote".to_string(),
+        "layer_00_tail".to_string(),
+    ]);
+    assert_eq!(
+        runtime_model
+            .hybrid_signal_representation_applications_from_catalog(
+                &package_root,
+                &implementation_catalog,
+                &independently_coverable_request,
+            )
+            .unwrap()
+            .len(),
+        3,
+        "independent candidates must be composed by the joint solver rather than each being forced to cover every incompatible layer",
+    );
+    let applications = runtime_model
+        .hybrid_signal_representation_applications_from_catalog(
+            &package_root,
+            &implementation_catalog,
+            &request,
+        )
+        .unwrap();
+    let alternative_model = &applications
+        .iter()
+        .find(|application| {
+            application.selection.selected[0].instance_ids == ["layer_00"]
+        })
+        .unwrap()
+        .runtime_model;
+    let alternative_signature = vulkan_runtime_placement_calibration_target_for_component(
+        alternative_model,
+        "layer_00",
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )
+    .unwrap()
+    .signature_id;
+    let mut placement_catalog = hybrid_test_catalog(&runtime_model);
+    let alternative_behavior = hybrid_test_behavior(&alternative_signature);
+    placement_catalog
+        .record_reference(VulkanPlacementCanonicalReference {
+            behavior: alternative_behavior.clone(),
+            output_digest: "output".to_string(),
+            output_artifact: None,
+            state_digest: "state".to_string(),
+        })
+        .unwrap();
+    placement_catalog
+        .record_observation(hybrid_test_observation(
+            alternative_behavior,
+            "gpu0",
+            4,
+        ))
+        .unwrap();
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([(hybrid_test_device("gpu0"), 100)]),
+        host_available_bytes: 100,
+    };
+
+    let resolution = resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
+        &package_root,
+        &runtime_model,
+        &BTreeMap::from([("gpu0".to_string(), profile)]),
+        execution,
+        &implementation_catalog,
+        &placement_catalog,
+        &capacity,
+        128,
+        &BTreeMap::from([("gpu0".to_string(), "gpu0".to_string())]),
+    )
+    .unwrap()
+    .expect("measured alternative has a complete route");
+
+    let selection = resolution
+        .runtime_model
+        .implementation_selection
+        .as_ref()
+        .expect("joint resolution must mount one canonical selection");
+    assert_eq!(selection.selected.len(), 3);
+    assert!(
+        selection
+            .selected
+            .iter()
+            .all(|selected| selected.implementation_id == "hybrid_implementation")
+    );
+    assert!(selection.exact_instance_ids.contains(&"output_transducer".to_string()));
+    assert!(
+        resolution
+            .runtime_model
+            .component_executions
+            .iter()
+            .filter(|execution| {
+                resolution
+                    .runtime_model
+                    .circuit_graph
+                    .components
+                    .iter()
+                    .find(|component| component.component_id == execution.component_id)
+                    .is_some_and(|component| component.runtime_role.is_signal_processor())
+            })
+            .all(|execution| execution.implementation == alternative_implementation)
+    );
+    resolution
+        .physical_execution_plan
+        .validate(&resolution.runtime_model)
+        .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

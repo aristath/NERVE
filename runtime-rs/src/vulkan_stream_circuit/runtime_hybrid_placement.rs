@@ -328,6 +328,203 @@ pub fn resolve_vulkan_runtime_hybrid_physical_execution(
     }))
 }
 
+/// Jointly selects the compiler-validated signal representation and its exact
+/// measured physical execution, then mounts one canonical implementation set.
+/// Decode owns the representation for the lifetime of the stream; prefill may
+/// choose a different physical schedule, but it is planned only after that
+/// same representation has been mounted.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_vulkan_runtime_hybrid_physical_execution_with_representations(
+    package_root: impl AsRef<Path>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    profiles_by_logical_device: &BTreeMap<String, crate::HardwareProcessProfile>,
+    execution: crate::RuntimeExecutionEnvelope,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    context_capacity_activations: usize,
+    logical_device_id_by_physical_device: &BTreeMap<String, String>,
+) -> Result<Option<VulkanRuntimeHybridPhysicalExecutionResolution>, VulkanRuntimeHybridPlacementError>
+{
+    let package_root = package_root.as_ref().canonicalize().map_err(|error| {
+        VulkanRuntimeHybridPlacementError(format!(
+            "failed to resolve runtime package root for hybrid selection: {error}",
+        ))
+    })?;
+    let implementation_catalog = runtime_model
+        .package
+        .implementation_catalog(&package_root)
+        .map_err(|error| {
+            VulkanRuntimeHybridPlacementError(format!(
+                "failed to load runtime implementation catalog for hybrid selection: {error}",
+            ))
+        })?;
+    resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
+        &package_root,
+        runtime_model,
+        profiles_by_logical_device,
+        execution,
+        &implementation_catalog,
+        catalog,
+        capacity,
+        context_capacity_activations,
+        logical_device_id_by_physical_device,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
+    package_root: &Path,
+    runtime_model: &VulkanResidentRuntimeModel,
+    profiles_by_logical_device: &BTreeMap<String, crate::HardwareProcessProfile>,
+    execution: crate::RuntimeExecutionEnvelope,
+    implementation_catalog: &crate::RuntimeImplementationCatalog,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    context_capacity_activations: usize,
+    logical_device_id_by_physical_device: &BTreeMap<String, String>,
+) -> Result<Option<VulkanRuntimeHybridPhysicalExecutionResolution>, VulkanRuntimeHybridPlacementError>
+{
+    let exact_baseline_incompatible_instance_ids =
+        vulkan_runtime_exact_baseline_incompatible_instance_ids(
+            runtime_model,
+            package_root,
+            profiles_by_logical_device,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let request = crate::RuntimeSelectionRequest::from_vulkan_runtime_model(
+        runtime_model,
+        profiles_by_logical_device,
+        execution,
+        exact_baseline_incompatible_instance_ids.clone(),
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let role_by_instance = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .map(|component| (component.component_id.as_str(), component.runtime_role))
+        .collect::<BTreeMap<_, _>>();
+    let signal_incompatible_instance_ids = exact_baseline_incompatible_instance_ids
+        .iter()
+        .filter(|instance_id| {
+            role_by_instance
+                .get(instance_id.as_str())
+                .is_some_and(|role| role.is_signal_processor())
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let applications = runtime_model
+        .hybrid_signal_representation_applications_from_catalog(
+            package_root,
+            implementation_catalog,
+            &request,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let Some(decode) = try_plan_vulkan_runtime_hybrid_ordered_graph_with_representations(
+        runtime_model,
+        &applications,
+        &signal_incompatible_instance_ids,
+        catalog,
+        capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    // Endpoint implementations do not participate in the signal-chain
+    // physical graph, but they still belong to the same validated mount
+    // transaction. Mixed signal/endpoint applications were already rejected
+    // while enumerating hybrid applications.
+    let independently_selected = implementation_catalog
+        .select(&request)
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let mut selected = decode.selected_implementations;
+    for endpoint_selection in independently_selected.selected {
+        let roles = endpoint_selection
+            .instance_ids
+            .iter()
+            .map(|instance_id| {
+                role_by_instance
+                    .get(instance_id.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        VulkanRuntimeHybridPlacementError(format!(
+                            "hybrid implementation selection references unknown instance {instance_id:?}",
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if roles.iter().all(|role| !role.is_signal_processor()) {
+            selected.push(endpoint_selection);
+        } else if roles.iter().any(|role| !role.is_signal_processor()) {
+            return runtime_hybrid_error(
+                "runtime implementation crosses the signal-chain physical-island boundary",
+            );
+        }
+    }
+    let selection = implementation_catalog
+        .selection_report_for_applications(&request, selected)
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let mounted_model = runtime_model
+        .clone()
+        .apply_runtime_implementation_catalog_selection(
+            package_root,
+            implementation_catalog,
+            selection,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+
+    let prefill_activation_batch_width = vulkan_runtime_hybrid_calibrated_prefill_widths(
+        &mounted_model,
+        catalog,
+    )?
+    .into_iter()
+    .filter(|width| *width <= context_capacity_activations)
+    .max();
+    let decode_owner_by_component = runtime_hybrid_physical_owners(&decode.ordered_placement)?;
+    let prefill = prefill_activation_batch_width
+        .map(|activation_batch_width| {
+            try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+                &mounted_model,
+                catalog,
+                capacity,
+                VulkanTargetedComponentExecutionPhase::Prefill {
+                    activation_batch_width,
+                },
+                Some(&decode_owner_by_component),
+            )
+        })
+        .transpose()?
+        .flatten();
+    let placement = VulkanRuntimeHybridPhaseSetPlacement {
+        decode: decode.ordered_placement,
+        prefill,
+    };
+    let decode_predicted_duration_ns_per_activation =
+        placement.decode.plan.predicted_duration_ns_per_activation;
+    let prefill_predicted_duration_ns_per_activation = placement
+        .prefill
+        .as_ref()
+        .map(|prefill| prefill.plan.predicted_duration_ns_per_activation);
+    let selected_prefill_activation_batch_width = placement
+        .prefill
+        .as_ref()
+        .map(|prefill| prefill.activation_batch_width);
+    let (runtime_model, physical_execution_plan) = lower_vulkan_runtime_hybrid_phase_set(
+        &mounted_model,
+        &placement,
+        logical_device_id_by_physical_device,
+    )?;
+    Ok(Some(VulkanRuntimeHybridPhysicalExecutionResolution {
+        runtime_model,
+        physical_execution_plan,
+        decode_predicted_duration_ns_per_activation,
+        prefill_activation_batch_width: selected_prefill_activation_batch_width,
+        prefill_predicted_duration_ns_per_activation,
+    }))
+}
+
 /// Attempts to select exact phase-local physical execution without making the
 /// optimization catalog a model-load dependency. Invalid or ambiguous evidence
 /// is still rejected. `None` means that valid evidence exists but no complete

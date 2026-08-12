@@ -50,7 +50,48 @@ fn auto_placement_hardware_profile(
             operating_system: "linux".to_string(),
             discovery_backend: "fixture".to_string(),
         },
-        capability_extensions: BTreeMap::new(),
+        capability_extensions: BTreeMap::from([
+            (
+                "vulkan_compiler_capabilities".to_string(),
+                serde_json::json!({
+                    "shader_features": [
+                        "buffer_device_address",
+                        "cooperative_matrix",
+                        "shader_bfloat16_cooperative_matrix",
+                        "shader_bfloat16_dot_product",
+                        "shader_bfloat16_type",
+                        "shader_float16",
+                        "shader_int8",
+                        "shader_int16",
+                        "shader_integer_dot_product",
+                        "storage_buffer8_bit_access",
+                        "storage_buffer16_bit_access",
+                        "uniform_and_storage_buffer8_bit_access",
+                        "uniform_and_storage_buffer16_bit_access",
+                        "vulkan_memory_model",
+                        "vulkan_memory_model_device_scope"
+                    ],
+                    "subgroup_operations": [
+                        "arithmetic", "ballot", "basic", "shuffle", "shuffle_relative", "vote"
+                    ],
+                    "subgroup_compute_supported": true,
+                    "subgroup_size": 64,
+                    "max_compute_work_group_invocations": 1024,
+                    "max_compute_work_group_size_x": 1024,
+                    "cooperative_bfloat16_shapes": [[16, 16, 16]],
+                    "cooperative_float8_e4m3_shapes": []
+                }),
+            ),
+            (
+                "vulkan_device".to_string(),
+                serde_json::json!({
+                    "extensions": [
+                        "VK_KHR_cooperative_matrix",
+                        "VK_KHR_shader_bfloat16"
+                    ]
+                }),
+            ),
+        ]),
         identity_extensions: BTreeMap::new(),
         runtime_bindings: BTreeMap::new(),
     })
@@ -1482,6 +1523,11 @@ fn representation_selection_converges_across_heterogeneous_placement() {
         placed.runtime_model.placement_device_ids(),
         ["primary", "spill"]
     );
+    assert_eq!(
+        placed.exact_runtime_model.placement_device_ids(),
+        ["primary", "spill"]
+    );
+    assert!(placed.exact_runtime_model.implementation_selection.is_none());
     let selection = placed.runtime_model.implementation_selection.unwrap();
     assert!(selection.selected.is_empty());
     assert!(!selection.exact_instance_ids.is_empty());

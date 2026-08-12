@@ -353,8 +353,26 @@ impl VulkanResidentRuntimeModel {
             execution,
             BTreeSet::new(),
         )?;
+        self.hybrid_signal_representation_applications_from_catalog(
+            &package_root,
+            &catalog,
+            &request,
+        )
+    }
+
+    fn hybrid_signal_representation_applications_from_catalog(
+        &self,
+        package_root: &Path,
+        catalog: &crate::RuntimeImplementationCatalog,
+        request: &crate::RuntimeSelectionRequest,
+    ) -> Result<Vec<VulkanRuntimeHybridRepresentationApplication>, VulkanResidentTokenModelPackageError>
+    {
+        let mut independent_request = request.clone();
+        independent_request
+            .exact_baseline_incompatible_instance_ids
+            .clear();
         let reports = catalog
-            .independent_application_selections(&request)
+            .independent_application_selections(&independent_request)
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
                     "failed to enumerate hybrid runtime representations: {error}",
@@ -388,8 +406,8 @@ impl VulkanResidentRuntimeModel {
                 let semantic_contract_id =
                     vulkan_runtime_implementation_semantic_contract_id(selected)?;
                 let runtime_model = self.clone().apply_runtime_implementation_catalog_selection(
-                    &package_root,
-                    &catalog,
+                    package_root,
+                    catalog,
                     report.clone(),
                 )?;
                 applications.push(VulkanRuntimeHybridRepresentationApplication {

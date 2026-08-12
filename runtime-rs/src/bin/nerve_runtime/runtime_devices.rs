@@ -97,6 +97,7 @@ struct RuntimeAutoPlacementContext {
     candidates: Vec<VulkanRuntimePlacementCandidate>,
     costs: VulkanRuntimePlacementCostModel,
     calibration_catalog: VulkanPlacementCalibrationCatalog,
+    exact_runtime_model: VulkanResidentRuntimeModel,
 }
 
 struct RuntimeCapacityPackedModel {
@@ -548,6 +549,7 @@ fn runtime_capacity_packed_model(
             candidates,
             costs: placement_costs,
             calibration_catalog: exact_calibration_catalog,
+            exact_runtime_model: selected.exact_runtime_model,
         }),
     })
 }
