@@ -17,6 +17,7 @@ use crate::calibration_suite_plan::{expand_target_orders, plan_calibration_suite
 use crate::load_wave_calibration::measure_load_wave_candidate_for_runtime_model;
 use crate::output::write_atomic;
 use crate::package_calibration::measure_package_candidates_for_runtime_model;
+use crate::selected_resource_calibration::measure_selected_resource_classes_for_runtime_model;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MeasuredTargetOrder {
@@ -109,6 +110,9 @@ pub fn run_calibration_suite(
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     let mut measured_component_candidates = 0usize;
     let mut unavailable_component_candidates = 0usize;
+    let mut selected_resource_cases = 0usize;
+    let mut measured_selected_resource_cases = 0usize;
+    let mut unavailable_selected_resource_cases = 0usize;
 
     for case in &component_cases {
         let mut current_width_measurements = Vec::new();
@@ -164,6 +168,20 @@ pub fn run_calibration_suite(
         }
     }
 
+    for case in &component_cases {
+        let measured = measure_selected_resource_classes_for_runtime_model(
+            &package,
+            &runtime_models[&case.owner_target_id][case.runtime_variant_index],
+            &case.target,
+            case.phase,
+            &case.owner_target_id,
+        )?;
+        selected_resource_cases += measured.planned_case_count;
+        measured_selected_resource_cases += measured.measured_case_count;
+        unavailable_selected_resource_cases += measured.unavailable_case_count;
+        catalog.merge(&measured.catalog)?;
+    }
+
     for case in &reference_plan.boundary_cases {
         let measured = measure_boundary_candidate_for_byte_counts(
             case.phase,
@@ -191,16 +209,20 @@ pub fn run_calibration_suite(
     let payload = catalog.to_json_bytes()?;
     write_atomic(output, &payload)?;
     println!(
-        "calibrated package suite: package={}, targets={}, component_cases={}, measured_component_candidates={}, unavailable_component_candidates={}, boundary_cases={}, load_wave_cases={}, references={}, observations={}, output={}",
+        "calibrated package suite: package={}, targets={}, component_cases={}, measured_component_candidates={}, unavailable_component_candidates={}, selected_resource_cases={}, measured_selected_resource_cases={}, unavailable_selected_resource_cases={}, boundary_cases={}, load_wave_cases={}, references={}, observations={}, selected_resource_classes={}, output={}",
         package.source_path().display(),
         target_ids.len(),
         component_cases.len(),
         measured_component_candidates,
         unavailable_component_candidates,
+        selected_resource_cases,
+        measured_selected_resource_cases,
+        unavailable_selected_resource_cases,
         reference_plan.boundary_cases.len(),
         load_wave_cases.len(),
         catalog.reference_count(),
         catalog.observation_count(),
+        catalog.selected_resource_execution_class_count(),
         output.display(),
     );
     Ok(())

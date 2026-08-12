@@ -415,11 +415,14 @@ mod tests {
             domain_id: "domain".to_string(),
             resource_count: 8,
             selection_signal: "signal".to_string(),
+            execution_signal: "execution".to_string(),
+            execution_calibration_word_base: 0x3f80_0000,
             encoding: nerve_runtime::CompiledResourceSelectionEncoding {
                 element_type: nerve_runtime::CompiledResourceSelectionElementType::U32,
                 selection_count_per_activation: 3,
                 index_shift: 0,
                 index_mask: 7,
+                calibration_word_base: 0,
             },
             mapping: nerve_runtime::CompiledResourceSelectorMapping::GroupTable {
                 atomic_group_ids: (0..8).map(|index| format!("group-{index}")).collect(),
@@ -441,11 +444,14 @@ mod tests {
             domain_id: "domain".to_string(),
             resource_count: 4,
             selection_signal: "signal".to_string(),
+            execution_signal: "execution".to_string(),
+            execution_calibration_word_base: 0x3f80_0000,
             encoding: nerve_runtime::CompiledResourceSelectionEncoding {
                 element_type: nerve_runtime::CompiledResourceSelectionElementType::U32,
                 selection_count_per_activation: 2,
                 index_shift: 0,
                 index_mask: 3,
+                calibration_word_base: 0,
             },
             mapping: nerve_runtime::CompiledResourceSelectorMapping::GroupTable {
                 atomic_group_ids: (0..4).map(|index| format!("group-{index}")).collect(),
