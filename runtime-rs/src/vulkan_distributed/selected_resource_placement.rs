@@ -1,12 +1,28 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanSelectedResourcePlacementDevice {
     pub device_id: String,
+    pub physical_device_id: String,
+    pub api_version: u32,
+    pub driver_version: u32,
     /// Payload bytes that this device may safely keep resident after current
     /// reservations and fixed runtime allocations have been deducted.
     pub resident_payload_capacity_bytes: usize,
-    /// Exact measured complete expert transaction duration for every resource
-    /// in selector order. Zero or missing entries are unavailable evidence.
-    pub measured_duration_ns_by_resource: Vec<u64>,
+    /// Exact measured costs keyed by compiler-declared structural execution
+    /// class. Missing classes are unavailable; costs are never inferred from
+    /// another representation, device, or average component duration.
+    pub measured_costs_by_execution_class:
+        BTreeMap<String, VulkanSelectedResourceExecutionClassCost>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanSelectedResourceExecutionClassCost {
+    pub phase: nerve_execution_contracts::ExecutionPhase,
+    pub complete_transaction: bool,
+    pub output_valid: bool,
+    pub warmup_call_count: usize,
+    pub measured_call_count: usize,
+    pub execution_duration_ns: u64,
+    pub lazy_load_wave_duration_ns: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,8 +77,15 @@ pub fn plan_selected_resource_placement(
     telemetry: &crate::vulkan_stream_circuit::VulkanSelectionTelemetryDomainSnapshot,
     devices: &[VulkanSelectedResourcePlacementDevice],
     residency_policy: crate::vulkan_stream_circuit::ResourceResidencyPolicy,
+    phase: nerve_execution_contracts::ExecutionPhase,
 ) -> Result<VulkanSelectedResourcePlacementPlan, VulkanDistributedPlanError> {
-    validate_selected_resource_placement_problem(component_id, partition, telemetry, devices)?;
+    validate_selected_resource_placement_problem(
+        component_id,
+        partition,
+        telemetry,
+        devices,
+        phase,
+    )?;
 
     let joint_selection_totals = (0..partition.resource_count)
         .map(|resource_index| {
@@ -134,7 +157,11 @@ pub fn plan_selected_resource_placement(
             if required_resident_bytes > load.resident_payload_capacity_bytes {
                 continue;
             }
-            let duration = u128::from(device.measured_duration_ns_by_resource[resource_index]);
+            let execution_class_id = &partition.resource_execution_class_ids[resource_index];
+            let duration = u128::from(
+                device.measured_costs_by_execution_class[execution_class_id]
+                    .execution_duration_ns,
+            );
             let first_contribution = selection_count.checked_mul(duration).ok_or_else(|| {
                 VulkanDistributedPlanError(
                     "selected-resource first-moment cost overflowed".to_string(),
@@ -156,8 +183,11 @@ pub fn plan_selected_resource_placement(
                             .co_selection_count(resource_index, *other_resource)
                             .unwrap_or(0),
                     );
+                    let other_class_id =
+                        &partition.resource_execution_class_ids[*other_resource];
                     let other_duration = u128::from(
-                        device.measured_duration_ns_by_resource[*other_resource],
+                        device.measured_costs_by_execution_class[other_class_id]
+                            .execution_duration_ns,
                     );
                     joint
                         .checked_mul(duration)
@@ -523,6 +553,7 @@ fn validate_selected_resource_placement_problem(
     partition: &VulkanDistributedSelectedResourcePartitionPlan,
     telemetry: &crate::vulkan_stream_circuit::VulkanSelectionTelemetryDomainSnapshot,
     devices: &[VulkanSelectedResourcePlacementDevice],
+    phase: nerve_execution_contracts::ExecutionPhase,
 ) -> Result<(), VulkanDistributedPlanError> {
     let expected_pair_count = if partition.selection_count_per_activation > 1 {
         partition
@@ -572,18 +603,42 @@ fn validate_selected_resource_placement_problem(
         ));
     }
     let mut device_ids = BTreeSet::new();
+    let mut physical_device_ids = BTreeSet::new();
+    let required_classes = partition
+        .resource_execution_class_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     for device in devices {
         if device.device_id.is_empty()
             || !device_ids.insert(device.device_id.as_str())
+            || device.physical_device_id.is_empty()
+            || !physical_device_ids.insert(device.physical_device_id.as_str())
+            || device.api_version == 0
+            || device.driver_version == 0
             || device.resident_payload_capacity_bytes == 0
-            || device.measured_duration_ns_by_resource.len() != partition.resource_count
             || device
-                .measured_duration_ns_by_resource
+                .measured_costs_by_execution_class
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != required_classes
+            || device
+                .measured_costs_by_execution_class
                 .iter()
-                .any(|duration| *duration == 0)
+                .any(|(class_id, cost)| {
+                    !valid_selected_resource_execution_class_id(class_id)
+                        || cost.phase != phase
+                        || !cost.complete_transaction
+                        || !cost.output_valid
+                        || cost.warmup_call_count == 0
+                        || !(1..=2).contains(&cost.measured_call_count)
+                        || cost.execution_duration_ns == 0
+                        || cost.lazy_load_wave_duration_ns == 0
+                })
         {
             return Err(VulkanDistributedPlanError(
-                "selected-resource placement devices require unique IDs, positive capacity, and complete measured costs"
+                "selected-resource placement devices require exact identities, positive capacity, and complete output-valid class measurements"
                     .to_string(),
             ));
         }
@@ -594,6 +649,18 @@ fn validate_selected_resource_placement_problem(
 #[cfg(test)]
 mod selected_resource_placement_tests {
     use super::*;
+
+    fn decode_cost(execution_duration_ns: u64) -> VulkanSelectedResourceExecutionClassCost {
+        VulkanSelectedResourceExecutionClassCost {
+            phase: nerve_execution_contracts::ExecutionPhase::Decode,
+            complete_transaction: true,
+            output_valid: true,
+            warmup_call_count: 1,
+            measured_call_count: 1,
+            execution_duration_ns,
+            lazy_load_wave_duration_ns: execution_duration_ns.saturating_mul(2),
+        }
+    }
 
     fn partition(resource_count: usize, selected: usize) -> VulkanDistributedSelectedResourcePartitionPlan {
         VulkanDistributedSelectedResourcePartitionPlan {
@@ -641,13 +708,19 @@ mod selected_resource_placement_tests {
         }
     }
 
-    fn devices(resource_count: usize, capacity: usize) -> Vec<VulkanSelectedResourcePlacementDevice> {
+    fn devices(_resource_count: usize, capacity: usize) -> Vec<VulkanSelectedResourcePlacementDevice> {
         ["a", "b"]
             .into_iter()
             .map(|device_id| VulkanSelectedResourcePlacementDevice {
                 device_id: device_id.to_string(),
+                physical_device_id: format!("physical-{device_id}"),
+                api_version: 1,
+                driver_version: 1,
                 resident_payload_capacity_bytes: capacity,
-                measured_duration_ns_by_resource: vec![10; resource_count],
+                measured_costs_by_execution_class: BTreeMap::from([(
+                    format!("sha256:{}", "a".repeat(64)),
+                    decode_cost(10),
+                )]),
             })
             .collect()
     }
@@ -660,6 +733,7 @@ mod selected_resource_placement_tests {
             &telemetry(vec![100; 4], vec![100, 0, 0, 0, 0, 100]),
             &devices(4, 40),
             crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+            nerve_execution_contracts::ExecutionPhase::Decode,
         )
         .unwrap();
         let owner = |resource_index| {
@@ -688,6 +762,7 @@ mod selected_resource_placement_tests {
             &telemetry(vec![1_000, 900, 1, 1], vec![0; 6]),
             &devices(4, 30),
             crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+            nerve_execution_contracts::ExecutionPhase::Decode,
         )
         .unwrap();
 
@@ -700,6 +775,50 @@ mod selected_resource_placement_tests {
     }
 
     #[test]
+    fn placement_uses_exact_class_costs_instead_of_resource_ordinals() {
+        let mut partition = partition(2, 1);
+        let class_a = format!("sha256:{}", "a".repeat(64));
+        let class_b = format!("sha256:{}", "b".repeat(64));
+        partition.resource_execution_class_ids = vec![class_a.clone(), class_b.clone()];
+        let devices = vec![
+            VulkanSelectedResourcePlacementDevice {
+                device_id: "a".to_string(),
+                physical_device_id: "physical-a".to_string(),
+                api_version: 1,
+                driver_version: 1,
+                resident_payload_capacity_bytes: 20,
+                measured_costs_by_execution_class: BTreeMap::from([
+                    (class_a.clone(), decode_cost(1)),
+                    (class_b.clone(), decode_cost(100)),
+                ]),
+            },
+            VulkanSelectedResourcePlacementDevice {
+                device_id: "b".to_string(),
+                physical_device_id: "physical-b".to_string(),
+                api_version: 1,
+                driver_version: 1,
+                resident_payload_capacity_bytes: 20,
+                measured_costs_by_execution_class: BTreeMap::from([
+                    (class_a, decode_cost(100)),
+                    (class_b, decode_cost(1)),
+                ]),
+            },
+        ];
+        let plan = plan_selected_resource_placement(
+            "layer",
+            &partition,
+            &telemetry(vec![1, 1], Vec::new()),
+            &devices,
+            crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+            nerve_execution_contracts::ExecutionPhase::Decode,
+        )
+        .unwrap();
+
+        assert_eq!(plan.assignments[0].device_id, "a");
+        assert_eq!(plan.assignments[1].device_id, "b");
+    }
+
+    #[test]
     fn eager_placement_rejects_insufficient_aggregate_capacity() {
         let error = plan_selected_resource_placement(
             "layer",
@@ -707,6 +826,7 @@ mod selected_resource_placement_tests {
             &telemetry(vec![1; 4], vec![0; 6]),
             &devices(4, 15),
             crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+            nerve_execution_contracts::ExecutionPhase::Decode,
         )
         .unwrap_err();
 
@@ -721,6 +841,7 @@ mod selected_resource_placement_tests {
             &telemetry(vec![1; 6], vec![0; 15]),
             &devices(6, 20)[..1],
             crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+            nerve_execution_contracts::ExecutionPhase::Decode,
         )
         .unwrap();
 
@@ -738,6 +859,7 @@ mod selected_resource_placement_tests {
             &telemetry(vec![1; 4], vec![0; 6]),
             &devices(4, 15)[..1],
             crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+            nerve_execution_contracts::ExecutionPhase::Decode,
         )
         .unwrap_err();
 
@@ -752,6 +874,7 @@ mod selected_resource_placement_tests {
             &telemetry(vec![1; 6], vec![0; 15]),
             &devices(6, 20)[..1],
             crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandRetained,
+            nerve_execution_contracts::ExecutionPhase::Decode,
         )
         .unwrap_err();
 
@@ -761,7 +884,9 @@ mod selected_resource_placement_tests {
     #[test]
     fn placement_rejects_incomplete_measurements_and_malformed_joint_telemetry() {
         let mut incomplete_devices = devices(4, 40);
-        incomplete_devices[0].measured_duration_ns_by_resource.pop();
+        incomplete_devices[0]
+            .measured_costs_by_execution_class
+            .clear();
         assert!(
             plan_selected_resource_placement(
                 "layer",
@@ -769,6 +894,25 @@ mod selected_resource_placement_tests {
                 &telemetry(vec![1; 4], vec![0; 6]),
                 &incomplete_devices,
                 crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+                nerve_execution_contracts::ExecutionPhase::Decode,
+            )
+            .is_err()
+        );
+        let mut wrong_phase = devices(4, 40);
+        wrong_phase[0]
+            .measured_costs_by_execution_class
+            .values_mut()
+            .next()
+            .unwrap()
+            .phase = nerve_execution_contracts::ExecutionPhase::Prefill;
+        assert!(
+            plan_selected_resource_placement(
+                "layer",
+                &partition(4, 2),
+                &telemetry(vec![1; 4], vec![0; 6]),
+                &wrong_phase,
+                crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+                nerve_execution_contracts::ExecutionPhase::Decode,
             )
             .is_err()
         );
@@ -779,6 +923,7 @@ mod selected_resource_placement_tests {
                 &telemetry(vec![1; 4], vec![0; 5]),
                 &devices(4, 40),
                 crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+                nerve_execution_contracts::ExecutionPhase::Decode,
             )
             .is_err()
         );
@@ -790,6 +935,7 @@ mod selected_resource_placement_tests {
             &telemetry(vec![1; 4], vec![0; 6]),
             &devices(4, 40),
             crate::vulkan_stream_circuit::ResourceResidencyPolicy::DemandPaged,
+            nerve_execution_contracts::ExecutionPhase::Decode,
         )
         .unwrap_err();
         assert!(error.0.contains("resource execution classes"));
