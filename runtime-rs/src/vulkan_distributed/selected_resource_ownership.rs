@@ -1,11 +1,31 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanDistributedSelectedResourceStorePlan {
     pub devices: Vec<VulkanDistributedSelectedResourceDevicePlan>,
+    /// Logical selected resources whose immutable parameter group is split
+    /// across more than one execution device. Every member is one physical
+    /// fragment of the same all-or-nothing residency cohort.
+    pub tensor_sharded_residency_cohorts:
+        Vec<VulkanDistributedSelectedResourceResidencyCohortPlan>,
     pub device_count: usize,
     pub selector_count: usize,
     pub selector_placement_count: usize,
     pub unique_atomic_group_count: usize,
     pub total_addressable_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedSelectedResourceResidencyCohortPlan {
+    pub selector_id: String,
+    pub resource_index: usize,
+    pub atomic_group_id: String,
+    pub members: Vec<VulkanDistributedSelectedResourceResidencyCohortMemberPlan>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanDistributedSelectedResourceResidencyCohortMemberPlan {
+    pub device_id: String,
+    pub logical_start: usize,
+    pub logical_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -745,6 +765,8 @@ fn selected_resource_store_plan_from_device_selectors(
     device_selectors: BTreeMap<String, Vec<VulkanDistributedSelectedResourceOwnership>>,
     selector_count: usize,
 ) -> Result<VulkanDistributedSelectedResourceStorePlan, VulkanDistributedPlanError> {
+    let tensor_sharded_residency_cohorts =
+        tensor_sharded_selected_resource_residency_cohorts(&device_selectors)?;
     let mut devices = Vec::with_capacity(device_selectors.len());
     let mut global_groups = BTreeMap::<String, usize>::new();
     let mut selector_placement_count = 0usize;
@@ -836,6 +858,7 @@ fn selected_resource_store_plan_from_device_selectors(
         });
     }
     Ok(VulkanDistributedSelectedResourceStorePlan {
+        tensor_sharded_residency_cohorts,
         device_count: devices.len(),
         selector_count,
         selector_placement_count,
@@ -843,6 +866,80 @@ fn selected_resource_store_plan_from_device_selectors(
         total_addressable_bytes,
         devices,
     })
+}
+
+fn tensor_sharded_selected_resource_residency_cohorts(
+    device_selectors: &BTreeMap<String, Vec<VulkanDistributedSelectedResourceOwnership>>,
+) -> Result<Vec<VulkanDistributedSelectedResourceResidencyCohortPlan>, VulkanDistributedPlanError>
+{
+    let mut members = BTreeMap::<
+        (String, usize, String),
+        BTreeMap<String, VulkanDistributedSelectedResourceResidencyCohortMemberPlan>,
+    >::new();
+    for (device_id, selectors) in device_selectors {
+        for selector in selectors {
+            for fragment in &selector.fragmented_resources {
+                let key = (
+                    selector.selector_id.clone(),
+                    fragment.resource_index,
+                    fragment.atomic_group_id.clone(),
+                );
+                let member = VulkanDistributedSelectedResourceResidencyCohortMemberPlan {
+                    device_id: device_id.clone(),
+                    logical_start: fragment.logical_start,
+                    logical_count: fragment.logical_count,
+                };
+                if let Some(previous) = members
+                    .entry(key)
+                    .or_default()
+                    .insert(device_id.clone(), member.clone())
+                    && previous != member
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "tensor-sharded selected resource {:?} index {} changes its fragment on device {device_id:?}",
+                        selector.selector_id, fragment.resource_index,
+                    )));
+                }
+            }
+        }
+    }
+
+    members
+        .into_iter()
+        .map(
+            |((selector_id, resource_index, atomic_group_id), by_device)| {
+                let mut cohort_members = by_device.into_values().collect::<Vec<_>>();
+                cohort_members.sort_by(|left, right| {
+                    (left.logical_start, left.device_id.as_str())
+                        .cmp(&(right.logical_start, right.device_id.as_str()))
+                });
+                let mut frontier = 0usize;
+                for member in &cohort_members {
+                    if member.logical_count == 0 || member.logical_start != frontier {
+                        return Err(VulkanDistributedPlanError(format!(
+                            "tensor-sharded selected resource {selector_id:?} index {resource_index} does not form one contiguous residency cohort",
+                        )));
+                    }
+                    frontier = frontier.checked_add(member.logical_count).ok_or_else(|| {
+                        VulkanDistributedPlanError(
+                            "tensor-sharded residency cohort logical extent overflowed".to_string(),
+                        )
+                    })?;
+                }
+                if cohort_members.is_empty() {
+                    return Err(VulkanDistributedPlanError(
+                        "tensor-sharded residency cohort has no physical members".to_string(),
+                    ));
+                }
+                Ok(VulkanDistributedSelectedResourceResidencyCohortPlan {
+                    selector_id,
+                    resource_index,
+                    atomic_group_id,
+                    members: cohort_members,
+                })
+            },
+        )
+        .collect()
 }
 
 fn validate_selected_resource_partition(

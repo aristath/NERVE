@@ -934,6 +934,22 @@ mod tests {
         assert_eq!(ownership.device_count, dispatch.shards.len());
         assert_eq!(ownership.unique_atomic_group_count, dispatch.shards.len());
         assert_eq!(ownership.total_addressable_bytes, 152);
+        let [cohort] = ownership.tensor_sharded_residency_cohorts.as_slice() else {
+            panic!("one fragmented expert must produce one logical residency cohort")
+        };
+        assert_eq!(cohort.selector_id, "experts");
+        assert_eq!(cohort.resource_index, 0);
+        assert_eq!(cohort.atomic_group_id, "expert-0");
+        assert_eq!(cohort.members.len(), dispatch.shards.len());
+        assert_eq!(cohort.members[0].logical_start, 0);
+        assert_eq!(
+            cohort
+                .members
+                .iter()
+                .map(|member| member.logical_count)
+                .sum::<usize>(),
+            dispatch.output_rows,
+        );
         for shard in &dispatch.shards {
             let device = ownership.device(&shard.device_id).unwrap();
             assert!(device.selectors[0].owned_resource_indices.is_empty());
@@ -2984,6 +3000,20 @@ mod tests {
         );
         assert_eq!(ownership.unique_atomic_group_count, plan.device_ids.len());
         assert_eq!(ownership.total_addressable_bytes, 288);
+        let [cohort] = ownership.tensor_sharded_residency_cohorts.as_slice() else {
+            panic!("the split expert must remain one logical residency cohort")
+        };
+        assert_eq!(cohort.selector_id, "routed-experts");
+        assert_eq!(cohort.resource_index, 0);
+        assert_eq!(cohort.atomic_group_id, "expert-0");
+        assert_eq!(
+            cohort
+                .members
+                .iter()
+                .map(|member| member.device_id.as_str())
+                .collect::<BTreeSet<_>>(),
+            plan.device_ids.iter().map(String::as_str).collect(),
+        );
         for device in &ownership.devices {
             let [selector] = device.selectors.as_slice() else {
                 panic!("each participant must own one selector cohort")
@@ -3041,6 +3071,12 @@ mod tests {
         assert_eq!(isolated_ownership.device_count, 1);
         assert_eq!(isolated_ownership.unique_atomic_group_count, 1);
         assert_eq!(isolated_ownership.total_addressable_bytes, 288);
+        assert_eq!(
+            isolated_ownership.tensor_sharded_residency_cohorts[0]
+                .members
+                .len(),
+            1,
+        );
 
         let mut mismatched = plan.clone();
         mismatched.dispatches[1].selected_resource_partitions[0].atomic_group_byte_counts[0] += 1;
