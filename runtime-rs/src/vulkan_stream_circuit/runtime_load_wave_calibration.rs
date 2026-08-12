@@ -93,6 +93,7 @@ impl VulkanRuntimeLoadWaveCalibrationReport {
         VulkanPlacementCanonicalReference {
             behavior: self.execution_case.behavior.clone(),
             output_digest: self.output_digest.clone(),
+            output_artifact: None,
             state_digest: self.state_digest.clone(),
         }
     }
@@ -106,6 +107,8 @@ impl VulkanRuntimeLoadWaveCalibrationReport {
             duration_ns: self.measured_ns,
             useful_activation_count: 1,
             output_digest: self.output_digest.clone(),
+            output_artifact: None,
+            output_equivalence: VulkanPlacementOutputEquivalenceEvidence::BitExact,
             state_digest: self.state_digest.clone(),
             resident_bytes_by_physical_device: BTreeMap::from([(
                 self.physical_device_id.clone(),
@@ -476,6 +479,7 @@ fn load_wave_behavior_identity(
             b"nerve.lazy_load_wave.request.v1",
             &[selector.id.as_bytes(), &indices_bytes],
         ),
+        equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
     })
 }
 
@@ -529,6 +533,7 @@ mod runtime_load_wave_calibration_validation_tests {
                 }],
             },
             input_fixture_digest: digest(5),
+            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
         };
         let physical_device_id = "vulkan-uuid:00112233445566778899aabbccddeeff".to_string();
         VulkanRuntimeLoadWaveCalibrationReport {

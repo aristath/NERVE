@@ -1,5 +1,5 @@
 pub const VULKAN_PLACEMENT_CALIBRATION_CATALOG_SCHEMA: &str =
-    "nerve.vulkan_placement_calibration_catalog.v3";
+    "nerve.vulkan_placement_calibration_catalog.v4";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -140,6 +140,7 @@ pub struct VulkanPlacementBehaviorIdentity {
     pub phase: nerve_execution_contracts::ExecutionPhase,
     pub shape: VulkanPlacementShapeClass,
     pub input_fixture_digest: String,
+    pub equivalence: VulkanPlacementEquivalenceIdentity,
 }
 
 /// Exact measured execution case. Changing a driver, shard, endpoint, owner,
@@ -160,6 +161,7 @@ pub struct VulkanPlacementExecutionCaseIdentity {
 pub struct VulkanPlacementCanonicalReference {
     pub behavior: VulkanPlacementBehaviorIdentity,
     pub output_digest: String,
+    pub output_artifact: Option<VulkanPlacementOutputArtifact>,
     pub state_digest: String,
 }
 
@@ -172,6 +174,8 @@ pub struct VulkanPlacementCalibrationObservation {
     pub duration_ns: u64,
     pub useful_activation_count: usize,
     pub output_digest: String,
+    pub output_artifact: Option<VulkanPlacementOutputArtifact>,
+    pub output_equivalence: VulkanPlacementOutputEquivalenceEvidence,
     pub state_digest: String,
     pub resident_bytes_by_physical_device: BTreeMap<String, usize>,
     pub transient_peak_bytes_by_physical_device: BTreeMap<String, usize>,
@@ -318,6 +322,13 @@ impl VulkanPlacementCalibrationCatalog {
                 "placement reference requires output and state digests".to_string(),
             ));
         }
+        validate_vulkan_placement_output_equivalence(
+            &reference.behavior.equivalence,
+            &reference.output_digest,
+            reference.output_artifact.as_ref(),
+            &reference.output_digest,
+            reference.output_artifact.as_ref(),
+        )?;
         match self
             .references
             .binary_search_by(|existing| existing.behavior.cmp(&reference.behavior))
@@ -352,12 +363,21 @@ impl VulkanPlacementCalibrationCatalog {
                     "placement candidate has no exact canonical behavior reference".to_string(),
                 )
             })?;
-        if observation.output_digest != reference.output_digest
-            || observation.state_digest != reference.state_digest
-        {
+        if observation.state_digest != reference.state_digest {
             return Err(VulkanPlacementCalibrationCatalogError(
-                "placement candidate output or state differs from its canonical reference"
-                    .to_string(),
+                "placement candidate state differs from its canonical reference".to_string(),
+            ));
+        }
+        let output_equivalence = validate_vulkan_placement_output_equivalence(
+            &reference.behavior.equivalence,
+            &reference.output_digest,
+            reference.output_artifact.as_ref(),
+            &observation.output_digest,
+            observation.output_artifact.as_ref(),
+        )?;
+        if observation.output_equivalence != output_equivalence {
+            return Err(VulkanPlacementCalibrationCatalogError(
+                "placement candidate output-equivalence evidence is not reproducible".to_string(),
             ));
         }
         match self.observations.binary_search_by(|existing| {
@@ -383,6 +403,16 @@ impl VulkanPlacementCalibrationCatalog {
             .binary_search_by(|observation| observation.execution_case.cmp(execution_case))
             .ok()
             .map(|index| &self.observations[index])
+    }
+
+    pub fn canonical_reference(
+        &self,
+        behavior: &VulkanPlacementBehaviorIdentity,
+    ) -> Option<&VulkanPlacementCanonicalReference> {
+        self.references
+            .binary_search_by(|reference| reference.behavior.cmp(behavior))
+            .ok()
+            .map(|index| &self.references[index])
     }
 
     pub fn observations_for_behavior(
@@ -477,6 +507,8 @@ fn compatible_remeasurement(
         && left.complete_transaction == right.complete_transaction
         && left.useful_activation_count == right.useful_activation_count
         && left.output_digest == right.output_digest
+        && left.output_artifact == right.output_artifact
+        && left.output_equivalence == right.output_equivalence
         && left.state_digest == right.state_digest
         && left.resident_bytes_by_physical_device == right.resident_bytes_by_physical_device
         && left.transient_peak_bytes_by_physical_device
@@ -505,6 +537,7 @@ fn validate_behavior_identity(
             "placement behavior identity is incomplete".to_string(),
         ));
     }
+    behavior.equivalence.validate()?;
     if !is_strictly_sorted(&behavior.contract_ids)
         || !valid_sha256_digest(&behavior.artifact_digest)
         || !valid_sha256_digest(&behavior.execution_graph_digest)
@@ -716,6 +749,7 @@ mod placement_calibration_catalog_tests {
                 }],
             },
             input_fixture_digest: format!("sha256:{}", "c".repeat(64)),
+            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
         }
     }
 
@@ -764,6 +798,8 @@ mod placement_calibration_catalog_tests {
             duration_ns,
             useful_activation_count: 1,
             output_digest: "output".to_string(),
+            output_artifact: None,
+            output_equivalence: VulkanPlacementOutputEquivalenceEvidence::BitExact,
             state_digest: "state".to_string(),
             resident_bytes_by_physical_device: BTreeMap::from([
                 ("gpu0".to_string(), resident_bytes),
@@ -784,6 +820,7 @@ mod placement_calibration_catalog_tests {
             .record_reference(VulkanPlacementCanonicalReference {
                 behavior: behavior(),
                 output_digest: "output".to_string(),
+                output_artifact: None,
                 state_digest: "state".to_string(),
             })
             .unwrap();
@@ -910,6 +947,71 @@ mod placement_calibration_catalog_tests {
                 .0
                 .contains("bounded complete transaction")
         );
+    }
+
+    #[test]
+    fn catalog_recomputes_compiler_declared_numeric_equivalence() {
+        let artifact = |value: f32| VulkanPlacementOutputArtifact {
+            scalar_format: VulkanPlacementScalarFormat::Bf16,
+            segments: vec![VulkanPlacementOutputSegment {
+                binding: 1,
+                name: "hidden".to_string(),
+                bytes: (((value.to_bits() >> 16) as u16).to_le_bytes()).to_vec(),
+            }],
+        };
+        let mut behavior = behavior();
+        behavior.equivalence = VulkanPlacementEquivalenceIdentity {
+            output: VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance,
+            state: VulkanPlacementEquivalenceKind::BitExact,
+            absolute_tolerance_bits: Some(0.01f64.to_bits()),
+            relative_tolerance_bits: Some(0.01f64.to_bits()),
+            output_scalar_format: Some(VulkanPlacementScalarFormat::Bf16),
+        };
+        let reference_artifact = artifact(1.0);
+        let candidate_artifact = artifact(1.0078125);
+        let reference_digest =
+            vulkan_placement_output_artifact_digest(&reference_artifact).unwrap();
+        let candidate_digest =
+            vulkan_placement_output_artifact_digest(&candidate_artifact).unwrap();
+        let evidence = validate_vulkan_placement_output_equivalence(
+            &behavior.equivalence,
+            &reference_digest,
+            Some(&reference_artifact),
+            &candidate_digest,
+            Some(&candidate_artifact),
+        )
+        .unwrap();
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: behavior.clone(),
+                output_digest: reference_digest,
+                output_artifact: Some(reference_artifact),
+                state_digest: "state".to_string(),
+            })
+            .unwrap();
+        let mut accepted = observation(behavior.clone(), "gpu0", "gpu0", 10, 16);
+        accepted.output_digest = candidate_digest;
+        accepted.output_artifact = Some(candidate_artifact);
+        accepted.output_equivalence = evidence;
+        catalog.record_observation(accepted).unwrap();
+        VulkanPlacementCalibrationCatalog::from_json_slice(
+            &catalog.to_json_bytes().unwrap(),
+        )
+        .unwrap();
+
+        let mut rejected = observation(behavior, "gpu1", "gpu1", 10, 16);
+        let rejected_artifact = artifact(1.03125);
+        rejected.output_digest =
+            vulkan_placement_output_artifact_digest(&rejected_artifact).unwrap();
+        rejected.output_artifact = Some(rejected_artifact);
+        rejected.output_equivalence =
+            VulkanPlacementOutputEquivalenceEvidence::AbsoluteRelativeTolerance {
+                compared_element_count: 1,
+                maximum_absolute_error_bits: 0,
+                maximum_relative_error_bits: 0,
+            };
+        assert!(catalog.record_observation(rejected).is_err());
     }
 
     #[test]
@@ -1167,6 +1269,7 @@ mod placement_calibration_catalog_tests {
                 .record_reference(VulkanPlacementCanonicalReference {
                     behavior,
                     output_digest: format!("output-{suffix}"),
+                    output_artifact: None,
                     state_digest: format!("state-{suffix}"),
                 })
                 .unwrap();

@@ -112,9 +112,12 @@ cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- summarize \
 ```
 
 The validator and summarizer also accept NERVE's exact
-`nerve.vulkan_placement_calibration_catalog.v3` catalogs. Those catalogs retain
+`nerve.vulkan_placement_calibration_catalog.v4` catalogs. Those catalogs retain
 compiler artifact, contract, phase, geometry, device UUID, driver, shard,
-owner, endpoint, transport, resource, output, and state identity. They are the
+owner, endpoint, transport, resource, output, state, and compiler-declared
+equivalence identity. Numerically tolerant distributed outputs retain their
+typed canonical and candidate artifacts so validation can be reproduced; a
+digest mismatch is never accepted on an untyped assertion. These catalogs are the
 only benchmark artifacts intended for future automatic placement consumption;
 the compact `nerve.placement_bench` ranking remains historical hardware
 evidence.

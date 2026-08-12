@@ -28,6 +28,7 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
         Ok(VulkanPlacementCanonicalReference {
             behavior: self.behavior_identity(),
             output_digest: self.fixture_digest.clone(),
+            output_artifact: None,
             state_digest: runtime_transfer_calibration_state_digest(),
         })
     }
@@ -82,6 +83,8 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
             duration_ns: self.measured_ns,
             useful_activation_count: 1,
             output_digest: self.output_digest.clone(),
+            output_artifact: None,
+            output_equivalence: VulkanPlacementOutputEquivalenceEvidence::BitExact,
             state_digest: runtime_transfer_calibration_state_digest(),
             resident_bytes_by_physical_device: BTreeMap::from([
                 (self.source_device_id.clone(), 0),
@@ -136,6 +139,7 @@ impl VulkanRuntimePlacementTransferCalibrationReport {
                 }],
             },
             input_fixture_digest: self.fixture_digest.clone(),
+            equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
         }
     }
 
