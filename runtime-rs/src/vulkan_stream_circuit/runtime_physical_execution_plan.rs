@@ -58,6 +58,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
             &component_ids,
         )?;
         self.validate_exact_phase_cases(
+            runtime_model,
             "decode",
             nerve_execution_contracts::ExecutionPhase::Decode,
             Some(1),
@@ -66,6 +67,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
             &self.decode_execution_cases_by_component,
         )?;
         self.validate_exact_phase_cases(
+            runtime_model,
             "decode_batch",
             nerve_execution_contracts::ExecutionPhase::Decode,
             None,
@@ -74,6 +76,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
             &self.decode_batch_execution_cases_by_component,
         )?;
         self.validate_exact_phase_cases(
+            runtime_model,
             "prefill",
             nerve_execution_contracts::ExecutionPhase::Prefill,
             None,
@@ -137,6 +140,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
     #[allow(clippy::too_many_arguments)]
     fn validate_exact_phase_cases(
         &self,
+        runtime_model: &VulkanResidentRuntimeModel,
         phase_name: &str,
         execution_phase: nerve_execution_contracts::ExecutionPhase,
         exact_batch_width: Option<usize>,
@@ -179,6 +183,13 @@ impl VulkanRuntimePhysicalExecutionPlan {
                     pool.len(),
                 ));
             }
+            validate_runtime_hybrid_case_for_component(
+                runtime_model,
+                component_id,
+                execution_phase,
+                batch_width,
+                case,
+            )?;
         }
         Ok(())
     }

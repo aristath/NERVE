@@ -524,7 +524,21 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .into_iter()
             .max()
             .unwrap_or(1);
-        let distributed_execution_plans =
+        let device_execution_identity_by_logical_device = device_ids
+            .iter()
+            .map(|device_id| {
+                let device = device_for(device_id)?;
+                Ok((
+                    device_id.clone(),
+                    VulkanPlacementDeviceExecutionIdentity {
+                        physical_device_id: device.physical_device_id().to_string(),
+                        api_version: device.api_version(),
+                        driver_version: device.driver_version(),
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, VulkanResidentInProcessPlacedRuntimeError>>()?;
+        let mut distributed_execution_plans =
             VulkanDistributedExecutionPlanSet::from_prepared_plans_with_resource_contract(
                 &prepared_plans,
                 &tensor_index,
@@ -542,6 +556,20 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )),
             )
         })?;
+        distributed_execution_plans
+            .apply_exact_execution_cases(
+                &physical_execution_plan.decode_execution_cases_by_component,
+                &physical_execution_plan.decode_batch_execution_cases_by_component,
+                &physical_execution_plan.prefill_execution_cases_by_component,
+                &device_execution_identity_by_logical_device,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to replay exact calibrated physical execution cases: {error}"
+                    )),
+                )
+            })?;
         let distributed_activation_plan =
             VulkanDistributedActivationBufferPlan::from_execution_plan_set(
                 &distributed_execution_plans,
