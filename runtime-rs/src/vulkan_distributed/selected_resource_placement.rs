@@ -299,6 +299,34 @@ pub fn plan_selected_resource_placement(
     residency_policy: crate::vulkan_stream_circuit::ResourceResidencyPolicy,
     phase: nerve_execution_contracts::ExecutionPhase,
 ) -> Result<VulkanSelectedResourcePlacementPlan, VulkanDistributedPlanError> {
+    try_plan_selected_resource_placement(
+        component_id,
+        partition,
+        execution_classes,
+        telemetry,
+        devices,
+        residency_policy,
+        phase,
+    )?
+    .ok_or_else(|| {
+        VulkanDistributedPlanError(format!(
+            "selected-resource placement for selector {:?} has no measured device with sufficient resident payload capacity",
+            partition.selector_id,
+        ))
+    })
+}
+
+/// Returns `None` when valid exact inputs have no feasible capacity assignment.
+/// Invalid identities, telemetry, or measurements remain errors.
+pub fn try_plan_selected_resource_placement(
+    component_id: &str,
+    partition: &VulkanDistributedSelectedResourcePartitionPlan,
+    execution_classes: &VulkanSelectedResourceExecutionClassPlan,
+    telemetry: &crate::vulkan_stream_circuit::VulkanSelectionTelemetryDomainSnapshot,
+    devices: &[VulkanSelectedResourcePlacementDevice],
+    residency_policy: crate::vulkan_stream_circuit::ResourceResidencyPolicy,
+    phase: nerve_execution_contracts::ExecutionPhase,
+) -> Result<Option<VulkanSelectedResourcePlacementPlan>, VulkanDistributedPlanError> {
     validate_selected_resource_placement_problem(
         component_id,
         partition,
@@ -492,10 +520,7 @@ pub fn plan_selected_resource_placement(
             projected_second,
         )) = candidates.into_iter().next()
         else {
-            return Err(VulkanDistributedPlanError(format!(
-                "selected resource {} for selector {:?} has no measured device whose resident payload capacity admits its {:?} residency requirement",
-                resource_index, partition.selector_id, residency_policy,
-            )));
+            return Ok(None);
         };
         let load = &mut loads[device_index];
         load.addressable_bytes = addressable_bytes;
@@ -541,13 +566,13 @@ pub fn plan_selected_resource_placement(
             owned_resource_indices: load.owned_resource_indices,
         })
         .collect();
-    Ok(VulkanSelectedResourcePlacementPlan {
+    Ok(Some(VulkanSelectedResourcePlacementPlan {
         selector_id: partition.selector_id.clone(),
         assignments,
         device_loads,
         maximum_first_moment_ns,
         maximum_second_moment_ns2,
-    })
+    }))
 }
 
 fn selected_resource_maximum_load_wave_bytes(
@@ -1076,6 +1101,19 @@ mod selected_resource_placement_tests {
     #[test]
     fn eager_placement_rejects_insufficient_aggregate_capacity() {
         let partition = partition(4, 2);
+        assert!(
+            try_plan_selected_resource_placement(
+                "layer",
+                &partition,
+                &execution_classes(&partition),
+                &telemetry(vec![1; 4], vec![0; 6]),
+                &devices(4, 15),
+                crate::vulkan_stream_circuit::ResourceResidencyPolicy::Eager,
+                nerve_execution_contracts::ExecutionPhase::Decode,
+            )
+            .unwrap()
+            .is_none()
+        );
         let error = plan_selected_resource_placement(
             "layer",
             &partition,

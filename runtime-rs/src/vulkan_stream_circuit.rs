@@ -109,9 +109,10 @@ use crate::vulkan_distributed::{
     VulkanDistributedReductionPlan, VulkanDistributedReductionRunner,
     VulkanDistributedSelectedResourceFragmentPlan, VulkanDistributedSelectedResourcePartitionPlan,
     VulkanDistributedSelectedResourceStorePlan, VulkanPhysicalExecutionIslandPlan,
-    VulkanPhysicalExecutionTransportKind, allocate_distributed_shared_buffer,
-    create_distributed_reduction_runner_for_buffers, distributed_shard_push_constants,
-    resolved_physical_execution_islands, selected_resource_activation,
+    VulkanPhysicalExecutionTransportKind, VulkanSelectedResourcePlacementPlan,
+    allocate_distributed_shared_buffer, create_distributed_reduction_runner_for_buffers,
+    distributed_shard_push_constants, resolved_physical_execution_islands,
+    selected_resource_activation, try_plan_selected_resource_placement,
     vulkan_distributed_placement_strategy,
 };
 

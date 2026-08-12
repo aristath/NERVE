@@ -321,6 +321,193 @@ pub fn vulkan_runtime_selected_resource_execution_requirements(
     Ok(plans)
 }
 
+/// Solves selected-resource ownership only when the mounted plan has complete
+/// exact execution and load-wave evidence for every required class on every
+/// compiled participant. `None` means the optional optimization is
+/// unavailable and the caller must preserve the validated compiler ownership.
+#[allow(clippy::too_many_arguments)]
+pub fn try_plan_vulkan_runtime_selected_resource_placements(
+    execution_plan: &VulkanDistributedExecutionPlan,
+    requirement_plans: &[VulkanRuntimeSelectedResourceExecutionRequirementPlan],
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacities: &[VulkanPlacementSelectedResourceDeviceCapacity],
+    telemetry: Option<&VulkanSelectionTelemetrySnapshot>,
+    residency_policy: ResourceResidencyPolicy,
+    phase: nerve_execution_contracts::ExecutionPhase,
+) -> Result<Option<Vec<VulkanSelectedResourcePlacementPlan>>, VulkanResidentTokenModelPackageError>
+{
+    let selector_ids = execution_plan
+        .dispatches
+        .iter()
+        .flat_map(|dispatch| {
+            dispatch
+                .selected_resource_partitions
+                .iter()
+                .map(|partition| partition.selector_id.as_str())
+        })
+        .collect::<BTreeSet<_>>();
+    if selector_ids.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    if requirement_plans
+        .iter()
+        .map(|plan| plan.selector_id.as_str())
+        .collect::<BTreeSet<_>>()
+        != selector_ids
+    {
+        return distributed_calibration_error(
+            "mounted selected-resource requirements do not cover every selector exactly once",
+        );
+    }
+
+    let mut placements = Vec::with_capacity(requirement_plans.len());
+    for requirement_plan in requirement_plans {
+        let partitions = execution_plan
+            .dispatches
+            .iter()
+            .flat_map(|dispatch| {
+                dispatch
+                    .selected_resource_partitions
+                    .iter()
+                    .filter(|partition| partition.selector_id == requirement_plan.selector_id)
+                    .map(move |partition| (dispatch, partition))
+            })
+            .collect::<Vec<_>>();
+        let Some((first_dispatch, partition)) = partitions.first().copied() else {
+            return distributed_calibration_error(
+                "mounted selected-resource requirement has no executable partition",
+            );
+        };
+        if first_dispatch.component_id != requirement_plan.component_id {
+            return distributed_calibration_error(
+                "mounted selected-resource requirement belongs to a different component",
+            );
+        }
+        let execution_classes = execution_plan
+            .selected_resource_execution_classes(&requirement_plan.selector_id)
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        if execution_classes.resource_execution_class_ids
+            != requirement_plan.resource_execution_class_ids
+        {
+            return distributed_calibration_error(
+                "mounted selected-resource classes changed after requirement derivation",
+            );
+        }
+        let participant_ids = partitions
+            .iter()
+            .flat_map(|(dispatch, _)| dispatch.shards.iter().map(|shard| shard.device_id.as_str()))
+            .collect::<BTreeSet<_>>();
+        if participant_ids.len() < 2 {
+            return Ok(None);
+        }
+        let candidate_capacities = capacities
+            .iter()
+            .filter(|capacity| participant_ids.contains(capacity.device_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if candidate_capacities.len() != participant_ids.len()
+            || candidate_capacities
+                .iter()
+                .map(|capacity| capacity.device_id.as_str())
+                .collect::<BTreeSet<_>>()
+                != participant_ids
+        {
+            return distributed_calibration_error(
+                "mounted selected-resource capacity does not cover every compiled participant",
+            );
+        }
+        let Some(devices) = catalog
+            .try_selected_resource_placement_devices(
+                &requirement_plan.requirements,
+                &candidate_capacities,
+            )
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let uniform_prior;
+        let domain = if let Some(telemetry) = telemetry {
+            let matching = telemetry
+                .domains
+                .iter()
+                .filter(|domain| {
+                    domain.execution_scope == partition.execution_scope
+                        && domain.component_id == first_dispatch.component_id
+                        && domain.node_id == partition.node_id
+                        && domain.domain_id == partition.domain_id
+                })
+                .collect::<Vec<_>>();
+            let [domain] = matching.as_slice() else {
+                return distributed_calibration_error(format!(
+                    "mounted selected-resource selector {:?} has {} exact telemetry domains; expected one",
+                    requirement_plan.selector_id,
+                    matching.len(),
+                ));
+            };
+            *domain
+        } else {
+            uniform_prior = uniform_selected_resource_telemetry(
+                &first_dispatch.component_id,
+                partition,
+            )?;
+            &uniform_prior
+        };
+        let Some(placement) = try_plan_selected_resource_placement(
+            &first_dispatch.component_id,
+            partition,
+            &execution_classes,
+            domain,
+            &devices,
+            residency_policy,
+            phase,
+        )
+        .map_err(|error| distributed_calibration_error_value(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        if placement
+            .assignments
+            .iter()
+            .map(|assignment| assignment.device_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            < 2
+        {
+            return Ok(None);
+        }
+        placements.push(placement);
+    }
+    Ok(Some(placements))
+}
+
+fn uniform_selected_resource_telemetry(
+    component_id: &str,
+    partition: &VulkanDistributedSelectedResourcePartitionPlan,
+) -> Result<VulkanSelectionTelemetryDomainSnapshot, VulkanResidentTokenModelPackageError> {
+    let pair_count = partition
+        .resource_count
+        .checked_mul(partition.resource_count.saturating_sub(1))
+        .and_then(|count| count.checked_div(2))
+        .ok_or_else(|| {
+            distributed_calibration_error_value(
+                "selected-resource uniform-prior pair count overflowed",
+            )
+        })?;
+    Ok(VulkanSelectionTelemetryDomainSnapshot {
+        execution_scope: partition.execution_scope.clone(),
+        component_id: component_id.to_string(),
+        node_id: partition.node_id.clone(),
+        domain_id: partition.domain_id.clone(),
+        resource_count: partition.resource_count,
+        selection_counts: vec![1; partition.resource_count],
+        co_selection_counts: if partition.selection_count_per_activation > 1 {
+            vec![1; pair_count]
+        } else {
+            Vec::new()
+        },
+    })
+}
+
 pub(crate) fn selected_resource_execution_requirement(
     component_signature: &str,
     selector: &CompiledResourceSelector,
@@ -441,6 +628,32 @@ mod runtime_selected_resource_execution_planning_tests {
         }
     }
 
+    fn partition(selection_count_per_activation: usize) -> VulkanDistributedSelectedResourcePartitionPlan {
+        VulkanDistributedSelectedResourcePartitionPlan {
+            execution_scope: "model".to_string(),
+            selector_id: "experts".to_string(),
+            node_id: "router".to_string(),
+            domain_id: "routed".to_string(),
+            selection_signal: "routes".to_string(),
+            address_table_binding: 0,
+            parameter_slots_binding: 1,
+            resource_count: 4,
+            parameters_per_resource: 1,
+            parameter_partitions: Vec::new(),
+            selection_count_per_activation,
+            resource_operation_class_ids: vec![digest('c'); 4],
+            atomic_group_ids: (0..4).map(|index| format!("expert-{index}")).collect(),
+            atomic_group_byte_counts: vec![16; 4],
+            atomic_group_resource_ids: (0..4)
+                .map(|index| vec![format!("weight-{index}")])
+                .collect(),
+            parameter_resource_ids: (0..4)
+                .map(|index| vec![format!("weight-{index}")])
+                .collect(),
+            parameter_resource_byte_counts: vec![vec![16]; 4],
+        }
+    }
+
     #[test]
     fn representative_plan_keeps_one_exact_resource_per_execution_class() {
         let class_a = digest('1');
@@ -477,5 +690,18 @@ mod runtime_selected_resource_execution_planning_tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("exact nonempty identities"));
+    }
+
+    #[test]
+    fn unobserved_selector_prior_is_uniform_and_pair_complete() {
+        let multi = uniform_selected_resource_telemetry("block", &partition(3)).unwrap();
+        assert_eq!(multi.selection_counts, vec![1; 4]);
+        assert_eq!(multi.co_selection_counts, vec![1; 6]);
+        assert_eq!(multi.component_id, "block");
+        assert_eq!(multi.node_id, "router");
+        assert_eq!(multi.domain_id, "routed");
+
+        let single = uniform_selected_resource_telemetry("block", &partition(1)).unwrap();
+        assert!(single.co_selection_counts.is_empty());
     }
 }

@@ -77,6 +77,26 @@ impl VulkanPlacementCalibrationCatalog {
         Vec<crate::vulkan_distributed::VulkanSelectedResourcePlacementDevice>,
         VulkanPlacementCalibrationCatalogError,
     > {
+        self.try_selected_resource_placement_devices(requirements, capacities)?
+            .ok_or_else(|| {
+                VulkanPlacementCalibrationCatalogError(
+                    "selected-resource placement lacks exact calibration coverage on at least one candidate device"
+                        .to_string(),
+                )
+            })
+    }
+
+    /// Returns `None` only for absent exact evidence. Invalid, stale,
+    /// conflicting, or ambiguous evidence remains an error and must not be
+    /// treated as a harmless optimization miss.
+    pub fn try_selected_resource_placement_devices(
+        &self,
+        requirements: &[VulkanPlacementSelectedResourceExecutionClassRequirement],
+        capacities: &[VulkanPlacementSelectedResourceDeviceCapacity],
+    ) -> Result<
+        Option<Vec<crate::vulkan_distributed::VulkanSelectedResourcePlacementDevice>>,
+        VulkanPlacementCalibrationCatalogError,
+    > {
         validate_selected_resource_execution_class_requirements(requirements)?;
         validate_selected_resource_device_capacities(capacities)?;
         let mut devices = Vec::with_capacity(capacities.len());
@@ -95,6 +115,9 @@ impl VulkanPlacementCalibrationCatalog {
                         )
                     })
                     .collect::<Vec<_>>();
+                if matching.is_empty() {
+                    return Ok(None);
+                }
                 let [calibration] = matching.as_slice() else {
                     return Err(VulkanPlacementCalibrationCatalogError(format!(
                         "selected-resource class {:?} has {} exact calibrations on physical device {:?}; expected one",
@@ -134,7 +157,7 @@ impl VulkanPlacementCalibrationCatalog {
                 },
             );
         }
-        Ok(devices)
+        Ok(Some(devices))
     }
 }
 
@@ -739,12 +762,21 @@ mod selected_resource_calibration_catalog_tests {
 
         let mut stale = requirement.clone();
         stale.artifact_digest = digest('9');
+        assert_eq!(
+            catalog
+                .try_selected_resource_placement_devices(
+                    std::slice::from_ref(&stale),
+                    std::slice::from_ref(&capacity),
+                )
+                .unwrap(),
+            None,
+        );
         assert!(
             catalog
                 .selected_resource_placement_devices(&[stale], std::slice::from_ref(&capacity))
                 .unwrap_err()
                 .to_string()
-                .contains("0 exact calibrations")
+                .contains("lacks exact calibration coverage")
         );
 
         let mut missing = requirement;
@@ -754,7 +786,7 @@ mod selected_resource_calibration_catalog_tests {
                 .selected_resource_placement_devices(&[missing], &[capacity])
                 .unwrap_err()
                 .to_string()
-                .contains("0 exact calibrations")
+                .contains("lacks exact calibration coverage")
         );
     }
 
