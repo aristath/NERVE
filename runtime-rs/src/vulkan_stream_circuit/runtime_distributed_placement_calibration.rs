@@ -785,60 +785,54 @@ fn distributed_calibration_fixture_identity(
 
 fn distributed_calibration_artifact_digest(
     loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
-    package_slice: &VulkanResidentModelPackageDeviceSlice,
+    execution_plan: &VulkanDistributedExecutionPlan,
 ) -> Result<String, VulkanResidentTokenModelPackageError> {
     let mut digest = Sha256::new();
-    digest.update(b"nerve.distributed_calibration_artifacts.v1\0");
-    let mut artifacts = loaded_manifest
-        .reusable_artifacts
-        .iter()
-        .collect::<Vec<_>>();
-    artifacts.sort_by(|left, right| left.artifact.family_id.cmp(&right.artifact.family_id));
-    if artifacts.is_empty() {
+    digest.update(b"nerve.distributed_calibration_artifacts.v2\0");
+    if execution_plan.dispatches.is_empty() {
         return distributed_calibration_error("distributed calibration artifact identity is empty");
     }
-    for artifact in artifacts {
-        let manifest_bytes = serde_json::to_vec(&artifact.artifact).map_err(|error| {
-            distributed_calibration_error_value(format!(
-                "failed to encode distributed calibration artifact {:?}: {error}",
-                artifact.artifact.family_id,
-            ))
-        })?;
-        digest.update((manifest_bytes.len() as u64).to_le_bytes());
-        digest.update(manifest_bytes);
-        for word in &artifact.words {
-            digest.update(word.to_le_bytes());
-        }
-    }
-    let mut batch_artifacts = package_slice.batch_kernels.iter().collect::<Vec<_>>();
-    batch_artifacts.sort_by(|left, right| {
-        left.component_id
-            .cmp(&right.component_id)
-            .then_with(|| left.node_id.cmp(&right.node_id))
-            .then_with(|| left.selection_priority.cmp(&right.selection_priority))
-            .then_with(|| left.lane_tile_width.cmp(&right.lane_tile_width))
-    });
-    for artifact in batch_artifacts {
-        digest.update(artifact.component_id.as_bytes());
-        digest.update([0]);
-        digest.update(artifact.node_id.as_bytes());
-        digest.update(artifact.lane_tile_width.to_le_bytes());
-        digest.update(artifact.selection_priority.to_le_bytes());
-        digest.update([
-            u8::from(artifact.independent_candidate_compatible),
-            u8::from(artifact.causal_sequence_compatible),
-            u8::from(artifact.parallel_block_compatible),
-        ]);
-        for stage in &artifact.stages {
-            digest.update(stage.shader_path.as_bytes());
-            digest.update(stage.local_size_x.to_le_bytes());
-            digest.update(stage.workgroup_count_x.to_le_bytes());
-            for word in &stage.spirv_words {
-                digest.update(word.to_le_bytes());
-            }
-        }
+    for dispatch in &execution_plan.dispatches {
+        let artifact = loaded_manifest
+            .physical_artifact(&dispatch.physical_artifact_id)
+            .ok_or_else(|| {
+                distributed_calibration_error_value(format!(
+                    "distributed calibration artifact identity is missing physical artifact {:?}",
+                    dispatch.physical_artifact_id,
+                ))
+            })?;
+        distributed_calibration_update_artifact_digest(&mut digest, artifact)?;
     }
     Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn distributed_calibration_update_artifact_digest(
+    digest: &mut Sha256,
+    artifact: &VulkanLoadedPhysicalKernelArtifact,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    // IDs, operation labels, and source paths are not executable identity.
+    // Hash only the interface and SPIR-V that the selected physical dispatch
+    // will execute, in dispatch order.
+    let interface = serde_json::to_vec(&(
+        artifact.artifact.entry_point.as_str(),
+        artifact.artifact.local_size_x,
+        artifact.artifact.workgroup_count_x,
+        &artifact.artifact.descriptor_signature,
+        &artifact.artifact.push_constants,
+        artifact.artifact.stream_control_binding,
+    ))
+    .map_err(|error| {
+        distributed_calibration_error_value(format!(
+            "failed to encode distributed calibration artifact interface: {error}",
+        ))
+    })?;
+    digest.update((interface.len() as u64).to_le_bytes());
+    digest.update(interface);
+    digest.update((artifact.words.len() as u64).to_le_bytes());
+    for word in &artifact.words {
+        digest.update(word.to_le_bytes());
+    }
+    Ok(())
 }
 
 fn distributed_calibration_execution_graph_digest(
@@ -1390,7 +1384,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             })?;
         let tick_plan = distributed_calibration_dispatch_tick_plan(&mounted_bound);
         let artifact_digest =
-            distributed_calibration_artifact_digest(&loaded_manifest, &targeted.slice)?;
+            distributed_calibration_artifact_digest(&loaded_manifest, &distributed_execution_plan)?;
         let execution_graph_digest =
             distributed_calibration_execution_graph_digest(target, &tick_plan);
         let execution_plan =
@@ -2401,6 +2395,55 @@ mod runtime_distributed_placement_calibration_strategy_tests {
 
         assert_eq!(first, relabeled);
         assert_ne!(first, different_topology);
+    }
+
+    fn artifact_digest(artifact: &VulkanLoadedPhysicalKernelArtifact) -> String {
+        let mut digest = Sha256::new();
+        distributed_calibration_update_artifact_digest(&mut digest, artifact).unwrap();
+        format!("sha256:{:x}", digest.finalize())
+    }
+
+    fn loaded_artifact(
+        artifact_id: &str,
+        op: &str,
+        path: &str,
+        words: Vec<u32>,
+    ) -> VulkanLoadedPhysicalKernelArtifact {
+        VulkanLoadedPhysicalKernelArtifact {
+            artifact: VulkanPhysicalKernelArtifact {
+                artifact_id: artifact_id.to_string(),
+                op: op.to_string(),
+                path: path.to_string(),
+                entry_point: "main".to_string(),
+                local_size_x: 256,
+                workgroup_count_x: 8,
+                descriptor_signature: Vec::new(),
+                push_constants: Vec::new(),
+                stream_control_binding: None,
+            },
+            resolved_path: PathBuf::from(path),
+            words,
+        }
+    }
+
+    #[test]
+    fn artifact_identity_uses_executable_bytes_and_interface_not_semantic_labels() {
+        let first = loaded_artifact("block.0.down", "down", "block.0/down.spv", vec![1, 2, 3]);
+        let relabeled = loaded_artifact(
+            "block.19.projection",
+            "semantic-projection-label",
+            "another/path.spv",
+            vec![1, 2, 3],
+        );
+        let different_binary = loaded_artifact(
+            "block.19.projection",
+            "semantic-projection-label",
+            "another/path.spv",
+            vec![1, 2, 4],
+        );
+
+        assert_eq!(artifact_digest(&first), artifact_digest(&relabeled));
+        assert_ne!(artifact_digest(&first), artifact_digest(&different_binary));
     }
 
     #[test]
