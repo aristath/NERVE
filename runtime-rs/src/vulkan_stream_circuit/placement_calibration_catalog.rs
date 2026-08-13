@@ -559,7 +559,10 @@ impl VulkanPlacementCalibrationCatalog {
                         | VulkanPlacementExecutionStrategy::IntraExpertTensorParallel
                         | VulkanPlacementExecutionStrategy::Hybrid
                         | VulkanPlacementExecutionStrategy::HybridRegion
-                ) && observation.execution_case.behavior.compiled_execution_signature
+                ) && observation
+                    .execution_case
+                    .behavior
+                    .compiled_execution_signature
                     == compiled_execution_signature
                     && observation
                         .execution_case
@@ -573,6 +576,31 @@ impl VulkanPlacementCalibrationCatalog {
         behaviors.sort();
         behaviors.dedup();
         behaviors
+    }
+
+    pub fn candidate_activation_batch_widths_for_runtime_phase(
+        &self,
+        runtime_implementation_fingerprint: &str,
+        phase: nerve_execution_contracts::ExecutionPhase,
+    ) -> Vec<usize> {
+        let mut widths = self
+            .observations
+            .iter()
+            .map(|observation| &observation.execution_case.behavior)
+            .chain(
+                self.region_executions
+                    .iter()
+                    .map(|region| &region.execution_case.behavior),
+            )
+            .filter(|behavior| {
+                behavior.runtime_implementation_fingerprint == runtime_implementation_fingerprint
+                    && behavior.phase == phase
+            })
+            .map(|behavior| behavior.shape.activation_batch_width)
+            .collect::<Vec<_>>();
+        widths.sort_unstable();
+        widths.dedup();
+        widths
     }
 
     pub fn directed_boundary_candidates(
@@ -840,8 +868,7 @@ fn validate_observation(
                     .selected_resource_indices_by_partition
                     .iter()
                     .any(|(_, indices)| {
-                        indices.is_empty()
-                            || indices.windows(2).any(|pair| pair[0] >= pair[1])
+                        indices.is_empty() || indices.windows(2).any(|pair| pair[0] >= pair[1])
                     })
                 || shard
                     .selected_resource_fragments_by_partition
@@ -880,7 +907,11 @@ fn shard_selected_resource_partition_ordinals(shard: &VulkanPlacementShardIdenti
         && shard
             .selected_resource_indices_by_partition
             .keys()
-            .all(|ordinal| !shard.selected_resource_fragments_by_partition.contains_key(ordinal))
+            .all(|ordinal| {
+                !shard
+                    .selected_resource_fragments_by_partition
+                    .contains_key(ordinal)
+            })
 }
 
 fn valid_selected_resource_fragments(
@@ -1099,15 +1130,13 @@ mod placement_calibration_catalog_tests {
                     atomic_group_id: "expert-0".to_string(),
                     logical_start: 0,
                     logical_count: 4,
-                    parameters: vec![
-                        VulkanPlacementSelectedResourceParameterFragmentIdentity {
-                            parameter_slot: 0,
-                            resource_id: "weight-0".to_string(),
-                            resource_byte_count: 16,
-                            byte_offset: 0,
-                            byte_count: 8,
-                        },
-                    ],
+                    parameters: vec![VulkanPlacementSelectedResourceParameterFragmentIdentity {
+                        parameter_slot: 0,
+                        resource_id: "weight-0".to_string(),
+                        resource_byte_count: 16,
+                        byte_offset: 0,
+                        byte_count: 8,
+                    }],
                 }],
             )]);
         let mut catalog = catalog_with_reference();
@@ -1600,11 +1629,9 @@ mod placement_calibration_catalog_tests {
         let first = observation(behavior.clone(), "gpu0", "gpu0", 10, 16);
         let mut second = observation(behavior.clone(), "gpu0", "gpu0", 8, 16);
         second.execution_case.contract_ids = vec!["other-contract".to_string()];
-        second.execution_case.implementation_digests =
-            vec![format!("sha256:{}", "e".repeat(64))];
+        second.execution_case.implementation_digests = vec![format!("sha256:{}", "e".repeat(64))];
         second.execution_case.artifact_digest = format!("sha256:{}", "f".repeat(64));
-        second.execution_case.execution_graph_digest =
-            format!("sha256:{}", "1".repeat(64));
+        second.execution_case.execution_graph_digest = format!("sha256:{}", "1".repeat(64));
         let VulkanPlacementOperationGeometry::Dispatch { geometry } =
             &mut second.execution_case.operations[0]
         else {
@@ -1665,6 +1692,41 @@ mod placement_calibration_catalog_tests {
     }
 
     #[test]
+    fn runtime_phase_width_query_is_sorted_deduplicated_and_fingerprint_exact() {
+        let mut width_four = behavior();
+        width_four.phase = nerve_execution_contracts::ExecutionPhase::Prefill;
+        width_four.shape.activation_batch_width = 4;
+        let mut width_eight = width_four.clone();
+        width_eight.compiled_execution_signature = format!("sha256:{}", "e".repeat(64));
+        width_eight.shape.activation_batch_width = 8;
+        let mut stale = width_four.clone();
+        stale.runtime_implementation_fingerprint = "stale-runtime".to_string();
+        stale.shape.activation_batch_width = 16;
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        for candidate in [width_eight, width_four, stale] {
+            catalog
+                .record_reference(VulkanPlacementCanonicalReference {
+                    behavior: candidate.clone(),
+                    output_digest: "output".to_string(),
+                    output_artifact: None,
+                    state_digest: "state".to_string(),
+                })
+                .unwrap();
+            catalog
+                .record_observation(observation(candidate, "gpu0", "gpu0", 10, 16))
+                .unwrap();
+        }
+
+        assert_eq!(
+            catalog.candidate_activation_batch_widths_for_runtime_phase(
+                "runtime",
+                nerve_execution_contracts::ExecutionPhase::Prefill,
+            ),
+            [4, 8],
+        );
+    }
+
+    #[test]
     fn directed_boundary_queries_exclude_other_runtime_implementations() {
         let current = behavior();
         let mut stale = current.clone();
@@ -1679,8 +1741,7 @@ mod placement_calibration_catalog_tests {
                     state_digest: "state".to_string(),
                 })
                 .unwrap();
-            let mut observation =
-                observation(candidate.clone(), "gpu0", "gpu1", 10, 16);
+            let mut observation = observation(candidate.clone(), "gpu0", "gpu1", 10, 16);
             observation.execution_case.strategy =
                 VulkanPlacementExecutionStrategy::DirectedBoundary;
             observation.execution_case.operations =
@@ -1783,12 +1844,13 @@ mod placement_calibration_catalog_tests {
     #[test]
     fn typed_transactions_reject_invalid_reduction_and_unknown_contract() {
         let mut invalid_reduction = observation(behavior(), "gpu0", "gpu0", 10, 16);
-        invalid_reduction.execution_case.operations = vec![VulkanPlacementOperationGeometry::Reduction {
-            contract_id: "contract".to_string(),
-            element_count: 128,
-            element_byte_count: 4,
-            participant_count: 1,
-        }];
+        invalid_reduction.execution_case.operations =
+            vec![VulkanPlacementOperationGeometry::Reduction {
+                contract_id: "contract".to_string(),
+                element_count: 128,
+                element_byte_count: 4,
+                participant_count: 1,
+            }];
         assert!(validate_observation(&invalid_reduction).is_err());
 
         let mut unknown_contract = observation(behavior(), "gpu0", "gpu0", 10, 16);

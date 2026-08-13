@@ -1048,14 +1048,7 @@ fn runtime_hybrid_planner_selects_one_complete_exact_serialized_region() {
 
 #[test]
 fn runtime_hybrid_prefill_discovers_and_lowers_region_only_evidence() {
-    let mut model = fixture_model_runtime_model_with_three_layer_series("gpu0");
-    for execution in &mut model.component_executions {
-        let mut prefill_terminal = execution.kernels.last().unwrap().clone();
-        prefill_terminal.execution_index += 1;
-        prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
-        prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
-        execution.kernels.push(prefill_terminal);
-    }
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let phase = VulkanTargetedComponentExecutionPhase::Prefill {
         activation_batch_width: 4,
     };
@@ -1712,14 +1705,7 @@ fn runtime_hybrid_lowering_preserves_exact_boundary_transport_for_mount() {
 
 #[test]
 fn runtime_hybrid_phase_set_keeps_decode_owners_while_optimizing_prefill() {
-    let mut model = fixture_model_runtime_model_with_three_layer_series("gpu0");
-    for execution in &mut model.component_executions {
-        let mut prefill_terminal = execution.kernels.last().unwrap().clone();
-        prefill_terminal.execution_index += 1;
-        prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
-        prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
-        execution.kernels.push(prefill_terminal);
-    }
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     record_hybrid_phase_candidates(
         &model,
@@ -1792,14 +1778,7 @@ fn runtime_hybrid_phase_set_keeps_decode_owners_while_optimizing_prefill() {
 
 #[test]
 fn runtime_hybrid_try_phase_set_preserves_decode_when_prefill_cannot_keep_its_owners() {
-    let mut model = fixture_model_runtime_model_with_three_layer_series("gpu0");
-    for execution in &mut model.component_executions {
-        let mut prefill_terminal = execution.kernels.last().unwrap().clone();
-        prefill_terminal.execution_index += 1;
-        prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
-        prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
-        execution.kernels.push(prefill_terminal);
-    }
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     record_hybrid_phase_candidates(
         &model,
@@ -1870,14 +1849,7 @@ fn runtime_hybrid_try_phase_set_preserves_decode_when_prefill_cannot_keep_its_ow
 
 #[test]
 fn runtime_hybrid_prefill_keeps_distinct_batch_width_cohorts() {
-    let mut model = fixture_model_runtime_model_with_three_layer_series("gpu0");
-    for execution in &mut model.component_executions {
-        let mut prefill_terminal = execution.kernels.last().unwrap().clone();
-        prefill_terminal.execution_index += 1;
-        prefill_terminal.node_id = format!("{}_prefill", prefill_terminal.node_id);
-        prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
-        execution.kernels.push(prefill_terminal);
-    }
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     for width in [4, 8] {
         record_hybrid_phase_candidates(

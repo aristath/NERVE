@@ -41,7 +41,10 @@ impl VulkanRuntimePlacementCalibrationPolicy {
         &self,
         physical_device_id: &str,
     ) -> Result<usize, VulkanResidentTokenModelPackageError> {
-        if self.maximum_resident_parameter_bytes_by_physical_device.is_empty() {
+        if self
+            .maximum_resident_parameter_bytes_by_physical_device
+            .is_empty()
+        {
             return Ok(self.maximum_total_resident_parameter_bytes);
         }
         self.maximum_resident_parameter_bytes_by_physical_device
@@ -360,8 +363,7 @@ pub fn vulkan_runtime_placement_calibration_target_for_component(
         .components
         .iter()
         .any(|component| {
-            component.component_id == component_id
-                && component.runtime_role.is_signal_processor()
+            component.component_id == component_id && component.runtime_role.is_signal_processor()
         })
     {
         return Err(VulkanRuntimeResidencyPlanError(format!(
@@ -414,14 +416,10 @@ pub fn vulkan_runtime_placement_calibration_targets_for_phase(
                         "runtime placement calibration found no execution for signal processor {component_id:?}",
                     ))
                 })?;
-            if !execution
-                .kernels
-                .iter()
-                .any(|kernel| kernel.execution_domain.supports_prefill())
-            {
+            if !vulkan_runtime_placement_execution_supports_phase(execution, phase) {
                 // Prefill is an end-to-end transaction. A width unsupported by
                 // even one signal processor cannot be represented by a partial
-                // calibration set and remains on the normal scalar path.
+                // calibration set.
                 return Ok(Vec::new());
             }
         }
@@ -430,10 +428,7 @@ pub fn vulkan_runtime_placement_calibration_targets_for_phase(
             &component_id,
             phase,
         )?;
-        if let Some(target_index) = signature_target_indices
-            .get(&target.signature_id)
-            .copied()
-        {
+        if let Some(target_index) = signature_target_indices.get(&target.signature_id).copied() {
             targets[target_index].component_ids.push(component_id);
             continue;
         }
@@ -448,18 +443,16 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
     execution: &VulkanResidentComponentExecutionSpec,
     phase: VulkanTargetedComponentExecutionPhase,
 ) -> Result<VulkanRuntimePlacementCalibrationTarget, VulkanRuntimeResidencyPlanError> {
-    let mut kernels = execution
-        .kernels
-        .iter()
-        .filter(|kernel| match phase {
-            VulkanTargetedComponentExecutionPhase::Decode => {
-                kernel.execution_domain.supports_decode()
-            }
-            VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
-                kernel.execution_domain.supports_prefill()
-            }
-        })
-        .collect::<Vec<_>>();
+    if !vulkan_runtime_placement_execution_supports_phase(execution, phase) {
+        let phase_name = match phase {
+            VulkanTargetedComponentExecutionPhase::Decode => "decode",
+            VulkanTargetedComponentExecutionPhase::Prefill { .. } => "causal prefill",
+        };
+        return Err(VulkanRuntimeResidencyPlanError(format!(
+            "runtime placement calibration found no complete {phase_name} transaction for signal processor {component_id:?}",
+        )));
+    }
+    let mut kernels = execution.kernels.iter().collect::<Vec<_>>();
     kernels.sort_by_key(|kernel| kernel.execution_index);
     let phase_name = match phase {
         VulkanTargetedComponentExecutionPhase::Decode => "decode",
@@ -471,12 +464,22 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
         ))
     })?;
     let signature_payload = serde_json::to_vec(&(
-        phase_name,
+        phase,
         execution.operator_type.as_str(),
         execution.implementation.as_str(),
         kernels
             .iter()
             .map(|kernel| {
+                let selected_batch_implementation = match phase {
+                    VulkanTargetedComponentExecutionPhase::Decode => None,
+                    VulkanTargetedComponentExecutionPhase::Prefill {
+                        activation_batch_width,
+                    } => vulkan_runtime_placement_prefill_implementation(
+                        kernel,
+                        activation_batch_width,
+                    )
+                    .expect("phase support was validated before signature construction"),
+                };
                 let mut physical_contracts = kernel
                     .physical_execution_contracts
                     .iter()
@@ -497,7 +500,7 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
                     kernel.local_size_x,
                     kernel.workgroup_count_x,
                     &kernel.batch_mode,
-                    &kernel.batch_implementations,
+                    selected_batch_implementation,
                     &kernel.resource_representation_dispatch,
                     physical_contracts,
                 )
@@ -517,6 +520,63 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
         implementation: execution.implementation.clone(),
         planned_resident_parameter_bytes: 0,
     })
+}
+
+fn vulkan_runtime_placement_execution_supports_phase(
+    execution: &VulkanResidentComponentExecutionSpec,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> bool {
+    !execution.kernels.is_empty()
+        && execution.kernels.iter().all(|kernel| match phase {
+            VulkanTargetedComponentExecutionPhase::Decode => {
+                kernel.execution_domain.supports_decode()
+            }
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width,
+            } => vulkan_runtime_placement_prefill_implementation(kernel, activation_batch_width)
+                .is_ok(),
+        })
+}
+
+fn vulkan_runtime_placement_prefill_implementation(
+    kernel: &VulkanResidentComponentKernelSpec,
+    activation_batch_width: usize,
+) -> Result<Option<&VulkanResidentComponentBatchImplementationSpec>, ()> {
+    if activation_batch_width == 0 {
+        return Err(());
+    }
+    if kernel.batch_mode == VulkanResidentComponentKernelBatchMode::SerialLanes {
+        return Ok(None);
+    }
+    let selected = kernel
+        .batch_implementations
+        .iter()
+        .filter(|implementation| {
+            implementation.execution_domain.supports_prefill()
+                && implementation.causal_sequence_compatible
+        })
+        .min_by_key(|implementation| {
+            let lane_tile_width = implementation.lane_tile_width as usize;
+            let priority = usize::MAX - implementation.selection_priority as usize;
+            if kernel.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan {
+                (0usize, priority, usize::MAX - lane_tile_width)
+            } else if lane_tile_width >= activation_batch_width {
+                (1usize, priority, lane_tile_width)
+            } else {
+                (2usize, usize::MAX - lane_tile_width, priority)
+            }
+        });
+    let Some(selected) = selected else {
+        // The component batch runner executes the scalar primary dispatch once
+        // per causal lane when no compatible batch artifact is available.
+        return Ok(None);
+    };
+    if kernel.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan
+        && activation_batch_width > selected.lane_tile_width as usize
+    {
+        return Err(());
+    }
+    Ok(Some(selected))
 }
 
 /// Measures every distinct compiled decode transaction on one physical device
@@ -618,7 +678,10 @@ fn compatible_runtime_placement_calibration_target_indices(
 mod runtime_placement_compatibility_tests {
     use super::*;
 
-    fn target(signature_id: &str, component_ids: &[&str]) -> VulkanRuntimePlacementCalibrationTarget {
+    fn target(
+        signature_id: &str,
+        component_ids: &[&str],
+    ) -> VulkanRuntimePlacementCalibrationTarget {
         VulkanRuntimePlacementCalibrationTarget {
             signature_id: signature_id.to_string(),
             component_id: component_ids[0].to_string(),
@@ -661,7 +724,7 @@ mod runtime_placement_compatibility_tests {
 
     #[test]
     fn calibration_compatibility_rejects_source_ids_at_the_instance_boundary() {
-        let targets = [target("shared", &["layer_00_repeat"] )];
+        let targets = [target("shared", &["layer_00_repeat"])];
 
         let error = compatible_runtime_placement_calibration_target_indices(
             &targets,
@@ -750,12 +813,8 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
             compatible_runtime_placement_calibration_target_indices(&suite.targets, compatible)
         },
     )?;
-    let (plans, shared_prepare_ns, slice_plan_prepare_ns) = suite.plans_for_device(
-        &device,
-        capability_class,
-        manifest_dir,
-        &target_indices,
-    )?;
+    let (plans, shared_prepare_ns, slice_plan_prepare_ns) =
+        suite.plans_for_device(&device, capability_class, manifest_dir, &target_indices)?;
     let targets = target_indices
         .iter()
         .map(|index| suite.targets[*index].clone())
@@ -773,9 +832,7 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
             let physical_parameter_capacity = policy
                 .parameter_capacity_for_physical_device(&physical_device_id)?
                 .min(policy.maximum_total_resident_parameter_bytes);
-            if target.planned_resident_parameter_bytes
-                > physical_parameter_capacity
-            {
+            if target.planned_resident_parameter_bytes > physical_parameter_capacity {
                 continue;
             }
             let case_started = Instant::now();
@@ -809,22 +866,20 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
             let warmup_useful_units = policy
                 .warmup_units
                 .checked_mul(activation_batch_width)
-                .ok_or_else(|| VulkanResidentTokenModelPackageError::new(
-                    "runtime placement calibration warmup work overflowed",
-                ))?;
+                .ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(
+                        "runtime placement calibration warmup work overflowed",
+                    )
+                })?;
             let measured_useful_units = policy
                 .measured_units
                 .checked_mul(activation_batch_width)
-                .ok_or_else(|| VulkanResidentTokenModelPackageError::new(
+                .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(
                     "runtime placement calibration measured work overflowed",
-                ))?;
-            let warmup = session.execute(
-                &device,
-                warmup_useful_units,
-                1,
-                0,
-                remaining,
-            )?;
+                )
+            })?;
+            let warmup = session.execute(&device, warmup_useful_units, 1, 0, remaining)?;
             let remaining = policy
                 .maximum_duration
                 .checked_sub(case_started.elapsed())
@@ -863,9 +918,10 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
                 session_mount_ns,
                 warmup_execution_ns: warmup.execution_ns,
                 measured_execution_ns: measured.execution_ns,
-                measured_ns_per_activation: measured.execution_ns.saturating_add(
-                    (measured_useful_units / 2) as u64,
-                ) / measured_useful_units as u64,
+                measured_ns_per_activation: measured
+                    .execution_ns
+                    .saturating_add((measured_useful_units / 2) as u64)
+                    / measured_useful_units as u64,
                 measured_windows: measured.throughput_windows,
                 physical_dispatch_count: measured.physical_dispatch_count,
                 output_digest: measured.output_digest,

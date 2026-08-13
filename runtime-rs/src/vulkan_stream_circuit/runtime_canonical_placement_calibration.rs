@@ -337,23 +337,38 @@ fn canonical_component_execution_contracts(
     }
     dispatches
         .into_iter()
-        .map(|dispatch| {
-            let (contract_phase, execution_shape, artifact_paths) = match phase {
-                VulkanTargetedComponentExecutionPhase::Decode => (
+        .map(|dispatch| match phase {
+            VulkanTargetedComponentExecutionPhase::Decode => {
+                canonical_single_device_contract_for_artifacts(
+                    &dispatch.physical_execution_contracts,
+                    &dispatch.op,
+                    &dispatch.node_id,
                     nerve_execution_contracts::ExecutionPhase::Decode,
                     nerve_execution_contracts::ExecutionShape::SingleLane,
-                    vec![dispatch.artifact_path.as_str()],
-                ),
-                VulkanTargetedComponentExecutionPhase::Prefill {
+                    &[dispatch.artifact_path.as_str()],
+                )
+                .map(|contract| vec![contract])
+            }
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width,
+            } => {
+                let selected = select_component_batch_kernel_artifact(
+                    &slice_plan.batch_kernels,
+                    &dispatch.component_id,
+                    &dispatch.node_id,
+                    VulkanComponentBatchExecutionMode::CausalSequence,
                     activation_batch_width,
-                } => {
-                    let artifact = select_component_batch_kernel_artifact(
-                        &slice_plan.batch_kernels,
-                        &dispatch.component_id,
-                        &dispatch.node_id,
-                        VulkanComponentBatchExecutionMode::CausalSequence,
-                        activation_batch_width,
-                    )
+                );
+                if selected.is_some_and(|artifact| {
+                    artifact.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan
+                        && activation_batch_width > artifact.lane_tile_width
+                }) {
+                    return canonical_calibration_error(format!(
+                        "canonical prefill dispatch {}.{} exceeds its causal scan tile width",
+                        dispatch.component_id, dispatch.node_id,
+                    ));
+                }
+                let executable_batch = selected
                     .filter(|artifact| {
                         component_batch_stages_replace_push_constants(
                             &artifact.stages,
@@ -362,34 +377,61 @@ fn canonical_component_execution_contracts(
                     })
                     .filter(|artifact| {
                         targeted_prefill_batch_mode_is_supported(artifact.batch_mode)
-                    })
-                    .ok_or_else(|| {
-                        canonical_calibration_error_value(format!(
-                            "canonical prefill dispatch {}.{} has no compiler-declared executable batch artifact",
-                            dispatch.component_id, dispatch.node_id,
-                        ))
-                    })?;
-                    (
+                    });
+                if let Some(artifact) = executable_batch {
+                    let artifact_paths = artifact
+                        .stages
+                        .iter()
+                        .map(|stage| stage.shader_path.as_str())
+                        .collect::<Vec<_>>();
+                    return canonical_single_device_contract_for_artifacts(
+                        &dispatch.physical_execution_contracts,
+                        &dispatch.op,
+                        &dispatch.node_id,
                         nerve_execution_contracts::ExecutionPhase::Prefill,
                         nerve_execution_contracts::ExecutionShape::MultiLane,
-                        artifact
-                            .stages
-                            .iter()
-                            .map(|stage| stage.shader_path.as_str())
-                            .collect(),
+                        &artifact_paths,
                     )
+                    .map(|contract| vec![contract]);
                 }
-            };
-            canonical_single_device_contract_for_artifacts(
-                &dispatch.physical_execution_contracts,
-                &dispatch.op,
-                &dispatch.node_id,
-                contract_phase,
-                execution_shape,
-                &artifact_paths,
-            )
+
+                // This is the exact component-batch fallback: execute the
+                // scalar primary dispatch once for every causal lane.
+                canonical_scalar_lane_prefill_contracts(
+                    &dispatch.physical_execution_contracts,
+                    &dispatch.op,
+                    &dispatch.node_id,
+                    dispatch.artifact_path.as_str(),
+                    activation_batch_width,
+                )
+            }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(|contracts| contracts.into_iter().flatten().collect())
+}
+
+fn canonical_scalar_lane_prefill_contracts(
+    contracts: &[nerve_execution_contracts::PhysicalExecutionContract],
+    operation_family: &str,
+    node_id: &str,
+    artifact_path: &str,
+    activation_batch_width: usize,
+) -> Result<Vec<nerve_execution_contracts::PhysicalExecutionContract>, VulkanResidentTokenModelPackageError>
+{
+    if activation_batch_width == 0 {
+        return canonical_calibration_error(
+            "canonical scalar-lane prefill requires a positive activation batch width",
+        );
+    }
+    canonical_single_device_contract_for_artifacts(
+        contracts,
+        operation_family,
+        node_id,
+        nerve_execution_contracts::ExecutionPhase::Decode,
+        nerve_execution_contracts::ExecutionShape::SingleLane,
+        &[artifact_path],
+    )
+    .map(|contract| vec![contract; activation_batch_width])
 }
 
 fn canonical_single_device_contract_for_artifacts(
@@ -674,6 +716,34 @@ mod runtime_canonical_placement_calibration_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn canonical_scalar_lane_prefill_repeats_the_exact_primary_contract() {
+        let model = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let kernel = &model.component_executions[0].kernels[0];
+
+        let contracts = canonical_scalar_lane_prefill_contracts(
+            &kernel.physical_execution_contracts,
+            &kernel.op,
+            &kernel.node_id,
+            &kernel.shader_path,
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(contracts.len(), 4);
+        assert!(contracts.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(canonical_scalar_lane_prefill_contracts(
+            &kernel.physical_execution_contracts,
+            &kernel.op,
+            &kernel.node_id,
+            &kernel.shader_path,
+            0,
+        )
+        .is_err());
     }
 
     #[test]

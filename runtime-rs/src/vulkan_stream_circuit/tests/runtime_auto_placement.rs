@@ -326,15 +326,10 @@ fn runtime_placement_calibration_signature_canonicalizes_contract_order() {
 
 #[test]
 fn runtime_placement_calibration_resolves_the_requested_component_phase_exactly() {
-    let mut runtime_model = fixture_model_runtime_model();
-    let execution = runtime_model.component_executions.first_mut().unwrap();
+    let runtime_model = fixture_model_runtime_model();
+    let execution = runtime_model.component_executions.first().unwrap();
     let component_id = execution.component_id.clone();
     let decode_terminal = execution.kernels.last().unwrap().node_id.clone();
-    let mut prefill_terminal = execution.kernels.last().unwrap().clone();
-    prefill_terminal.execution_index += 1;
-    prefill_terminal.node_id = "fixture_prefill_terminal".to_string();
-    prefill_terminal.execution_domain = VulkanResidentComponentKernelExecutionDomain::Prefill;
-    execution.kernels.push(prefill_terminal);
 
     let decode = vulkan_runtime_placement_calibration_target_for_component(
         &runtime_model,
@@ -355,17 +350,118 @@ fn runtime_placement_calibration_resolves_the_requested_component_phase_exactly(
     assert_eq!(decode.component_ids, [component_id.clone()]);
     assert_eq!(decode.terminal_node_id, decode_terminal);
     assert_eq!(prefill.component_id, component_id);
-    assert_eq!(prefill.terminal_node_id, "fixture_prefill_terminal");
+    assert_eq!(prefill.terminal_node_id, decode_terminal);
     assert_ne!(decode.signature_id, prefill.signature_id);
 }
 
 #[test]
 fn incomplete_prefill_transaction_is_not_published_as_calibration_evidence() {
+    let mut runtime_model = fixture_model_runtime_model();
+    let causal_scan = runtime_model.component_executions[0]
+        .kernels
+        .iter_mut()
+        .find(|kernel| kernel.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan)
+        .unwrap();
+    causal_scan
+        .batch_implementations
+        .iter_mut()
+        .for_each(|implementation| implementation.lane_tile_width = 1);
+    let targets = vulkan_runtime_placement_calibration_targets_for_phase(
+        &runtime_model,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 64,
+        },
+    )
+    .unwrap();
+
+    assert!(targets.is_empty());
+}
+
+#[test]
+fn complete_compiler_declared_causal_prefill_is_published() {
     let runtime_model = fixture_model_runtime_model();
     let targets = vulkan_runtime_placement_calibration_targets_for_phase(
         &runtime_model,
         VulkanTargetedComponentExecutionPhase::Prefill {
             activation_batch_width: 64,
+        },
+    )
+    .unwrap();
+
+    assert!(!targets.is_empty());
+    let expected_occurrences = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .count();
+    assert_eq!(
+        targets
+            .iter()
+            .map(|target| target.component_ids.len())
+            .sum::<usize>(),
+        expected_occurrences,
+    );
+    assert_eq!(
+        targets[0].terminal_node_id,
+        runtime_model.component_executions[0]
+            .kernels
+            .last()
+            .unwrap()
+            .node_id,
+    );
+}
+
+#[test]
+fn scalar_lane_prefill_fallback_is_published_as_a_complete_transaction() {
+    let mut runtime_model = fixture_model_runtime_model();
+    for kernel in &mut runtime_model.component_executions[0].kernels {
+        kernel.batch_mode = VulkanResidentComponentKernelBatchMode::SerialLanes;
+        kernel.batch_implementations.clear();
+    }
+
+    let targets = vulkan_runtime_placement_calibration_targets_for_phase(
+        &runtime_model,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 4,
+        },
+    )
+    .unwrap();
+
+    assert!(!targets.is_empty());
+}
+
+#[test]
+fn prefill_calibration_identity_tracks_the_selected_batch_width() {
+    let runtime_model = fixture_model_runtime_model();
+    let component_id = runtime_model.component_executions[0].component_id.clone();
+    let narrow = vulkan_runtime_placement_calibration_target_for_component(
+        &runtime_model,
+        &component_id,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 4,
+        },
+    )
+    .unwrap();
+    let wide = vulkan_runtime_placement_calibration_target_for_component(
+        &runtime_model,
+        &component_id,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 64,
+        },
+    )
+    .unwrap();
+
+    assert_ne!(narrow.signature_id, wide.signature_id);
+}
+
+#[test]
+fn prefill_wider_than_a_causal_scan_tile_is_not_published() {
+    let runtime_model = fixture_model_runtime_model();
+    let targets = vulkan_runtime_placement_calibration_targets_for_phase(
+        &runtime_model,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 65,
         },
     )
     .unwrap();
@@ -464,11 +560,9 @@ fn cost_aware_contiguous_placement_jointly_selects_device_order_and_boundary() {
 
 #[test]
 fn cost_aware_placement_uses_a_sparse_component_compatibility_matrix() {
-    let components = ["a", "b", "c", "d"].map(|component_id| {
-        CapacityPackedPlacementComponent {
-            component_id: component_id.to_string(),
-            resident_weight_bytes: 1,
-        }
+    let components = ["a", "b", "c", "d"].map(|component_id| CapacityPackedPlacementComponent {
+        component_id: component_id.to_string(),
+        resident_weight_bytes: 1,
     });
     let candidates = [
         VulkanRuntimePlacementCandidate {
@@ -507,11 +601,9 @@ fn cost_aware_placement_uses_a_sparse_component_compatibility_matrix() {
 
 #[test]
 fn cost_aware_placement_rejects_noncontiguous_partial_device_coverage() {
-    let components = ["a", "b", "c", "d"].map(|component_id| {
-        CapacityPackedPlacementComponent {
-            component_id: component_id.to_string(),
-            resident_weight_bytes: 1,
-        }
+    let components = ["a", "b", "c", "d"].map(|component_id| CapacityPackedPlacementComponent {
+        component_id: component_id.to_string(),
+        resident_weight_bytes: 1,
     });
     let candidates = [
         VulkanRuntimePlacementCandidate {
@@ -539,7 +631,11 @@ fn cost_aware_placement_rejects_noncontiguous_partial_device_coverage() {
     )
     .unwrap_err();
 
-    assert!(error.to_string().contains("no cost-aware contiguous placement"));
+    assert!(
+        error
+            .to_string()
+            .contains("no cost-aware contiguous placement")
+    );
 }
 
 #[test]
@@ -569,11 +665,10 @@ fn normalized_device_cost_compares_partial_targets_by_mean_component_cost() {
 
 #[test]
 fn measured_candidate_subsets_include_nonprefix_combinations_once() {
-    let candidates = ["a", "b", "c"]
-        .map(|device_id| VulkanRuntimePlacementCandidate {
-            device_id: device_id.to_string(),
-            safe_capacity_bytes: 1,
-        });
+    let candidates = ["a", "b", "c"].map(|device_id| VulkanRuntimePlacementCandidate {
+        device_id: device_id.to_string(),
+        safe_capacity_bytes: 1,
+    });
 
     let subsets = runtime_placement_candidate_subsets(&candidates, 2)
         .unwrap()
@@ -605,7 +700,11 @@ fn runtime_placement_discovers_exact_graph_boundary_payloads() {
     let byte_counts = vulkan_runtime_placement_transfer_byte_counts(&runtime_model).unwrap();
 
     assert_eq!(boundaries.len(), 2);
-    assert!(boundaries.iter().all(|boundary| !boundary.transfers.is_empty()));
+    assert!(
+        boundaries
+            .iter()
+            .all(|boundary| !boundary.transfers.is_empty())
+    );
     assert_eq!(
         byte_counts,
         boundaries
@@ -657,11 +756,9 @@ fn automatic_cost_placement_rejects_a_non_chain_graph_without_flattening_its_wir
 
 #[test]
 fn cost_aware_placement_uses_payload_specific_directional_transfer_costs() {
-    let components = ["a", "b", "c"].map(|component_id| {
-        CapacityPackedPlacementComponent {
-            component_id: component_id.to_string(),
-            resident_weight_bytes: 1,
-        }
+    let components = ["a", "b", "c"].map(|component_id| CapacityPackedPlacementComponent {
+        component_id: component_id.to_string(),
+        resident_weight_bytes: 1,
     });
     let candidates = [
         VulkanRuntimePlacementCandidate {
@@ -732,10 +829,14 @@ fn cost_aware_placement_rejects_an_unmeasured_boundary_instead_of_assuming_zero(
         }],
     };
 
-    let error = runtime_placement_boundary_cost_ns(&boundary, "source", "target", &costs)
-        .unwrap_err();
+    let error =
+        runtime_placement_boundary_cost_ns(&boundary, "source", "target", &costs).unwrap_err();
 
-    assert!(error.to_string().contains("no measured 32-byte boundary cost"));
+    assert!(
+        error
+            .to_string()
+            .contains("no measured 32-byte boundary cost")
+    );
 }
 
 #[test]
@@ -866,16 +967,8 @@ fn demand_paged_subset_expands_while_another_device_can_reduce_paging() {
         },
     ];
 
-    assert!(demand_paged_subset_has_addressable_shortfall(
-        &balance,
-        &candidates[..1],
-    )
-    .unwrap());
-    assert!(!demand_paged_subset_has_addressable_shortfall(
-        &balance,
-        &candidates,
-    )
-    .unwrap());
+    assert!(demand_paged_subset_has_addressable_shortfall(&balance, &candidates[..1],).unwrap());
+    assert!(!demand_paged_subset_has_addressable_shortfall(&balance, &candidates,).unwrap());
 }
 
 #[test]
@@ -896,16 +989,8 @@ fn demand_paged_subset_accounts_for_endpoint_auxiliary_residency() {
         },
     ];
 
-    assert!(demand_paged_subset_has_addressable_shortfall(
-        &balance,
-        &candidates[..1],
-    )
-    .unwrap());
-    assert!(!demand_paged_subset_has_addressable_shortfall(
-        &balance,
-        &candidates,
-    )
-    .unwrap());
+    assert!(demand_paged_subset_has_addressable_shortfall(&balance, &candidates[..1],).unwrap());
+    assert!(!demand_paged_subset_has_addressable_shortfall(&balance, &candidates,).unwrap());
 }
 
 #[test]
@@ -920,11 +1005,7 @@ fn demand_paged_subset_reports_shortfall_even_when_no_larger_set_exists() {
         safe_capacity_bytes: 100,
     };
 
-    assert!(demand_paged_subset_has_addressable_shortfall(
-        &balance,
-        &[candidate],
-    )
-    .unwrap());
+    assert!(demand_paged_subset_has_addressable_shortfall(&balance, &[candidate],).unwrap());
 }
 
 #[test]
@@ -1169,9 +1250,7 @@ fn placement_cost_model_accepts_exact_sparse_device_coverage() {
     assert!(all_component_ids.len() >= 2);
     let midpoint = all_component_ids.len() / 2;
     let mut costs = VulkanRuntimePlacementCostModel::default();
-    costs
-        .record_default_graph_compatibility("first")
-        .unwrap();
+    costs.record_default_graph_compatibility("first").unwrap();
     for (device_id, selected_ids) in [
         ("first", &all_component_ids[..midpoint]),
         ("second", &all_component_ids[midpoint..]),
@@ -1236,7 +1315,11 @@ fn placement_cost_model_rejects_a_component_uncovered_by_every_device() {
         .unwrap_err();
 
     assert!(error.to_string().contains("cannot execute components"));
-    assert!(error.to_string().contains(all_component_ids.last().unwrap()));
+    assert!(
+        error
+            .to_string()
+            .contains(all_component_ids.last().unwrap())
+    );
 }
 
 #[test]
@@ -1391,15 +1474,10 @@ fn measured_auto_placement_can_select_a_nonprefix_single_device() {
     assert!(component_ids.len() >= 3);
     let mut costs = VulkanRuntimePlacementCostModel::default();
     for device_id in ["ranked-first-partial", "complete"] {
-        costs
-            .record_default_graph_compatibility(device_id)
-            .unwrap();
+        costs.record_default_graph_compatibility(device_id).unwrap();
     }
     for (device_id, selected_component_ids) in [
-        (
-            "ranked-first-partial",
-            component_ids[..1].to_vec(),
-        ),
+        ("ranked-first-partial", component_ids[..1].to_vec()),
         (
             "ranked-second-partial",
             component_ids[component_ids.len() - 1..].to_vec(),
@@ -1527,7 +1605,12 @@ fn representation_selection_converges_across_heterogeneous_placement() {
         placed.exact_runtime_model.placement_device_ids(),
         ["primary", "spill"]
     );
-    assert!(placed.exact_runtime_model.implementation_selection.is_none());
+    assert!(
+        placed
+            .exact_runtime_model
+            .implementation_selection
+            .is_none()
+    );
     let selection = placed.runtime_model.implementation_selection.unwrap();
     assert!(selection.selected.is_empty());
     assert!(!selection.exact_instance_ids.is_empty());
@@ -1811,12 +1894,9 @@ fn owned_runtime_placement_matches_the_borrowed_transformation() {
         ("layer_00".to_string(), "physical-b".to_string()),
         ("output_transducer".to_string(), "physical-c".to_string()),
     ]);
-    let borrowed = vulkan_runtime_model_with_component_placement(
-        &runtime_model,
-        "physical-a",
-        &placement,
-    )
-    .unwrap();
+    let borrowed =
+        vulkan_runtime_model_with_component_placement(&runtime_model, "physical-a", &placement)
+            .unwrap();
     let owned = vulkan_runtime_model_with_component_placement_owned(
         runtime_model,
         "physical-a",
