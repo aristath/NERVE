@@ -141,6 +141,23 @@ the local placement calibration, and the mounted graph.
   composes disjoint region overlays at their own source anchors. Hardware-
   neutral provider, mount, malformed-input, cache-identity, and composition
   tests pass; live performance remains unmeasured under the GPU quarantine.
+- The attention audit established that the current indexed-attention kernel
+  already performs online softmax and value accumulation in one dispatch; it
+  does not materialize a full F32 score plane. The next exact alternative is
+  therefore query-head grouping, not another score/value split. A new
+  structure-discovered provider finds all 43 DeepSeek attention regions and
+  emits head-group 2, 4, and 8 alternatives for each of the three distinct
+  history/physical classes: nine candidate families in total. Each workgroup
+  reuses one KV/latent-state read across its query-head group while preserving
+  the source subgroup reduction and token-accumulation order independently for
+  every head. The alternatives retain the original parameters and transient
+  state, cover decode and causal multi-lane prefill, replace only their exact
+  source-anchored component region, and remain unselected until measured. A
+  real two-layer DeepSeek head-group-4 candidate has been constructed from the
+  current package and passed deterministic SPIR-V reconstruction plus both
+  independent overlay and per-head arithmetic proofs. Sequential shader,
+  provider, mounting, target, source-artifact, and composition regressions
+  pass. Live equivalence and performance remain part of the authorized gate.
 - A mounted derived representation now reserves a complete hot selected-expert
   wave per affected selector in addition to its immutable compact source. The
   contract accounts transformed and unchanged atomic-group members, source and
@@ -769,10 +786,22 @@ For every numbered item below:
   TP without changing Sinkhorn, reduction, or residual ordering.
 - Treat attention as its own partition family. Define legal query/head,
   indexer, latent-state, KV/state, output-projection, and reduction contracts
-  rather than reusing the FFN partition rules.
-- Improve attention read and score as one complete transaction. Do not
-  materialize a full F32 score plane or split score and value into independently
-  scheduled kernels when the complete stream loses.
+  rather than reusing the FFN partition rules. The query-head grouping
+  subfamily is complete hardware-neutrally: capability, geometry, history
+  class, exact source region, shader, and per-head reduction order are explicit
+  contracts. On the live gate, compare its head-group 2, 4, and 8 alternatives
+  against the unmodified source independently for each physical class; retain
+  the source wherever grouping does not win. Latent/indexer partitioning,
+  output-projection ownership, and any cross-device attention island still
+  require their own exact contracts before they can be selected.
+- Improve attention read and score as one complete transaction. The compiled
+  baseline already keeps online softmax and value accumulation in one dispatch
+  without a full F32 score plane, and the grouped alternatives preserve that
+  transaction. On the authorized live gate, measure whether their shared
+  latent reads reduce the complete attention phase and product-token latency;
+  reject any candidate that only improves an isolated shader. Do not split
+  score and value into independently scheduled kernels when the complete
+  stream loses.
 - Reduce state-commit cost by publishing only authoritative causal changes
   through the persistent transaction. Do not reintroduce full-state baseline
   copies, clean replay, or hot-path completion polling.

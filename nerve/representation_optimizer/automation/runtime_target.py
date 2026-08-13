@@ -42,6 +42,9 @@ from nerve.representation_optimizer.providers.codebook import (
     ExactCodebookProofVerifier,
     ExactEmbeddedParameterProgramProofVerifier,
 )
+from nerve.representation_optimizer.providers.attention_head_grouping import (
+    ExactAttentionHeadGroupingProofVerifier,
+)
 from nerve.representation_optimizer.providers.resident_expansion import (
     ExactResidentExpansionProofVerifier,
 )
@@ -902,6 +905,10 @@ def _build_target(
                     candidate_workspace_root=candidate_workspace,
                 ),
                 ExactHyperNormFusionProofVerifier(
+                    source_artifacts=source_artifacts,
+                    candidate_workspace_root=candidate_workspace,
+                ),
+                ExactAttentionHeadGroupingProofVerifier(
                     source_artifacts=source_artifacts,
                     candidate_workspace_root=candidate_workspace,
                 ),
