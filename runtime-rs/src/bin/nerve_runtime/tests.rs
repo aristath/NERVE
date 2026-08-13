@@ -13,6 +13,7 @@ mod tests {
     use nerve_runtime::{
         ResourceResidencyPolicy, RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
         RuntimeRecoverableChatTurnError, VulkanComputeDeviceInfo,
+        VulkanResidentDistributedExecutionPhaseCounters,
         VulkanResidentHfTokenizerTextCodec, VulkanResidentTokenTextCodec,
         VulkanResidentTokenTextCodecError, assistant_content_token_ids, chat_transcript_codec,
         model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
@@ -27,7 +28,7 @@ mod tests {
         rank_runtime_auto_placement_candidates_across_capability_classes,
         resolve_runtime_context_size, resolve_runtime_vulkan_physical_device_ref_in,
         resolve_speculative_draft_tokens, runtime_chat_repl_control, runtime_critical_path_lines,
-        runtime_device_bindings_report,
+        runtime_device_bindings_report, runtime_distributed_execution_phase_counter_lines,
         runtime_physical_device_bindings_in, runtime_uses_explicit_placement, submit_chat_turn,
         usage, validate_explicit_logical_device_bindings,
     };
@@ -1324,5 +1325,32 @@ mod tests {
                 .any(|line| line.contains("phase=queue_submission"))
         );
         assert!(!lines.iter().any(|line| line.contains("phase=unused")));
+    }
+
+    #[test]
+    fn distributed_execution_output_uses_the_conversation_gate_schema() {
+        let lines = runtime_distributed_execution_phase_counter_lines(
+            "prefill",
+            &VulkanResidentDistributedExecutionPhaseCounters {
+                island_submissions: 11,
+                shard_submissions: 23,
+                tensor_parallel_island_submissions: 2,
+                whole_expert_parallel_island_submissions: 3,
+                intra_expert_tensor_parallel_island_submissions: 5,
+                hybrid_island_submissions: 1,
+            },
+        );
+
+        assert_eq!(
+            lines,
+            vec![
+                "  distributed_prefill_island_submissions=11",
+                "  distributed_prefill_shard_submissions=23",
+                "  distributed_prefill_tensor_parallel_island_submissions=2",
+                "  distributed_prefill_whole_expert_parallel_island_submissions=3",
+                "  distributed_prefill_intra_expert_tensor_parallel_island_submissions=5",
+                "  distributed_prefill_hybrid_island_submissions=1",
+            ]
+        );
     }
 }

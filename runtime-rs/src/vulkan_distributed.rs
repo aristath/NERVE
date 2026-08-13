@@ -1,4 +1,5 @@
 include!("vulkan_distributed/execution_plans.rs");
+include!("vulkan_distributed/physical_execution_observation.rs");
 include!("vulkan_distributed/activation_buffers.rs");
 include!("vulkan_distributed/dispatch_shards.rs");
 include!("vulkan_distributed/parameter_buffers.rs");

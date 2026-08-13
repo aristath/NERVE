@@ -656,6 +656,14 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
         .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         let runners = VulkanDistributedDispatchRunners::create(
             &execution_plan,
+            match target.phase {
+                VulkanTargetedComponentExecutionPhase::Decode => {
+                    VulkanResidentDistributedExecutionPhase::Decode
+                }
+                VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+                    VulkanResidentDistributedExecutionPhase::Prefill
+                }
+            },
             &parameter_buffers,
             &selected_resource_mount.dynamic_buffers,
             &selected_resource_mount.stores,

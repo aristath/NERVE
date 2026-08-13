@@ -1199,6 +1199,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             .then(|| {
                 VulkanDistributedDispatchRunners::create(
                     &distributed_execution_plan,
+                    VulkanResidentDistributedExecutionPhase::Decode,
                     &distributed_parameter_buffers,
                     &selected_resource_mount.dynamic_buffers,
                     &selected_resource_mount.stores,

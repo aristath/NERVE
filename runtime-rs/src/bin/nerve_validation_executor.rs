@@ -1875,63 +1875,7 @@ fn add_counters(
     total: &mut VulkanResidentExecutionCounters,
     value: VulkanResidentExecutionCounters,
 ) {
-    total.resident_sequence_prepare_calls = total
-        .resident_sequence_prepare_calls
-        .saturating_add(value.resident_sequence_prepare_calls);
-    total.resident_sequence_recorded_command_buffers = total
-        .resident_sequence_recorded_command_buffers
-        .saturating_add(value.resident_sequence_recorded_command_buffers);
-    total.resident_sequence_reused_command_buffers = total
-        .resident_sequence_reused_command_buffers
-        .saturating_add(value.resident_sequence_reused_command_buffers);
-    total.resident_sequence_queue_submits = total
-        .resident_sequence_queue_submits
-        .saturating_add(value.resident_sequence_queue_submits);
-    total.resident_sequence_completion_waits = total
-        .resident_sequence_completion_waits
-        .saturating_add(value.resident_sequence_completion_waits);
-    total.resident_queue_batch_submits = total
-        .resident_queue_batch_submits
-        .saturating_add(value.resident_queue_batch_submits);
-    total.resident_queue_batch_commands = total
-        .resident_queue_batch_commands
-        .saturating_add(value.resident_queue_batch_commands);
-    total.resident_copy_queue_submits = total
-        .resident_copy_queue_submits
-        .saturating_add(value.resident_copy_queue_submits);
-    total.resident_copy_waits = total
-        .resident_copy_waits
-        .saturating_add(value.resident_copy_waits);
-    total.execution_quantum_count = total
-        .execution_quantum_count
-        .saturating_add(value.execution_quantum_count);
-    total.execution_quantum_region_count = total
-        .execution_quantum_region_count
-        .saturating_add(value.execution_quantum_region_count);
-    total.execution_quantum_forced_yield_count = total
-        .execution_quantum_forced_yield_count
-        .saturating_add(value.execution_quantum_forced_yield_count);
-    total.execution_quantum_estimated_work_units = total
-        .execution_quantum_estimated_work_units
-        .saturating_add(value.execution_quantum_estimated_work_units);
-    total.execution_quantum_estimated_memory_bytes = total
-        .execution_quantum_estimated_memory_bytes
-        .saturating_add(value.execution_quantum_estimated_memory_bytes);
-    total.execution_quantum_dispatch_count = total
-        .execution_quantum_dispatch_count
-        .saturating_add(value.execution_quantum_dispatch_count);
-    total.execution_quantum_predicted_duration_ns = total
-        .execution_quantum_predicted_duration_ns
-        .saturating_add(value.execution_quantum_predicted_duration_ns);
-    total.execution_quantum_host_submit_wait_duration_ns = total
-        .execution_quantum_host_submit_wait_duration_ns
-        .saturating_add(value.execution_quantum_host_submit_wait_duration_ns);
-    total.execution_quantum_max_region_count = total
-        .execution_quantum_max_region_count
-        .max(value.execution_quantum_max_region_count);
-    total.execution_quantum_max_host_submit_wait_duration_ns = total
-        .execution_quantum_max_host_submit_wait_duration_ns
-        .max(value.execution_quantum_max_host_submit_wait_duration_ns);
+    total.saturating_accumulate(value);
 }
 
 fn resolve_package_path(root: &Path, raw: &str) -> PathBuf {

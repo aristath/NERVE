@@ -208,24 +208,18 @@ pub(crate) fn mounted_physical_execution_summary(
         ..VulkanMountedPhysicalExecutionSummary::default()
     };
     for island in islands {
-        use nerve_execution_contracts::ExecutionStrategy;
-        let saw_tensor_parallel = island
-            .dispatches
-            .iter()
-            .any(|dispatch| dispatch.execution_strategy == ExecutionStrategy::TensorParallel);
-        let saw_whole_expert = island
-            .dispatches
-            .iter()
-            .any(|dispatch| dispatch.execution_strategy == ExecutionStrategy::ExpertParallel);
-        let saw_intra_expert = island.dispatches.iter().any(|dispatch| {
-            dispatch.execution_strategy == ExecutionStrategy::TensorParallelExpert
-        });
-        match (saw_tensor_parallel, saw_whole_expert, saw_intra_expert) {
-            (true, false, false) => summary.tensor_parallel_island_count += 1,
-            (false, true, false) => summary.whole_expert_parallel_island_count += 1,
-            (false, false, true) => summary.intra_expert_tensor_parallel_island_count += 1,
-            (false, false, false) => {}
-            _ => summary.hybrid_island_count += 1,
+        match physical_execution_island_kind(island) {
+            Some(VulkanPhysicalExecutionIslandKind::TensorParallel) => {
+                summary.tensor_parallel_island_count += 1
+            }
+            Some(VulkanPhysicalExecutionIslandKind::WholeExpertParallel) => {
+                summary.whole_expert_parallel_island_count += 1
+            }
+            Some(VulkanPhysicalExecutionIslandKind::IntraExpertTensorParallel) => {
+                summary.intra_expert_tensor_parallel_island_count += 1
+            }
+            Some(VulkanPhysicalExecutionIslandKind::Hybrid) => summary.hybrid_island_count += 1,
+            None => {}
         }
     }
     summary

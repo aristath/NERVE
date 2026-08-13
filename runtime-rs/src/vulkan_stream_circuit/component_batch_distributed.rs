@@ -9,6 +9,7 @@ struct VulkanResidentPlacedComponentBatchRunner {
 
 struct VulkanDistributedComponentBatchRunners {
     dispatches: Vec<VulkanDistributedComponentBatchDispatchRunner>,
+    execution_phase: VulkanResidentDistributedExecutionPhase,
     dependency_clock: VulkanDistributedDependencyClock,
     reduction_buffers: Vec<VulkanDistributedReductionBuffer>,
     _private_activation_buffers: BTreeMap<
@@ -1046,6 +1047,15 @@ impl VulkanDistributedComponentBatchRunners {
         }
         Ok(Self {
             dispatches: island_dispatches,
+            execution_phase: match execution_mode {
+                VulkanComponentBatchExecutionMode::CausalSequence => {
+                    VulkanResidentDistributedExecutionPhase::Prefill
+                }
+                VulkanComponentBatchExecutionMode::IndependentStreams
+                | VulkanComponentBatchExecutionMode::ParallelBlock => {
+                    VulkanResidentDistributedExecutionPhase::Decode
+                }
+            },
             dependency_clock: VulkanDistributedDependencyClock::new(),
             reduction_buffers,
             _private_activation_buffers: private_activation_buffers,
@@ -1275,14 +1285,19 @@ impl VulkanDistributedComponentBatchRunners {
             .iter()
             .any(|shard| !shard.selected_resource_gates.is_empty());
         if has_demand_gates {
-            return self.run_demand_gated_dispatch(
+            self.run_demand_gated_dispatch(
                 devices,
                 dispatch,
                 batch_width,
                 dependency_value,
                 consume_owner_ready_signal,
                 prepare_owner_continuation,
+            )?;
+            record_vulkan_physical_execution_island_submission(
+                self.execution_phase,
+                &dispatch.planned,
             );
+            return Ok(());
         }
         let mut submitted =
             Vec::<(&VulkanComputeDevice, &VulkanResidentKernelSequence)>::with_capacity(
@@ -1390,6 +1405,10 @@ impl VulkanDistributedComponentBatchRunners {
                 ));
             }
         }
+        record_vulkan_physical_execution_island_submission(
+            self.execution_phase,
+            &dispatch.planned,
+        );
         Ok(())
     }
 

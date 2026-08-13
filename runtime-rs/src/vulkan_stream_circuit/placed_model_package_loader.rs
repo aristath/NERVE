@@ -1484,6 +1484,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut distributed_dispatch_runners = VulkanDistributedDispatchRunners::create(
             &stream_distributed_execution_plans.decode,
+            VulkanResidentDistributedExecutionPhase::Decode,
             &self.distributed_parameter_buffers,
             &distributed_dynamic_resource_buffers,
             &self.compiled_resource_device_stores,

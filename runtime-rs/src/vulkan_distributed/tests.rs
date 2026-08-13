@@ -3442,6 +3442,63 @@ mod tests {
         assert_eq!(summary.intra_expert_tensor_parallel_island_count, 0);
         assert_eq!(summary.hybrid_island_count, 0);
         assert_eq!(summary.selected_resource_placement_count, 3);
+        assert_eq!(
+            physical_execution_island_kind(&island),
+            Some(VulkanPhysicalExecutionIslandKind::TensorParallel)
+        );
+        crate::vulkan_compute::reset_vulkan_resident_execution_counters();
+        record_vulkan_physical_execution_island_submission(
+            VulkanResidentDistributedExecutionPhase::Decode,
+            &island,
+        );
+        let counters = crate::vulkan_compute::vulkan_resident_execution_counters();
+        assert_eq!(counters.distributed.decode.island_submissions, 1);
+        assert_eq!(
+            counters
+                .distributed
+                .decode
+                .tensor_parallel_island_submissions,
+            1
+        );
+        assert_eq!(
+            counters.distributed.decode.shard_submissions,
+            island.leader().shards.len() as u64
+        );
+        crate::vulkan_compute::reset_vulkan_resident_execution_counters();
+    }
+
+    #[test]
+    fn physical_execution_observation_classifies_every_distributed_strategy() {
+        let mut island = fixture_plan("row_major").execution_islands.remove(0);
+        assert_eq!(
+            physical_execution_island_kind(&island),
+            Some(VulkanPhysicalExecutionIslandKind::TensorParallel)
+        );
+
+        island.dispatches[0].execution_strategy = ExecutionStrategy::ExpertParallel;
+        assert_eq!(
+            physical_execution_island_kind(&island),
+            Some(VulkanPhysicalExecutionIslandKind::WholeExpertParallel)
+        );
+
+        island.dispatches[0].execution_strategy = ExecutionStrategy::TensorParallelExpert;
+        assert_eq!(
+            physical_execution_island_kind(&island),
+            Some(VulkanPhysicalExecutionIslandKind::IntraExpertTensorParallel)
+        );
+
+        let mut whole_expert = island.dispatches[0].clone();
+        whole_expert.execution_strategy = ExecutionStrategy::ExpertParallel;
+        island.dispatches.push(whole_expert);
+        assert_eq!(
+            physical_execution_island_kind(&island),
+            Some(VulkanPhysicalExecutionIslandKind::Hybrid)
+        );
+
+        for dispatch in &mut island.dispatches {
+            dispatch.execution_strategy = ExecutionStrategy::SingleDevice;
+        }
+        assert_eq!(physical_execution_island_kind(&island), None);
     }
 
     #[test]

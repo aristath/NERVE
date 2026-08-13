@@ -158,6 +158,8 @@ fn print_runtime_sustained_decode_stats(
 
 fn print_runtime_execution_counters(counters: &VulkanResidentExecutionCounters) {
     println!("execution:");
+    print_runtime_distributed_execution_phase_counters("decode", &counters.distributed.decode);
+    print_runtime_distributed_execution_phase_counters("prefill", &counters.distributed.prefill);
     println!(
         "  resident_sequence_prepare_calls={}",
         counters.resident_sequence_prepare_calls
@@ -267,6 +269,47 @@ fn print_runtime_execution_counters(counters: &VulkanResidentExecutionCounters) 
         "  execution_quantum_max_host_submit_wait_ms={:.3}",
         nanos_to_millis(counters.execution_quantum_max_host_submit_wait_duration_ns)
     );
+}
+
+fn print_runtime_distributed_execution_phase_counters(
+    phase: &str,
+    counters: &VulkanResidentDistributedExecutionPhaseCounters,
+) {
+    for line in runtime_distributed_execution_phase_counter_lines(phase, counters) {
+        println!("{line}");
+    }
+}
+
+fn runtime_distributed_execution_phase_counter_lines(
+    phase: &str,
+    counters: &VulkanResidentDistributedExecutionPhaseCounters,
+) -> Vec<String> {
+    vec![
+        format!(
+            "  distributed_{phase}_island_submissions={}",
+            counters.island_submissions
+        ),
+        format!(
+            "  distributed_{phase}_shard_submissions={}",
+            counters.shard_submissions
+        ),
+        format!(
+            "  distributed_{phase}_tensor_parallel_island_submissions={}",
+            counters.tensor_parallel_island_submissions
+        ),
+        format!(
+            "  distributed_{phase}_whole_expert_parallel_island_submissions={}",
+            counters.whole_expert_parallel_island_submissions
+        ),
+        format!(
+            "  distributed_{phase}_intra_expert_tensor_parallel_island_submissions={}",
+            counters.intra_expert_tensor_parallel_island_submissions
+        ),
+        format!(
+            "  distributed_{phase}_hybrid_island_submissions={}",
+            counters.hybrid_island_submissions
+        ),
+    ]
 }
 
 fn print_runtime_critical_path(report: &RuntimeCriticalPathReport) {

@@ -83,7 +83,237 @@ pub struct VulkanResidentExecutionCounters {
     pub execution_quantum_host_submit_wait_duration_ns: u64,
     pub execution_quantum_max_region_count: u64,
     pub execution_quantum_max_host_submit_wait_duration_ns: u64,
+    pub distributed: VulkanResidentDistributedExecutionCounters,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulkanResidentDistributedExecutionCounters {
+    pub decode: VulkanResidentDistributedExecutionPhaseCounters,
+    pub prefill: VulkanResidentDistributedExecutionPhaseCounters,
+}
+
+impl VulkanResidentExecutionCounters {
+    pub fn saturating_accumulate(&mut self, value: Self) {
+        self.resident_sequence_prepare_calls = self
+            .resident_sequence_prepare_calls
+            .saturating_add(value.resident_sequence_prepare_calls);
+        self.resident_sequence_recorded_command_buffers = self
+            .resident_sequence_recorded_command_buffers
+            .saturating_add(value.resident_sequence_recorded_command_buffers);
+        self.resident_sequence_reused_command_buffers = self
+            .resident_sequence_reused_command_buffers
+            .saturating_add(value.resident_sequence_reused_command_buffers);
+        self.resident_sequence_queue_submits = self
+            .resident_sequence_queue_submits
+            .saturating_add(value.resident_sequence_queue_submits);
+        self.resident_sequence_completion_waits = self
+            .resident_sequence_completion_waits
+            .saturating_add(value.resident_sequence_completion_waits);
+        self.resident_queue_batch_submits = self
+            .resident_queue_batch_submits
+            .saturating_add(value.resident_queue_batch_submits);
+        self.resident_queue_batch_commands = self
+            .resident_queue_batch_commands
+            .saturating_add(value.resident_queue_batch_commands);
+        self.resident_copy_queue_submits = self
+            .resident_copy_queue_submits
+            .saturating_add(value.resident_copy_queue_submits);
+        self.resident_copy_waits = self
+            .resident_copy_waits
+            .saturating_add(value.resident_copy_waits);
+        self.demand_initial_sequence_count = self
+            .demand_initial_sequence_count
+            .saturating_add(value.demand_initial_sequence_count);
+        self.demand_initial_device_duration_ns = self
+            .demand_initial_device_duration_ns
+            .saturating_add(value.demand_initial_device_duration_ns);
+        self.demand_initial_max_device_duration_ns = self
+            .demand_initial_max_device_duration_ns
+            .max(value.demand_initial_max_device_duration_ns);
+        self.demand_resume_sequence_count = self
+            .demand_resume_sequence_count
+            .saturating_add(value.demand_resume_sequence_count);
+        self.demand_resume_device_duration_ns = self
+            .demand_resume_device_duration_ns
+            .saturating_add(value.demand_resume_device_duration_ns);
+        self.demand_resume_max_device_duration_ns = self
+            .demand_resume_max_device_duration_ns
+            .max(value.demand_resume_max_device_duration_ns);
+        self.resident_component_sequence_count = self
+            .resident_component_sequence_count
+            .saturating_add(value.resident_component_sequence_count);
+        self.resident_component_device_duration_ns = self
+            .resident_component_device_duration_ns
+            .saturating_add(value.resident_component_device_duration_ns);
+        self.resident_component_max_device_duration_ns = self
+            .resident_component_max_device_duration_ns
+            .max(value.resident_component_max_device_duration_ns);
+        self.execution_quantum_count = self
+            .execution_quantum_count
+            .saturating_add(value.execution_quantum_count);
+        self.execution_quantum_region_count = self
+            .execution_quantum_region_count
+            .saturating_add(value.execution_quantum_region_count);
+        self.execution_quantum_forced_yield_count = self
+            .execution_quantum_forced_yield_count
+            .saturating_add(value.execution_quantum_forced_yield_count);
+        self.execution_quantum_estimated_work_units = self
+            .execution_quantum_estimated_work_units
+            .saturating_add(value.execution_quantum_estimated_work_units);
+        self.execution_quantum_estimated_memory_bytes = self
+            .execution_quantum_estimated_memory_bytes
+            .saturating_add(value.execution_quantum_estimated_memory_bytes);
+        self.execution_quantum_dispatch_count = self
+            .execution_quantum_dispatch_count
+            .saturating_add(value.execution_quantum_dispatch_count);
+        self.execution_quantum_predicted_duration_ns = self
+            .execution_quantum_predicted_duration_ns
+            .saturating_add(value.execution_quantum_predicted_duration_ns);
+        self.execution_quantum_host_submit_wait_duration_ns = self
+            .execution_quantum_host_submit_wait_duration_ns
+            .saturating_add(value.execution_quantum_host_submit_wait_duration_ns);
+        self.execution_quantum_max_region_count = self
+            .execution_quantum_max_region_count
+            .max(value.execution_quantum_max_region_count);
+        self.execution_quantum_max_host_submit_wait_duration_ns = self
+            .execution_quantum_max_host_submit_wait_duration_ns
+            .max(value.execution_quantum_max_host_submit_wait_duration_ns);
+        self.distributed.saturating_accumulate(value.distributed);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulkanResidentDistributedExecutionPhaseCounters {
+    pub island_submissions: u64,
+    pub shard_submissions: u64,
+    pub tensor_parallel_island_submissions: u64,
+    pub whole_expert_parallel_island_submissions: u64,
+    pub intra_expert_tensor_parallel_island_submissions: u64,
+    pub hybrid_island_submissions: u64,
+}
+
+impl VulkanResidentDistributedExecutionPhaseCounters {
+    fn saturating_accumulate(&mut self, value: Self) {
+        self.island_submissions = self
+            .island_submissions
+            .saturating_add(value.island_submissions);
+        self.shard_submissions = self
+            .shard_submissions
+            .saturating_add(value.shard_submissions);
+        self.tensor_parallel_island_submissions = self
+            .tensor_parallel_island_submissions
+            .saturating_add(value.tensor_parallel_island_submissions);
+        self.whole_expert_parallel_island_submissions = self
+            .whole_expert_parallel_island_submissions
+            .saturating_add(value.whole_expert_parallel_island_submissions);
+        self.intra_expert_tensor_parallel_island_submissions = self
+            .intra_expert_tensor_parallel_island_submissions
+            .saturating_add(value.intra_expert_tensor_parallel_island_submissions);
+        self.hybrid_island_submissions = self
+            .hybrid_island_submissions
+            .saturating_add(value.hybrid_island_submissions);
+    }
+}
+
+impl VulkanResidentDistributedExecutionCounters {
+    fn saturating_accumulate(&mut self, value: Self) {
+        self.decode.saturating_accumulate(value.decode);
+        self.prefill.saturating_accumulate(value.prefill);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VulkanResidentDistributedExecutionPhase {
+    Decode,
+    Prefill,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VulkanResidentDistributedExecutionKind {
+    TensorParallel,
+    WholeExpertParallel,
+    IntraExpertTensorParallel,
+    Hybrid,
+}
+
+struct VulkanResidentDistributedExecutionCounterBank {
+    island_submissions: AtomicU64,
+    shard_submissions: AtomicU64,
+    tensor_parallel_island_submissions: AtomicU64,
+    whole_expert_parallel_island_submissions: AtomicU64,
+    intra_expert_tensor_parallel_island_submissions: AtomicU64,
+    hybrid_island_submissions: AtomicU64,
+}
+
+impl VulkanResidentDistributedExecutionCounterBank {
+    const fn new() -> Self {
+        Self {
+            island_submissions: AtomicU64::new(0),
+            shard_submissions: AtomicU64::new(0),
+            tensor_parallel_island_submissions: AtomicU64::new(0),
+            whole_expert_parallel_island_submissions: AtomicU64::new(0),
+            intra_expert_tensor_parallel_island_submissions: AtomicU64::new(0),
+            hybrid_island_submissions: AtomicU64::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        self.island_submissions.store(0, Ordering::Relaxed);
+        self.shard_submissions.store(0, Ordering::Relaxed);
+        self.tensor_parallel_island_submissions
+            .store(0, Ordering::Relaxed);
+        self.whole_expert_parallel_island_submissions
+            .store(0, Ordering::Relaxed);
+        self.intra_expert_tensor_parallel_island_submissions
+            .store(0, Ordering::Relaxed);
+        self.hybrid_island_submissions.store(0, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> VulkanResidentDistributedExecutionPhaseCounters {
+        VulkanResidentDistributedExecutionPhaseCounters {
+            island_submissions: self.island_submissions.load(Ordering::Relaxed),
+            shard_submissions: self.shard_submissions.load(Ordering::Relaxed),
+            tensor_parallel_island_submissions: self
+                .tensor_parallel_island_submissions
+                .load(Ordering::Relaxed),
+            whole_expert_parallel_island_submissions: self
+                .whole_expert_parallel_island_submissions
+                .load(Ordering::Relaxed),
+            intra_expert_tensor_parallel_island_submissions: self
+                .intra_expert_tensor_parallel_island_submissions
+                .load(Ordering::Relaxed),
+            hybrid_island_submissions: self
+                .hybrid_island_submissions
+                .load(Ordering::Relaxed),
+        }
+    }
+
+    fn record(&self, kind: VulkanResidentDistributedExecutionKind, shard_count: usize) {
+        self.island_submissions.fetch_add(1, Ordering::Relaxed);
+        self.shard_submissions.fetch_add(
+            u64::try_from(shard_count).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        let strategy_counter = match kind {
+            VulkanResidentDistributedExecutionKind::TensorParallel => {
+                &self.tensor_parallel_island_submissions
+            }
+            VulkanResidentDistributedExecutionKind::WholeExpertParallel => {
+                &self.whole_expert_parallel_island_submissions
+            }
+            VulkanResidentDistributedExecutionKind::IntraExpertTensorParallel => {
+                &self.intra_expert_tensor_parallel_island_submissions
+            }
+            VulkanResidentDistributedExecutionKind::Hybrid => &self.hybrid_island_submissions,
+        };
+        strategy_counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+static DISTRIBUTED_DECODE_EXECUTION_COUNTERS: VulkanResidentDistributedExecutionCounterBank =
+    VulkanResidentDistributedExecutionCounterBank::new();
+static DISTRIBUTED_PREFILL_EXECUTION_COUNTERS: VulkanResidentDistributedExecutionCounterBank =
+    VulkanResidentDistributedExecutionCounterBank::new();
 
 static RESIDENT_SEQUENCE_PREPARE_CALLS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_SEQUENCE_RECORDED_COMMAND_BUFFERS: AtomicU64 = AtomicU64::new(0);
@@ -143,6 +373,8 @@ pub fn reset_vulkan_resident_execution_counters() {
     EXECUTION_QUANTUM_HOST_SUBMIT_WAIT_DURATION_NS.store(0, Ordering::Relaxed);
     EXECUTION_QUANTUM_MAX_REGION_COUNT.store(0, Ordering::Relaxed);
     EXECUTION_QUANTUM_MAX_HOST_SUBMIT_WAIT_DURATION_NS.store(0, Ordering::Relaxed);
+    DISTRIBUTED_DECODE_EXECUTION_COUNTERS.reset();
+    DISTRIBUTED_PREFILL_EXECUTION_COUNTERS.reset();
 }
 
 pub fn vulkan_resident_execution_counters() -> VulkanResidentExecutionCounters {
@@ -192,6 +424,25 @@ pub fn vulkan_resident_execution_counters() -> VulkanResidentExecutionCounters {
             .load(Ordering::Relaxed),
         execution_quantum_max_host_submit_wait_duration_ns:
             EXECUTION_QUANTUM_MAX_HOST_SUBMIT_WAIT_DURATION_NS.load(Ordering::Relaxed),
+        distributed: VulkanResidentDistributedExecutionCounters {
+            decode: DISTRIBUTED_DECODE_EXECUTION_COUNTERS.snapshot(),
+            prefill: DISTRIBUTED_PREFILL_EXECUTION_COUNTERS.snapshot(),
+        },
+    }
+}
+
+pub(crate) fn record_vulkan_resident_distributed_execution_submission(
+    phase: VulkanResidentDistributedExecutionPhase,
+    kind: VulkanResidentDistributedExecutionKind,
+    shard_count: usize,
+) {
+    match phase {
+        VulkanResidentDistributedExecutionPhase::Decode => {
+            DISTRIBUTED_DECODE_EXECUTION_COUNTERS.record(kind, shard_count)
+        }
+        VulkanResidentDistributedExecutionPhase::Prefill => {
+            DISTRIBUTED_PREFILL_EXECUTION_COUNTERS.record(kind, shard_count)
+        }
     }
 }
 

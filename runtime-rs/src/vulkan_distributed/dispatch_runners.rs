@@ -2,6 +2,7 @@ pub struct VulkanDistributedDispatchRunners {
     pub dispatches: Vec<VulkanDistributedDispatchRunner>,
     pub dispatch_count: usize,
     pub shard_count: usize,
+    execution_phase: VulkanResidentDistributedExecutionPhase,
     transaction_predicates: BTreeMap<String, Arc<VulkanResidentBuffer>>,
 }
 
@@ -573,8 +574,9 @@ fn distributed_primary_input_binding_offset(
 }
 
 impl VulkanDistributedDispatchRunners {
-    pub fn create<'a, F, E>(
+    pub(crate) fn create<'a, F, E>(
         execution_plan: &VulkanDistributedExecutionPlan,
+        execution_phase: VulkanResidentDistributedExecutionPhase,
         parameter_buffers: &VulkanDistributedParameterBuffers,
         dynamic_resource_buffers: &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
         resource_stores: &BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
@@ -1011,6 +1013,7 @@ impl VulkanDistributedDispatchRunners {
             dispatch_count: execution_plan.dispatches.len(),
             dispatches,
             shard_count,
+            execution_phase,
             transaction_predicates: transaction_predicates.cloned().unwrap_or_default(),
         })
     }
@@ -1458,6 +1461,10 @@ impl VulkanDistributedDispatchRunners {
             }
         }
 
+        record_vulkan_physical_execution_island_submission(
+            self.execution_phase,
+            &dispatch.planned,
+        );
         Ok(VulkanDistributedDispatchRun {
             owner_device_id: owner_device_id.to_string(),
             dispatch_index,
