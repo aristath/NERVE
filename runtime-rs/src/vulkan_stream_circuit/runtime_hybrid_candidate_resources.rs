@@ -506,9 +506,12 @@ fn exact_vulkan_runtime_hybrid_component_state_requirements(
         if speculative_draft_tokens > 0 {
             let mut by_device =
                 BTreeMap::from([(owner_logical_device_id.to_string(), breakdown)]);
+            let mut allocations_by_device =
+                BTreeMap::from([(owner_logical_device_id.to_string(), Vec::new())]);
             for decoder in &placed_model.package.speculative_decoders {
                 plan_speculative_decoder_residency(
                     &mut by_device,
+                    &mut allocations_by_device,
                     package_root,
                     &placed_model,
                     tensor_index,

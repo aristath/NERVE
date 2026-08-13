@@ -165,6 +165,125 @@ fn runtime_residency_preserves_output_sampler_and_feedback_allocation_identities
 }
 
 #[test]
+fn runtime_residency_preserves_speculative_decoder_scopes_and_two_pending_frames() {
+    let mut runtime_model = fixture_model_runtime_model();
+    let mut decoder = parallel_speculative_decoder_with_default("draft_scope", 2);
+    decoder.execution_contract =
+        VulkanResidentSpeculativeExecutionContract::AutoregressiveFeedback {
+            processor_schedule: "one_token_per_tick".to_string(),
+            output_schedule: "dedicated_token_transducer".to_string(),
+        };
+    decoder.input_adapter = Some(VulkanResidentDraftInputAdapterPackageSpec {
+        component_id: "draft_input".to_string(),
+        token_embedding_signal_id: "token_embedding".to_string(),
+        target_hidden_signal_id: "target_hidden".to_string(),
+        output_signal_id: "draft_hidden".to_string(),
+        input_frame_byte_capacity: 128,
+        target_hidden_byte_capacity: 128,
+        output_frame_byte_capacity: 128,
+    });
+    decoder.output_transducer = Some(VulkanResidentDraftOutputTransducerPackageSpec {
+        component_id: "draft_output".to_string(),
+        input_signal_id: "draft_hidden".to_string(),
+        hidden_signal_id: "normalized_hidden".to_string(),
+        logits_signal_id: "logits".to_string(),
+        norm_parameter_tensor: "norm".to_string(),
+        norm_parameter_dtype: "BF16".to_string(),
+        norm_parameter_shape: vec![64],
+        norm_parameter_byte_capacity: 128,
+        projection_parameter_tensor: "projection".to_string(),
+        projection_parameter_dtype: "BF16".to_string(),
+        projection_parameter_shape: vec![64, 64],
+        projection_parameter_byte_capacity: 8_192,
+        projection_scale_parameter_tensor: None,
+        projection_scale_parameter_dtype: None,
+        projection_scale_parameter_shape: None,
+        projection_scale_parameter_byte_capacity: None,
+        input_frame_byte_capacity: 128,
+        output_hidden_byte_capacity: 128,
+        logits_byte_capacity: 256,
+        vocabulary_size: 64,
+        hidden_size: 64,
+        projection_workgroup_count_x: 1,
+        norm_local_size_x: 64,
+        projection_local_size_x: 64,
+        norm_shader_path: "unused.spv".to_string(),
+        projection_shader_path: "unused.spv".to_string(),
+    });
+    runtime_model.package.speculative_decoders.push(decoder);
+    let package_root = tiny_model_dir();
+    let tensor_index = runtime_model
+        .load_runtime_tensor_index(&package_root)
+        .unwrap();
+
+    let plan = plan_vulkan_runtime_residency(
+        &package_root,
+        &runtime_model,
+        &tensor_index,
+        16,
+        2,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    let device = &plan.device_plans[0];
+    let draft_allocations = device
+        .resident_stream_device_allocations
+        .iter()
+        .filter(|allocation| {
+            matches!(
+                &allocation.scope,
+                VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { decoder_id }
+                    if decoder_id == "draft_scope"
+            )
+        })
+        .collect::<Vec<_>>();
+    let draft_workspace_ids = draft_allocations
+        .iter()
+        .filter_map(|allocation| match &allocation.kind {
+            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                buffer_id,
+                ..
+            } => Some(buffer_id.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    assert!(!draft_allocations.is_empty());
+    assert!(draft_workspace_ids.contains("pending_target_hidden_0"));
+    assert!(draft_workspace_ids.contains("pending_target_hidden_1"));
+    assert!(draft_workspace_ids.contains("catch_up_controls"));
+    assert_eq!(
+        draft_allocations
+            .iter()
+            .filter(|allocation| {
+                matches!(
+                    allocation.kind,
+                    VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                        class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                        ..
+                    }
+                )
+            })
+            .map(|allocation| allocation.byte_capacity)
+            .sum::<usize>(),
+        device.breakdown.speculative_decoder_workspace_bytes,
+    );
+    assert!(
+        device.breakdown.speculative_decoder_workspace_bytes
+            >= 2 * 128 + VULKAN_BACKEND_LOOP_MAX_WINDOW * VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    );
+    VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &plan,
+        &[device.device_id.clone()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &empty_physical_execution_activation_plan(),
+    )
+    .expect("physical admission must accept every scoped speculative allocation");
+}
+
+#[test]
 fn sampler_residency_tracks_random_scratch_and_seed_for_every_random_method() {
     let mut spec = fixture_model_runtime_model().package.sampler.spec;
     spec.method = "temperature_top_p".to_string();

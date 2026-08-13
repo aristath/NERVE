@@ -760,6 +760,7 @@ fn execution_transient_device_requirements_are_queried_and_aligned_per_allocatio
 fn resident_stream_device_requirements_are_queried_and_aligned_per_allocation() {
     let allocations = vec![
         VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::State {
                 component_id: "component".to_string(),
                 state_id: "state".to_string(),
@@ -767,6 +768,7 @@ fn resident_stream_device_requirements_are_queried_and_aligned_per_allocation() 
             byte_capacity: 17,
         },
         VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::SelectionTelemetry {
                 component_id: "component".to_string(),
                 node_id: "node".to_string(),
@@ -976,6 +978,7 @@ fn physical_execution_residency_replaces_boundary_storage_by_exact_identity() {
         base.device_plans[0].breakdown.boundary_buffer_bytes = 64;
         base.device_plans[0].resident_stream_device_allocations =
             vec![VulkanRuntimeResidentStreamAllocation {
+                scope: VulkanRuntimeResidentStreamAllocationScope::Target,
                 kind,
                 byte_capacity: 64,
             }];
@@ -1334,6 +1337,66 @@ fn graph_edge_binding_rejects_conflicting_distributed_route_atomically() {
 }
 
 #[test]
+fn graph_edge_binding_never_consumes_same_named_speculative_allocations() {
+    let (mut base, edge_plans) = physical_execution_edge_base_plan();
+    let owner = base
+        .device_plans
+        .iter_mut()
+        .find(|device| device.device_id == "owner")
+        .unwrap();
+    let mut speculative = owner
+        .resident_stream_device_allocations
+        .iter()
+        .find(|allocation| {
+            matches!(
+                allocation.kind,
+                VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort { .. }
+            )
+        })
+        .unwrap()
+        .clone();
+    speculative.scope = VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
+        decoder_id: "draft".to_string(),
+    };
+    owner.breakdown.speculative_decoder_activation_bytes += speculative.byte_capacity;
+    owner.working_set.activation_headroom_bytes += speculative.byte_capacity;
+    owner.initial_device_resident_bytes += speculative.byte_capacity;
+    base.total_initial_device_resident_bytes += speculative.byte_capacity;
+    owner
+        .resident_stream_device_allocations
+        .push(speculative.clone());
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &empty_physical_execution_activation_plan(),
+    )
+    .unwrap();
+
+    plan.bind_graph_edge_memory_domains(
+        &edge_plans,
+        &empty_physical_execution_activation_plan(),
+        &BTreeMap::from([(
+            5,
+            physical_execution_edge_route(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging),
+        )]),
+        &BTreeMap::from([
+            ("owner".to_string(), "physical-owner".to_string()),
+            ("helper".to_string(), "physical-helper".to_string()),
+        ]),
+    )
+    .unwrap();
+
+    assert!(plan.device_plans.iter().any(|device| {
+        device
+            .resident_stream_device_allocations
+            .iter()
+            .any(|allocation| allocation == &speculative)
+    }));
+}
+
+#[test]
 fn feedback_control_binding_uses_one_device_allocation_when_colocated() {
     let (mut base, _) = physical_execution_edge_base_plan();
     add_feedback_control_residency(&mut base, 12_345);
@@ -1602,6 +1665,7 @@ fn physical_execution_edge_base_plan() -> (VulkanRuntimeResidencyPlan, Vec<Vulka
     owner
         .resident_stream_device_allocations
         .push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort {
                 component_id: "input_adapter".to_string(),
                 port_id: "shared_context".to_string(),
@@ -1622,6 +1686,7 @@ fn physical_execution_edge_base_plan() -> (VulkanRuntimeResidencyPlan, Vec<Vulka
         ..VulkanRuntimeDeviceResidencyBreakdown::default()
     };
     helper.resident_stream_device_allocations = vec![VulkanRuntimeResidentStreamAllocation {
+        scope: VulkanRuntimeResidentStreamAllocationScope::Target,
         kind: VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming { edge_index: 5 },
         byte_capacity: 8_192,
     }];
@@ -1643,6 +1708,7 @@ fn add_feedback_control_residency(base: &mut VulkanRuntimeResidencyPlan, byte_ca
     owner
         .resident_stream_device_allocations
         .push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
                 class: VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
                 scope_id: "package".to_string(),
@@ -1713,6 +1779,7 @@ fn physical_execution_residency_base_plan(
                 ..VulkanRuntimeDeviceResidencyBreakdown::default()
             },
             resident_stream_device_allocations: vec![VulkanRuntimeResidentStreamAllocation {
+                scope: VulkanRuntimeResidentStreamAllocationScope::Target,
                 kind: VulkanRuntimeResidentStreamAllocationKind::ActivationSlot {
                     component_id: "component".to_string(),
                     slot: 0,

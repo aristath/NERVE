@@ -527,8 +527,16 @@ For every numbered item below:
   per participant, and the input, output, and selected sampler dispatches are
   explicit. The materialized loader independently reconstructs the registered
   dispatch count and fails if its allocation differs from the workload-free
-  plan. Speculative-decoder state, activation, sampler, and auxiliary
-  allocations still enter terminal admission as class aggregates.
+  plan. Every currently planned speculative-decoder scalar state, transaction,
+  telemetry, activation, boundary, edge, stream-control, output, sampler, and
+  auxiliary buffer now retains both its decoder scope and allocation identity.
+  This exposed and fixed two undercounts: draft selection telemetry was absent,
+  and autoregressive execution reserves two alternating pending target-hidden
+  buffers rather than one. The lazily cached autoregressive catch-up batch
+  runners and the permanently mounted parallel-block proposal,
+  committed-context, state-ingestion, history, and readback buffers do not yet
+  have workload-free allocation plans; terminal admission must cover those
+  actual allocations before speculative TP can enter the live gate.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

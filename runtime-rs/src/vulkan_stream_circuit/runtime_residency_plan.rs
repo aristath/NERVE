@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_residency_plan.v7";
+    "nerve.vulkan_runtime_residency_plan.v8";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeResidencyPlan {
@@ -51,8 +51,16 @@ pub struct VulkanRuntimeDeviceResidencyPlan {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct VulkanRuntimeResidentStreamAllocation {
+    pub scope: VulkanRuntimeResidentStreamAllocationScope,
     pub kind: VulkanRuntimeResidentStreamAllocationKind,
     pub byte_capacity: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VulkanRuntimeResidentStreamAllocationScope {
+    Target,
+    SpeculativeDecoder { decoder_id: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -61,6 +69,8 @@ pub enum VulkanRuntimeResidentBufferClass {
     OutputTransducerWorkspace,
     SamplerWorkspace,
     FeedbackWorkspace,
+    SpeculativeDecoderState,
+    SpeculativeDecoderWorkspace,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -321,6 +331,7 @@ fn plan_vulkan_runtime_residency_with_contract(
         for decoder in &runtime_model.package.speculative_decoders {
             plan_speculative_decoder_residency(
                 &mut by_device,
+                &mut resident_stream_device_allocations_by_device,
                 manifest_dir,
                 runtime_model,
                 tensor_index,
@@ -521,6 +532,7 @@ fn plan_stream_circuit_residency_for_component(
         state_bytes =
             checked_residency_add(state_bytes, layout.byte_capacity, "stream state bytes")?;
         allocations.push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::State {
                 component_id: state.component_id.clone(),
                 state_id: state.state_id.clone(),
@@ -541,6 +553,7 @@ fn plan_stream_circuit_residency_for_component(
                 "state transaction bytes",
             )?;
             allocations.push(VulkanRuntimeResidentStreamAllocation {
+                scope: VulkanRuntimeResidentStreamAllocationScope::Target,
                 kind: VulkanRuntimeResidentStreamAllocationKind::StateTransaction {
                     component_id: state.component_id.clone(),
                     state_id: state.state_id.clone(),
@@ -562,6 +575,7 @@ fn plan_stream_circuit_residency_for_component(
                 "causal verification snapshots",
             )?;
             allocations.push(VulkanRuntimeResidentStreamAllocation {
+                scope: VulkanRuntimeResidentStreamAllocationScope::Target,
                 kind: VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot {
                     component_id: state.component_id.clone(),
                     state_id: state.state_id.clone(),
@@ -580,6 +594,7 @@ fn plan_stream_circuit_residency_for_component(
             "selection telemetry bytes",
         )?;
         allocations.push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::SelectionTelemetry {
                 component_id: telemetry.component_id.clone(),
                 node_id: telemetry.node_id.clone(),
@@ -606,6 +621,7 @@ fn plan_stream_circuit_residency_for_component(
                 "activation slot bytes",
             )?;
             allocations.push(VulkanRuntimeResidentStreamAllocation {
+                scope: VulkanRuntimeResidentStreamAllocationScope::Target,
                 kind: VulkanRuntimeResidentStreamAllocationKind::ActivationSlot {
                     component_id: bank.component_id.clone(),
                     slot: slot.slot,
@@ -631,6 +647,7 @@ fn plan_stream_circuit_residency_for_component(
             "model boundary buffers",
         )?;
         allocations.push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::BoundaryInput {
                 component_id: input.component_id.clone(),
                 signal_id: input.signal_id.clone(),
@@ -660,6 +677,7 @@ fn plan_stream_circuit_residency_for_component(
             "model boundary buffers",
         )?;
         allocations.push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::BoundaryOutput {
                 component_id: output.component_id.clone(),
                 signal_id: output.signal_id.clone(),
@@ -786,6 +804,7 @@ fn plan_edge_residency_allocations_with_passthrough(
         }
         total = checked_residency_add(total, byte_capacity, "placed edge buffers")?;
         allocations.push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort {
                 component_id: producer_component_id,
                 port_id,
@@ -804,6 +823,7 @@ fn plan_edge_residency_allocations_with_passthrough(
             required_optional_bytes(endpoint.byte_capacity, "placed incoming edge buffer")?;
         total = checked_residency_add(total, byte_capacity, "placed edge buffers")?;
         allocations.push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
             kind: VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming {
                 edge_index: endpoint.edge_index,
             },
@@ -816,6 +836,7 @@ fn plan_edge_residency_allocations_with_passthrough(
 #[allow(clippy::too_many_arguments)]
 fn plan_speculative_decoder_residency(
     by_device: &mut BTreeMap<String, VulkanRuntimeDeviceResidencyBreakdown>,
+    allocations_by_device: &mut BTreeMap<String, Vec<VulkanRuntimeResidentStreamAllocation>>,
     manifest_dir: &Path,
     target_runtime_model: &VulkanResidentRuntimeModel,
     tensor_index: &TensorIndex,
@@ -842,6 +863,25 @@ fn plan_speculative_decoder_residency(
     })?;
     let stream =
         plan_stream_circuit_residency(&placed_plan, context_capacity_activations, true, 0)?;
+    let decoder_scope = VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
+        decoder_id: decoder.id.clone(),
+    };
+    let mut decoder_allocations = stream
+        .allocations
+        .iter()
+        .cloned()
+        .map(|mut allocation| {
+            allocation.scope = decoder_scope.clone();
+            allocation
+        })
+        .collect::<Vec<_>>();
+    decoder_allocations.push(scoped_runtime_buffer_allocation(
+        decoder_scope.clone(),
+        VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
+        &decoder.id,
+        "stream_control",
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+    )?);
     let state_bytes = [
         stream.state_bytes,
         stream.transaction_bytes,
@@ -858,6 +898,7 @@ fn plan_speculative_decoder_residency(
     )?;
     let activation_bytes = [
         stream.activation_bytes,
+        stream.selection_telemetry_bytes,
         stream.boundary_bytes,
         stream.edge_bytes,
     ]
@@ -880,27 +921,77 @@ fn plan_speculative_decoder_residency(
         decoder.dedicated_input_adapter(),
         decoder.dedicated_output_transducer(),
     ) {
-        (Some(input), Some(output)) => (
-            checked_residency_add(
+        (Some(input), Some(output)) => {
+            let output_allocations = vec![
+                scoped_runtime_buffer_allocation(
+                    decoder_scope.clone(),
+                    VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    &decoder.id,
+                    "normalized_frame",
+                    output.output_hidden_byte_capacity,
+                )?,
+                scoped_runtime_buffer_allocation(
+                    decoder_scope.clone(),
+                    VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    &decoder.id,
+                    "logits",
+                    output.logits_byte_capacity,
+                )?,
+            ];
+            let output_workspace = checked_residency_add(
                 output.output_hidden_byte_capacity,
                 output.logits_byte_capacity,
                 "speculative decoder output workspace",
-            )?,
-            sampler_workspace_bytes(
+            )?;
+            let mut sampler_allocations = sampler_workspace_allocations(
                 &target_runtime_model.package.sampler.spec,
                 context_capacity_activations,
                 true,
-            )?,
-            checked_residency_add(
-                input.target_hidden_byte_capacity,
-                checked_residency_mul(
-                    VULKAN_BACKEND_LOOP_MAX_WINDOW,
-                    VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
-                    "speculative catch-up controls",
+            )?;
+            for allocation in &mut sampler_allocations {
+                allocation.scope = decoder_scope.clone();
+                let VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer { class, .. } =
+                    &mut allocation.kind
+                else {
+                    unreachable!("sampler workspace planner emits runtime buffers")
+                };
+                *class = VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace;
+            }
+            let sampler_workspace = runtime_buffer_allocation_total(&sampler_allocations)?;
+            let catch_up_control_bytes = checked_residency_mul(
+                VULKAN_BACKEND_LOOP_MAX_WINDOW,
+                VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                "speculative catch-up controls",
+            )?;
+            let auxiliary_allocations = vec![
+                scoped_runtime_buffer_allocation(
+                    decoder_scope.clone(),
+                    VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    &decoder.id,
+                    "pending_target_hidden_0",
+                    input.target_hidden_byte_capacity,
                 )?,
-                "speculative decoder auxiliary workspace",
-            )?,
-        ),
+                scoped_runtime_buffer_allocation(
+                    decoder_scope.clone(),
+                    VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    &decoder.id,
+                    "pending_target_hidden_1",
+                    input.target_hidden_byte_capacity,
+                )?,
+                scoped_runtime_buffer_allocation(
+                    decoder_scope.clone(),
+                    VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    &decoder.id,
+                    "catch_up_controls",
+                    catch_up_control_bytes,
+                )?,
+            ];
+            let auxiliary_workspace = runtime_buffer_allocation_total(&auxiliary_allocations)?;
+            decoder_allocations.extend(output_allocations);
+            decoder_allocations.extend(sampler_allocations);
+            decoder_allocations.extend(auxiliary_allocations);
+            (output_workspace, sampler_workspace, auxiliary_workspace)
+        }
         (None, None) => (0, 0, 0),
         _ => {
             return Err(VulkanRuntimeResidencyPlanError(format!(
@@ -922,6 +1013,14 @@ fn plan_speculative_decoder_residency(
             })?,
         "speculative decoder workspace bytes",
     )?;
+    allocations_by_device
+        .get_mut(output_device_id)
+        .ok_or_else(|| {
+            VulkanRuntimeResidencyPlanError(format!(
+                "speculative decoder device {output_device_id:?} has no allocation ledger"
+            ))
+        })?
+        .extend(decoder_allocations);
     Ok(())
 }
 
@@ -1167,6 +1266,22 @@ fn runtime_buffer_allocation(
     buffer_id: &str,
     byte_capacity: usize,
 ) -> Result<VulkanRuntimeResidentStreamAllocation, VulkanRuntimeResidencyPlanError> {
+    scoped_runtime_buffer_allocation(
+        VulkanRuntimeResidentStreamAllocationScope::Target,
+        class,
+        scope_id,
+        buffer_id,
+        byte_capacity,
+    )
+}
+
+fn scoped_runtime_buffer_allocation(
+    scope: VulkanRuntimeResidentStreamAllocationScope,
+    class: VulkanRuntimeResidentBufferClass,
+    scope_id: &str,
+    buffer_id: &str,
+    byte_capacity: usize,
+) -> Result<VulkanRuntimeResidentStreamAllocation, VulkanRuntimeResidencyPlanError> {
     if scope_id.is_empty() || buffer_id.is_empty() || byte_capacity == 0 {
         return Err(VulkanRuntimeResidencyPlanError(
             "runtime buffer allocation requires a class, scope, buffer identity, and positive capacity"
@@ -1174,6 +1289,7 @@ fn runtime_buffer_allocation(
         ));
     }
     Ok(VulkanRuntimeResidentStreamAllocation {
+        scope,
         kind: VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
             class,
             scope_id: scope_id.to_string(),

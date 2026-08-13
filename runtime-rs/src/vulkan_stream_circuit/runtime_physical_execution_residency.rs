@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v7";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v8";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -483,14 +483,15 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                     .iter()
                     .enumerate()
                     .filter_map(move |(allocation_index, allocation)| {
-                        matches!(
+                        (allocation.scope == VulkanRuntimeResidentStreamAllocationScope::Target
+                            && matches!(
                             &allocation.kind,
                             VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
                                 class: VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
                                 buffer_id,
                                 ..
                             } if buffer_id == "control"
-                        )
+                        ))
                         .then_some((device_index, allocation_index))
                     })
             })
@@ -552,14 +553,15 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 .resident_stream_device_allocations
                 .iter()
                 .filter_map(|allocation| {
-                    matches!(
+                    (allocation.scope == VulkanRuntimeResidentStreamAllocationScope::Target
+                        && matches!(
                         &allocation.kind,
                         VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
                             class: VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
                             buffer_id,
                             ..
                         } if buffer_id == "control"
-                    )
+                    ))
                     .then_some(allocation.byte_capacity)
                 })
         });
@@ -661,7 +663,8 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 .resident_stream_device_allocations
                 .iter()
                 .filter(|allocation| {
-                    matches!(
+                    allocation.scope == VulkanRuntimeResidentStreamAllocationScope::Target
+                        && matches!(
                         &allocation.kind,
                         VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort {
                             component_id,
@@ -792,7 +795,10 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 let matches = destination_plan
                     .resident_stream_device_allocations
                     .iter()
-                    .filter(|allocation| allocation.kind == kind)
+                    .filter(|allocation| {
+                        allocation.scope == VulkanRuntimeResidentStreamAllocationScope::Target
+                            && allocation.kind == kind
+                    })
                     .collect::<Vec<_>>();
                 let [incoming_allocation] = matches.as_slice() else {
                     return Err(VulkanRuntimeResidencyPlanError(format!(
@@ -870,6 +876,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                         if !retained {
                             additions.entry(representative.clone()).or_default().push(
                                 VulkanRuntimeResidentStreamAllocation {
+                                    scope: VulkanRuntimeResidentStreamAllocationScope::Target,
                                     kind: VulkanRuntimeResidentStreamAllocationKind::EdgeStagingReplica {
                                         component_id: group.source_component_id.clone(),
                                         port_id: group.source_port_id.clone(),
@@ -904,7 +911,9 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             let mut removed_bytes = 0usize;
             let mut retained = Vec::with_capacity(device.resident_stream_device_allocations.len());
             for allocation in std::mem::take(&mut device.resident_stream_device_allocations) {
-                if removals.remove(&(device.device_id.clone(), allocation.kind.clone())) {
+                if allocation.scope == VulkanRuntimeResidentStreamAllocationScope::Target
+                    && removals.remove(&(device.device_id.clone(), allocation.kind.clone()))
+                {
                     removed_bytes = checked_residency_add(
                         removed_bytes,
                         allocation.byte_capacity,
@@ -1071,14 +1080,15 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                     .iter()
                     .enumerate()
                     .filter_map(move |(allocation_index, allocation)| {
-                        matches!(
+                        (allocation.scope == VulkanRuntimeResidentStreamAllocationScope::Target
+                            && matches!(
                             &allocation.kind,
                             VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
                                 class: VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
                                 buffer_id,
                                 ..
                             } if buffer_id == "control"
-                        )
+                        ))
                         .then_some((device_index, allocation_index))
                     })
             })
@@ -1446,40 +1456,69 @@ fn validate_resident_stream_allocation_ledger(
     let mut output_transducer_workspace_bytes = 0usize;
     let mut sampler_workspace_bytes = 0usize;
     let mut feedback_workspace_bytes = 0usize;
+    let mut speculative_decoder_state_bytes = 0usize;
+    let mut speculative_decoder_activation_bytes = 0usize;
+    let mut speculative_decoder_workspace_bytes = 0usize;
     for allocation in &device.resident_stream_device_allocations {
-        if allocation.byte_capacity == 0 || !identities.insert(&allocation.kind) {
+        if allocation.byte_capacity == 0
+            || !identities.insert((&allocation.scope, &allocation.kind))
+        {
             return Err(VulkanRuntimeResidencyPlanError(format!(
-                "base residency on {:?} has an empty or repeated resident stream allocation {:?}",
-                device.device_id, allocation.kind,
+                "base residency on {:?} has an empty or repeated resident stream allocation {:?} in {:?}",
+                device.device_id, allocation.kind, allocation.scope,
             )));
         }
-        let (bytes, label) = match &allocation.kind {
-            VulkanRuntimeResidentStreamAllocationKind::State { .. } => {
+        let (bytes, label) = match (&allocation.scope, &allocation.kind) {
+            (
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentStreamAllocationKind::State { .. },
+            ) => {
                 (&mut state_bytes, "resident stream state")
             }
-            VulkanRuntimeResidentStreamAllocationKind::StateTransaction { .. } => {
+            (
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentStreamAllocationKind::StateTransaction { .. },
+            ) => {
                 (&mut state_transaction_bytes, "resident state transaction")
             }
-            VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot { .. } => (
+            (
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot { .. },
+            ) => (
                 &mut causal_verification_snapshot_bytes,
                 "resident causal verification snapshot",
             ),
-            VulkanRuntimeResidentStreamAllocationKind::SelectionTelemetry { .. } => {
+            (
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentStreamAllocationKind::SelectionTelemetry { .. },
+            ) => {
                 (&mut selection_telemetry_bytes, "resident selection telemetry")
             }
-            VulkanRuntimeResidentStreamAllocationKind::ActivationSlot { .. } => {
+            (
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentStreamAllocationKind::ActivationSlot { .. },
+            ) => {
                 (&mut activation_slot_bytes, "resident activation slot")
             }
-            VulkanRuntimeResidentStreamAllocationKind::BoundaryInput { .. }
-            | VulkanRuntimeResidentStreamAllocationKind::BoundaryOutput { .. } => {
+            (
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentStreamAllocationKind::BoundaryInput { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::BoundaryOutput { .. },
+            ) => {
                 (&mut boundary_buffer_bytes, "resident boundary buffer")
             }
-            VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort { .. }
-            | VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming { .. }
-            | VulkanRuntimeResidentStreamAllocationKind::EdgeStagingReplica { .. } => {
+            (
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::EdgeStagingReplica { .. },
+            ) => {
                 (&mut edge_buffer_bytes, "resident edge buffer")
             }
-            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer { class, .. } => match class {
+            (
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer { class, .. },
+            ) => match class {
                 VulkanRuntimeResidentBufferClass::OutputTransducerWorkspace => (
                     &mut output_transducer_workspace_bytes,
                     "resident output transducer workspace",
@@ -1490,7 +1529,55 @@ fn validate_resident_stream_allocation_ledger(
                 VulkanRuntimeResidentBufferClass::FeedbackWorkspace => {
                     (&mut feedback_workspace_bytes, "resident feedback workspace")
                 }
+                VulkanRuntimeResidentBufferClass::SpeculativeDecoderState
+                | VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace => {
+                    return Err(VulkanRuntimeResidencyPlanError(
+                        "target stream allocation uses a speculative-decoder buffer class"
+                            .to_string(),
+                    ));
+                }
             },
+            (
+                VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { .. },
+                VulkanRuntimeResidentStreamAllocationKind::State { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::StateTransaction { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot { .. },
+            ) => (&mut speculative_decoder_state_bytes, "speculative decoder state"),
+            (
+                VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { .. },
+                VulkanRuntimeResidentStreamAllocationKind::SelectionTelemetry { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::ActivationSlot { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::BoundaryInput { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::BoundaryOutput { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::EdgeStagingReplica { .. },
+            ) => (
+                &mut speculative_decoder_activation_bytes,
+                "speculative decoder activation",
+            ),
+            (
+                VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { .. },
+                VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                    class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
+                    ..
+                },
+            ) => (&mut speculative_decoder_state_bytes, "speculative decoder state"),
+            (
+                VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { .. },
+                VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                    class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    ..
+                },
+            ) => (
+                &mut speculative_decoder_workspace_bytes,
+                "speculative decoder workspace",
+            ),
+            (VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { .. }, _) => {
+                return Err(VulkanRuntimeResidencyPlanError(
+                    "speculative decoder allocation uses a target-only buffer class".to_string(),
+                ));
+            }
         };
         *bytes = checked_residency_add(*bytes, allocation.byte_capacity, label)?;
     }
@@ -1537,6 +1624,21 @@ fn validate_resident_stream_allocation_ledger(
             "feedback workspace",
             feedback_workspace_bytes,
             declared.feedback_workspace_bytes,
+        ),
+        (
+            "speculative decoder state",
+            speculative_decoder_state_bytes,
+            declared.speculative_decoder_state_bytes,
+        ),
+        (
+            "speculative decoder activation",
+            speculative_decoder_activation_bytes,
+            declared.speculative_decoder_activation_bytes,
+        ),
+        (
+            "speculative decoder workspace",
+            speculative_decoder_workspace_bytes,
+            declared.speculative_decoder_workspace_bytes,
         ),
     ];
     if let Some((label, allocation_bytes, breakdown_bytes)) = actual
