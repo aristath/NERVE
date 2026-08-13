@@ -863,7 +863,20 @@ For every numbered item below:
   prefix is a prefix of the exact future-turn rendering and that disabled
   reasoning retention or tool-preservation policy disables the shadow rather
   than guessing. Runtime fork/scheduling/commit wiring and complete-product
-  measurement remain below. For reasoning models, the canonical branch may
+  measurement remain below. The existing placed-stream fork is not an
+  acceptable implementation for this transaction: it allocates another
+  full-context state buffer per component and copies every resident state
+  buffer before execution. Introduce a stream-group-owned physical state-page
+  pool with branch-local page tables, reference-counted immutable prefix
+  pages, and bounded copy-on-write tail pages. Generation and canonical
+  logical streams must receive independent scheduler/history/session state
+  while their mounted operators, permanent parameters, and unchanged prefix
+  pages remain shared. The pool must prevent physical-page aliasing between
+  writable branches, remain correct with more than one pending device
+  submission, and make branch promotion/discard an ownership operation rather
+  than a state copy. Account the exact additional page/table/control bytes and
+  reject branch creation before allocation when the selected targets lack
+  headroom. For reasoning models, the canonical branch may
   consume the known assistant/non-reasoning prefix immediately, discard private
   reasoning, and consume answer content after the reasoning boundary. Buffer
   tool markup or any other structurally uncertain suffix until complete parse
