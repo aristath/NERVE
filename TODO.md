@@ -370,21 +370,23 @@ For every numbered item below:
   now carry those typed dimensions and immutable claim identities; shared
   claims deduplicate only when their definitions match, cache waves must fit
   the admitted quota, and different claim sets remain distinct on the Pareto
-  frontier. The production resolver no longer treats bounded component
-  calibration memory as final admission: it enumerates the measured Pareto
-  frontier, lowers candidates in objective order, and runs the ordinary
-  package's exact slice, distributed parameter/exclusion, activation,
-  selected-resource ownership, cache-quota, atomic load-wave, and physical
-  residency planners at the requested context, speculation, residency policy,
-  and live reservation envelope without opening Vulkan or allocating VRAM.
-  An infeasible fast route is skipped in favor of the next complete route;
-  normal mount still repeats the same centralized derivations and remains the
-  final race-safe admission gate. This prevents sampled calibration memory from
-  being accepted as capacity proof, but route completeness can still depend on
-  sampled resource dimensions during Pareto pruning. Per-island exact resource
-  claims must therefore move ahead of the ordered solve, both to make pruning
-  authoritative and to expose reusable claims to the future general-DAG
-  solver.
+  frontier. The representation-aware production resolver no longer treats
+  bounded component-calibration memory as final admission or as a route-pruning
+  dimension. It lazily visits complete decode and owner-compatible prefill
+  routes in nondecreasing predicted-duration order with no arbitrary candidate
+  cap, lowers each route, and runs the ordinary package's exact slice,
+  distributed parameter/exclusion, activation, selected-resource ownership,
+  cache-quota, atomic load-wave, and physical-residency planners at the
+  requested context, speculation, residency policy, and live reservation
+  envelope without opening Vulkan or allocating VRAM. An infeasible fast route
+  is skipped in favor of the next complete route even when bounded calibration
+  data made that route look resource-dominated; exact sequential tests cover
+  both representation/decode and prefill route discovery. Normal mount repeats
+  the same centralized derivations and remains the final race-safe admission
+  gate. Per-island exact resource claims must still move ahead of the ordered
+  solve so exact infeasibility can prune partial routes safely rather than
+  relying on potentially exponential terminal enumeration, and so the future
+  general-DAG solver can reuse the same authoritative claims.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
   durations. Model compute and transfer queues, dependency edges, collectives,
   independent expert branches, resource contention, and legal overlap.

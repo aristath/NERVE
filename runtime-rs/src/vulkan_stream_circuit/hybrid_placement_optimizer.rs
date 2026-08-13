@@ -172,6 +172,13 @@ pub struct VulkanHybridPlacementPlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanHybridPlacementRoute {
+    pub steps: Vec<VulkanHybridScheduledStep>,
+    pub predicted_duration_ns_per_activation: u128,
+    pub calibration_resource_reservations: VulkanHybridResourceReservations,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanHybridPlacementError(pub String);
 
 impl Display for VulkanHybridPlacementError {
@@ -196,6 +203,11 @@ struct VulkanHybridResolvedBoundaryCandidate<'a> {
     resources: &'a VulkanHybridCandidateResources,
 }
 
+struct VulkanHybridResolvedCandidateGraph<'a> {
+    regions_by_start: BTreeMap<usize, Vec<VulkanHybridResolvedRegionCandidate<'a>>>,
+    boundaries_by_index: BTreeMap<usize, Vec<VulkanHybridResolvedBoundaryCandidate<'a>>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanHybridPlacementState {
     cursor: usize,
@@ -203,6 +215,15 @@ struct VulkanHybridPlacementState {
     steps: Vec<VulkanHybridScheduledStep>,
     predicted_duration_ns_per_activation: u128,
     resource_reservations: VulkanHybridResourceReservations,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanHybridRouteSearchState {
+    cursor: usize,
+    output_physical_device_id: Option<String>,
+    steps: Vec<VulkanHybridScheduledStep>,
+    predicted_duration_ns_per_activation: u128,
+    calibration_resource_reservations: VulkanHybridResourceReservations,
 }
 
 /// Selects exact measured physical islands for a canonical ordered graph.
@@ -324,6 +345,335 @@ pub fn plan_vulkan_hybrid_ordered_graph_candidates_with_resources(
         return Ok(Vec::new());
     }
 
+    let resolved = resolve_vulkan_hybrid_candidate_graph(
+        catalog,
+        component_count,
+        region_candidates,
+        boundary_candidates,
+        resources,
+    )?;
+
+    let mut states_by_cursor = vec![Vec::<VulkanHybridPlacementState>::new(); component_count + 1];
+    states_by_cursor[0].push(VulkanHybridPlacementState {
+        cursor: 0,
+        output_physical_device_id: None,
+        steps: Vec::new(),
+        predicted_duration_ns_per_activation: 0,
+        resource_reservations: VulkanHybridResourceReservations::default(),
+    });
+
+    for cursor in 0..component_count {
+        let states = std::mem::take(&mut states_by_cursor[cursor]);
+        let Some(candidates) = resolved.regions_by_start.get(&cursor) else {
+            continue;
+        };
+        for state in states {
+            for candidate in candidates {
+                let boundary_options = matching_hybrid_boundary_options(
+                    state.output_physical_device_id.as_deref(),
+                    candidate.observation,
+                    cursor,
+                    &resolved.boundaries_by_index,
+                );
+                for boundary in boundary_options {
+                    let Some(mut next) = apply_hybrid_boundary(&state, boundary, capacity)? else {
+                        continue;
+                    };
+                    let Some(resource_reservations) = next
+                        .resource_reservations
+                        .reserve(candidate.resources, capacity)
+                        .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
+                    else {
+                        continue;
+                    };
+                    next.predicted_duration_ns_per_activation = next
+                        .predicted_duration_ns_per_activation
+                        .checked_add(normalized_hybrid_duration_ns(candidate.observation)?)
+                        .ok_or_else(|| {
+                            VulkanHybridPlacementError(
+                                "hybrid placement predicted duration overflowed".to_string(),
+                            )
+                        })?;
+                    next.resource_reservations = resource_reservations;
+                    next.cursor = candidate.request.component_end;
+                    next.output_physical_device_id = Some(
+                        candidate
+                            .observation
+                            .execution_case
+                            .output_physical_device_id
+                            .clone(),
+                    );
+                    next.steps.push(VulkanHybridScheduledStep::Region {
+                        candidate_id: candidate.request.candidate_id.clone(),
+                        component_start: candidate.request.component_start,
+                        component_end: candidate.request.component_end,
+                        execution_case: candidate.observation.execution_case.clone(),
+                    });
+                    insert_hybrid_pareto_state(
+                        &mut states_by_cursor[candidate.request.component_end],
+                        next,
+                    );
+                }
+            }
+        }
+    }
+
+    let mut complete = states_by_cursor
+        .pop()
+        .expect("a state bucket exists for the graph terminus")
+        .into_iter()
+        .collect::<Vec<_>>();
+    complete.sort_by(|left, right| {
+        hybrid_state_ordering_key(left).cmp(&hybrid_state_ordering_key(right))
+    });
+    Ok(complete
+        .into_iter()
+        .map(|state| VulkanHybridPlacementPlan {
+            steps: state.steps,
+            predicted_duration_ns_per_activation: state.predicted_duration_ns_per_activation,
+            resource_reservations: state.resource_reservations,
+        })
+        .collect())
+}
+
+/// Visits complete measured routes in nondecreasing predicted-duration order
+/// until the caller accepts one. Resource observations are validated but never
+/// used to discard a partial route: the caller can therefore apply an exact
+/// full-mount verifier without making route discovery depend on sampled
+/// calibration residency. The search is lazy and has no arbitrary candidate
+/// cap; an admissible suffix-duration bound keeps unrelated slower prefixes out
+/// of the frontier until they can matter.
+pub fn visit_vulkan_hybrid_ordered_graph_routes_by_duration<T, F>(
+    catalog: &VulkanPlacementCalibrationCatalog,
+    component_count: usize,
+    region_candidates: &[VulkanHybridRegionCandidate],
+    boundary_candidates: &[VulkanHybridBoundaryCandidate],
+    resources: &VulkanHybridCandidateResourceCatalog,
+    eligible_capacity: &VulkanPlacementCapacityEnvelope,
+    mut visitor: F,
+) -> Result<Option<T>, VulkanHybridPlacementError>
+where
+    F: FnMut(&VulkanHybridPlacementRoute) -> Result<Option<T>, VulkanHybridPlacementError>,
+{
+    if component_count == 0 {
+        return Err(VulkanHybridPlacementError(
+            "hybrid placement requires a nonempty ordered graph".to_string(),
+        ));
+    }
+    validate_hybrid_capacity_envelope(eligible_capacity)?;
+    if region_candidates.is_empty() {
+        return Ok(None);
+    }
+    let resolved = resolve_vulkan_hybrid_candidate_graph(
+        catalog,
+        component_count,
+        region_candidates,
+        boundary_candidates,
+        resources,
+    )?;
+    let minimum_suffix_duration =
+        minimum_hybrid_route_suffix_durations(component_count, &resolved, eligible_capacity)?;
+    let Some(initial_bound) = minimum_suffix_duration[0] else {
+        return Ok(None);
+    };
+    let unbounded_capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: eligible_capacity
+            .available_bytes_by_device
+            .keys()
+            .cloned()
+            .map(|device| (device, usize::MAX))
+            .collect(),
+        host_available_bytes: usize::MAX,
+    };
+    let mut frontier = BTreeMap::<(u128, u128, u64), VulkanHybridRouteSearchState>::new();
+    frontier.insert(
+        (initial_bound, 0, 0),
+        VulkanHybridRouteSearchState {
+            cursor: 0,
+            output_physical_device_id: None,
+            steps: Vec::new(),
+            predicted_duration_ns_per_activation: 0,
+            calibration_resource_reservations: VulkanHybridResourceReservations::default(),
+        },
+    );
+    let mut insertion_ordinal = 0u64;
+
+    while let Some((_, state)) = frontier.pop_first() {
+        if state.cursor == component_count {
+            let route = VulkanHybridPlacementRoute {
+                steps: state.steps,
+                predicted_duration_ns_per_activation: state.predicted_duration_ns_per_activation,
+                calibration_resource_reservations: state.calibration_resource_reservations,
+            };
+            if let Some(result) = visitor(&route)? {
+                return Ok(Some(result));
+            }
+            continue;
+        }
+        let Some(candidates) = resolved.regions_by_start.get(&state.cursor) else {
+            continue;
+        };
+        for candidate in candidates {
+            if !hybrid_execution_case_uses_only_eligible_devices(
+                &candidate.observation.execution_case,
+                eligible_capacity,
+            ) {
+                continue;
+            }
+            let boundary_options = matching_hybrid_boundary_options(
+                state.output_physical_device_id.as_deref(),
+                candidate.observation,
+                state.cursor,
+                &resolved.boundaries_by_index,
+            );
+            for boundary in boundary_options {
+                if boundary.is_some_and(|boundary| {
+                    !hybrid_execution_case_uses_only_eligible_devices(
+                        &boundary.observation.execution_case,
+                        eligible_capacity,
+                    )
+                }) {
+                    continue;
+                }
+                let mut next = state.clone();
+                if let Some(boundary) = boundary {
+                    next.calibration_resource_reservations = next
+                        .calibration_resource_reservations
+                        .reserve(boundary.resources, &unbounded_capacity)
+                        .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
+                        .ok_or_else(|| {
+                            VulkanHybridPlacementError(
+                                "hybrid boundary calibration resource claims exceed an unbounded route envelope"
+                                    .to_string(),
+                            )
+                        })?;
+                    next.predicted_duration_ns_per_activation = next
+                        .predicted_duration_ns_per_activation
+                        .checked_add(normalized_hybrid_duration_ns(boundary.observation)?)
+                        .ok_or_else(|| {
+                            VulkanHybridPlacementError(
+                                "hybrid boundary predicted duration overflowed".to_string(),
+                            )
+                        })?;
+                    next.steps.push(VulkanHybridScheduledStep::Boundary {
+                        boundary_index: boundary.request.boundary_index,
+                        execution_case: boundary.observation.execution_case.clone(),
+                    });
+                }
+                next.calibration_resource_reservations = next
+                    .calibration_resource_reservations
+                    .reserve(candidate.resources, &unbounded_capacity)
+                    .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
+                    .ok_or_else(|| {
+                        VulkanHybridPlacementError(
+                            "hybrid region calibration resource claims exceed an unbounded route envelope"
+                                .to_string(),
+                        )
+                    })?;
+                next.predicted_duration_ns_per_activation = next
+                    .predicted_duration_ns_per_activation
+                    .checked_add(normalized_hybrid_duration_ns(candidate.observation)?)
+                    .ok_or_else(|| {
+                        VulkanHybridPlacementError(
+                            "hybrid placement predicted duration overflowed".to_string(),
+                        )
+                    })?;
+                next.cursor = candidate.request.component_end;
+                next.output_physical_device_id = Some(
+                    candidate
+                        .observation
+                        .execution_case
+                        .output_physical_device_id
+                        .clone(),
+                );
+                next.steps.push(VulkanHybridScheduledStep::Region {
+                    candidate_id: candidate.request.candidate_id.clone(),
+                    component_start: candidate.request.component_start,
+                    component_end: candidate.request.component_end,
+                    execution_case: candidate.observation.execution_case.clone(),
+                });
+                let Some(suffix) = minimum_suffix_duration[next.cursor] else {
+                    continue;
+                };
+                let estimated_duration = next
+                    .predicted_duration_ns_per_activation
+                    .checked_add(suffix)
+                    .ok_or_else(|| {
+                        VulkanHybridPlacementError(
+                            "hybrid route duration bound overflowed".to_string(),
+                        )
+                    })?;
+                insertion_ordinal = insertion_ordinal.checked_add(1).ok_or_else(|| {
+                    VulkanHybridPlacementError(
+                        "hybrid route search insertion ordinal overflowed".to_string(),
+                    )
+                })?;
+                frontier.insert(
+                    (
+                        estimated_duration,
+                        next.predicted_duration_ns_per_activation,
+                        insertion_ordinal,
+                    ),
+                    next,
+                );
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn minimum_hybrid_route_suffix_durations(
+    component_count: usize,
+    resolved: &VulkanHybridResolvedCandidateGraph<'_>,
+    eligible_capacity: &VulkanPlacementCapacityEnvelope,
+) -> Result<Vec<Option<u128>>, VulkanHybridPlacementError> {
+    let mut suffix = vec![None; component_count + 1];
+    suffix[component_count] = Some(0);
+    for cursor in (0..component_count).rev() {
+        let Some(candidates) = resolved.regions_by_start.get(&cursor) else {
+            continue;
+        };
+        for candidate in candidates {
+            if !hybrid_execution_case_uses_only_eligible_devices(
+                &candidate.observation.execution_case,
+                eligible_capacity,
+            ) {
+                continue;
+            }
+            let Some(remaining) = suffix[candidate.request.component_end] else {
+                continue;
+            };
+            let duration = normalized_hybrid_duration_ns(candidate.observation)?
+                .checked_add(remaining)
+                .ok_or_else(|| {
+                    VulkanHybridPlacementError(
+                        "hybrid route suffix duration overflowed".to_string(),
+                    )
+                })?;
+            suffix[cursor] = Some(suffix[cursor].map_or(duration, |current| current.min(duration)));
+        }
+    }
+    Ok(suffix)
+}
+
+fn hybrid_execution_case_uses_only_eligible_devices(
+    execution_case: &VulkanPlacementExecutionCaseIdentity,
+    eligible_capacity: &VulkanPlacementCapacityEnvelope,
+) -> bool {
+    execution_case.devices.iter().all(|device| {
+        eligible_capacity
+            .available_bytes_by_device
+            .contains_key(device)
+    })
+}
+
+fn resolve_vulkan_hybrid_candidate_graph<'a>(
+    catalog: &'a VulkanPlacementCalibrationCatalog,
+    component_count: usize,
+    region_candidates: &'a [VulkanHybridRegionCandidate],
+    boundary_candidates: &'a [VulkanHybridBoundaryCandidate],
+    resources: &'a VulkanHybridCandidateResourceCatalog,
+) -> Result<VulkanHybridResolvedCandidateGraph<'a>, VulkanHybridPlacementError> {
     let mut candidate_ids = BTreeSet::new();
     let mut expected_phase = None;
     let mut semantic_cohort_by_range = BTreeMap::new();
@@ -453,88 +803,17 @@ pub fn plan_vulkan_hybrid_ordered_graph_candidates_with_resources(
                 resources: candidate_resources,
             });
     }
-
-    let mut states_by_cursor = vec![Vec::<VulkanHybridPlacementState>::new(); component_count + 1];
-    states_by_cursor[0].push(VulkanHybridPlacementState {
-        cursor: 0,
-        output_physical_device_id: None,
-        steps: Vec::new(),
-        predicted_duration_ns_per_activation: 0,
-        resource_reservations: VulkanHybridResourceReservations::default(),
-    });
-
-    for cursor in 0..component_count {
-        let states = std::mem::take(&mut states_by_cursor[cursor]);
-        let Some(candidates) = regions_by_start.get(&cursor) else {
-            continue;
-        };
-        for state in states {
-            for candidate in candidates {
-                let boundary_options = matching_hybrid_boundary_options(
-                    &state,
-                    candidate.observation,
-                    cursor,
-                    &boundaries_by_index,
-                );
-                for boundary in boundary_options {
-                    let Some(mut next) = apply_hybrid_boundary(&state, boundary, capacity)? else {
-                        continue;
-                    };
-                    let Some(resource_reservations) = next
-                        .resource_reservations
-                        .reserve(candidate.resources, capacity)
-                        .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
-                    else {
-                        continue;
-                    };
-                    next.predicted_duration_ns_per_activation = next
-                        .predicted_duration_ns_per_activation
-                        .checked_add(normalized_hybrid_duration_ns(candidate.observation)?)
-                        .ok_or_else(|| {
-                            VulkanHybridPlacementError(
-                                "hybrid placement predicted duration overflowed".to_string(),
-                            )
-                        })?;
-                    next.resource_reservations = resource_reservations;
-                    next.cursor = candidate.request.component_end;
-                    next.output_physical_device_id = Some(
-                        candidate
-                            .observation
-                            .execution_case
-                            .output_physical_device_id
-                            .clone(),
-                    );
-                    next.steps.push(VulkanHybridScheduledStep::Region {
-                        candidate_id: candidate.request.candidate_id.clone(),
-                        component_start: candidate.request.component_start,
-                        component_end: candidate.request.component_end,
-                        execution_case: candidate.observation.execution_case.clone(),
-                    });
-                    insert_hybrid_pareto_state(
-                        &mut states_by_cursor[candidate.request.component_end],
-                        next,
-                    );
-                }
-            }
-        }
+    for candidates in boundaries_by_index.values_mut() {
+        candidates.sort_by(|left, right| {
+            left.observation
+                .execution_case
+                .cmp(&right.observation.execution_case)
+        });
     }
-
-    let mut complete = states_by_cursor
-        .pop()
-        .expect("a state bucket exists for the graph terminus")
-        .into_iter()
-        .collect::<Vec<_>>();
-    complete.sort_by(|left, right| {
-        hybrid_state_ordering_key(left).cmp(&hybrid_state_ordering_key(right))
-    });
-    Ok(complete
-        .into_iter()
-        .map(|state| VulkanHybridPlacementPlan {
-            steps: state.steps,
-            predicted_duration_ns_per_activation: state.predicted_duration_ns_per_activation,
-            resource_reservations: state.resource_reservations,
-        })
-        .collect())
+    Ok(VulkanHybridResolvedCandidateGraph {
+        regions_by_start,
+        boundaries_by_index,
+    })
 }
 
 fn validate_hybrid_capacity_envelope(
@@ -584,12 +863,12 @@ fn is_exact_directed_boundary_observation(
 }
 
 fn matching_hybrid_boundary_options<'a>(
-    state: &VulkanHybridPlacementState,
+    output_physical_device_id: Option<&str>,
     next: &VulkanPlacementCalibrationObservation,
     cursor: usize,
     boundaries_by_index: &'a BTreeMap<usize, Vec<VulkanHybridResolvedBoundaryCandidate<'a>>>,
 ) -> Vec<Option<&'a VulkanHybridResolvedBoundaryCandidate<'a>>> {
-    let Some(source) = state.output_physical_device_id.as_deref() else {
+    let Some(source) = output_physical_device_id else {
         return vec![None];
     };
     let destination = next.execution_case.input_physical_device_id.as_str();
@@ -919,7 +1198,11 @@ mod hybrid_placement_optimizer_tests {
     }
 
     fn selected_region_ids(plan: &VulkanHybridPlacementPlan) -> Vec<&str> {
-        plan.steps
+        selected_step_region_ids(&plan.steps)
+    }
+
+    fn selected_step_region_ids(steps: &[VulkanHybridScheduledStep]) -> Vec<&str> {
+        steps
             .iter()
             .filter_map(|step| match step {
                 VulkanHybridScheduledStep::Region { candidate_id, .. } => {
@@ -976,44 +1259,70 @@ mod hybrid_placement_optimizer_tests {
         );
         let boundary = record(&mut catalog, boundary_observation("gpu0", "gpu1", 100));
 
+        let candidates = [
+            VulkanHybridRegionCandidate {
+                candidate_id: "fast-remote".to_string(),
+                component_start: 0,
+                component_end: 1,
+                semantic_contract_id: "first".to_string(),
+                execution_case: fast_remote,
+            },
+            VulkanHybridRegionCandidate {
+                candidate_id: "slower-local".to_string(),
+                component_start: 0,
+                component_end: 1,
+                semantic_contract_id: "first".to_string(),
+                execution_case: slower_local,
+            },
+            VulkanHybridRegionCandidate {
+                candidate_id: "second".to_string(),
+                component_start: 1,
+                component_end: 2,
+                semantic_contract_id: "second".to_string(),
+                execution_case: second,
+            },
+        ];
+        let boundaries = [VulkanHybridBoundaryCandidate {
+            boundary_index: 0,
+            byte_count: 16,
+            execution_case: boundary,
+        }];
+        let placement_capacity = capacity(2, 100, 100);
         let plan = plan_vulkan_hybrid_ordered_graph(
             &catalog,
             2,
-            &[
-                VulkanHybridRegionCandidate {
-                    candidate_id: "fast-remote".to_string(),
-                    component_start: 0,
-                    component_end: 1,
-                    semantic_contract_id: "first".to_string(),
-                    execution_case: fast_remote,
-                },
-                VulkanHybridRegionCandidate {
-                    candidate_id: "slower-local".to_string(),
-                    component_start: 0,
-                    component_end: 1,
-                    semantic_contract_id: "first".to_string(),
-                    execution_case: slower_local,
-                },
-                VulkanHybridRegionCandidate {
-                    candidate_id: "second".to_string(),
-                    component_start: 1,
-                    component_end: 2,
-                    semantic_contract_id: "second".to_string(),
-                    execution_case: second,
-                },
-            ],
-            &[VulkanHybridBoundaryCandidate {
-                boundary_index: 0,
-                byte_count: 16,
-                execution_case: boundary,
-            }],
-            &capacity(2, 100, 100),
+            &candidates,
+            &boundaries,
+            &placement_capacity,
         )
         .unwrap();
 
         assert_eq!(selected_region_ids(&plan), ["slower-local", "second"]);
         assert_eq!(plan.predicted_duration_ns_per_activation, 20);
         assert_eq!(plan.steps.len(), 2);
+
+        let resources = VulkanHybridCandidateResourceCatalog::from_calibration(
+            &catalog,
+            &candidates,
+            &boundaries,
+        )
+        .unwrap();
+        let ordered = visit_vulkan_hybrid_ordered_graph_routes_by_duration(
+            &catalog,
+            2,
+            &candidates,
+            &boundaries,
+            &resources,
+            &placement_capacity,
+            |route| Ok(Some(route.clone())),
+        )
+        .unwrap()
+        .expect("the duration-ordered visitor must produce a complete route");
+        assert_eq!(
+            selected_step_region_ids(&ordered.steps),
+            ["slower-local", "second"]
+        );
+        assert_eq!(ordered.predicted_duration_ns_per_activation, 20);
     }
 
     #[test]
@@ -1555,6 +1864,184 @@ mod hybrid_placement_optimizer_tests {
                 .execution_transient_peak_bytes,
             0
         );
+    }
+
+    #[test]
+    fn duration_ordered_route_search_reaches_a_sampled_resource_dominated_alternative() {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let fast = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("first"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 10)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                5,
+                1,
+            ),
+        );
+        let mut slow_observation = region_observation(
+            region_behavior("first"),
+            VulkanPlacementExecutionStrategy::SingleDevice,
+            &[("gpu0", 20)],
+            "gpu0",
+            "gpu0",
+            "gpu0",
+            8,
+            1,
+        );
+        slow_observation.execution_case.implementation_digests = vec![digest('e')];
+        slow_observation.execution_case.artifact_digest = digest('f');
+        let slow = record(&mut catalog, slow_observation);
+        let second = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("second"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 10)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                5,
+                1,
+            ),
+        );
+        let candidates = [
+            VulkanHybridRegionCandidate {
+                candidate_id: "fast".to_string(),
+                component_start: 0,
+                component_end: 1,
+                semantic_contract_id: "first".to_string(),
+                execution_case: fast,
+            },
+            VulkanHybridRegionCandidate {
+                candidate_id: "slow".to_string(),
+                component_start: 0,
+                component_end: 1,
+                semantic_contract_id: "first".to_string(),
+                execution_case: slow,
+            },
+            VulkanHybridRegionCandidate {
+                candidate_id: "second".to_string(),
+                component_start: 1,
+                component_end: 2,
+                semantic_contract_id: "second".to_string(),
+                execution_case: second,
+            },
+        ];
+        let resources =
+            VulkanHybridCandidateResourceCatalog::from_calibration(&catalog, &candidates, &[])
+                .unwrap();
+        let capacity = capacity(2, 100, 100);
+        let pareto = plan_vulkan_hybrid_ordered_graph_candidates_with_resources(
+            &catalog,
+            2,
+            &candidates,
+            &[],
+            &resources,
+            &capacity,
+        )
+        .unwrap();
+        assert_eq!(pareto.len(), 1);
+        assert_eq!(selected_region_ids(&pareto[0]), ["fast", "second"]);
+
+        let mut visited = Vec::new();
+        let selected = visit_vulkan_hybrid_ordered_graph_routes_by_duration(
+            &catalog,
+            2,
+            &candidates,
+            &[],
+            &resources,
+            &capacity,
+            |route| {
+                let ids = selected_step_region_ids(&route.steps)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                visited.push(ids.clone());
+                Ok((ids[0] == "slow").then(|| route.clone()))
+            },
+        )
+        .unwrap()
+        .expect("the exact terminal verifier accepts the second route");
+
+        assert_eq!(visited, [["fast", "second"], ["slow", "second"]]);
+        assert_eq!(
+            selected_step_region_ids(&selected.steps),
+            ["slow", "second"]
+        );
+        assert_eq!(selected.predicted_duration_ns_per_activation, 13);
+    }
+
+    #[test]
+    fn duration_ordered_route_search_never_visits_an_ineligible_device() {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let unavailable = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("only"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu2", 10)],
+                "gpu2",
+                "gpu2",
+                "gpu2",
+                1,
+                1,
+            ),
+        );
+        let available = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("only"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 10)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                20,
+                1,
+            ),
+        );
+        let candidates = [
+            VulkanHybridRegionCandidate {
+                candidate_id: "unavailable".to_string(),
+                component_start: 0,
+                component_end: 1,
+                semantic_contract_id: "only".to_string(),
+                execution_case: unavailable,
+            },
+            VulkanHybridRegionCandidate {
+                candidate_id: "available".to_string(),
+                component_start: 0,
+                component_end: 1,
+                semantic_contract_id: "only".to_string(),
+                execution_case: available,
+            },
+        ];
+        let resources =
+            VulkanHybridCandidateResourceCatalog::from_calibration(&catalog, &candidates, &[])
+                .unwrap();
+        let mut visited = Vec::new();
+
+        let selected = visit_vulkan_hybrid_ordered_graph_routes_by_duration(
+            &catalog,
+            1,
+            &candidates,
+            &[],
+            &resources,
+            &capacity(2, 100, 100),
+            |route| {
+                visited.push(selected_step_region_ids(&route.steps)[0].to_string());
+                Ok(Some(route.clone()))
+            },
+        )
+        .unwrap()
+        .expect("the eligible slower route remains available");
+
+        assert_eq!(visited, ["available"]);
+        assert_eq!(selected_step_region_ids(&selected.steps), ["available"]);
     }
 
     #[test]

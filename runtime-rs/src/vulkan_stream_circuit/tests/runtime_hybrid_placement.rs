@@ -1425,6 +1425,95 @@ fn runtime_hybrid_jointly_selects_a_faster_compatible_representation() {
 }
 
 #[test]
+fn runtime_hybrid_route_visitor_reaches_a_sampled_dominated_representation() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let mut fast_model = model.clone();
+    fast_model
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .implementation = "fast_large_representation".to_string();
+    let mut slow_model = model.clone();
+    slow_model
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .implementation = "slow_small_representation".to_string();
+    let mut catalog = hybrid_test_catalog(&model);
+    for (alternative, duration) in [(&fast_model, 4), (&slow_model, 6)] {
+        let signature = vulkan_runtime_placement_calibration_target_for_component(
+            alternative,
+            "layer_00",
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap()
+        .signature_id;
+        let behavior = hybrid_test_behavior(&signature);
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: behavior.clone(),
+                output_digest: "output".to_string(),
+                output_artifact: None,
+                state_digest: "state".to_string(),
+            })
+            .unwrap();
+        catalog
+            .record_observation(hybrid_test_observation(behavior, "gpu0", duration))
+            .unwrap();
+    }
+    let applications = [
+        hybrid_test_representation_application(fast_model, &["layer_00"]),
+        hybrid_test_representation_application(slow_model, &["layer_00"]),
+    ];
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+    let mut visited = Vec::new();
+
+    let selected = visit_runtime_hybrid_representation_placements_by_duration(
+        &model,
+        &applications,
+        &BTreeSet::from(["layer_00".to_string()]),
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        |placement| {
+            let candidate_id = placement
+                .ordered_placement
+                .plan
+                .steps
+                .iter()
+                .find_map(|step| match step {
+                    VulkanHybridScheduledStep::Region {
+                        candidate_id,
+                        component_start: 0,
+                        ..
+                    } => Some(candidate_id.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            visited.push(candidate_id.clone());
+            Ok(candidate_id
+                .starts_with("representation:1:")
+                .then_some(placement))
+        },
+    )
+    .unwrap()
+    .expect("the terminal verifier accepts the slower representation");
+
+    assert!(visited[0].starts_with("representation:0:"));
+    assert!(visited[1].starts_with("representation:1:"));
+    assert_eq!(visited.len(), 2);
+    assert_eq!(selected.selected_implementations.len(), 1);
+}
+
+#[test]
 fn runtime_hybrid_mounts_the_jointly_selected_representation_and_physical_plan_once() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1793,6 +1882,109 @@ fn runtime_hybrid_phase_set_keeps_decode_owners_while_optimizing_prefill() {
     assert_eq!(physical_plan.prefill_execution_cases_by_component.len(), 3);
     assert!(physical_plan.component_device_pools.decode.is_empty());
     assert!(physical_plan.component_device_pools.prefill.is_empty());
+}
+
+#[test]
+fn runtime_hybrid_prefill_route_visitor_reaches_a_sampled_dominated_alternative() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let phase = VulkanTargetedComponentExecutionPhase::Prefill {
+        activation_batch_width: 4,
+    };
+    let mut signatures = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| {
+            vulkan_runtime_placement_calibration_target_for_component(
+                &model,
+                &component.component_id,
+                phase,
+            )
+            .unwrap()
+            .signature_id
+        })
+        .collect::<Vec<_>>();
+    signatures.sort();
+    signatures.dedup();
+
+    let slow_artifact_digest = hybrid_test_digest('f');
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    for signature in signatures {
+        let behavior = hybrid_test_behavior_for_phase(
+            &signature,
+            nerve_execution_contracts::ExecutionPhase::Prefill,
+            4,
+        );
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: behavior.clone(),
+                output_digest: "output".to_string(),
+                output_artifact: None,
+                state_digest: "state".to_string(),
+            })
+            .unwrap();
+        catalog
+            .record_observation(hybrid_test_observation(behavior.clone(), "gpu0", 5))
+            .unwrap();
+        let mut slow = hybrid_test_observation(behavior, "gpu0", 8);
+        slow.execution_case.implementation_digests = vec![hybrid_test_digest('e')];
+        slow.execution_case.artifact_digest = slow_artifact_digest.clone();
+        slow.resident_bytes_by_physical_device
+            .insert("gpu0".to_string(), 20);
+        catalog.record_observation(slow).unwrap();
+    }
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([(hybrid_test_device("gpu0"), 100)]),
+        host_available_bytes: 100,
+    };
+    let required_owners = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| (component.component_id.clone(), "gpu0".to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let route_uses_slow_artifact = |placement: &VulkanRuntimeHybridOrderedPlacement| {
+        placement.plan.steps.iter().any(|step| {
+            matches!(
+                step,
+                VulkanHybridScheduledStep::Region { execution_case, .. }
+                    if execution_case.artifact_digest == slow_artifact_digest
+            )
+        })
+    };
+
+    let pareto = try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+        &model,
+        &catalog,
+        &capacity,
+        phase,
+        Some(&required_owners),
+    )
+    .unwrap()
+    .expect("the sampled Pareto planner has a complete fast route");
+    assert!(!route_uses_slow_artifact(&pareto));
+
+    let mut visited_slow_artifact = Vec::new();
+    let selected = visit_vulkan_runtime_hybrid_ordered_graph_with_owners_by_duration(
+        &model,
+        &catalog,
+        &capacity,
+        phase,
+        Some(&required_owners),
+        |placement| {
+            let uses_slow_artifact = route_uses_slow_artifact(&placement);
+            visited_slow_artifact.push(uses_slow_artifact);
+            Ok(uses_slow_artifact.then_some(placement))
+        },
+    )
+    .unwrap()
+    .expect("the terminal verifier accepts a sampled-dominated prefill route");
+
+    assert_eq!(visited_slow_artifact, [false, true]);
+    assert!(route_uses_slow_artifact(&selected));
+    assert_eq!(selected.activation_batch_width, 4);
 }
 
 #[test]

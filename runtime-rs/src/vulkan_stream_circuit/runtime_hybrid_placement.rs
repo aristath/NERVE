@@ -168,70 +168,130 @@ fn runtime_hybrid_representation_placement_candidates(
         capacity,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    let mut placements = Vec::with_capacity(plans.len());
-    for plan in plans {
-        let mut selected_implementations = Vec::new();
-        for step in &plan.steps {
-            let VulkanHybridScheduledStep::Region { candidate_id, .. } = step else {
-                continue;
-            };
-            if let Some(selected) = candidates
-                .representation_selections_by_candidate_id
-                .get(candidate_id)
-            {
-                selected_implementations.extend(selected.iter().cloned());
-            }
-        }
-        selected_implementations.sort_by(|left, right| {
-            (
-                left.instance_ids.as_slice(),
-                left.implementation_id.as_str(),
+    plans
+        .into_iter()
+        .map(|plan| {
+            runtime_hybrid_representation_placement_from_plan(
+                &candidates,
+                exact_baseline_incompatible_instance_ids,
+                plan,
             )
-                .cmp(&(
-                    right.instance_ids.as_slice(),
-                    right.implementation_id.as_str(),
-                ))
-        });
-        let mut covered = BTreeSet::new();
-        for selected in &selected_implementations {
-            if selected
-                .instance_ids
-                .iter()
-                .any(|instance_id| !covered.insert(instance_id.clone()))
-            {
-                return runtime_hybrid_error(
-                    "joint representation placement selected overlapping implementation applications",
-                );
-            }
+        })
+        .collect()
+}
+
+fn visit_runtime_hybrid_representation_placements_by_duration<T, F>(
+    runtime_model: &VulkanResidentRuntimeModel,
+    applications: &[VulkanRuntimeHybridRepresentationApplication],
+    exact_baseline_incompatible_instance_ids: &BTreeSet<String>,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    eligible_capacity: &VulkanPlacementCapacityEnvelope,
+    phase: VulkanTargetedComponentExecutionPhase,
+    mut visitor: F,
+) -> Result<Option<T>, VulkanRuntimeHybridPlacementError>
+where
+    F: FnMut(
+        VulkanRuntimeHybridRepresentationPlacement,
+    ) -> Result<Option<T>, VulkanRuntimeHybridPlacementError>,
+{
+    let candidates = runtime_hybrid_representation_candidate_graph(
+        runtime_model,
+        applications,
+        exact_baseline_incompatible_instance_ids,
+        catalog,
+        phase,
+        None,
+    )?;
+    visit_vulkan_hybrid_ordered_graph_routes_by_duration(
+        catalog,
+        candidates.component_ids.len(),
+        &candidates.region_candidates,
+        &candidates.boundary_candidates,
+        &candidates.resource_catalog,
+        eligible_capacity,
+        |route| {
+            let placement = runtime_hybrid_representation_placement_from_plan(
+                &candidates,
+                exact_baseline_incompatible_instance_ids,
+                VulkanHybridPlacementPlan {
+                    steps: route.steps.clone(),
+                    predicted_duration_ns_per_activation: route
+                        .predicted_duration_ns_per_activation,
+                    resource_reservations: route.calibration_resource_reservations.clone(),
+                },
+            )
+            .map_err(|error| VulkanHybridPlacementError(error.to_string()))?;
+            visitor(placement).map_err(|error| VulkanHybridPlacementError(error.to_string()))
+        },
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))
+}
+
+fn runtime_hybrid_representation_placement_from_plan(
+    candidates: &VulkanRuntimeHybridCandidateGraph,
+    exact_baseline_incompatible_instance_ids: &BTreeSet<String>,
+    plan: VulkanHybridPlacementPlan,
+) -> Result<VulkanRuntimeHybridRepresentationPlacement, VulkanRuntimeHybridPlacementError> {
+    let mut selected_implementations = Vec::new();
+    for step in &plan.steps {
+        let VulkanHybridScheduledStep::Region { candidate_id, .. } = step else {
+            continue;
+        };
+        if let Some(selected) = candidates
+            .representation_selections_by_candidate_id
+            .get(candidate_id)
+        {
+            selected_implementations.extend(selected.iter().cloned());
         }
-        if !exact_baseline_incompatible_instance_ids.is_subset(&covered) {
+    }
+    selected_implementations.sort_by(|left, right| {
+        (
+            left.instance_ids.as_slice(),
+            left.implementation_id.as_str(),
+        )
+            .cmp(&(
+                right.instance_ids.as_slice(),
+                right.implementation_id.as_str(),
+            ))
+    });
+    let mut covered = BTreeSet::new();
+    for selected in &selected_implementations {
+        if selected
+            .instance_ids
+            .iter()
+            .any(|instance_id| !covered.insert(instance_id.clone()))
+        {
             return runtime_hybrid_error(
-                "joint representation placement retained an incompatible exact baseline",
+                "joint representation placement selected overlapping implementation applications",
             );
         }
-        let selected_region_executions = plan
-            .steps
-            .iter()
-            .filter_map(|step| match step {
-                VulkanHybridScheduledStep::Region { execution_case, .. } => candidates
-                    .region_executions_by_case
-                    .get(execution_case)
-                    .map(|calibration| (execution_case.clone(), calibration.clone())),
-                VulkanHybridScheduledStep::Boundary { .. } => None,
-            })
-            .collect();
-        placements.push(VulkanRuntimeHybridRepresentationPlacement {
-            ordered_placement: VulkanRuntimeHybridOrderedPlacement {
-                component_ids: candidates.component_ids.clone(),
-                execution_phase: candidates.execution_phase,
-                activation_batch_width: candidates.activation_batch_width,
-                plan,
-                region_executions_by_case: selected_region_executions,
-            },
-            selected_implementations,
-        });
     }
-    Ok(placements)
+    if !exact_baseline_incompatible_instance_ids.is_subset(&covered) {
+        return runtime_hybrid_error(
+            "joint representation placement retained an incompatible exact baseline",
+        );
+    }
+    let selected_region_executions = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            VulkanHybridScheduledStep::Region { execution_case, .. } => candidates
+                .region_executions_by_case
+                .get(execution_case)
+                .map(|calibration| (execution_case.clone(), calibration.clone())),
+            VulkanHybridScheduledStep::Boundary { .. } => None,
+        })
+        .collect();
+    Ok(VulkanRuntimeHybridRepresentationPlacement {
+        ordered_placement: VulkanRuntimeHybridOrderedPlacement {
+            component_ids: candidates.component_ids.clone(),
+            execution_phase: candidates.execution_phase,
+            activation_batch_width: candidates.activation_batch_width,
+            plan,
+            region_executions_by_case: selected_region_executions,
+        },
+        selected_implementations,
+    })
 }
 
 /// Selects the best complete measured layer-serial route. This is the
@@ -469,37 +529,10 @@ fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
             &request,
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    // Bounded component-calibration sessions are Pareto evidence, not final
-    // mount admission. When an exact workload-free mount planner is available,
-    // enumerate the measured Pareto frontier without rejecting a retained route
-    // solely against sampled capacity, then admit each full lowered route
-    // against the real context, speculation, cache, load-wave, and live
-    // capacities below. Exact per-island claims are still required before
-    // sampled resource dimensions can be removed from frontier pruning.
-    let candidate_capacity =
-        physical_mount_planning
-            .as_ref()
-            .map(|_| VulkanPlacementCapacityEnvelope {
-                available_bytes_by_device: capacity
-                    .available_bytes_by_device
-                    .keys()
-                    .cloned()
-                    .map(|device| (device, usize::MAX))
-                    .collect(),
-                host_available_bytes: usize::MAX,
-            });
-    let candidate_capacity = candidate_capacity.as_ref().unwrap_or(capacity);
-    let decode_candidates = runtime_hybrid_representation_placement_candidates(
-        runtime_model,
-        &applications,
-        &signal_incompatible_instance_ids,
-        catalog,
-        candidate_capacity,
-        VulkanTargetedComponentExecutionPhase::Decode,
-    )?;
-    if decode_candidates.is_empty() {
-        return Ok(None);
-    }
+    // Bounded component-calibration memory is ordering evidence, never final
+    // admission or a route-discovery constraint. Decode routes are visited
+    // lazily by predicted duration without sampled-resource Pareto pruning;
+    // the full lowered package plan below is the terminal verifier.
 
     // Endpoint implementations do not participate in the signal-chain
     // physical graph, but they still belong to the same validated mount
@@ -532,100 +565,141 @@ fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
             );
         }
     }
-    for decode in decode_candidates {
-        let mut selected = decode.selected_implementations;
-        selected.extend(endpoint_selections.iter().cloned());
-        let selection = implementation_catalog
-            .selection_report_for_applications(&request, selected)
-            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-        let mounted_model = runtime_model
-            .clone()
-            .apply_runtime_implementation_catalog_selection(
-                package_root,
-                implementation_catalog,
-                selection,
-            )
-            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    visit_runtime_hybrid_representation_placements_by_duration(
+        runtime_model,
+        &applications,
+        &signal_incompatible_instance_ids,
+        catalog,
+        capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        |decode| {
+            let mut selected = decode.selected_implementations;
+            selected.extend(endpoint_selections.iter().cloned());
+            let selection = implementation_catalog
+                .selection_report_for_applications(&request, selected)
+                .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+            let mounted_model = runtime_model
+                .clone()
+                .apply_runtime_implementation_catalog_selection(
+                    package_root,
+                    implementation_catalog,
+                    selection,
+                )
+                .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
 
-        let prefill_activation_batch_width =
-            vulkan_runtime_hybrid_calibrated_prefill_widths(&mounted_model, catalog)?
-                .into_iter()
-                .filter(|width| *width <= context_capacity_activations)
-                .max();
-        let decode_owner_by_component = runtime_hybrid_physical_owners(&decode.ordered_placement)?;
-        let prefill = prefill_activation_batch_width
-            .map(|activation_batch_width| {
-                try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners(
+            let prefill_activation_batch_width =
+                vulkan_runtime_hybrid_calibrated_prefill_widths(&mounted_model, catalog)?
+                    .into_iter()
+                    .filter(|width| *width <= context_capacity_activations)
+                    .max();
+            let decode_owner_by_component =
+                runtime_hybrid_physical_owners(&decode.ordered_placement)?;
+            if let Some(activation_batch_width) = prefill_activation_batch_width {
+                let resolution = visit_vulkan_runtime_hybrid_ordered_graph_with_owners_by_duration(
                     &mounted_model,
                     catalog,
-                    candidate_capacity,
+                    capacity,
                     VulkanTargetedComponentExecutionPhase::Prefill {
                         activation_batch_width,
                     },
                     Some(&decode_owner_by_component),
-                )
-            })
-            .transpose()?
-            .flatten();
-        let placement = VulkanRuntimeHybridPhaseSetPlacement {
-            decode: decode.ordered_placement,
-            prefill,
-        };
-        let decode_predicted_duration_ns_per_activation =
-            placement.decode.plan.predicted_duration_ns_per_activation;
-        let prefill_predicted_duration_ns_per_activation = placement
-            .prefill
-            .as_ref()
-            .map(|prefill| prefill.plan.predicted_duration_ns_per_activation);
-        let selected_prefill_activation_batch_width = placement
-            .prefill
-            .as_ref()
-            .map(|prefill| prefill.activation_batch_width);
-        let (runtime_model, physical_execution_plan) = lower_vulkan_runtime_hybrid_phase_set(
-            &mounted_model,
-            &placement,
-            logical_device_id_by_physical_device,
-        )?;
-        let physical_mount_plan = if let Some(planning) = physical_mount_planning.as_ref() {
-            let required_devices = physical_execution_plan
-                .device_ids(&runtime_model)
-                .into_iter()
-                .collect::<BTreeSet<_>>();
-            let planning_devices = planning
-                .devices
-                .iter()
-                .filter(|device| required_devices.contains(&device.logical_device_id))
-                .cloned()
-                .collect::<Vec<_>>();
-            let exact = plan_vulkan_runtime_physical_mount(
-                package_root,
-                &runtime_model,
-                &physical_execution_plan,
-                Some(catalog),
-                context_capacity_activations,
-                planning.speculative_draft_tokens,
-                planning.residency_policy,
-                &planning_devices,
-                planning.host_safe_capacity_bytes,
-            )
-            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-            if exact.is_none() {
-                continue;
+                    |prefill| {
+                        try_resolve_vulkan_runtime_hybrid_phase_set_mount(
+                            package_root,
+                            &mounted_model,
+                            decode.ordered_placement.clone(),
+                            Some(prefill),
+                            catalog,
+                            context_capacity_activations,
+                            logical_device_id_by_physical_device,
+                            physical_mount_planning.as_ref(),
+                        )
+                    },
+                )?;
+                if resolution.is_some() {
+                    return Ok(resolution);
+                }
             }
-            exact
-        } else {
-            None
+            try_resolve_vulkan_runtime_hybrid_phase_set_mount(
+                package_root,
+                &mounted_model,
+                decode.ordered_placement,
+                None,
+                catalog,
+                context_capacity_activations,
+                logical_device_id_by_physical_device,
+                physical_mount_planning.as_ref(),
+            )
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_resolve_vulkan_runtime_hybrid_phase_set_mount(
+    package_root: &Path,
+    mounted_model: &VulkanResidentRuntimeModel,
+    decode: VulkanRuntimeHybridOrderedPlacement,
+    prefill: Option<VulkanRuntimeHybridOrderedPlacement>,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    context_capacity_activations: usize,
+    logical_device_id_by_physical_device: &BTreeMap<String, String>,
+    physical_mount_planning: Option<&VulkanRuntimeHybridMountPlanningContext<'_>>,
+) -> Result<Option<VulkanRuntimeHybridPhysicalExecutionResolution>, VulkanRuntimeHybridPlacementError>
+{
+    let placement = VulkanRuntimeHybridPhaseSetPlacement { decode, prefill };
+    let decode_predicted_duration_ns_per_activation =
+        placement.decode.plan.predicted_duration_ns_per_activation;
+    let prefill_predicted_duration_ns_per_activation = placement
+        .prefill
+        .as_ref()
+        .map(|prefill| prefill.plan.predicted_duration_ns_per_activation);
+    let selected_prefill_activation_batch_width = placement
+        .prefill
+        .as_ref()
+        .map(|prefill| prefill.activation_batch_width);
+    let (runtime_model, physical_execution_plan) = lower_vulkan_runtime_hybrid_phase_set(
+        mounted_model,
+        &placement,
+        logical_device_id_by_physical_device,
+    )?;
+    let physical_mount_plan = if let Some(planning) = physical_mount_planning {
+        let required_devices = physical_execution_plan
+            .device_ids(&runtime_model)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let planning_devices = planning
+            .devices
+            .iter()
+            .filter(|device| required_devices.contains(&device.logical_device_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let exact = plan_vulkan_runtime_physical_mount(
+            package_root,
+            &runtime_model,
+            &physical_execution_plan,
+            Some(catalog),
+            context_capacity_activations,
+            planning.speculative_draft_tokens,
+            planning.residency_policy,
+            &planning_devices,
+            planning.host_safe_capacity_bytes,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let Some(exact) = exact else {
+            return Ok(None);
         };
-        return Ok(Some(VulkanRuntimeHybridPhysicalExecutionResolution {
-            runtime_model,
-            physical_execution_plan,
-            decode_predicted_duration_ns_per_activation,
-            prefill_activation_batch_width: selected_prefill_activation_batch_width,
-            prefill_predicted_duration_ns_per_activation,
-            physical_mount_plan,
-        }));
-    }
-    Ok(None)
+        Some(exact)
+    } else {
+        None
+    };
+    Ok(Some(VulkanRuntimeHybridPhysicalExecutionResolution {
+        runtime_model,
+        physical_execution_plan,
+        decode_predicted_duration_ns_per_activation,
+        prefill_activation_batch_width: selected_prefill_activation_batch_width,
+        prefill_predicted_duration_ns_per_activation,
+        physical_mount_plan,
+    }))
 }
 
 /// Attempts to select exact phase-local physical execution without making the
@@ -716,26 +790,74 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners_and_filter(
         capacity,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    Ok(plan.map(|plan| {
-        let selected_region_executions = plan
-            .steps
-            .iter()
-            .filter_map(|step| match step {
-                VulkanHybridScheduledStep::Region { execution_case, .. } => candidates
-                    .region_executions_by_case
-                    .get(execution_case)
-                    .map(|calibration| (execution_case.clone(), calibration.clone())),
-                VulkanHybridScheduledStep::Boundary { .. } => None,
-            })
-            .collect();
-        VulkanRuntimeHybridOrderedPlacement {
-            component_ids: candidates.component_ids,
-            execution_phase: candidates.execution_phase,
-            activation_batch_width: candidates.activation_batch_width,
-            plan,
-            region_executions_by_case: selected_region_executions,
-        }
-    }))
+    Ok(plan.map(|plan| runtime_hybrid_ordered_placement_from_plan(&candidates, plan)))
+}
+
+fn visit_vulkan_runtime_hybrid_ordered_graph_with_owners_by_duration<T, F>(
+    runtime_model: &VulkanResidentRuntimeModel,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    eligible_capacity: &VulkanPlacementCapacityEnvelope,
+    phase: VulkanTargetedComponentExecutionPhase,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
+    mut visitor: F,
+) -> Result<Option<T>, VulkanRuntimeHybridPlacementError>
+where
+    F: FnMut(
+        VulkanRuntimeHybridOrderedPlacement,
+    ) -> Result<Option<T>, VulkanRuntimeHybridPlacementError>,
+{
+    let candidates = runtime_hybrid_candidate_graph(
+        runtime_model,
+        catalog,
+        phase,
+        required_owner_by_component,
+        VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+    )?;
+    visit_vulkan_hybrid_ordered_graph_routes_by_duration(
+        catalog,
+        candidates.component_ids.len(),
+        &candidates.region_candidates,
+        &candidates.boundary_candidates,
+        &candidates.resource_catalog,
+        eligible_capacity,
+        |route| {
+            visitor(runtime_hybrid_ordered_placement_from_plan(
+                &candidates,
+                VulkanHybridPlacementPlan {
+                    steps: route.steps.clone(),
+                    predicted_duration_ns_per_activation: route
+                        .predicted_duration_ns_per_activation,
+                    resource_reservations: route.calibration_resource_reservations.clone(),
+                },
+            ))
+            .map_err(|error| VulkanHybridPlacementError(error.to_string()))
+        },
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))
+}
+
+fn runtime_hybrid_ordered_placement_from_plan(
+    candidates: &VulkanRuntimeHybridCandidateGraph,
+    plan: VulkanHybridPlacementPlan,
+) -> VulkanRuntimeHybridOrderedPlacement {
+    let selected_region_executions = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            VulkanHybridScheduledStep::Region { execution_case, .. } => candidates
+                .region_executions_by_case
+                .get(execution_case)
+                .map(|calibration| (execution_case.clone(), calibration.clone())),
+            VulkanHybridScheduledStep::Boundary { .. } => None,
+        })
+        .collect();
+    VulkanRuntimeHybridOrderedPlacement {
+        component_ids: candidates.component_ids.clone(),
+        execution_phase: candidates.execution_phase,
+        activation_batch_width: candidates.activation_batch_width,
+        plan,
+        region_executions_by_case: selected_region_executions,
+    }
 }
 
 fn runtime_hybrid_candidate_graph(
