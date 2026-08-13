@@ -137,6 +137,20 @@ the local placement calibration, and the mounted graph.
   Therefore the package proves that TP is compiled and mountable, not that an
   inference token has executed through TP; selection, equivalence, performance,
   and teardown remain part of the explicitly authorized live gate.
+- The workload-free calibration preflight now resolves that package on the five
+  R9700 targets at 128K context, package-default seven-token speculation, and
+  demand-paged residency without opening compute devices or submitting GPU
+  work. It exposes 225 decode and 225 width-four causal-prefill component cases,
+  no unsupported requested phase, 430 whole-expert and 430 intra-expert TP
+  candidates across both phases, 344 unique distributed contracts, 40 directed
+  boundary cases, and 2,760 selected-resource load-wave cases. For each phase
+  and owner, the 43 transformer components expose distributed candidates while
+  the input and output stream adapters correctly retain their scalar-lane
+  causal fallback. Prefill identities now include the selected compiler batch
+  artifact and requested width; a causal-scan width overflow is rejected, while
+  a legal scalar-per-lane fallback is accounted as the exact repeated primary
+  contract. This is authoritative preflight evidence, not live TP execution or
+  performance evidence.
 - The calibration suite now produces canonical serialized and predicted
   mixed-hybrid region evidence from bounded, complete mounted transactions.
   It measures compute, synchronization, transfers, collectives, output, state,
@@ -405,6 +419,13 @@ For every numbered item below:
 
 ### 9. Make temporal prefill a true multi-token transaction
 
+- Hardware-neutral calibration planning now treats compiler-declared causal
+  batch artifacts and scalar-per-lane adapters as one complete prefill
+  transaction. It keeps widths that select different artifacts in distinct
+  identities, rejects incomplete causal-scan widths, discovers exact hybrid
+  cohorts from the catalog rather than a decode-only surrogate signature, and
+  produces complete DeepSeek width-four component, distributed, boundary, and
+  load-wave cases. Mounted equivalence and performance remain to be proven.
 - Execute prompt blocks through the same resident gates, execution islands,
   transfers, attention updates, and terminal completion without a host loop per
   token.
