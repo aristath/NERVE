@@ -692,6 +692,13 @@ combined path cost.
   or performance-equivalence band.
 - Current safe capacity and exact model residency decide feasibility; benchmark
   rankings never override capacity.
+- Demand-paged load-wave admission does not prove warm working-set viability.
+  Candidate subset selection separately compares each exact per-device maximum
+  addressable residency—including store overhead, state, and activations—with
+  that target's safe capacity. It keeps considering additional compatible
+  targets while a complete warm fit is avoidable, and accepts a smaller paged
+  cache only when no legal larger subset removes the shortfall. Runtime
+  telemetry may subsequently rebalance a materially smaller observed hot set.
 - Lazy experts remain independently selectable resources rather than being
   collapsed back into whole-layer placement.
 - The generated JSON files remain local calibration artifacts and are not

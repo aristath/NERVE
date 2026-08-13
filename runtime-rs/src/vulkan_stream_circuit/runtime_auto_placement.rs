@@ -753,8 +753,11 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
                     })?;
                     let shortfall = paged_balance
                         .as_ref()
-                        .map(|balance| {
-                            demand_paged_subset_has_addressable_shortfall(balance, &selected)
+                        .map(|_| {
+                            demand_paged_placement_has_addressable_shortfall(
+                                &placed.residency_plan,
+                                &selected,
+                            )
                         })
                         .transpose()?
                         .unwrap_or(false);
@@ -841,43 +844,68 @@ fn runtime_placement_candidate_subsets(
 
 /// A demand-paged package may execute inside a cache much smaller than its
 /// addressable resources, but that does not make the smaller cache the best
-/// placement. Keep increasing the selected device count while doing so can
-/// eliminate an aggregate addressable-capacity shortfall. At the largest
-/// legal set paging remains valid and unavoidable.
-fn demand_paged_subset_has_addressable_shortfall(
-    balance: &VulkanRuntimePagedPlacementBalance,
+/// placement. Use the exact admitted per-device residency plan, including
+/// permanent parameters, store metadata/padding, state, and activations. Raw
+/// aggregate target capacity can hide an overloaded device behind unused
+/// capacity on another target. At the largest legal set paging remains valid
+/// and unavoidable.
+fn demand_paged_placement_has_addressable_shortfall(
+    plan: &VulkanRuntimeResidencyPlan,
     selected: &[VulkanRuntimePlacementCandidate],
 ) -> Result<bool, VulkanRuntimeResidencyPlanError> {
-    if selected.is_empty() {
+    if plan.residency_policy != ResourceResidencyPolicy::DemandPaged
+        || plan.device_plans.is_empty()
+        || selected.is_empty()
+    {
         return Err(VulkanRuntimeResidencyPlanError(
-            "demand-paged subset accounting requires a nonempty device set".to_string(),
+            "demand-paged addressable-fit accounting requires a paged residency plan and nonempty device set"
+                .to_string(),
         ));
     }
-    let addressable_bytes = balance
-        .component_weights
+    let capacity_by_device = selected
         .iter()
-        .copied()
-        .chain([
-            balance.input_auxiliary_weight_bytes,
-            balance.output_auxiliary_weight_bytes,
-        ])
-        .try_fold(0u128, |total, bytes| {
-            total.checked_add(bytes).ok_or_else(|| {
-                VulkanRuntimeResidencyPlanError(
-                    "demand-paged addressable working-set bytes overflowed".to_string(),
-                )
-            })
-        })?;
-    let safe_capacity_bytes = selected.iter().try_fold(0u128, |total, candidate| {
-        total
-            .checked_add(candidate.safe_capacity_bytes as u128)
+        .map(|candidate| (candidate.device_id.as_str(), candidate.safe_capacity_bytes))
+        .collect::<BTreeMap<_, _>>();
+    if capacity_by_device.len() != selected.len()
+        || selected.iter().any(|candidate| {
+            candidate.device_id.trim().is_empty() || candidate.safe_capacity_bytes == 0
+        })
+    {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "demand-paged addressable-fit accounting requires unique nonempty positive-capacity devices"
+                .to_string(),
+        ));
+    }
+    let mut planned_devices = BTreeSet::new();
+    let mut has_shortfall = false;
+    for device_plan in &plan.device_plans {
+        if device_plan.device_id.trim().is_empty()
+            || !planned_devices.insert(device_plan.device_id.as_str())
+        {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "demand-paged residency plan repeats or empties a logical device".to_string(),
+            ));
+        }
+        let safe_capacity_bytes = capacity_by_device
+            .get(device_plan.device_id.as_str())
+            .copied()
             .ok_or_else(|| {
-                VulkanRuntimeResidencyPlanError(
-                    "demand-paged compatible device capacity overflowed".to_string(),
-                )
-            })
-    })?;
-    Ok(addressable_bytes > safe_capacity_bytes)
+                VulkanRuntimeResidencyPlanError(format!(
+                    "demand-paged residency plan references unselected device {:?}",
+                    device_plan.device_id,
+                ))
+            })?;
+        has_shortfall |=
+            vulkan_runtime_maximum_device_resident_bytes(device_plan)? > safe_capacity_bytes;
+    }
+    if planned_devices
+        != capacity_by_device.keys().copied().collect::<BTreeSet<_>>()
+    {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "demand-paged residency plan does not cover every selected device".to_string(),
+        ));
+    }
+    Ok(has_shortfall)
 }
 
 #[allow(clippy::too_many_arguments)]

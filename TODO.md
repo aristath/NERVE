@@ -675,10 +675,19 @@ For every numbered item below:
 - Replan when reservations, selected targets, graph wiring, or implementation
   contracts change. Expert hotness may adapt online without rebuilding the
   stable backbone plan per token.
-- Reject a demand-paged candidate whose measured warm working-set estimate
-  exceeds its aggregate per-device cache quotas when another compatible target
-  can make that shortfall avoidable. Capacity admission and steady-state
-  working-set viability are separate proofs.
+- Initial demand-paged subset selection now treats physical admission and warm
+  viability as separate proofs. After every otherwise admissible placement it
+  uses the exact per-device residency plan—not aggregate source tensor weight
+  or raw summed VRAM—to compare the complete addressable parameter set plus
+  store metadata/padding, state, and activations with each target's measured
+  safe capacity. A shortfall hidden by spare capacity on another selected
+  target remains a shortfall. The search keeps adding compatible targets while
+  any larger legal subset can eliminate it, and uses the largest-capacity paged
+  fallback only when complete warm residency is genuinely unavoidable.
+  Runtime pressure telemetry still drives profitable warm rebalancing when the
+  actual hot set is smaller than the full addressable set. The explicitly
+  authorized product gate must prove that these two stages prevent the prior
+  cache-thrash plateau without needlessly adding a target.
 
 ### 7. Make hybrid execution device-owned
 

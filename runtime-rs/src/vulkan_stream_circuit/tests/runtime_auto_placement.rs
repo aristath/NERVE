@@ -947,37 +947,78 @@ fn cost_aware_paged_placement_cannot_strand_material_retained_capacity() {
     assert!((4..=6).contains(&fast_count));
 }
 
+fn demand_paged_addressable_plan(
+    devices: &[(&str, usize, usize)],
+) -> VulkanRuntimeResidencyPlan {
+    let device_plans = devices
+        .iter()
+        .map(|(device_id, maximum_addressable_bytes, fixed_store_bytes)| {
+            VulkanRuntimeDeviceResidencyPlan {
+                device_id: (*device_id).to_string(),
+                parameter_residency: VulkanRuntimeParameterResidencyBytes {
+                    always_resident_bytes: 0,
+                    initial_dynamic_bytes: 0,
+                    current_resident_bytes: 0,
+                    maximum_addressable_bytes: *maximum_addressable_bytes,
+                    staging_headroom_bytes: 1,
+                },
+                resource_store: VulkanCompiledResourceStoreResidencyBytes {
+                    metadata_device_bytes: *fixed_store_bytes,
+                    ..VulkanCompiledResourceStoreResidencyBytes::default()
+                },
+                working_set: VulkanRuntimeWorkingSetBytes::default(),
+                breakdown: VulkanRuntimeDeviceResidencyBreakdown::default(),
+                resident_stream_device_allocations: Vec::new(),
+                initial_device_resident_bytes: *fixed_store_bytes,
+            }
+        })
+        .collect::<Vec<_>>();
+    VulkanRuntimeResidencyPlan {
+        schema: VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA.to_string(),
+        package_id: "paged-addressable-fixture".to_string(),
+        residency_policy: ResourceResidencyPolicy::DemandPaged,
+        context_capacity_activations: 1,
+        speculative_draft_tokens: 0,
+        total_initial_device_resident_bytes: device_plans
+            .iter()
+            .map(|device| device.initial_device_resident_bytes)
+            .sum(),
+        total_current_resident_parameter_bytes: 0,
+        total_maximum_addressable_parameter_bytes: device_plans
+            .iter()
+            .map(|device| device.parameter_residency.maximum_addressable_bytes)
+            .sum(),
+        device_plans,
+    }
+}
+
 #[test]
 fn demand_paged_subset_expands_while_another_device_can_reduce_paging() {
-    const LAYER_BYTES: u128 = 843_498_240;
-    const DEVICE_BYTES: usize = 27 * 1024 * 1024 * 1024;
-    let balance = VulkanRuntimePagedPlacementBalance {
-        component_weights: vec![LAYER_BYTES; 40],
-        input_auxiliary_weight_bytes: 0,
-        output_auxiliary_weight_bytes: 0,
-    };
     let candidates = [
         VulkanRuntimePlacementCandidate {
             device_id: "first".to_string(),
-            safe_capacity_bytes: DEVICE_BYTES,
+            safe_capacity_bytes: 100,
         },
         VulkanRuntimePlacementCandidate {
             device_id: "second".to_string(),
-            safe_capacity_bytes: DEVICE_BYTES,
+            safe_capacity_bytes: 100,
         },
     ];
+    let one_device = demand_paged_addressable_plan(&[("first", 120, 0)]);
+    let two_devices =
+        demand_paged_addressable_plan(&[("first", 60, 0), ("second", 60, 0)]);
 
-    assert!(demand_paged_subset_has_addressable_shortfall(&balance, &candidates[..1],).unwrap());
-    assert!(!demand_paged_subset_has_addressable_shortfall(&balance, &candidates,).unwrap());
+    assert!(
+        demand_paged_placement_has_addressable_shortfall(&one_device, &candidates[..1])
+            .unwrap()
+    );
+    assert!(
+        !demand_paged_placement_has_addressable_shortfall(&two_devices, &candidates).unwrap()
+    );
 }
 
 #[test]
 fn demand_paged_subset_accounts_for_endpoint_auxiliary_residency() {
-    let balance = VulkanRuntimePagedPlacementBalance {
-        component_weights: vec![40, 40],
-        input_auxiliary_weight_bytes: 15,
-        output_auxiliary_weight_bytes: 15,
-    };
     let candidates = [
         VulkanRuntimePlacementCandidate {
             device_id: "first".to_string(),
@@ -988,24 +1029,104 @@ fn demand_paged_subset_accounts_for_endpoint_auxiliary_residency() {
             safe_capacity_bytes: 100,
         },
     ];
+    let one_device = demand_paged_addressable_plan(&[("first", 80, 30)]);
+    let two_devices =
+        demand_paged_addressable_plan(&[("first", 40, 15), ("second", 40, 15)]);
 
-    assert!(demand_paged_subset_has_addressable_shortfall(&balance, &candidates[..1],).unwrap());
-    assert!(!demand_paged_subset_has_addressable_shortfall(&balance, &candidates,).unwrap());
+    assert!(
+        demand_paged_placement_has_addressable_shortfall(&one_device, &candidates[..1])
+            .unwrap()
+    );
+    assert!(
+        !demand_paged_placement_has_addressable_shortfall(&two_devices, &candidates).unwrap()
+    );
 }
 
 #[test]
 fn demand_paged_subset_reports_shortfall_even_when_no_larger_set_exists() {
-    let balance = VulkanRuntimePagedPlacementBalance {
-        component_weights: vec![100, 100],
-        input_auxiliary_weight_bytes: 0,
-        output_auxiliary_weight_bytes: 0,
-    };
     let candidate = VulkanRuntimePlacementCandidate {
         device_id: "only".to_string(),
         safe_capacity_bytes: 100,
     };
+    let plan = demand_paged_addressable_plan(&[("only", 200, 0)]);
 
-    assert!(demand_paged_subset_has_addressable_shortfall(&balance, &[candidate],).unwrap());
+    assert!(demand_paged_placement_has_addressable_shortfall(&plan, &[candidate]).unwrap());
+}
+
+#[test]
+fn demand_paged_subset_rejects_per_device_shortfall_hidden_by_aggregate_capacity() {
+    let candidates = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "overloaded".to_string(),
+            safe_capacity_bytes: 100,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "underused".to_string(),
+            safe_capacity_bytes: 100,
+        },
+    ];
+    let plan = demand_paged_addressable_plan(&[
+        ("overloaded", 120, 0),
+        ("underused", 80, 0),
+    ]);
+
+    assert_eq!(
+        plan.total_maximum_addressable_parameter_bytes,
+        candidates
+            .iter()
+            .map(|candidate| candidate.safe_capacity_bytes)
+            .sum::<usize>()
+    );
+    assert!(demand_paged_placement_has_addressable_shortfall(&plan, &candidates).unwrap());
+}
+
+#[test]
+fn demand_paged_addressable_fit_rejects_unknown_or_duplicate_devices() {
+    let plan = demand_paged_addressable_plan(&[("first", 50, 0)]);
+    let unknown = [VulkanRuntimePlacementCandidate {
+        device_id: "other".to_string(),
+        safe_capacity_bytes: 100,
+    }];
+    assert!(
+        demand_paged_placement_has_addressable_shortfall(&plan, &unknown)
+            .unwrap_err()
+            .0
+            .contains("unselected device")
+    );
+
+    let repeated = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "first".to_string(),
+            safe_capacity_bytes: 100,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "first".to_string(),
+            safe_capacity_bytes: 100,
+        },
+    ];
+    assert!(
+        demand_paged_placement_has_addressable_shortfall(&plan, &repeated)
+            .unwrap_err()
+            .0
+            .contains("unique")
+    );
+
+    let extra = [
+        VulkanRuntimePlacementCandidate {
+            device_id: "first".to_string(),
+            safe_capacity_bytes: 100,
+        },
+        VulkanRuntimePlacementCandidate {
+            device_id: "unused".to_string(),
+            safe_capacity_bytes: 100,
+        },
+    ];
+    assert!(
+        demand_paged_placement_has_addressable_shortfall(&plan, &extra)
+            .unwrap_err()
+            .0
+            .contains("every selected device")
+    );
 }
 
 #[test]
