@@ -1,0 +1,17 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer TransactionPredicate {
+    uint words[];
+} transaction;
+
+layout(set = 0, binding = 1) readonly buffer ShardPredicate {
+    uint words[];
+} shard;
+
+void main() {
+    transaction.words[0] = 0u;
+    atomicCompSwap(transaction.words[1], 0u, shard.words[1]);
+    memoryBarrierBuffer();
+}

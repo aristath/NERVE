@@ -1,13 +1,16 @@
 pub(crate) struct VulkanDistributedResidencyCommitRunner {
-    _predicate_clear_dispatch: VulkanResidentKernelDispatch,
+    _predicate_commit_dispatches: Vec<VulkanResidentKernelDispatch>,
     pub(crate) sequence: VulkanResidentKernelSequence,
 }
 
-fn distributed_clear_predicate_spirv_words(
+fn distributed_commit_residency_fault_spirv_words(
 ) -> Result<Vec<u32>, VulkanDistributedDispatchRunnerError> {
     embedded_distributed_reduction_spirv_words(
-        include_bytes!(concat!(env!("OUT_DIR"), "/distributed_clear_predicate.spv")),
-        "clear_predicate",
+        include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/distributed_commit_residency_fault.spv"
+        )),
+        "commit_residency_fault",
     )
 }
 
@@ -28,29 +31,19 @@ fn create_distributed_residency_commit_runner(
             "distributed shard residency commit requires a transaction predicate".to_string(),
         )
     })?;
-    let predicate_clear_dispatch = device
-        .create_resident_kernel_dispatch_2d_labeled(
-            &distributed_clear_predicate_spirv_words()?,
-            &[VulkanResidentKernelBufferBinding::new(
-                0,
-                transaction_predicate,
-                size_of::<u32>(),
-            )
-            .with_access(VulkanResidentKernelBufferAccess::Write)],
-            1,
-            1,
-            1,
-            0,
-            Some(format!(
-                "component={component_id} node={node_id} distributed=commit_residency",
-            )),
-        )
-        .map_err(VulkanDistributedDispatchRunnerError::from)?;
-    let steps = shard_residency_predicates
+    let predicate_commit_dispatches = create_distributed_residency_fault_commit_dispatches(
+        device,
+        component_id,
+        node_id,
+        transaction_predicate,
+        shard_residency_predicates,
+    )?;
+    let steps = predicate_commit_dispatches
         .iter()
+        .zip(shard_residency_predicates)
         .enumerate()
-        .map(|(predicate_index, predicate)| {
-            VulkanResidentKernelSequenceStep::new(&predicate_clear_dispatch, &[])
+        .map(|(predicate_index, (dispatch, predicate))| {
+            VulkanResidentKernelSequenceStep::new(dispatch, &[])
                 .with_condition(
                     predicate,
                     0,
@@ -67,7 +60,60 @@ fn create_distributed_residency_commit_runner(
         .record_resident_kernel_sequence(&sequence, &steps)
         .map_err(VulkanDistributedDispatchRunnerError::from)?;
     Ok(VulkanDistributedResidencyCommitRunner {
-        _predicate_clear_dispatch: predicate_clear_dispatch,
+        _predicate_commit_dispatches: predicate_commit_dispatches,
         sequence,
     })
+}
+
+fn create_distributed_residency_fault_commit_dispatches(
+    device: &VulkanComputeDevice,
+    component_id: &str,
+    node_id: &str,
+    transaction_predicate: &Arc<VulkanResidentBuffer>,
+    shard_residency_predicates: &[Arc<VulkanResidentBuffer>],
+) -> Result<Vec<VulkanResidentKernelDispatch>, VulkanDistributedDispatchRunnerError> {
+    if transaction_predicate.byte_capacity()
+        < VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY
+        || shard_residency_predicates.iter().any(|predicate| {
+            predicate.byte_capacity() < VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY
+        })
+    {
+        return Err(VulkanDistributedDispatchRunnerError(
+            "distributed residency fault publication requires two-word predicates"
+                .to_string(),
+        ));
+    }
+    let spirv = distributed_commit_residency_fault_spirv_words()?;
+    shard_residency_predicates
+        .iter()
+        .enumerate()
+        .map(|(predicate_index, predicate)| {
+            device
+                .create_resident_kernel_dispatch_2d_labeled(
+                    &spirv,
+                    &[
+                        VulkanResidentKernelBufferBinding::new(
+                            0,
+                            transaction_predicate,
+                            VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+                        )
+                        .with_access(VulkanResidentKernelBufferAccess::ReadWrite),
+                        VulkanResidentKernelBufferBinding::new(
+                            1,
+                            predicate,
+                            VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+                        )
+                        .with_access(VulkanResidentKernelBufferAccess::Read),
+                    ],
+                    1,
+                    1,
+                    1,
+                    0,
+                    Some(format!(
+                        "component={component_id} node={node_id} distributed=commit_residency shard={predicate_index}",
+                    )),
+                )
+                .map_err(VulkanDistributedDispatchRunnerError::from)
+        })
+        .collect()
 }

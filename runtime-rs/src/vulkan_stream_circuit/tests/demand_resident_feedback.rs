@@ -94,19 +94,6 @@ fn demand_checkpoint_resume_places_terminal_snapshots_after_the_exact_suffix() {
 }
 
 #[test]
-fn demand_feedback_requires_one_unambiguous_miss_checkpoint() {
-    assert_eq!(
-        unique_pending_demand_feedback_checkpoint(&[]).unwrap(),
-        None
-    );
-    assert_eq!(
-        unique_pending_demand_feedback_checkpoint(&[(3, 1, 4)]).unwrap(),
-        Some((3, 1, 4))
-    );
-    assert!(unique_pending_demand_feedback_checkpoint(&[(3, 1, 4), (3, 2, 0)]).is_err());
-}
-
-#[test]
 fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() {
     assert_eq!(
         resident_feedback_fault_reason_from_continuation(VULKAN_FEEDBACK_CONTINUATION_READY)
@@ -125,6 +112,7 @@ fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() 
         sampled_tick_count: 8,
         stop_reason: VULKAN_FEEDBACK_STOP_REASON_NONE,
         fault_reason: VULKAN_FEEDBACK_FAULT_NONE,
+        fault_source_id: 0,
         template_replayed: false,
     };
     assert_eq!(
@@ -137,6 +125,7 @@ fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() 
         sampled_tick_count: 3,
         stop_reason: VULKAN_FEEDBACK_STOP_REASON_EOS,
         fault_reason: VULKAN_FEEDBACK_FAULT_RESIDENCY,
+        fault_source_id: 17,
         template_replayed: false,
     };
     assert_eq!(
@@ -149,6 +138,7 @@ fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() 
         sampled_tick_count: 0,
         stop_reason: VULKAN_FEEDBACK_STOP_REASON_CANCELLED,
         fault_reason: VULKAN_FEEDBACK_FAULT_RESIDENCY,
+        fault_source_id: 17,
         template_replayed: false,
     };
     assert_eq!(
@@ -161,6 +151,7 @@ fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() 
         sampled_tick_count: 3,
         stop_reason: VULKAN_FEEDBACK_STOP_REASON_NONE,
         fault_reason: VULKAN_FEEDBACK_FAULT_NONE,
+        fault_source_id: 0,
         template_replayed: false,
     };
     assert!(resident_feedback_terminal_state(inferred_fault, 8).is_err());
@@ -170,6 +161,7 @@ fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() 
         sampled_tick_count: 4,
         stop_reason: VULKAN_FEEDBACK_STOP_REASON_NONE,
         fault_reason: VULKAN_FEEDBACK_FAULT_RESIDENCY,
+        fault_source_id: 17,
         template_replayed: false,
     };
     assert!(resident_feedback_terminal_state(contradictory_fault, 8).is_err());
@@ -179,6 +171,7 @@ fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() 
         sampled_tick_count: 8,
         stop_reason: VULKAN_FEEDBACK_STOP_REASON_NONE,
         fault_reason: 2,
+        fault_source_id: 0,
         template_replayed: false,
     };
     assert!(resident_feedback_terminal_state(unknown_fault, 8).is_err());
@@ -188,9 +181,22 @@ fn demand_feedback_fault_is_explicit_and_never_inferred_from_partial_counters() 
         sampled_tick_count: 0,
         stop_reason: 3,
         fault_reason: VULKAN_FEEDBACK_FAULT_RESIDENCY,
+        fault_source_id: 17,
         template_replayed: false,
     };
     assert!(resident_feedback_terminal_state(unknown_stop_during_fault, 8).is_err());
+
+    let missing_fault_source = VulkanResidentFeedbackControlCompletion {
+        fault_source_id: 0,
+        ..fault
+    };
+    assert!(resident_feedback_terminal_state(missing_fault_source, 8).is_err());
+
+    let stale_fault_source = VulkanResidentFeedbackControlCompletion {
+        fault_source_id: 17,
+        ..complete
+    };
+    assert!(resident_feedback_terminal_state(stale_fault_source, 8).is_err());
 }
 
 #[test]
@@ -215,6 +221,70 @@ fn demand_feedback_allows_one_checkpoint_to_discover_distinct_resource_sets() {
     assert_eq!(
         resolved.get(&checkpoint),
         Some(&BTreeSet::from([4, 51, 68, 89, 138]))
+    );
+}
+
+#[test]
+fn demand_feedback_fault_sources_are_stable_structural_identities() {
+    let local = demand_feedback_local_fault_source_id("target", "checkpoint", "selector");
+    let same_local = demand_feedback_local_fault_source_id("target", "checkpoint", "selector");
+    let other_local = demand_feedback_local_fault_source_id("target", "other", "selector");
+    let distributed = demand_feedback_distributed_fault_source_id(
+        "target",
+        "layer_00",
+        "moe_gate_up",
+        "selector",
+    );
+
+    assert_ne!(local, 0);
+    assert_eq!(local, same_local);
+    assert_ne!(local, other_local);
+    assert_ne!(local, distributed);
+}
+
+#[test]
+fn demand_feedback_fault_source_catalog_rejects_ambiguity() {
+    let source = VulkanDemandFeedbackFaultSource::Local {
+        slice_index: 1,
+        segment_index: 2,
+    };
+    let mut sources = BTreeMap::new();
+    register_demand_feedback_fault_source(
+        &mut sources,
+        17,
+        "local:first".to_string(),
+        source.clone(),
+    )
+    .unwrap();
+    register_demand_feedback_fault_source(
+        &mut sources,
+        17,
+        "local:first".to_string(),
+        source.clone(),
+    )
+    .unwrap();
+    assert_eq!(sources.len(), 1);
+    let error = register_demand_feedback_fault_source(
+        &mut sources,
+        17,
+        "distributed:second".to_string(),
+        VulkanDemandFeedbackFaultSource::Distributed {
+            owner_device_id: "gpu1".to_string(),
+            dispatch_index: 3,
+        },
+    )
+    .unwrap_err();
+    assert!(error.0.contains("fault-source collision 17"));
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources.get(&17).map(|(_, source)| source), Some(&source));
+    assert!(
+        register_demand_feedback_fault_source(
+            &mut sources,
+            0,
+            "reserved".to_string(),
+            source,
+        )
+        .is_err()
     );
 }
 

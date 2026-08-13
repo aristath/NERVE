@@ -11,6 +11,7 @@ struct VulkanDemandResidencyExecutionContext {
 struct VulkanDemandResidencyGateSpec {
     checkpoint_id: String,
     selector_id: String,
+    fault_source_id: u32,
     command_after_dispatch_index: usize,
     selection_count: usize,
     selection_index_shift: u32,
@@ -63,6 +64,7 @@ struct VulkanDemandResidencyGateRuntime {
     selector_id: String,
     command_index: usize,
     checkpoint_tag: u32,
+    fault_source_id: u32,
     selection_count: usize,
     gate: VulkanGpuResidencyGate,
 }
@@ -424,6 +426,11 @@ impl VulkanDemandResidencySegment {
                 gate_specs.push(VulkanDemandResidencyGateSpec {
                     checkpoint_id: checkpoint.id.clone(),
                     selector_id: selector.id.clone(),
+                    fault_source_id: demand_feedback_local_fault_source_id(
+                        &context.execution_scope,
+                        &checkpoint.id,
+                        &selector.id,
+                    ),
                     command_after_dispatch_index: checkpoint.selection_dispatch_index,
                     selection_count: selector.encoding.selection_count_per_activation,
                     selection_index_shift: selector.encoding.index_shift,
@@ -619,25 +626,6 @@ impl VulkanDemandResidencySegment {
         Ok(())
     }
 
-    fn feedback_lane_has_pending_miss(
-        &self,
-        sequence_variant: u8,
-        feedback_lane: usize,
-    ) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
-        self.chains
-            .borrow()
-            .get(&(
-                sequence_variant,
-                VulkanDemandResidencyChainLane::Feedback(feedback_lane),
-            ))
-            .ok_or_else(|| {
-                demand_dispatch_error(format!(
-                    "resident feedback demand lane {feedback_lane} was not prepared"
-                ))
-            })?
-            .has_pending_miss()
-    }
-
     fn resolve_feedback_lane_miss(
         &self,
         device: &VulkanComputeDevice,
@@ -820,6 +808,11 @@ impl VulkanDemandResidencyDispatchChain {
                 selector_id: spec.selector_id.clone(),
                 command_index,
                 checkpoint_tag,
+                fault_source_id: if shared_pipeline_guard {
+                    spec.fault_source_id
+                } else {
+                    0
+                },
                 selection_count: spec.selection_count,
                 gate,
             });
@@ -1112,19 +1105,17 @@ impl VulkanDemandResidencyDispatchChain {
         )
     }
 
-    fn has_pending_miss(&self) -> Result<bool, VulkanMountedPlacedResidentKernelDispatchError> {
-        self.missing_queue
-            .notification_epoch()
-            .map(|epoch| epoch != self.observed_notification_epoch.get())
-            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)
-    }
-
     fn resolve_pending_miss_without_resume(
         &self,
         device: &VulkanComputeDevice,
         context: &VulkanDemandResidencyExecutionContext,
     ) -> Result<Option<(usize, Vec<usize>)>, VulkanMountedPlacedResidentKernelDispatchError> {
-        if !self.has_pending_miss()? {
+        if self
+            .missing_queue
+            .notification_epoch()
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?
+            == self.observed_notification_epoch.get()
+        {
             return Ok(None);
         }
         self.continuation_enabled.set(false);
@@ -1370,6 +1361,11 @@ impl VulkanDemandResidencyDispatchChain {
                     gate.checkpoint_tag,
                     gate.command_index == direct_gate_command_index,
                     gate.command_index == direct_gate_command_index,
+                    if feedback_indirect.is_some() {
+                        gate.fault_source_id
+                    } else {
+                        0
+                    },
                 )
             })
             .collect::<Result<Vec<_>, _>>()

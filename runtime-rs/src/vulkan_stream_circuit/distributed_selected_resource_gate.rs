@@ -7,6 +7,7 @@ pub(crate) struct VulkanDistributedSelectedResourceGate {
     gate: VulkanGpuResidencyGate,
     pipeline_predicate: Arc<VulkanResidentBuffer>,
     gate_push_constants: Vec<u8>,
+    feedback_gate_push_constants: Option<Vec<u8>>,
     context: VulkanDemandResidencyExecutionContext,
     observed_notification_epoch: Cell<u32>,
 }
@@ -23,6 +24,20 @@ struct VulkanDistributedSelectedResourcePendingMiss {
     published_count: u32,
     request_count: usize,
     resource_indices: Vec<usize>,
+}
+
+fn reset_distributed_selected_resource_predicate(
+    predicate: &VulkanResidentBuffer,
+) -> Result<(), VulkanDistributedDispatchRunnerError> {
+    if predicate.byte_capacity() >= VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY {
+        predicate
+            .write_bytes(&demand_feedback_ready_predicate_bytes())
+            .map_err(VulkanDistributedDispatchRunnerError::from)
+    } else {
+        predicate
+            .write_bytes(&1u32.to_le_bytes())
+            .map_err(VulkanDistributedDispatchRunnerError::from)
+    }
 }
 
 impl VulkanDistributedSelectedResourceGate {
@@ -167,10 +182,30 @@ impl VulkanDistributedSelectedResourceGate {
             },
         )
         .map_err(VulkanDistributedDispatchRunnerError::from)?;
+        let fault_source_id = demand_feedback_distributed_fault_source_id(
+            execution_scope,
+            &dispatch.component_id,
+            &dispatch.node_id,
+            &partition.selector_id,
+        );
         let gate_push_constants = gate
-            .push_constants(selection_count, checkpoint_tag, false, false)
+            .push_constants(selection_count, checkpoint_tag, false, false, 0)
             .map_err(VulkanDistributedDispatchRunnerError::from)?
             .to_vec();
+        let feedback_gate_push_constants = (gate.transaction_predicate().byte_capacity()
+            >= VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY)
+            .then(|| {
+                gate.push_constants(
+                    selection_count,
+                    checkpoint_tag,
+                    false,
+                    false,
+                    fault_source_id,
+                )
+                .map(|bytes| bytes.to_vec())
+                .map_err(VulkanDistributedDispatchRunnerError::from)
+            })
+            .transpose()?;
         let owner = DeviceResourceResidencyOwnerId::new(format!(
             "distributed:{}:{}:{}:{}",
             execution_scope, dispatch.component_id, dispatch.node_id, checkpoint_tag
@@ -185,6 +220,7 @@ impl VulkanDistributedSelectedResourceGate {
             gate,
             pipeline_predicate: transaction_predicate,
             gate_push_constants,
+            feedback_gate_push_constants,
             context: VulkanDemandResidencyExecutionContext {
                 execution_scope: execution_scope.to_string(),
                 contract: Arc::clone(&store.contract),
@@ -218,7 +254,7 @@ impl VulkanDistributedSelectedResourceGate {
                 )
             })?;
         self.gate
-            .push_constants(selection_count, self.checkpoint_tag, false, false)
+            .push_constants(selection_count, self.checkpoint_tag, false, false, 0)
             .map(|bytes| bytes.to_vec())
             .map_err(VulkanDistributedDispatchRunnerError::from)
     }
@@ -315,7 +351,12 @@ impl VulkanDistributedSelectedResourceGate {
     ) -> Result<VulkanResidentKernelSequenceStep<'a>, VulkanDistributedDispatchRunnerError> {
         VulkanResidentKernelSequenceStep::new_indirect(
             self.gate.dispatch(),
-            &self.gate_push_constants,
+            self.feedback_gate_push_constants.as_deref().ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(
+                    "distributed selected-resource feedback gate has no two-word fault predicate"
+                        .to_string(),
+                )
+            })?,
             indirect,
             byte_offset,
         )
@@ -348,10 +389,7 @@ impl VulkanDistributedSelectedResourceGate {
     }
 
     pub(crate) fn reset_local_predicate(&self) -> Result<(), VulkanDistributedDispatchRunnerError> {
-        self.gate
-            .continuation_predicate()
-            .write_bytes(&1u32.to_le_bytes())
-            .map_err(VulkanDistributedDispatchRunnerError::from)
+        reset_distributed_selected_resource_predicate(self.gate.continuation_predicate())
     }
 
     pub(crate) fn missing_snapshot(
@@ -455,10 +493,7 @@ impl VulkanDistributedSelectedResourceGate {
     {
         self.acknowledge_missing_through(pending.published_count)?;
         self.observe_notification_epoch(pending.notification_epoch);
-        self.gate
-            .continuation_predicate()
-            .write_bytes(&1u32.to_le_bytes())
-            .map_err(VulkanDistributedDispatchRunnerError::from)?;
+        reset_distributed_selected_resource_predicate(self.gate.continuation_predicate())?;
         Ok(VulkanDistributedSelectedResourceResolvedMiss {
             selector_id: self.selector_id.clone(),
             checkpoint_tag: self.checkpoint_tag,

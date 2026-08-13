@@ -715,9 +715,13 @@ For every numbered item below:
 
 ### 7. Make hybrid execution device-owned
 
-- Make a resident sparse-expert hit continue directly into expert execution
-  without a host predicate read, fence, or terminal wait. Only a real miss may
-  stop the bounded transaction and publish a fault record.
+- On the authorized live gate, prove that a resident sparse-expert hit continues
+  directly into expert execution without a host predicate read, fence, or
+  terminal wait. A real miss now stops the bounded device transaction and
+  publishes a transaction-unique structural source ID; terminal host recovery
+  indexes only that checkpoint or distributed island instead of scanning every
+  feedback lane, local segment, and distributed gate. Validate the complete
+  miss, replay, subsequent-hit, and teardown cycle on a mounted sparse model.
 - Make cross-device edges, TP fan-out/collection, expert dispatch/reduction,
   and arbitrary ordered visits such as `gpu0 -> gpu1 -> gpu0` part of the
   compiled transaction through persistent activation rings and timeline

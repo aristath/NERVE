@@ -2228,7 +2228,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
         },
     )
     .unwrap();
-    let first_control = gate.push_constants(1, 17, true, true).unwrap();
+    let first_control = gate.push_constants(1, 17, true, true, 0).unwrap();
     device
         .run_resident_kernel_dispatch(gate.dispatch(), &first_control)
         .unwrap();
@@ -2253,7 +2253,7 @@ fn optional_output_heads_follow_group_table_miss_load_hit_and_unload() {
         .unwrap();
     gate.acknowledge_missing_through(missing.published_count)
         .unwrap();
-    let second_control = gate.push_constants(1, 18, true, true).unwrap();
+    let second_control = gate.push_constants(1, 18, true, true, 0).unwrap();
     device
         .run_resident_kernel_dispatch(gate.dispatch(), &second_control)
         .unwrap();

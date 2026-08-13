@@ -1371,7 +1371,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                 // the shard.
                 plan.add_device_allocation(
                     &shard.device_id,
-                    size_of::<u32>(),
+                    VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
                     "distributed shard residency predicate",
                 )?;
             }

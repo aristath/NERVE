@@ -29,6 +29,7 @@ use crate::vulkan_stream_circuit::{
     VulkanModelBoundaryBufferOverride, VulkanModelBoundaryDirection,
     VulkanPhysicalKernelArtifactManifest, VulkanPreparedDispatch, VulkanPreparedDispatchPlan,
     VulkanResidentFeedbackControlPlane, VulkanResidentKernelSourceResourceRepresentation,
+    VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY, demand_feedback_ready_predicate_bytes,
 };
 #[cfg(test)]
 use crate::vulkan_stream_circuit::{

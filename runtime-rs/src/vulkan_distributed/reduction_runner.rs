@@ -2,7 +2,7 @@ const DISTRIBUTED_SUM_F32_LOCAL_SIZE_X: usize = 64;
 const DISTRIBUTED_SUM_F32_PUSH_CONSTANT_BYTE_COUNT: u32 = 12;
 
 pub(crate) struct VulkanDistributedReductionRunner {
-    _predicate_clear_dispatch: Option<VulkanResidentKernelDispatch>,
+    _predicate_commit_dispatches: Vec<VulkanResidentKernelDispatch>,
     _resident_dispatch: VulkanResidentKernelDispatch,
     pub(crate) sequence: VulkanResidentKernelSequence,
 }
@@ -344,52 +344,40 @@ pub(crate) fn create_distributed_reduction_runner_for_buffers(
     let sequence = device
         .create_resident_kernel_sequence()
         .map_err(VulkanDistributedDispatchRunnerError::from)?;
-    let predicate_clear_dispatch = match (
+    let predicate_commit_dispatches = match (
         transaction_predicate,
         shard_residency_predicates.is_empty(),
     ) {
-        (_, true) => None,
+        (_, true) => Vec::new(),
         (None, false) => {
             return Err(VulkanDistributedDispatchRunnerError(
                 "distributed residency predicates require a transaction predicate".to_string(),
             ));
         }
-        (Some(predicate), false) => Some(
-            device
-                .create_resident_kernel_dispatch_2d_labeled(
-                    &distributed_clear_predicate_spirv_words()?,
-                    &[VulkanResidentKernelBufferBinding::new(
-                        0,
-                        predicate,
-                        size_of::<u32>(),
-                    )
-                    .with_access(VulkanResidentKernelBufferAccess::Write)],
-                    1,
-                    1,
-                    1,
-                    0,
-                    Some(format!(
-                        "component={} node={} distributed=commit_residency",
-                        planned_dispatch.component_id, planned_dispatch.node_id,
-                    )),
-                )
-                .map_err(VulkanDistributedDispatchRunnerError::from)?,
-        ),
+        (Some(predicate), false) => create_distributed_residency_fault_commit_dispatches(
+            device,
+            &planned_dispatch.component_id,
+            &planned_dispatch.node_id,
+            predicate,
+            shard_residency_predicates,
+        )?,
     };
     let mut steps = Vec::with_capacity(shard_residency_predicates.len() + 1);
-    if let Some(clear) = &predicate_clear_dispatch {
-        for (predicate_index, predicate) in shard_residency_predicates.iter().enumerate() {
-            steps.push(
-                VulkanResidentKernelSequenceStep::new(clear, &[])
-                    .with_condition(
-                        predicate,
-                        0,
-                        true,
-                        u32::try_from(predicate_index + 1).unwrap_or(u32::MAX),
-                    )
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?,
-            );
-        }
+    for (predicate_index, (commit, predicate)) in predicate_commit_dispatches
+        .iter()
+        .zip(shard_residency_predicates)
+        .enumerate()
+    {
+        steps.push(
+            VulkanResidentKernelSequenceStep::new(commit, &[])
+                .with_condition(
+                    predicate,
+                    0,
+                    true,
+                    u32::try_from(predicate_index + 1).unwrap_or(u32::MAX),
+                )
+                .map_err(VulkanDistributedDispatchRunnerError::from)?,
+        );
     }
     let reduction_step = VulkanResidentKernelSequenceStep::new(&resident_dispatch, &push_constants);
     let reduction_step = match transaction_predicate {
@@ -403,7 +391,7 @@ pub(crate) fn create_distributed_reduction_runner_for_buffers(
         .record_resident_kernel_sequence(&sequence, &steps)
         .map_err(VulkanDistributedDispatchRunnerError::from)?;
     Ok(VulkanDistributedReductionRunner {
-        _predicate_clear_dispatch: predicate_clear_dispatch,
+        _predicate_commit_dispatches: predicate_commit_dispatches,
         _resident_dispatch: resident_dispatch,
         sequence,
     })

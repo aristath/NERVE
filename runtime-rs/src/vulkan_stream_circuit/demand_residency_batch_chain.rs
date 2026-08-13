@@ -1072,6 +1072,7 @@ impl VulkanDemandResidencyBatchChain {
                         gate.checkpoint_tag,
                         gate.command_index == direct_gate_command_index,
                         gate.command_index == direct_gate_command_index,
+                        0,
                     )
             })
             .collect::<Result<Vec<_>, _>>()

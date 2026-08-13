@@ -452,21 +452,18 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                             .to_string(),
                     ))
                 })?;
-                let resolution = demand
-                    .resolve_published_fault(
-                        &self.device_slices,
-                        devices,
-                        &self.distributed_dispatch_runners,
-                        pending.tick_count,
-                        completion.executed_tick_count,
-                        VulkanResidentPlacedTokenTickTail::Sample.sequence_variant(),
-                    )?
-                    .ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                            "device published a residency fault without one immutable miss record"
-                                .to_string(),
-                        ))
-                    })?;
+                let resolution = demand.resolve_published_fault(
+                    &self.device_slices,
+                    devices,
+                    &self.distributed_dispatch_runners,
+                    VulkanDemandFeedbackPublishedFault {
+                        tick_count: pending.tick_count,
+                        feedback_lane: completion.executed_tick_count,
+                        source_id: completion.fault_source_id,
+                        sequence_variant: VulkanResidentPlacedTokenTickTail::Sample
+                            .sequence_variant(),
+                    },
+                )?;
                 for (checkpoint, resource_indices) in &resolution.resolved {
                     state.resolved_resource_count = state
                         .resolved_resource_count

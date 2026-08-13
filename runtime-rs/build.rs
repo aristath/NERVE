@@ -62,9 +62,9 @@ fn main() {
             .join("distributed_sum_f32_to_bf16.spv"),
     );
     compile_runtime_shader(
-        &manifest_dir.join("shaders/distributed_clear_predicate.comp"),
+        &manifest_dir.join("shaders/distributed_commit_residency_fault.comp"),
         &PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo provides OUT_DIR"))
-            .join("distributed_clear_predicate.spv"),
+            .join("distributed_commit_residency_fault.spv"),
     );
     compile_runtime_shader(
         &manifest_dir.join("shaders/distributed_sum_f32_add_bf16_residual.comp"),
@@ -140,7 +140,7 @@ fn main() {
         "Cargo.lock",
         "Cargo.toml",
         "build.rs",
-        "shaders/distributed_clear_predicate.comp",
+        "shaders/distributed_commit_residency_fault.comp",
         "shaders/distributed_sum_f32.comp",
         "shaders/distributed_sum_f32_to_bf16.comp",
         "shaders/distributed_sum_f32_add_bf16_residual.comp",

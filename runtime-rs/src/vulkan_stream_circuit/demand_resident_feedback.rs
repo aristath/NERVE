@@ -1,8 +1,100 @@
+const VULKAN_DEMAND_FEEDBACK_PREDICATE_WORD_COUNT: usize = 2;
+pub(crate) const VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY: usize =
+    VULKAN_DEMAND_FEEDBACK_PREDICATE_WORD_COUNT * size_of::<u32>();
+
+pub(crate) fn demand_feedback_ready_predicate_bytes(
+) -> [u8; VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY] {
+    let mut bytes = [0u8; VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY];
+    bytes[..size_of::<u32>()].copy_from_slice(&1u32.to_le_bytes());
+    bytes
+}
+
 struct VulkanResidentDemandFeedbackState {
     predicates_by_device: BTreeMap<String, Arc<VulkanResidentBuffer>>,
     completion_predicate: Arc<VulkanResidentBuffer>,
     stores_by_device: BTreeMap<String, Arc<VulkanCompiledResourceDeviceStore>>,
     distributed_resource_domain_counts: Vec<usize>,
+    fault_sources: BTreeMap<u32, VulkanDemandFeedbackFaultSource>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VulkanDemandFeedbackFaultSource {
+    Local {
+        slice_index: usize,
+        segment_index: usize,
+    },
+    Distributed {
+        owner_device_id: String,
+        dispatch_index: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VulkanDemandFeedbackPublishedFault {
+    tick_count: usize,
+    feedback_lane: usize,
+    source_id: u32,
+    sequence_variant: u8,
+}
+
+fn demand_feedback_fault_source_id(kind: &str, fields: &[&str]) -> u32 {
+    let mut digest = Sha256::new();
+    for field in std::iter::once(kind).chain(fields.iter().copied()) {
+        digest.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_le_bytes());
+        digest.update(field.as_bytes());
+    }
+    let digest = digest.finalize();
+    digest
+        .chunks_exact(size_of::<u32>())
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("SHA-256 u32 chunks are exact")))
+        .find(|value| *value != 0)
+        .unwrap_or(1)
+}
+
+fn demand_feedback_local_fault_source_id(
+    execution_scope: &str,
+    checkpoint_id: &str,
+    selector_id: &str,
+) -> u32 {
+    demand_feedback_fault_source_id(
+        "local",
+        &[execution_scope, checkpoint_id, selector_id],
+    )
+}
+
+fn demand_feedback_distributed_fault_source_id(
+    execution_scope: &str,
+    component_id: &str,
+    node_id: &str,
+    selector_id: &str,
+) -> u32 {
+    demand_feedback_fault_source_id(
+        "distributed",
+        &[execution_scope, component_id, node_id, selector_id],
+    )
+}
+
+fn register_demand_feedback_fault_source(
+    sources: &mut BTreeMap<u32, (String, VulkanDemandFeedbackFaultSource)>,
+    source_id: u32,
+    identity: String,
+    source: VulkanDemandFeedbackFaultSource,
+) -> Result<(), VulkanError> {
+    if source_id == 0 {
+        return Err(VulkanError(
+            "demand feedback fault source zero is reserved".to_string(),
+        ));
+    }
+    if let Some((existing_identity, existing_source)) = sources.get(&source_id) {
+        if existing_identity == &identity && existing_source == &source {
+            return Ok(());
+        }
+        return Err(VulkanError(format!(
+            "demand feedback fault-source collision {source_id}: {existing_identity:?} at {existing_source:?} conflicts with {identity:?} at {source:?}",
+        )));
+    }
+    sources.insert(source_id, (identity, source));
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -468,11 +560,16 @@ where
     let buffers = if let Some((owner, peers)) = resolved_devices.split_first() {
         if peers.is_empty() {
             vec![Arc::new(
-                owner.create_conditional_resident_buffer(size_of::<u32>())?,
+                owner.create_conditional_resident_buffer(
+                    VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+                )?,
             )]
         } else {
             owner
-                .create_shared_conditional_resident_buffers(peers, size_of::<u32>())?
+                .create_shared_conditional_resident_buffers(
+                    peers,
+                    VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+                )?
                 .buffers
         }
     } else {
@@ -501,7 +598,8 @@ fn write_shared_device_predicate_views<'a>(
     predicates: impl IntoIterator<Item = &'a Arc<VulkanResidentBuffer>>,
     enabled: bool,
 ) -> Result<(), VulkanError> {
-    let value = u32::from(enabled).to_le_bytes();
+    let mut value = demand_feedback_ready_predicate_bytes();
+    value[..size_of::<u32>()].copy_from_slice(&u32::from(enabled).to_le_bytes());
     let mut written_views = BTreeSet::new();
     for predicate in predicates {
         if written_views.insert(Arc::as_ptr(predicate) as usize) {
@@ -570,11 +668,83 @@ impl VulkanResidentDemandFeedbackState {
                     "demand feedback predicates do not contain output device {output_device_id:?}"
                 ))
             })?;
+        let mut fault_sources = BTreeMap::new();
+        for (slice_index, slice) in device_slices.iter().enumerate() {
+            for (segment_index, demand) in slice
+                .resident_execution_plan
+                .dispatch_segments
+                .iter()
+                .enumerate()
+                .filter_map(|(segment_index, segment)| {
+                    segment
+                        .demand_residency
+                        .as_ref()
+                        .map(|demand| (segment_index, demand))
+                })
+            {
+                for gate in &demand.gate_specs {
+                    let identity = format!(
+                        "local:{}:{}:{}",
+                        demand.context.execution_scope, gate.checkpoint_id, gate.selector_id,
+                    );
+                    register_demand_feedback_fault_source(
+                        &mut fault_sources,
+                        demand_feedback_local_fault_source_id(
+                            &demand.context.execution_scope,
+                            &gate.checkpoint_id,
+                            &gate.selector_id,
+                        ),
+                        identity,
+                        VulkanDemandFeedbackFaultSource::Local {
+                            slice_index,
+                            segment_index,
+                        },
+                    )?;
+                }
+            }
+        }
+        for island in &model
+            .distributed_execution_plans
+            .decode
+            .execution_islands
+        {
+            let leader = island.leader();
+            for dispatch in &island.dispatches {
+                for partition in &dispatch.selected_resource_partitions {
+                    let identity = format!(
+                        "distributed:{}:{}:{}:{}",
+                        partition.execution_scope,
+                        dispatch.component_id,
+                        dispatch.node_id,
+                        partition.selector_id,
+                    );
+                    register_demand_feedback_fault_source(
+                        &mut fault_sources,
+                        demand_feedback_distributed_fault_source_id(
+                            &partition.execution_scope,
+                            &dispatch.component_id,
+                            &dispatch.node_id,
+                            &partition.selector_id,
+                        ),
+                        identity,
+                        VulkanDemandFeedbackFaultSource::Distributed {
+                            owner_device_id: island.owner_device_id.clone(),
+                            dispatch_index: leader.dispatch_index,
+                        },
+                    )?;
+                }
+            }
+        }
+        let fault_sources = fault_sources
+            .into_iter()
+            .map(|(source_id, (_, source))| (source_id, source))
+            .collect();
         Ok(Self {
             predicates_by_device,
             completion_predicate,
             stores_by_device: model.compiled_resource_device_stores.clone(),
             distributed_resource_domain_counts,
+            fault_sources,
         })
     }
 
@@ -582,16 +752,22 @@ impl VulkanResidentDemandFeedbackState {
         write_shared_device_predicate_views(self.predicates_by_device.values(), true)
     }
 
-    fn pipeline_predicate_diagnostic(&self) -> Result<BTreeMap<String, u32>, VulkanError> {
+    fn pipeline_predicate_diagnostic(
+        &self,
+    ) -> Result<BTreeMap<String, [u32; VULKAN_DEMAND_FEEDBACK_PREDICATE_WORD_COUNT]>, VulkanError>
+    {
         self.predicates_by_device
             .iter()
             .map(|(device_id, predicate)| {
-                let bytes = predicate.read_bytes(size_of::<u32>())?;
-                let value = u32::from_le_bytes(bytes.try_into().map_err(|_| {
-                    VulkanError(format!(
-                        "demand feedback predicate on {device_id:?} did not contain one u32"
-                    ))
-                })?);
+                let bytes = predicate.read_bytes(VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY)?;
+                let value = std::array::from_fn(|word| {
+                    let start = word * size_of::<u32>();
+                    u32::from_le_bytes(
+                        bytes[start..start + size_of::<u32>()]
+                            .try_into()
+                            .expect("demand feedback predicate words are exact u32s"),
+                    )
+                });
                 Ok((device_id.clone(), value))
             })
             .collect()
@@ -606,7 +782,7 @@ impl VulkanResidentDemandFeedbackState {
             control.fault_publication_buffer()?,
             0,
             VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET * size_of::<u32>(),
-            size_of::<u32>(),
+            VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
         )
     }
 
@@ -663,11 +839,15 @@ impl VulkanResidentDemandFeedbackState {
         device_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         distributed_runners: &VulkanDistributedDispatchRunners,
-        tick_count: usize,
-        fault_feedback_lane: usize,
-        sequence_variant: u8,
-    ) -> Result<Option<VulkanDemandFeedbackFaultResolution>, VulkanResidentInProcessPlacedRuntimeError>
+        fault: VulkanDemandFeedbackPublishedFault,
+    ) -> Result<VulkanDemandFeedbackFaultResolution, VulkanResidentInProcessPlacedRuntimeError>
     {
+        let VulkanDemandFeedbackPublishedFault {
+            tick_count,
+            feedback_lane: fault_feedback_lane,
+            source_id: fault_source_id,
+            sequence_variant,
+        } = fault;
         if fault_feedback_lane >= tick_count {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                 VulkanError(format!(
@@ -675,57 +855,16 @@ impl VulkanResidentDemandFeedbackState {
                 )),
             ));
         }
-        let mut local_pending = Vec::new();
-        for feedback_lane in 0..tick_count {
-            for (slice_index, slice) in device_slices.iter().enumerate() {
-                for (segment_index, segment) in slice
-                    .resident_execution_plan
-                    .dispatch_segments
-                    .iter()
-                    .enumerate()
-                {
-                    let Some(demand) = &segment.demand_residency else {
-                        continue;
-                    };
-                    if demand
-                        .feedback_lane_has_pending_miss(sequence_variant, feedback_lane)
-                        .map_err(
-                            VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch,
-                        )?
-                    {
-                        local_pending.push((feedback_lane, slice_index, segment_index));
-                    }
-                }
-            }
-        }
-        let distributed_pending = distributed_runners
-            .pending_residency_dispatches()
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Tick(
-                    VulkanMountedPlacedResidentInProcessStreamTickError::Distributed(error),
-                )
-            })?;
-        let logical_checkpoint_count = local_pending.len() + distributed_pending.len();
-        if logical_checkpoint_count == 0 {
-            return Ok(None);
-        }
-        if logical_checkpoint_count != 1 {
-            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                VulkanError(format!(
-                    "one guarded resident feedback attempt reported {logical_checkpoint_count} independent miss checkpoints: local={local_pending:?}, distributed={distributed_pending:?}"
-                )),
-            ));
-        }
-        if let Some((feedback_lane, slice_index, segment_index)) =
-            local_pending.first().copied()
+        let fault_source = self.fault_sources.get(&fault_source_id).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "demand feedback published unknown fault-source ID {fault_source_id}",
+            )))
+        })?;
+        if let VulkanDemandFeedbackFaultSource::Local {
+            slice_index,
+            segment_index,
+        } = *fault_source
         {
-            if feedback_lane != fault_feedback_lane {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                    VulkanError(format!(
-                        "demand feedback control reported fault lane {fault_feedback_lane}, but the local gate reported lane {feedback_lane}"
-                    )),
-                ));
-            }
             let slice = &device_slices[slice_index];
             let device = devices.get(&slice.device_id).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
@@ -737,7 +876,7 @@ impl VulkanResidentDemandFeedbackState {
                 .as_ref()
                 .expect("pending demand feedback segment remains mounted");
             let (gate_index, resource_indices) = demand
-                .resolve_feedback_lane_miss(device, sequence_variant, feedback_lane)
+                .resolve_feedback_lane_miss(device, sequence_variant, fault_feedback_lane)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::ResidentDispatch)?
                 .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
@@ -745,21 +884,25 @@ impl VulkanResidentDemandFeedbackState {
                     ))
                 })?;
             let checkpoint = VulkanDemandFeedbackCheckpoint {
-                feedback_lane,
+                feedback_lane: fault_feedback_lane,
                 target: VulkanDemandFeedbackCheckpointTarget::Local {
                     slice_index,
                     segment_index,
                     gate_index,
                 },
             };
-            return Ok(Some(VulkanDemandFeedbackFaultResolution {
+            return Ok(VulkanDemandFeedbackFaultResolution {
                 resolved: vec![(checkpoint, resource_indices)],
                 resume_checkpoint: checkpoint,
-            }));
+            });
         }
-        let (owner_device_id, dispatch_index) = distributed_pending
-            .first()
-            .expect("one distributed checkpoint was validated");
+        let VulkanDemandFeedbackFaultSource::Distributed {
+            owner_device_id,
+            dispatch_index,
+        } = fault_source
+        else {
+            unreachable!("local demand feedback fault returned above");
+        };
         let slice_index = device_slices
             .iter()
             .position(|slice| slice.device_id == *owner_device_id)
@@ -821,23 +964,9 @@ impl VulkanResidentDemandFeedbackState {
                         .to_string(),
                 ))
             })?;
-        Ok(Some(VulkanDemandFeedbackFaultResolution {
+        Ok(VulkanDemandFeedbackFaultResolution {
             resolved,
             resume_checkpoint,
-        }))
-    }
-}
-
-#[cfg(test)]
-fn unique_pending_demand_feedback_checkpoint(
-    pending: &[(usize, usize, usize)],
-) -> Result<Option<(usize, usize, usize)>, VulkanError> {
-    match pending {
-        [] => Ok(None),
-        [checkpoint] => Ok(Some(*checkpoint)),
-        _ => Err(VulkanError(format!(
-            "one guarded resident feedback attempt reported {} independent miss checkpoints: {pending:?}",
-            pending.len()
-        ))),
+        })
     }
 }

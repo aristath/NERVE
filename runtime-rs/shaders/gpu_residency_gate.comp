@@ -35,7 +35,7 @@ layout(set = 0, binding = 7) readonly buffer GateConfiguration {
 } configuration;
 
 layout(set = 0, binding = 8) buffer TransactionPredicate {
-    uint enabled;
+    uint words[];
 } transaction;
 
 layout(push_constant) uniform GateControl {
@@ -43,6 +43,7 @@ layout(push_constant) uniform GateControl {
     uint checkpoint_tag;
     uint restore_downstream;
     uint restore_transaction;
+    uint fault_source_id;
 } control;
 
 const uint ADDRESS_RECORD_WORDS = 8u;
@@ -260,12 +261,19 @@ void main() {
     resolved_addresses.words[7] = 0u;
     if (!all_resident) {
         continuation.enabled = 0u;
-        transaction.enabled = 0u;
+        transaction.words[0] = 0u;
+        if (control.fault_source_id != 0u) {
+            atomicCompSwap(
+                transaction.words[1],
+                0u,
+                control.fault_source_id
+            );
+        }
     } else if (control.restore_downstream != 0u) {
         continuation.enabled = 1u;
     }
     if (all_resident && control.restore_transaction != 0u) {
-        transaction.enabled = 1u;
+        transaction.words[0] = 1u;
     }
 
     memoryBarrierBuffer();

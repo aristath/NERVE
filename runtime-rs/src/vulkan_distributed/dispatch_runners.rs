@@ -623,7 +623,9 @@ impl VulkanDistributedDispatchRunners {
                     {
                         let predicate = Arc::new(
                             owner_device
-                                .create_conditional_resident_buffer(size_of::<u32>())
+                                .create_conditional_resident_buffer(
+                                    VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+                                )
                                 .map_err(VulkanDistributedDispatchRunnerError::from)?,
                         );
                         (Arc::clone(&predicate), predicate)
@@ -631,7 +633,7 @@ impl VulkanDistributedDispatchRunners {
                         let mut buffers = owner_device
                             .create_shared_conditional_resident_buffers(
                                 &[device],
-                                size_of::<u32>(),
+                                VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
                             )
                             .map_err(VulkanDistributedDispatchRunnerError::from)?
                             .buffers
@@ -655,7 +657,7 @@ impl VulkanDistributedDispatchRunners {
                         (owner_view, shard_view)
                     };
                     owner_view
-                        .write_bytes(&1u32.to_le_bytes())
+                        .write_bytes(&demand_feedback_ready_predicate_bytes())
                         .map_err(VulkanDistributedDispatchRunnerError::from)?;
                     owner_shard_residency_predicates.push(owner_view);
                     Some(shard_view)
@@ -1475,31 +1477,6 @@ impl VulkanDistributedDispatchRunners {
         })
     }
 
-    pub(crate) fn pending_residency_dispatches(
-        &self,
-    ) -> Result<Vec<(String, usize)>, VulkanDistributedDispatchRunnerError> {
-        let mut pending = Vec::new();
-        for dispatch in &self.dispatches {
-            let has_pending = dispatch
-                .shards
-                .iter()
-                .flat_map(|shard| shard.selected_resource_gates.iter().flatten())
-                .try_fold(false, |pending, gate| {
-                    Ok::<_, VulkanDistributedDispatchRunnerError>(
-                        pending
-                            || gate.notification_epoch()? != gate.observed_notification_epoch(),
-                    )
-                })?;
-            if has_pending {
-                pending.push((
-                    dispatch.planned.owner_device_id.clone(),
-                    dispatch.planned.leader().dispatch_index,
-                ));
-            }
-        }
-        Ok(pending)
-    }
-
     pub(crate) fn reset_residency_predicates(
         &self,
     ) -> Result<(), VulkanDistributedDispatchRunnerError> {
@@ -1705,7 +1682,7 @@ impl VulkanDistributedDispatchRunners {
         for predicate in self.transaction_predicates.values() {
             if restored.insert(Arc::as_ptr(predicate) as usize) {
                 predicate
-                    .write_bytes(&1u32.to_le_bytes())
+                    .write_bytes(&demand_feedback_ready_predicate_bytes())
                     .map_err(VulkanDistributedDispatchRunnerError::from)?;
             }
         }

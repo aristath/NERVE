@@ -9,6 +9,7 @@ const VULKAN_FEEDBACK_FAULT_RESIDENCY: u32 = 1;
 const VULKAN_FEEDBACK_CONTINUATION_FAULTED: u32 = 0;
 const VULKAN_FEEDBACK_CONTINUATION_READY: u32 = 1;
 const VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET: usize = 10;
+const VULKAN_FEEDBACK_FAULT_SOURCE_WORD_OFFSET: usize = 11;
 
 pub(crate) struct VulkanResidentFeedbackControlPlane {
     vocabulary_size: usize,
@@ -48,6 +49,7 @@ struct VulkanResidentFeedbackControlCompletion {
     sampled_tick_count: usize,
     stop_reason: u32,
     fault_reason: u32,
+    fault_source_id: u32,
     template_replayed: bool,
 }
 
@@ -107,7 +109,19 @@ fn resident_feedback_terminal_state(
         )));
     }
     if completion.fault_reason == VULKAN_FEEDBACK_FAULT_RESIDENCY {
+        if completion.fault_source_id == 0 {
+            return Err(VulkanError(
+                "resident feedback residency fault omitted its device fault-source ID"
+                    .to_string(),
+            ));
+        }
         return Ok(VulkanResidentFeedbackTerminalState::ResidencyFault);
+    }
+    if completion.fault_source_id != 0 {
+        return Err(VulkanError(format!(
+            "resident feedback ordinary completion retained fault-source ID {}",
+            completion.fault_source_id,
+        )));
     }
     if completion.executed_tick_count == 0
         || completion.sampled_tick_count == 0
@@ -420,6 +434,9 @@ impl VulkanResidentFeedbackControlPlane {
                     VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET * size_of::<u32>(),
                 )?,
             )?,
+            fault_source_id: buffer.read_persistently_mapped_u32_le_at(
+                VULKAN_FEEDBACK_FAULT_SOURCE_WORD_OFFSET * size_of::<u32>(),
+            )?,
             template_replayed: false,
         })
     }
@@ -434,9 +451,12 @@ impl VulkanResidentFeedbackControlPlane {
                 "cannot acknowledge resident feedback continuation state {continuation} as a residency fault"
             )));
         }
+        let mut acknowledged = [0u8; 2 * size_of::<u32>()];
+        acknowledged[..size_of::<u32>()]
+            .copy_from_slice(&VULKAN_FEEDBACK_CONTINUATION_READY.to_le_bytes());
         buffer.write_bytes_at(
             VULKAN_FEEDBACK_CONTINUATION_WORD_OFFSET * size_of::<u32>(),
-            &VULKAN_FEEDBACK_CONTINUATION_READY.to_le_bytes(),
+            &acknowledged,
         )
     }
 

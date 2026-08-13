@@ -1,4 +1,4 @@
-const VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT: u32 = 16;
+const VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT: u32 = 20;
 const VULKAN_GPU_RESIDENCY_GATE_GROUP_RECORD_WORD_COUNT: usize = 2;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT: usize = 8;
 const VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT: usize = 8;
@@ -625,7 +625,7 @@ impl VulkanGpuResidencyGate {
                 binding: 8,
                 buffer: &transaction_predicate,
                 byte_offset: 0,
-                byte_len: size_of::<u32>(),
+                byte_len: transaction_predicate.byte_capacity(),
                 access: VulkanResidentKernelBufferAccess::ReadWrite,
             },
         ];
@@ -812,14 +812,25 @@ impl VulkanGpuResidencyGate {
         checkpoint_tag: u32,
         restore_downstream: bool,
         restore_transaction: bool,
+        fault_source_id: u32,
     ) -> Result<[u8; VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT as usize], VulkanError>
     {
+        if fault_source_id != 0
+            && self.transaction_predicate.byte_capacity() < 2 * size_of::<u32>()
+        {
+            return Err(VulkanError(format!(
+                "GPU residency fault publication needs {} transaction-predicate bytes, found {}",
+                2 * size_of::<u32>(),
+                self.transaction_predicate.byte_capacity(),
+            )));
+        }
         vulkan_gpu_residency_gate_push_constants(
             self.maximum_selection_count,
             selection_count,
             checkpoint_tag,
             restore_downstream,
             restore_transaction,
+            fault_source_id,
         )
     }
 
@@ -854,6 +865,7 @@ fn vulkan_gpu_residency_gate_push_constants(
     checkpoint_tag: u32,
     restore_downstream: bool,
     restore_transaction: bool,
+    fault_source_id: u32,
 ) -> Result<[u8; VULKAN_GPU_RESIDENCY_GATE_PUSH_CONSTANT_BYTE_COUNT as usize], VulkanError> {
     if selection_count == 0 || selection_count > maximum_selection_count {
         return Err(VulkanError(format!(
@@ -869,6 +881,7 @@ fn vulkan_gpu_residency_gate_push_constants(
     bytes[4..8].copy_from_slice(&checkpoint_tag.to_le_bytes());
     bytes[8..12].copy_from_slice(&u32::from(restore_downstream).to_le_bytes());
     bytes[12..16].copy_from_slice(&u32::from(restore_transaction).to_le_bytes());
+    bytes[16..20].copy_from_slice(&fault_source_id.to_le_bytes());
     Ok(bytes)
 }
 
