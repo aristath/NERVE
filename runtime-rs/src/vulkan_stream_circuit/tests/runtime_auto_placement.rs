@@ -1803,3 +1803,26 @@ fn runtime_auto_placement_rewires_without_discarding_selected_artifacts() {
     assert_eq!(rewired.component_executions, execution_before);
     assert_eq!(rewired.placement_device_ids(), ["physical-a"]);
 }
+
+#[test]
+fn owned_runtime_placement_matches_the_borrowed_transformation() {
+    let runtime_model = fixture_model_runtime_model();
+    let placement = BTreeMap::from([
+        ("layer_00".to_string(), "physical-b".to_string()),
+        ("output_transducer".to_string(), "physical-c".to_string()),
+    ]);
+    let borrowed = vulkan_runtime_model_with_component_placement(
+        &runtime_model,
+        "physical-a",
+        &placement,
+    )
+    .unwrap();
+    let owned = vulkan_runtime_model_with_component_placement_owned(
+        runtime_model,
+        "physical-a",
+        &placement,
+    )
+    .unwrap();
+
+    assert_eq!(owned, borrowed);
+}

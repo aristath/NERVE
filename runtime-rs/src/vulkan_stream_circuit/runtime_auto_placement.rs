@@ -1837,8 +1837,23 @@ pub fn vulkan_runtime_model_with_component_placement(
     default_device_id: &str,
     placement: &BTreeMap<String, String>,
 ) -> Result<VulkanResidentRuntimeModel, VulkanRuntimeResidencyPlanError> {
-    let mut placed_model = runtime_model.clone();
-    let mut runtime_graph = runtime_model.runtime_graph.clone();
+    vulkan_runtime_model_with_component_placement_owned(
+        runtime_model.clone(),
+        default_device_id,
+        placement,
+    )
+}
+
+/// Applies explicit physical ownership to an already-owned runtime model.
+/// Package calibration and other one-shot transformations use this form so a
+/// large compiled package is never deep-cloned merely to rewrite its small
+/// runtime graph and placement records.
+pub fn vulkan_runtime_model_with_component_placement_owned(
+    mut placed_model: VulkanResidentRuntimeModel,
+    default_device_id: &str,
+    placement: &BTreeMap<String, String>,
+) -> Result<VulkanResidentRuntimeModel, VulkanRuntimeResidencyPlanError> {
+    let mut runtime_graph = placed_model.runtime_graph.clone();
     runtime_graph.default_device_id = default_device_id.to_string();
     for instance in &mut runtime_graph.instances {
         instance.device_id = placement
@@ -1846,9 +1861,8 @@ pub fn vulkan_runtime_model_with_component_placement(
             .cloned()
             .unwrap_or_else(|| default_device_id.to_string());
     }
-    let source_graph = runtime_model
+    let source_graph = placed_model
         .package
-        .clone()
         .resolved_source_graph(PathBuf::from("."))
         .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     let runtime_graph = attach_generation_node_devices_for_vulkan(runtime_graph, &source_graph)
@@ -1859,16 +1873,11 @@ pub fn vulkan_runtime_model_with_component_placement(
             placed = placed.with_component_device(&instance.instance_id, &instance.device_id);
         }
     }
+    source_graph
+        .instantiate_runtime_graph(&runtime_graph)
+        .and_then(|graph| graph.placement_plan(&placed).map(|_| ()))
+        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     placed_model.runtime_graph = runtime_graph;
     placed_model.placement = placed;
-    placed_model
-        .resolved_graph(PathBuf::from("."))
-        .and_then(|graph| {
-            graph
-                .placement_plan(&placed_model.placement)
-                .map(|_| ())
-                .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))
-        })
-        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     Ok(placed_model)
 }
