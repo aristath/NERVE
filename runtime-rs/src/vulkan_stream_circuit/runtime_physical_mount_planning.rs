@@ -198,6 +198,13 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
         resolution
             .plans
             .physical_execution_residency_plan
+            .bind_feedback_control_memory_domain(&physical_device_by_logical_device)
+            .map_err(|error| {
+                physical_mount_planning_error("feedback-control memory-domain binding", error)
+            })?;
+        resolution
+            .plans
+            .physical_execution_residency_plan
             .bind_stream_control_memory_domain(&physical_device_by_logical_device)
             .map_err(|error| {
                 physical_mount_planning_error("stream-control memory-domain binding", error)

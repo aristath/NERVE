@@ -77,10 +77,120 @@ fn runtime_residency_plan_uses_physical_transient_layout_without_opening_vulkan(
         short_device.breakdown.selection_telemetry_bytes,
         short_device.breakdown.activation_slot_bytes,
         short_device.breakdown.boundary_buffer_bytes,
+        short_device.breakdown.edge_buffer_bytes,
+        short_device.breakdown.output_transducer_workspace_bytes,
+        short_device.breakdown.sampler_workspace_bytes,
+        short_device.breakdown.feedback_workspace_bytes,
     ]
     .into_iter()
     .sum::<usize>();
     assert_eq!(ledger_bytes, covered_breakdown_bytes);
+}
+
+#[test]
+fn runtime_residency_preserves_output_sampler_and_feedback_allocation_identities() {
+    let runtime_model = fixture_model_runtime_model();
+    let package_root = tiny_model_dir();
+    let tensor_index = runtime_model
+        .load_runtime_tensor_index(&package_root)
+        .unwrap();
+    let plan = plan_vulkan_runtime_residency(
+        &package_root,
+        &runtime_model,
+        &tensor_index,
+        16,
+        0,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    let device = &plan.device_plans[0];
+    let runtime_buffers = device
+        .resident_stream_device_allocations
+        .iter()
+        .filter_map(|allocation| match &allocation.kind {
+            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                class,
+                buffer_id,
+                ..
+            } => Some((*class, buffer_id.as_str(), allocation.byte_capacity)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(runtime_buffers.contains(&(
+        VulkanRuntimeResidentBufferClass::OutputTransducerWorkspace,
+        "normalized_frame",
+        runtime_model
+            .package
+            .output_transducer
+            .spec
+            .normalized_frame_byte_capacity,
+    )));
+    assert!(runtime_buffers.contains(&(
+        VulkanRuntimeResidentBufferClass::OutputTransducerWorkspace,
+        "logits",
+        runtime_model.package.output_transducer.spec.logits_byte_capacity,
+    )));
+    assert!(runtime_buffers.iter().any(|(class, buffer_id, _)| {
+        *class == VulkanRuntimeResidentBufferClass::SamplerWorkspace
+            && *buffer_id == "history_and_output"
+    }));
+    assert!(runtime_buffers.iter().any(|(class, buffer_id, _)| {
+        *class == VulkanRuntimeResidentBufferClass::FeedbackWorkspace
+            && *buffer_id == "control"
+    }));
+    for (class, expected) in [
+        (
+            VulkanRuntimeResidentBufferClass::OutputTransducerWorkspace,
+            device.breakdown.output_transducer_workspace_bytes,
+        ),
+        (
+            VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+            device.breakdown.sampler_workspace_bytes,
+        ),
+        (
+            VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
+            device.breakdown.feedback_workspace_bytes,
+        ),
+    ] {
+        assert_eq!(
+            runtime_buffers
+                .iter()
+                .filter(|(candidate, _, _)| *candidate == class)
+                .map(|(_, _, bytes)| *bytes)
+                .sum::<usize>(),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn sampler_residency_tracks_random_scratch_and_seed_for_every_random_method() {
+    let mut spec = fixture_model_runtime_model().package.sampler.spec;
+    spec.method = "temperature_top_p".to_string();
+    spec.scratch_byte_capacity = 4_096;
+    let random = sampler_workspace_allocations(&spec, 16, false).unwrap();
+    let random_ids = random
+        .iter()
+        .filter_map(|allocation| match &allocation.kind {
+            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer { buffer_id, .. } => {
+                Some(buffer_id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(random_ids.contains("scratch"));
+    assert!(random_ids.contains("random_seed"));
+
+    spec.method = "greedy".to_string();
+    let greedy = sampler_workspace_allocations(&spec, 16, false).unwrap();
+    assert!(greedy.iter().all(|allocation| {
+        !matches!(
+            &allocation.kind,
+            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer { buffer_id, .. }
+                if buffer_id == "scratch" || buffer_id == "random_seed"
+        )
+    }));
 }
 
 #[test]

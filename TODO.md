@@ -512,8 +512,19 @@ For every numbered item below:
   missing routes fail atomically, and planning and mounting use the same pure
   physical-route resolver. Terminal admission queries every external and staged
   allocation separately at its exact Vulkan requirement rather than rounding a
-  logical aggregate. Sampler, feedback, and speculative-decoder allocations
-  still enter terminal admission as class aggregates.
+  logical aggregate. Output-transducer and main-sampler buffers now retain
+  stable allocation identities too, including history/output, random scratch
+  and seed, token state/snapshot/batch, and runtime parameters. This closes a
+  `temperature_top_p` omission in the old sampler aggregate. Feedback control
+  and speculative target-frame history also have distinct identities; the
+  control allocation stays device-local for one physical target and moves to
+  one shared-host allocation for a multi-target stream. Parallel-only
+  speculative decoders no longer reserve an autoregressive target-frame
+  history they never allocate. The feedback-control dispatch-table capacity is
+  still planned from a conservative class upper bound rather than the exact
+  final local, distributed, and residency-gate dispatch set. Speculative-decoder
+  state, activation, sampler, and auxiliary allocations also still enter
+  terminal admission as class aggregates.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_residency_plan.v6";
+    "nerve.vulkan_runtime_residency_plan.v7";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeResidencyPlan {
@@ -55,6 +55,14 @@ pub struct VulkanRuntimeResidentStreamAllocation {
     pub byte_capacity: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanRuntimeResidentBufferClass {
+    OutputTransducerWorkspace,
+    SamplerWorkspace,
+    FeedbackWorkspace,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VulkanRuntimeResidentStreamAllocationKind {
@@ -99,6 +107,11 @@ pub enum VulkanRuntimeResidentStreamAllocationKind {
         component_id: String,
         port_id: String,
         edge_indices: Vec<usize>,
+    },
+    RuntimeBuffer {
+        class: VulkanRuntimeResidentBufferClass,
+        scope_id: String,
+        buffer_id: String,
     },
 }
 
@@ -262,25 +275,47 @@ fn plan_vulkan_runtime_residency_with_contract(
             "output device {output_device_id:?} has no resident component slice"
         ))
     })?;
-    output.output_transducer_workspace_bytes = checked_residency_add(
-        runtime_model
-            .package
-            .output_transducer
-            .spec
-            .normalized_frame_byte_capacity,
-        runtime_model.package.output_transducer.spec.logits_byte_capacity,
-        "output transducer workspace",
-    )?;
-    output.sampler_workspace_bytes = sampler_workspace_bytes(
+    let output_transducer_allocations = vec![
+        runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::OutputTransducerWorkspace,
+            &runtime_model.package.output_transducer.spec.transducer_id,
+            "normalized_frame",
+            runtime_model
+                .package
+                .output_transducer
+                .spec
+                .normalized_frame_byte_capacity,
+        )?,
+        runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::OutputTransducerWorkspace,
+            &runtime_model.package.output_transducer.spec.transducer_id,
+            "logits",
+            runtime_model.package.output_transducer.spec.logits_byte_capacity,
+        )?,
+    ];
+    output.output_transducer_workspace_bytes =
+        runtime_buffer_allocation_total(&output_transducer_allocations)?;
+    let sampler_allocations = sampler_workspace_allocations(
         &runtime_model.package.sampler.spec,
         context_capacity_activations,
         false,
     )?;
-    output.feedback_workspace_bytes = main_feedback_workspace_bytes(
+    output.sampler_workspace_bytes = runtime_buffer_allocation_total(&sampler_allocations)?;
+    let feedback_allocations = main_feedback_workspace_allocations(
         runtime_model,
         context_capacity_activations,
         mount_speculative_decoders,
     )?;
+    output.feedback_workspace_bytes = runtime_buffer_allocation_total(&feedback_allocations)?;
+    resident_stream_device_allocations_by_device
+        .get_mut(&output_device_id)
+        .expect("output owner allocation ledger was indexed above")
+        .extend(
+            output_transducer_allocations
+                .into_iter()
+                .chain(sampler_allocations)
+                .chain(feedback_allocations),
+        );
 
     if mount_speculative_decoders {
         for decoder in &runtime_model.package.speculative_decoders {
@@ -950,10 +985,22 @@ fn sampler_workspace_bytes(
     context_capacity_activations: usize,
     private_feedback_control: bool,
 ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    runtime_buffer_allocation_total(&sampler_workspace_allocations(
+        spec,
+        context_capacity_activations,
+        private_feedback_control,
+    )?)
+}
+
+fn sampler_workspace_allocations(
+    spec: &VulkanResidentSamplerSpec,
+    context_capacity_activations: usize,
+    private_feedback_control: bool,
+) -> Result<Vec<VulkanRuntimeResidentStreamAllocation>, VulkanRuntimeResidencyPlanError> {
     let vocabulary_size = spec.logits_byte_capacity / std::mem::size_of::<f32>();
     let token_state_is_active =
         spec.repetition_penalty != 1.0 || spec.presence_penalty != 0.0;
-    let mut total = checked_residency_add(
+    let history_byte_capacity = checked_residency_add(
         checked_residency_mul(
             context_capacity_activations,
             VULKAN_SAMPLER_HISTORY_RECORD_BYTE_CAPACITY,
@@ -962,9 +1009,25 @@ fn sampler_workspace_bytes(
         spec.output_byte_capacity,
         "sampler history",
     )?;
-    if spec.method == "temperature_top_k_top_p" {
-        total = checked_residency_add(total, spec.scratch_byte_capacity, "sampler scratch")?;
-        total = checked_residency_add(total, 4, "sampler seed")?;
+    let mut allocations = vec![runtime_buffer_allocation(
+        VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+        &spec.sampler_id,
+        "history_and_output",
+        history_byte_capacity,
+    )?];
+    if sampler_method_uses_randomness(&spec.method) {
+        allocations.push(runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+            &spec.sampler_id,
+            "scratch",
+            spec.scratch_byte_capacity,
+        )?);
+        allocations.push(runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+            &spec.sampler_id,
+            "random_seed",
+            4,
+        )?);
     }
     let seen_token_bytes = vocabulary_size
         .div_ceil(u32::BITS as usize)
@@ -973,29 +1036,44 @@ fn sampler_workspace_bytes(
             VulkanRuntimeResidencyPlanError("sampler token-state size overflowed".to_string())
         })?;
     if token_state_is_active || spec.runtime_parameterized {
-        total =
-            checked_residency_add(total, seen_token_bytes, "sampler token-state bytes")?;
+        allocations.push(runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+            &spec.sampler_id,
+            "seen_token_state",
+            seen_token_bytes,
+        )?);
     }
     if token_state_is_active {
-        total =
-            checked_residency_add(total, seen_token_bytes, "sampler token snapshot bytes")?;
-        total = checked_residency_add(
-            total,
+        allocations.push(runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+            &spec.sampler_id,
+            "seen_token_snapshot",
+            seen_token_bytes,
+        )?);
+        allocations.push(runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+            &spec.sampler_id,
+            "seen_token_batch",
             VULKAN_BACKEND_LOOP_MAX_WINDOW * std::mem::size_of::<u32>(),
-            "sampler token batch bytes",
-        )?;
+        )?);
     }
     if spec.runtime_parameterized {
-        total = checked_residency_add(total, 6 * std::mem::size_of::<u32>(), "sampler parameters")?;
+        allocations.push(runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+            &spec.sampler_id,
+            "runtime_parameters",
+            6 * std::mem::size_of::<u32>(),
+        )?);
     }
     if private_feedback_control {
-        total = checked_residency_add(
-            total,
+        allocations.push(runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+            &spec.sampler_id,
+            "private_feedback_control",
             (VULKAN_FEEDBACK_CONTROL_HEADER_WORD_COUNT + 1) * std::mem::size_of::<u32>(),
-            "sampler feedback control",
-        )?;
+        )?);
     }
-    Ok(total)
+    Ok(allocations)
 }
 
 fn main_feedback_workspace_bytes(
@@ -1003,6 +1081,18 @@ fn main_feedback_workspace_bytes(
     context_capacity_activations: usize,
     mount_speculative_decoders: bool,
 ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    runtime_buffer_allocation_total(&main_feedback_workspace_allocations(
+        runtime_model,
+        context_capacity_activations,
+        mount_speculative_decoders,
+    )?)
+}
+
+fn main_feedback_workspace_allocations(
+    runtime_model: &VulkanResidentRuntimeModel,
+    context_capacity_activations: usize,
+    mount_speculative_decoders: bool,
+) -> Result<Vec<VulkanRuntimeResidentStreamAllocation>, VulkanRuntimeResidencyPlanError> {
     let vocabulary_size =
         runtime_model.package.sampler.spec.logits_byte_capacity / std::mem::size_of::<f32>();
     let stop_mask_words = vocabulary_size.div_ceil(u32::BITS as usize);
@@ -1040,22 +1130,65 @@ fn main_feedback_workspace_bytes(
                 "feedback control workspace overflowed".to_string(),
             )
         })?;
-    if !mount_speculative_decoders || runtime_model.package.speculative_decoders.is_empty() {
-        return Ok(control_bytes);
-    }
-    checked_residency_add(
+    let mut allocations = vec![runtime_buffer_allocation(
+        VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
+        &runtime_model.package.package_id,
+        "control",
         control_bytes,
-        checked_residency_mul(
-            runtime_model
-                .package
-                .output_transducer
-                .spec
-                .normalized_frame_byte_capacity,
-            context_capacity_activations.min(VULKAN_BACKEND_LOOP_MAX_WINDOW),
-            "speculative target-frame history",
-        )?,
-        "feedback workspace",
-    )
+    )?];
+    let retains_normalized_frames = mount_speculative_decoders
+        && runtime_model
+            .package
+            .speculative_decoders
+            .iter()
+            .any(|decoder| decoder.execution_contract.uses_dedicated_autoregressive_io());
+    if retains_normalized_frames {
+        allocations.push(runtime_buffer_allocation(
+            VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
+            &runtime_model.package.package_id,
+            "speculative_target_frame_history",
+            checked_residency_mul(
+                runtime_model
+                    .package
+                    .output_transducer
+                    .spec
+                    .normalized_frame_byte_capacity,
+                context_capacity_activations.min(VULKAN_BACKEND_LOOP_MAX_WINDOW),
+                "speculative target-frame history",
+            )?,
+        )?);
+    }
+    Ok(allocations)
+}
+
+fn runtime_buffer_allocation(
+    class: VulkanRuntimeResidentBufferClass,
+    scope_id: &str,
+    buffer_id: &str,
+    byte_capacity: usize,
+) -> Result<VulkanRuntimeResidentStreamAllocation, VulkanRuntimeResidencyPlanError> {
+    if scope_id.is_empty() || buffer_id.is_empty() || byte_capacity == 0 {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "runtime buffer allocation requires a class, scope, buffer identity, and positive capacity"
+                .to_string(),
+        ));
+    }
+    Ok(VulkanRuntimeResidentStreamAllocation {
+        kind: VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+            class,
+            scope_id: scope_id.to_string(),
+            buffer_id: buffer_id.to_string(),
+        },
+        byte_capacity,
+    })
+}
+
+fn runtime_buffer_allocation_total(
+    allocations: &[VulkanRuntimeResidentStreamAllocation],
+) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    allocations.iter().try_fold(0usize, |total, allocation| {
+        checked_residency_add(total, allocation.byte_capacity, "runtime buffer allocations")
+    })
 }
 
 fn sum_transient_state_breakdown(

@@ -1,20 +1,43 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v6";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v7";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VulkanRuntimeExternalDeviceLocalResidentAllocationKind {
+    EdgeProducedPort {
+        component_id: String,
+        port_id: String,
+        edge_indices: Vec<usize>,
+    },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeExternalDeviceLocalResidentAllocation {
+    pub kind: VulkanRuntimeExternalDeviceLocalResidentAllocationKind,
     pub owner_device_id: String,
     pub participant_device_ids: Vec<String>,
     pub byte_capacity: usize,
-    pub concern: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VulkanRuntimeSharedHostResidentAllocationKind {
+    EdgeStaging {
+        component_id: String,
+        port_id: String,
+        edge_indices: Vec<usize>,
+    },
+    FeedbackControl {
+        scope_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeSharedHostResidentAllocation {
+    pub kind: VulkanRuntimeSharedHostResidentAllocationKind,
     pub owner_device_id: String,
     pub participant_device_ids: Vec<String>,
     pub byte_capacity: usize,
-    pub concern: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -31,6 +54,7 @@ pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
     pub distributed_shared_host_bytes_per_stream: usize,
     pub external_edge_device_bytes_per_stream: usize,
     pub staged_edge_shared_host_bytes_per_stream: usize,
+    pub feedback_control_shared_host_bytes_per_stream: usize,
     pub execution_transient_device_bytes_per_stream: usize,
 }
 
@@ -62,6 +86,7 @@ pub struct VulkanRuntimePhysicalExecutionResidencyPlan {
     pub resident_shared_host_allocations: Vec<VulkanRuntimeSharedHostResidentAllocation>,
     pub shared_stream_control_host_bytes_per_stream: usize,
     pub graph_edge_memory_domains_bound: bool,
+    pub feedback_control_memory_domain_bound: bool,
 }
 
 impl VulkanRuntimePhysicalExecutionResidencyPlan {
@@ -434,6 +459,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             resident_shared_host_allocations: Vec::new(),
             shared_stream_control_host_bytes_per_stream: 0,
             graph_edge_memory_domains_bound: false,
+            feedback_control_memory_domain_bound: false,
         })
     }
 
@@ -687,15 +713,14 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                         .entry(group.source_device_id.clone())
                         .or_default()
                         .push(VulkanRuntimeExternalDeviceLocalResidentAllocation {
+                            kind: VulkanRuntimeExternalDeviceLocalResidentAllocationKind::EdgeProducedPort {
+                                component_id: group.source_component_id.clone(),
+                                port_id: group.source_port_id.clone(),
+                                edge_indices: produced_edge_indices_vec.clone(),
+                            },
                             owner_device_id: group.source_device_id.clone(),
                             participant_device_ids: representative_device_ids,
                             byte_capacity: group.byte_capacity,
-                            concern: format!(
-                                "edge produced port {}.{} for {:?}",
-                                group.source_component_id,
-                                group.source_port_id,
-                                produced_edge_indices_vec,
-                            ),
                         });
                 }
                 Some(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging) => {
@@ -735,15 +760,14 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                         }
                     }
                     shared_host_additions.push(VulkanRuntimeSharedHostResidentAllocation {
+                        kind: VulkanRuntimeSharedHostResidentAllocationKind::EdgeStaging {
+                            component_id: group.source_component_id.clone(),
+                            port_id: group.source_port_id.clone(),
+                            edge_indices: produced_edge_indices_vec.clone(),
+                        },
                         owner_device_id: group.source_device_id.clone(),
                         participant_device_ids: representative_device_ids,
                         byte_capacity: group.byte_capacity,
-                        concern: format!(
-                            "edge staging {}.{} for {:?}",
-                            group.source_component_id,
-                            group.source_port_id,
-                            produced_edge_indices_vec,
-                        ),
                     });
                 }
                 Some(route) => {
@@ -887,6 +911,162 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             },
         )?;
         next.graph_edge_memory_domains_bound = true;
+        *self = next;
+        Ok(())
+    }
+
+    fn bind_feedback_control_memory_domain(
+        &mut self,
+        physical_device_by_logical_device: &BTreeMap<String, String>,
+    ) -> Result<(), VulkanRuntimeResidencyPlanError> {
+        if self.feedback_control_memory_domain_bound {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "feedback-control memory domain was already bound".to_string(),
+            ));
+        }
+        let mut next = self.clone();
+        let planned_devices = next
+            .device_plans
+            .iter()
+            .map(|device| device.device_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if physical_device_by_logical_device.len() != planned_devices.len()
+            || planned_devices.iter().any(|device_id| {
+                !physical_device_by_logical_device.contains_key(*device_id)
+            })
+        {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "feedback-control memory-domain binding is incomplete or contains extra logical devices"
+                    .to_string(),
+            ));
+        }
+        let matches = next
+            .device_plans
+            .iter()
+            .enumerate()
+            .flat_map(|(device_index, device)| {
+                device
+                    .resident_stream_device_allocations
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(allocation_index, allocation)| {
+                        matches!(
+                            &allocation.kind,
+                            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                                class: VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
+                                buffer_id,
+                                ..
+                            } if buffer_id == "control"
+                        )
+                        .then_some((device_index, allocation_index))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let [(owner_index, allocation_index)] = matches.as_slice() else {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "feedback-control memory-domain binding found {} control allocations, expected one",
+                matches.len(),
+            )));
+        };
+        let owner_device_id = next.device_plans[*owner_index].device_id.clone();
+        let owner_physical_device_id = physical_device_by_logical_device
+            .get(&owner_device_id)
+            .expect("feedback control owner was validated above");
+        let mut logical_devices_by_physical = BTreeMap::<String, BTreeSet<String>>::new();
+        for device_id in planned_devices {
+            logical_devices_by_physical
+                .entry(
+                    physical_device_by_logical_device
+                        .get(device_id)
+                        .expect("feedback control participant was validated above")
+                        .clone(),
+                )
+                .or_default()
+                .insert(device_id.to_string());
+        }
+        if logical_devices_by_physical.len() == 1 {
+            next.feedback_control_memory_domain_bound = true;
+            *self = next;
+            return Ok(());
+        }
+
+        let mut participant_device_ids = logical_devices_by_physical
+            .iter()
+            .map(|(physical_device_id, logical_device_ids)| {
+                if physical_device_id == owner_physical_device_id {
+                    owner_device_id.clone()
+                } else {
+                    logical_device_ids
+                        .first()
+                        .expect("feedback control physical participant is nonempty")
+                        .clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        participant_device_ids.sort();
+        let allocation = next.device_plans[*owner_index]
+            .resident_stream_device_allocations
+            .remove(*allocation_index);
+        let scope_id = match &allocation.kind {
+            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                class: VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
+                scope_id,
+                buffer_id,
+            } if buffer_id == "control" => scope_id.clone(),
+            _ => unreachable!("feedback control allocation identity was selected above"),
+        };
+        let owner = &mut next.device_plans[*owner_index];
+        owner.breakdown.owner_stream_device_bytes = owner
+            .breakdown
+            .owner_stream_device_bytes
+            .checked_sub(allocation.byte_capacity)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "feedback-control device residency underflowed".to_string(),
+                )
+            })?;
+        owner.stream_device_local_bytes = owner
+            .stream_device_local_bytes
+            .checked_sub(allocation.byte_capacity)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "feedback-control stream device residency underflowed".to_string(),
+                )
+            })?;
+        owner.breakdown.feedback_control_shared_host_bytes_per_stream = allocation.byte_capacity;
+        owner.stream_shared_host_bytes = checked_residency_add(
+            owner.stream_shared_host_bytes,
+            allocation.byte_capacity,
+            "feedback-control shared-host residency",
+        )?;
+        next.resident_shared_host_allocations
+            .push(VulkanRuntimeSharedHostResidentAllocation {
+                kind: VulkanRuntimeSharedHostResidentAllocationKind::FeedbackControl { scope_id },
+                owner_device_id,
+                participant_device_ids,
+                byte_capacity: allocation.byte_capacity,
+            });
+        next.total_stream_device_local_bytes = next.device_plans.iter().try_fold(
+            0usize,
+            |total, device| {
+                checked_residency_add(
+                    total,
+                    device.stream_device_local_bytes,
+                    "feedback-control total device residency",
+                )
+            },
+        )?;
+        next.total_stream_shared_host_bytes = next.device_plans.iter().try_fold(
+            0usize,
+            |total, device| {
+                checked_residency_add(
+                    total,
+                    device.stream_shared_host_bytes,
+                    "feedback-control total shared-host residency",
+                )
+            },
+        )?;
+        next.feedback_control_memory_domain_bound = true;
         *self = next;
         Ok(())
     }
@@ -1142,6 +1322,9 @@ fn validate_resident_stream_allocation_ledger(
     let mut activation_slot_bytes = 0usize;
     let mut boundary_buffer_bytes = 0usize;
     let mut edge_buffer_bytes = 0usize;
+    let mut output_transducer_workspace_bytes = 0usize;
+    let mut sampler_workspace_bytes = 0usize;
+    let mut feedback_workspace_bytes = 0usize;
     for allocation in &device.resident_stream_device_allocations {
         if allocation.byte_capacity == 0 || !identities.insert(&allocation.kind) {
             return Err(VulkanRuntimeResidencyPlanError(format!(
@@ -1175,6 +1358,18 @@ fn validate_resident_stream_allocation_ledger(
             | VulkanRuntimeResidentStreamAllocationKind::EdgeStagingReplica { .. } => {
                 (&mut edge_buffer_bytes, "resident edge buffer")
             }
+            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer { class, .. } => match class {
+                VulkanRuntimeResidentBufferClass::OutputTransducerWorkspace => (
+                    &mut output_transducer_workspace_bytes,
+                    "resident output transducer workspace",
+                ),
+                VulkanRuntimeResidentBufferClass::SamplerWorkspace => {
+                    (&mut sampler_workspace_bytes, "resident sampler workspace")
+                }
+                VulkanRuntimeResidentBufferClass::FeedbackWorkspace => {
+                    (&mut feedback_workspace_bytes, "resident feedback workspace")
+                }
+            },
         };
         *bytes = checked_residency_add(*bytes, allocation.byte_capacity, label)?;
     }
@@ -1207,6 +1402,21 @@ fn validate_resident_stream_allocation_ledger(
             declared.boundary_buffer_bytes,
         ),
         ("edge buffer", edge_buffer_bytes, declared.edge_buffer_bytes),
+        (
+            "output transducer workspace",
+            output_transducer_workspace_bytes,
+            declared.output_transducer_workspace_bytes,
+        ),
+        (
+            "sampler workspace",
+            sampler_workspace_bytes,
+            declared.sampler_workspace_bytes,
+        ),
+        (
+            "feedback workspace",
+            feedback_workspace_bytes,
+            declared.feedback_workspace_bytes,
+        ),
     ];
     if let Some((label, allocation_bytes, breakdown_bytes)) = actual
         .into_iter()
