@@ -611,6 +611,229 @@ fn device_local_capacity_permit_rejects_invalid_split_without_mutation() {
 }
 
 #[test]
+fn stream_memory_admission_scopes_exact_device_and_host_children() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let device_a = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let device_b = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let device_a_key = Arc::as_ptr(&device_a) as usize;
+    let device_b_key = Arc::as_ptr(&device_b) as usize;
+    let host_key = Arc::as_ptr(&host) as usize;
+    let admission = VulkanMemoryAdmission::from_test_permits(
+        vec![
+            (
+                device_a_key,
+                VulkanDeviceLocalMemoryPermit::acquire(&device_a, 1_000_000, 300_000).unwrap(),
+            ),
+            (
+                device_b_key,
+                VulkanDeviceLocalMemoryPermit::acquire(&device_b, 1_000_000, 200_000).unwrap(),
+            ),
+        ],
+        Some((
+            host_key,
+            VulkanHostMemoryPermit::acquire(&host, 1_000_000, 100_000).unwrap(),
+        )),
+    );
+
+    let device_a_allocation;
+    let device_b_allocation;
+    let host_allocation;
+    {
+        let _scope = admission.enter();
+        device_a_allocation = take_scoped_device_local_memory_capacity(&device_a, 125_000)
+            .expect("device A is in the active transaction")
+            .unwrap()
+            .commit(125_000)
+            .unwrap();
+        device_b_allocation = take_scoped_device_local_memory_capacity(&device_b, 75_000)
+            .expect("device B is in the active transaction")
+            .unwrap()
+            .commit(75_000)
+            .unwrap();
+        host_allocation = take_scoped_host_memory_capacity(&host, 40_000)
+            .expect("host memory is in the active transaction")
+            .unwrap()
+            .commit(40_000)
+            .unwrap();
+    }
+
+    assert!(take_scoped_device_local_memory_capacity(&device_a, 1).is_none());
+    assert!(take_scoped_host_memory_capacity(&host, 1).is_none());
+    assert_eq!(admission.remaining_device_bytes(device_a_key), 175_000);
+    assert_eq!(admission.remaining_device_bytes(device_b_key), 125_000);
+    assert_eq!(admission.remaining_host_bytes(), 60_000);
+    assert_eq!(device_a.lock().unwrap().tracked_allocation_bytes, 125_000);
+    assert_eq!(device_b.lock().unwrap().tracked_allocation_bytes, 75_000);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 40_000);
+
+    drop(admission);
+    assert_eq!(device_a.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(device_b.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
+    drop(device_a_allocation);
+    drop(device_b_allocation);
+    drop(host_allocation);
+    assert_eq!(device_a.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(device_b.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
+fn host_memory_permits_contend_and_roll_back_without_leaking_capacity() {
+    let tracker = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let first = VulkanHostMemoryPermit::acquire(&tracker, 1_000_000, 600_000).unwrap();
+    let error = VulkanHostMemoryPermit::acquire(&tracker, 1_000_000, 400_001)
+        .expect_err("pending host transactions must contend atomically");
+    assert!(error.to_string().contains("600000 pending"));
+
+    let second = VulkanHostMemoryPermit::acquire(&tracker, 1_000_000, 400_000).unwrap();
+    drop(first);
+    assert_eq!(tracker.lock().unwrap().pending_reservation_bytes, 400_000);
+    let committed = second.commit(350_000).unwrap();
+    assert_eq!(tracker.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(tracker.lock().unwrap().tracked_allocation_bytes, 350_000);
+    drop(committed);
+    assert_eq!(tracker.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
+fn host_memory_permit_accounts_committed_bytes_against_a_falling_live_snapshot() {
+    let tracker = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let first = VulkanHostMemoryPermit::acquire(&tracker, 1_000_000, 600_000)
+        .unwrap()
+        .commit(600_000)
+        .unwrap();
+
+    let second = VulkanHostMemoryPermit::acquire(&tracker, 400_000, 400_000).unwrap();
+    assert_eq!(tracker.lock().unwrap().tracked_allocation_bytes, 600_000);
+    assert_eq!(tracker.lock().unwrap().pending_reservation_bytes, 400_000);
+    assert!(VulkanHostMemoryPermit::acquire(&tracker, 400_000, 1).is_err());
+
+    drop(second);
+    drop(first);
+    assert_eq!(tracker.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(tracker.lock().unwrap().pending_reservation_bytes, 0);
+}
+
+#[test]
+fn nested_stream_memory_admission_uses_the_innermost_transaction() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let key = Arc::as_ptr(&tracker) as usize;
+    let outer = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            key,
+            VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 300_000).unwrap(),
+        )],
+        None,
+    );
+    let inner = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            key,
+            VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 200_000).unwrap(),
+        )],
+        None,
+    );
+
+    let _outer_scope = outer.enter();
+    {
+        let _inner_scope = inner.enter();
+        drop(
+            take_scoped_device_local_memory_capacity(&tracker, 50_000)
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    assert_eq!(inner.remaining_device_bytes(key), 150_000);
+    assert_eq!(outer.remaining_device_bytes(key), 300_000);
+    drop(
+        take_scoped_device_local_memory_capacity(&tracker, 25_000)
+            .unwrap()
+            .unwrap(),
+    );
+    assert_eq!(outer.remaining_device_bytes(key), 275_000);
+}
+
+#[test]
+fn nested_stream_memory_admission_never_borrows_an_outer_participant() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let outer_tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let inner_tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let outer_key = Arc::as_ptr(&outer_tracker) as usize;
+    let inner_key = Arc::as_ptr(&inner_tracker) as usize;
+    let host_key = Arc::as_ptr(&host) as usize;
+    let outer = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            outer_key,
+            VulkanDeviceLocalMemoryPermit::acquire(&outer_tracker, 1_000_000, 300_000)
+                .unwrap(),
+        )],
+        Some((
+            host_key,
+            VulkanHostMemoryPermit::acquire(&host, 1_000_000, 100_000).unwrap(),
+        )),
+    );
+    let inner = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            inner_key,
+            VulkanDeviceLocalMemoryPermit::acquire(&inner_tracker, 1_000_000, 200_000)
+                .unwrap(),
+        )],
+        None,
+    );
+
+    let _outer_scope = outer.enter();
+    let _inner_scope = inner.enter();
+    let device_error = take_scoped_device_local_memory_capacity(&outer_tracker, 1)
+        .unwrap()
+        .unwrap_err();
+    let host_error = take_scoped_host_memory_capacity(&host, 1)
+        .unwrap()
+        .unwrap_err();
+    assert!(device_error.to_string().contains("active stream admission"));
+    assert!(host_error.to_string().contains("no shared-host"));
+    assert_eq!(outer.remaining_device_bytes(outer_key), 300_000);
+    assert_eq!(outer.remaining_host_bytes(), 100_000);
+}
+
+#[test]
+fn stream_memory_admission_rejects_unplanned_allocation_without_spending_credit() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let key = Arc::as_ptr(&tracker) as usize;
+    let admission = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            key,
+            VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 100_000).unwrap(),
+        )],
+        None,
+    );
+
+    let _scope = admission.enter();
+    let error = take_scoped_device_local_memory_capacity(&tracker, 100_001)
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("cannot provide a 100001-byte child"));
+    assert_eq!(admission.remaining_device_bytes(key), 100_000);
+    assert_eq!(tracker.lock().unwrap().pending_reservation_bytes, 100_000);
+    assert_eq!(tracker.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
 fn device_local_memory_counter_tolerance_is_bounded_by_protected_headroom() {
     let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
     let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(

@@ -61,6 +61,56 @@ impl VulkanComputeDevice {
                 "shared host allocation capacity must not be zero".to_string(),
             ));
         }
+        let layout = self.shared_host_allocation_layout(peer_devices, byte_capacity, usage)?;
+        let allocation_size = layout.size();
+        let capacity_permit = take_scoped_host_memory_capacity(
+            &self.context.host_memory_budget_tracker,
+            allocation_size,
+        )
+        .transpose()?;
+        let pointer = unsafe { alloc_zeroed(layout) };
+        if pointer.is_null() {
+            return Err(VulkanError(format!(
+                "failed to allocate {allocation_size} bytes of aligned shared host memory"
+            )));
+        }
+        let host_memory_reservation = match capacity_permit {
+            Some(permit) => match permit.commit(allocation_size) {
+                Ok(reservation) => Some(reservation),
+                Err(error) => {
+                    unsafe { dealloc(pointer, layout) };
+                    return Err(error);
+                }
+            },
+            None => None,
+        };
+        Ok(Arc::new(VulkanSharedHostAllocation {
+            address: pointer as usize,
+            layout,
+            byte_capacity,
+            _host_memory_reservation: host_memory_reservation,
+        }))
+    }
+
+    pub(crate) fn shared_host_allocation_requirement_bytes(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+    ) -> Result<usize, VulkanError> {
+        self.shared_host_allocation_layout(
+            peer_devices,
+            byte_capacity,
+            resident_buffer_usage(),
+        )
+        .map(|layout| layout.size())
+    }
+
+    fn shared_host_allocation_layout(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+        usage: vk::BufferUsageFlags,
+    ) -> Result<Layout, VulkanError> {
         let mut alignment = 1usize;
         let mut required_size = byte_capacity;
         for device in std::iter::once(self).chain(peer_devices.iter().copied()) {
@@ -90,20 +140,8 @@ impl VulkanComputeDevice {
             .checked_add(alignment - 1)
             .map(|size| size & !(alignment - 1))
             .ok_or_else(|| VulkanError("shared host allocation size overflowed".to_string()))?;
-        let layout = Layout::from_size_align(allocation_size, alignment).map_err(|error| {
-            VulkanError(format!("invalid shared host allocation layout: {error}"))
-        })?;
-        let pointer = unsafe { alloc_zeroed(layout) };
-        if pointer.is_null() {
-            return Err(VulkanError(format!(
-                "failed to allocate {allocation_size} bytes of aligned shared host memory"
-            )));
-        }
-        Ok(Arc::new(VulkanSharedHostAllocation {
-            address: pointer as usize,
-            layout,
-            byte_capacity,
-        }))
+        Layout::from_size_align(allocation_size, alignment)
+            .map_err(|error| VulkanError(format!("invalid shared host allocation layout: {error}")))
     }
 
     fn shared_host_buffer_memory_requirements(

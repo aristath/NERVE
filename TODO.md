@@ -466,9 +466,29 @@ For every numbered item below:
   same selected-resource/transient fixed point, and records the winning width
   in both the workload-free mount and real package. A one-byte-short widest
   plan downshifts instead of failing or mounting an unaccounted runner; capacity
-  below the scalar contract fails closed. The remaining resource work is to
-  make multi-stream admission one atomic device/host reservation transaction
-  whose permits are consumed by the subsequent buffer allocations. Exact
+  below the scalar contract fails closed. Multi-stream admission is now one
+  atomic, deterministically ordered physical-device and process-wide shared-host
+  reservation transaction. Each device-local or shared-host Vulkan allocation
+  consumes a split child permit from the active stream transaction at its
+  queried memory-requirement size; committed reservations follow buffer
+  lifetime, unused prompt and
+  verification credit remains attached to the stream, nested constructions
+  cannot borrow an outer stream's participants, and any undeclared allocation
+  fails closed. Shared-host reservations use the falling live MemAvailable
+  snapshot without double-charging already tracked allocations. Exact
+  sequential tests cover split accounting, competing transactions, nested
+  isolation, partial commit, rollback, and teardown.
+
+  The remaining resource work is an allocation-level terminal ledger. Replace
+  every residual logical-capacity aggregate with the exact Vulkan requirement
+  for each concrete allocation before acquiring the transaction; include
+  per-allocation shared-host alignment for prefill/verification transients;
+  move the one multi-device stream-control allocation from per-device working
+  sets to shared-host residency; and remove the provisional distributed edge
+  buffers that are allocated only to be replaced during boundary mounting.
+  Prove that the admitted device/host totals are consumed exactly—neither
+  exhausted early nor left as unexplained credit—on local, staged, direct
+  device-local, speculative, and TP stream shapes. Exact
   sequential tests also cover source
   projections, uneven selector waves, paged versus retained/eager quotas,
   selected-resource exclusion from permanent graph fallback, insufficient

@@ -511,6 +511,7 @@ struct VulkanInstanceContext {
     instance: ash::Instance,
     device_local_memory_budget_trackers:
         Mutex<BTreeMap<String, std::sync::Weak<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>>>,
+    host_memory_budget_tracker: Arc<Mutex<VulkanHostMemoryBudgetTracker>>,
 }
 
 /// Owns the Vulkan logical device independently from any one runtime wrapper.
@@ -626,6 +627,7 @@ pub struct VulkanSharedHostAllocation {
     address: usize,
     layout: Layout,
     byte_capacity: usize,
+    _host_memory_reservation: Option<Arc<VulkanHostMemoryReservation>>,
 }
 
 /// Identity shared by device-local buffers that import the same external

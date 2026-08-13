@@ -1399,44 +1399,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .as_ref()
             .map(|state| &state.execution_plans)
             .unwrap_or(&self.distributed_execution_plans);
-        let mut physical_device_by_logical_device = BTreeMap::new();
-        let mut safe_capacity_by_physical_device = BTreeMap::new();
-        for device_plan in &self.physical_execution_residency_plan.device_plans {
-            let device = device_for(&device_plan.device_id)?;
-            let physical_device_id = device.physical_device_id().to_string();
-            physical_device_by_logical_device
-                .insert(device_plan.device_id.clone(), physical_device_id.clone());
-            let safe_capacity =
-                usize::try_from(device.device_local_memory_budget().reservable_bytes)
-                    .unwrap_or(usize::MAX);
-            safe_capacity_by_physical_device
-                .entry(physical_device_id)
-                .and_modify(|capacity: &mut usize| *capacity = (*capacity).min(safe_capacity))
-                .or_insert(safe_capacity);
-        }
-        let safe_host_bytes = if self
-            .physical_execution_residency_plan
-            .total_stream_shared_host_bytes
-            == 0
-        {
-            usize::MAX
-        } else {
-            vulkan_safe_host_available_bytes()
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?
-        };
-        admit_vulkan_runtime_physical_execution_stream(
-            &self.physical_execution_residency_plan,
-            &physical_device_by_logical_device,
-            &safe_capacity_by_physical_device,
-            safe_host_bytes,
-        )
-        .map_err(|error| {
-            VulkanResidentInProcessPlacedRuntimeError::Package(
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "failed exact physical execution stream admission: {error}"
-                )),
-            )
-        })?;
+        let stream_memory_admission =
+            reserve_vulkan_runtime_physical_execution_stream_memory(self, &device_for)?;
+        let _stream_memory_scope = stream_memory_admission.enter();
         let distributed_dynamic_resource_buffers = self
             .distributed_dynamic_resource_buffers
             .iter()
@@ -1939,6 +1904,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             })
             .collect();
         Ok(VulkanResidentInProcessPlacedStreamProcessor {
+            stream_memory_admission,
             model: self.clone(),
             distributed_dispatch_runners,
             distributed_dynamic_resource_buffers,

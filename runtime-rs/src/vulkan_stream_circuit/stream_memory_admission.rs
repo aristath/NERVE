@@ -1,0 +1,193 @@
+fn shared_host_allocation_requirement_for_logical_devices<'a, F>(
+    owner_device_id: &str,
+    participant_device_ids: &[String],
+    byte_capacity: usize,
+    device_for: &F,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError>
+where
+    F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    let owner = device_for(owner_device_id)?;
+    let mut unique_peers = BTreeMap::<String, &VulkanComputeDevice>::new();
+    for device_id in participant_device_ids {
+        let participant = device_for(device_id)?;
+        if !participant.shares_logical_device_with(owner) {
+            unique_peers
+                .entry(participant.physical_device_id().to_string())
+                .or_insert(participant);
+        }
+    }
+    owner
+        .shared_host_allocation_requirement_bytes(
+            &unique_peers.values().copied().collect::<Vec<_>>(),
+            byte_capacity,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+}
+
+fn distributed_shared_host_requirement_bytes<'a, F>(
+    plan: &VulkanDistributedActivationBufferPlan,
+    device_for: &F,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError>
+where
+    F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    if plan.route != VulkanSharedResidentBufferRoute::SharedHost {
+        return Ok(0);
+    }
+    plan.allocations
+        .iter()
+        .map(|allocation| {
+            shared_host_allocation_requirement_for_logical_devices(
+                &allocation.owner_device_id,
+                &allocation.device_ids,
+                allocation.byte_capacity,
+                device_for,
+            )
+        })
+        .chain(plan.reduction_allocations.iter().map(|allocation| {
+            shared_host_allocation_requirement_for_logical_devices(
+                &allocation.owner_device_id,
+                &allocation.device_ids,
+                allocation.byte_capacity,
+                device_for,
+            )
+        }))
+        .try_fold(0usize, |total, bytes| {
+            total.checked_add(bytes?).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(
+                        "distributed shared-host allocation requirements overflowed",
+                    ),
+                )
+            })
+        })
+}
+
+fn shared_stream_control_requirement_bytes(
+    physical_devices: &BTreeMap<String, &VulkanComputeDevice>,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+    if physical_devices.len() <= 1 {
+        return Ok(0);
+    }
+    let mut participants = physical_devices.values().copied();
+    let owner = participants
+        .next()
+        .expect("multiple physical stream devices exist");
+    owner
+        .shared_host_allocation_requirement_bytes(
+            &participants.collect::<Vec<_>>(),
+            VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+}
+
+fn reserve_vulkan_runtime_physical_execution_stream_memory<'a, F>(
+    package: &VulkanResidentInProcessPlacedModelPackage,
+    device_for: &F,
+) -> Result<Arc<VulkanMemoryAdmission>, VulkanResidentInProcessPlacedRuntimeError>
+where
+    F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    let plan = &package.physical_execution_residency_plan;
+    let mut physical_device_by_logical_device = BTreeMap::new();
+    let mut safe_capacity_by_physical_device = BTreeMap::new();
+    let mut physical_devices = BTreeMap::<String, &VulkanComputeDevice>::new();
+    let stream_device_requirements = plan
+        .device_plans
+        .iter()
+        .map(|device_plan| {
+            let device = device_for(&device_plan.device_id)?;
+            let physical_device_id = device.physical_device_id().to_string();
+            physical_device_by_logical_device
+                .insert(device_plan.device_id.clone(), physical_device_id.clone());
+            let safe_capacity =
+                usize::try_from(device.device_local_memory_budget().reservable_bytes)
+                    .unwrap_or(usize::MAX);
+            safe_capacity_by_physical_device
+                .entry(physical_device_id.clone())
+                .and_modify(|capacity: &mut usize| *capacity = (*capacity).min(safe_capacity))
+                .or_insert(safe_capacity);
+            physical_devices.entry(physical_device_id).or_insert(device);
+            Ok((device, device_plan.stream_device_local_bytes))
+        })
+        .collect::<Result<Vec<_>, VulkanResidentInProcessPlacedRuntimeError>>()?;
+
+    let safe_host_bytes = if plan.total_stream_shared_host_bytes == 0
+        && physical_devices.len() <= 1
+    {
+        usize::MAX
+    } else {
+        vulkan_safe_host_available_bytes()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?
+    };
+    admit_vulkan_runtime_physical_execution_stream(
+        plan,
+        &physical_device_by_logical_device,
+        &safe_capacity_by_physical_device,
+        safe_host_bytes,
+    )
+    .map_err(|error| {
+        VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed exact physical execution stream admission: {error}"
+            )),
+        )
+    })?;
+
+    let distributed_shared_host_logical_bytes =
+        if package.distributed_activation_plan.route == VulkanSharedResidentBufferRoute::SharedHost
+        {
+            package.distributed_activation_plan.total_shared_byte_capacity
+        } else {
+            0
+        };
+    let non_distributed_shared_host_bytes = plan
+        .total_stream_shared_host_bytes
+        .checked_sub(distributed_shared_host_logical_bytes)
+        .ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(
+                    "physical execution shared-host residency omits distributed allocations",
+                ),
+            )
+        })?;
+    let shared_stream_control_requirement =
+        shared_stream_control_requirement_bytes(&physical_devices)?;
+    let stream_host_requirement_bytes =
+        distributed_shared_host_requirement_bytes(&package.distributed_activation_plan, device_for)?
+            .checked_add(non_distributed_shared_host_bytes)
+            .and_then(|bytes| bytes.checked_add(shared_stream_control_requirement))
+            .ok_or_else(|| {
+        VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(
+                "physical execution shared-host reservation overflowed",
+            ),
+        )
+    })?;
+    let stream_host_requirement = if stream_host_requirement_bytes == 0 {
+        None
+    } else {
+        let representative = physical_devices.values().next().copied().ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(
+                    "physical execution stream admission has no device",
+                ),
+            )
+        })?;
+        Some((
+            representative,
+            safe_host_bytes,
+            stream_host_requirement_bytes,
+        ))
+    };
+    VulkanMemoryAdmission::reserve(&stream_device_requirements, stream_host_requirement)
+        .map(Arc::new)
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed atomic physical execution stream reservation: {error}",
+                )),
+            )
+        })
+}

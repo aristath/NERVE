@@ -104,6 +104,7 @@ impl VulkanComputeDeviceCatalog {
                     _entry: entry,
                     instance,
                     device_local_memory_budget_trackers: Mutex::new(BTreeMap::new()),
+                    host_memory_budget_tracker: vulkan_host_memory_budget_tracker(),
                 }),
                 physical_devices,
                 available_devices,

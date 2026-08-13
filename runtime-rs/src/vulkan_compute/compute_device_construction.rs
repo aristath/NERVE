@@ -286,6 +286,23 @@ impl VulkanComputeDevice {
         &self,
         byte_count: usize,
     ) -> Result<VulkanDeviceLocalMemoryPermit, VulkanError> {
+        if let Some(permit) = take_scoped_device_local_memory_capacity(
+            &self.device_local_memory_budget_tracker,
+            byte_count,
+        ) {
+            return permit;
+        }
+        self.reserve_fixed_device_local_memory_capacity_unscoped(byte_count)
+    }
+
+    /// Reserves fixed capacity without consulting an enclosing allocation
+    /// scope. Only admission transactions themselves may call this: using a
+    /// parent stream's permit to admit a child stream would make the two
+    /// lifetimes contend for one promise and invalidate atomic teardown.
+    fn reserve_fixed_device_local_memory_capacity_unscoped(
+        &self,
+        byte_count: usize,
+    ) -> Result<VulkanDeviceLocalMemoryPermit, VulkanError> {
         let initial_error = match self.reserve_device_local_memory_capacity(byte_count) {
             Ok(permit) => return Ok(permit),
             Err(error) => error,

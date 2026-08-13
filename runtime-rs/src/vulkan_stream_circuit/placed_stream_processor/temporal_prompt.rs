@@ -409,6 +409,12 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         if mounted_capacity.is_some_and(|capacity| requested_width <= capacity) {
             return Ok(());
         }
+        // Prompt and speculative-verification runners are deliberately mounted
+        // on first use. Consume their buffers from the same all-participant
+        // stream transaction that was acquired before the base stream was
+        // constructed; otherwise lazy mounting could race another stream for
+        // capacity that the physical plan already promised to this one.
+        let _stream_memory_scope = self.stream_memory_admission.enter();
         // Normal prompt ingestion has no causal rollback snapshots, so one
         // full-width runner avoids retaining a new activation bank for every
         // prompt remainder. Verification is different: its snapshot storage
