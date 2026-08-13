@@ -74,6 +74,7 @@ pub struct VulkanResidentTargetedComponentSession {
     mounted: VulkanMountedPlacedStreamCircuit,
     source_dispatch: VulkanMountedPlacedBoundDispatch,
     execution: VulkanTargetedComponentExecution,
+    representation_context: Option<VulkanDemandResidencyExecutionContext>,
     capture_output_values: bool,
 }
 
@@ -383,6 +384,22 @@ impl VulkanResidentTargetedExecutionSession {
                     seed,
                     maximum_quantum_wait,
                 )
+            }
+        }
+    }
+
+    pub fn prepare_loaded_representations_for_measurement(
+        &self,
+        device: &VulkanComputeDevice,
+    ) -> Result<
+        VulkanCompiledResourceRepresentationReport,
+        VulkanResidentTokenModelPackageError,
+    > {
+        match self {
+            Self::Component(session) => session
+                .prepare_loaded_representations_for_measurement(device),
+            Self::OutputTransducer(_) => {
+                Ok(VulkanCompiledResourceRepresentationReport::default())
             }
         }
     }
@@ -966,6 +983,7 @@ impl VulkanResidentTargetedComponentSession {
                 "targeted dispatch {component_id}.{node_id} requires at least one input and output signal; found {input_count} inputs and {output_count} outputs"
             ));
         }
+        let representation_context = demand_context.clone();
         let execution = match phase {
             VulkanTargetedComponentExecutionPhase::Decode => {
                 VulkanTargetedComponentExecution::Decode(
@@ -1004,8 +1022,32 @@ impl VulkanResidentTargetedComponentSession {
             mounted,
             source_dispatch,
             execution,
+            representation_context,
             capture_output_values,
         })
+    }
+
+    fn prepare_loaded_representations_for_measurement(
+        &self,
+        device: &VulkanComputeDevice,
+    ) -> Result<
+        VulkanCompiledResourceRepresentationReport,
+        VulkanResidentTokenModelPackageError,
+    > {
+        self.representation_context
+            .as_ref()
+            .map(|context| {
+                context
+                    .store
+                    .prepare_loaded_representations_for_measurement(device)
+                    .map_err(|error| {
+                        targeted_component_error_value(format!(
+                            "failed to prepare targeted resident representation: {error}",
+                        ))
+                    })
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     pub fn execute(

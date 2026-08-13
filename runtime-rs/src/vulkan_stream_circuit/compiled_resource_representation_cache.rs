@@ -30,6 +30,27 @@ struct VulkanCompiledResourceRepresentationCandidate {
     selection_count: u64,
 }
 
+fn require_complete_targeted_representation_preparation(
+    report: &VulkanCompiledResourceRepresentationReport,
+    expected_group_count: usize,
+) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+    if report.considered_group_count == expected_group_count
+        && report.promoted_group_count == expected_group_count
+        && !report.skipped_unstable_load_interval
+        && report.skipped_capacity_bytes == 0
+    {
+        return Ok(());
+    }
+    Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+        "targeted representation preparation promoted {} of {} warmed groups (considered {}, skipped_capacity_bytes={}, unstable={}); measured execution is forbidden",
+        report.promoted_group_count,
+        expected_group_count,
+        report.considered_group_count,
+        report.skipped_capacity_bytes,
+        report.skipped_unstable_load_interval,
+    )))
+}
+
 impl VulkanCompiledResourceDeviceStore {
     fn supports_adaptive_representations(&self) -> bool {
         self.representation_arena.is_some() && self.representation_backing_store.is_some()
@@ -54,6 +75,139 @@ impl VulkanCompiledResourceDeviceStore {
         Ok(self.maximum_allocation_byte_capacity.saturating_sub(
             source_committed_bytes.saturating_add(representation_committed_bytes),
         ))
+    }
+
+    /// Materialize the resident derivation for every currently loaded resource
+    /// group that can use one.
+    ///
+    /// Normal stream execution deliberately waits for a stable prompt boundary
+    /// before adapting representations. A targeted optimizer session has no
+    /// prompt stream, so its discarded warmup establishes that boundary
+    /// explicitly. This method converts only groups that the warmup actually
+    /// loaded; it never guesses a future expert working set or expands every
+    /// resource admitted by the selector.
+    pub fn prepare_loaded_representations_for_measurement(
+        &self,
+        device: &VulkanComputeDevice,
+    ) -> Result<
+        VulkanCompiledResourceRepresentationReport,
+        VulkanCompiledResourceDeviceStoreError,
+    > {
+        if !self.supports_adaptive_representations() {
+            return Ok(VulkanCompiledResourceRepresentationReport::default());
+        }
+        if device.physical_device_id() != self.physical_device_id {
+            return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
+                "compiled representation device {:?} differs from store physical device {:?}",
+                device.physical_device_id(),
+                self.physical_device_id,
+            )));
+        }
+
+        let inactive_group_ids = self
+            .manager
+            .eviction_candidates(&BTreeSet::new())
+            .map_err(compiled_device_store_residency_error)?
+            .into_iter()
+            .map(|candidate| candidate.group_id)
+            .collect::<BTreeSet<_>>();
+        let device_tier_group_ids = match &self.memory_plan {
+            Some(memory_plan) => memory_plan
+                .lock()
+                .map_err(|_| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled resource memory plan was poisoned while preparing representations",
+                    )
+                })?
+                .group_tiers
+                .iter()
+                .filter(|(_, tier)| **tier == VulkanCompiledResourceMemoryTier::Device)
+                .map(|(group_id, _)| group_id.clone())
+                .collect::<BTreeSet<_>>(),
+            None => inactive_group_ids.clone(),
+        };
+        let promoted_group_ids = self
+            .address_state
+            .lock()
+            .map_err(|_| {
+                VulkanCompiledResourceDeviceStoreError::new(
+                    "compiled resource address state was poisoned while preparing representations",
+                )
+            })?
+            .promoted_representations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        let mut expected_group_ids = BTreeSet::new();
+        let mut domains = Vec::new();
+        for selector in self.contract.selectors.iter().filter(|selector| {
+            self.allowed_selector_ids.contains(&selector.id)
+        }) {
+            let mut selection_counts = vec![0u64; selector.resource_count];
+            for (resource_index, selection_count) in
+                selection_counts.iter_mut().enumerate()
+            {
+                let resolved = self.resolve_selector_resource(
+                    &selector.id,
+                    resource_index,
+                )?;
+                let group_id = resolved.id();
+                if inactive_group_ids.contains(group_id)
+                    && device_tier_group_ids.contains(group_id)
+                    && !promoted_group_ids.contains(group_id)
+                    && resolved.has_resident_derivation()
+                {
+                    *selection_count = 1;
+                    expected_group_ids.insert(group_id.to_string());
+                }
+            }
+            if selection_counts.iter().any(|count| *count > 0) {
+                let co_selection_count = selector
+                    .resource_count
+                    .checked_mul(selector.resource_count.saturating_sub(1))
+                    .and_then(|count| count.checked_div(2))
+                    .ok_or_else(|| {
+                        VulkanCompiledResourceDeviceStoreError::new(
+                            "compiled representation co-selection counter count overflowed",
+                        )
+                    })?;
+                domains.push(VulkanSelectionTelemetryDomainSnapshot {
+                    execution_scope: selector.execution_scope.clone(),
+                    component_id: selector.component_id.clone(),
+                    node_id: selector.node_id.clone(),
+                    domain_id: selector.domain_id.clone(),
+                    resource_count: selector.resource_count,
+                    selection_counts,
+                    co_selection_counts: vec![0; co_selection_count],
+                });
+            }
+        }
+        if expected_group_ids.is_empty() {
+            return Ok(VulkanCompiledResourceRepresentationReport::default());
+        }
+
+        let started = Instant::now();
+        let telemetry = VulkanSelectionTelemetrySnapshot { domains };
+        let first = self.optimize_representations_from_selection_telemetry(
+            device,
+            &telemetry,
+        )?;
+        let mut report = if first.skipped_unstable_load_interval {
+            self.optimize_representations_from_selection_telemetry(
+                device,
+                &telemetry,
+            )?
+        } else {
+            first
+        };
+        report.elapsed_ns =
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        require_complete_targeted_representation_preparation(
+            &report,
+            expected_group_ids.len(),
+        )?;
+        Ok(report)
     }
 
     pub fn optimize_representations_from_selection_telemetry(
@@ -116,10 +270,8 @@ impl VulkanCompiledResourceDeviceStore {
                 })?
                 .group_tiers
                 .iter()
-                .filter_map(|(group_id, tier)| {
-                    (*tier == VulkanCompiledResourceMemoryTier::Device)
-                        .then(|| group_id.clone())
-                })
+                .filter(|(_, tier)| **tier == VulkanCompiledResourceMemoryTier::Device)
+                .map(|(group_id, _)| group_id.clone())
                 .collect::<BTreeSet<_>>(),
             None => inactive_group_ids.clone(),
         };
@@ -527,5 +679,51 @@ impl VulkanCompiledResourceDeviceStore {
                 .reclaimed_since_boundary = true;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod targeted_representation_preparation_tests {
+    use super::*;
+
+    #[test]
+    fn targeted_representation_preparation_rejects_partial_promotion() {
+        let report = VulkanCompiledResourceRepresentationReport {
+            considered_group_count: 2,
+            promoted_group_count: 1,
+            promoted_source_bytes: 64,
+            promoted_resident_bytes: 128,
+            skipped_unstable_load_interval: false,
+            skipped_capacity_bytes: 128,
+            elapsed_ns: 7,
+        };
+        let error = require_complete_targeted_representation_preparation(
+            &report,
+            2,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("promoted 1 of 2 warmed groups"),
+            "{error}",
+        );
+        assert!(
+            error.to_string().contains("measured execution is forbidden"),
+            "{error}",
+        );
+    }
+
+    #[test]
+    fn targeted_representation_preparation_accepts_only_the_complete_wave() {
+        let report = VulkanCompiledResourceRepresentationReport {
+            considered_group_count: 2,
+            promoted_group_count: 2,
+            promoted_source_bytes: 128,
+            promoted_resident_bytes: 256,
+            skipped_unstable_load_interval: false,
+            skipped_capacity_bytes: 0,
+            elapsed_ns: 7,
+        };
+        require_complete_targeted_representation_preparation(&report, 2)
+            .unwrap();
     }
 }

@@ -7,16 +7,17 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use nerve_runtime::{
-    RuntimeStagedCandidate, VulkanComputeDevice, VulkanComputeDeviceCatalog,
-    VulkanResidentBufferPool, VulkanResidentModelPackageManifest, VulkanResidentRuntimeModel,
-    VulkanResidentTargetedExecutionSession, VulkanResidentTargetedModelPackageDeviceSlice,
-    VulkanTargetedComponentExecutionPhase, VulkanTargetedComponentExecutionScope,
+    RuntimeStagedCandidate, VulkanCompiledResourceRepresentationReport, VulkanComputeDevice,
+    VulkanComputeDeviceCatalog, VulkanResidentBufferPool, VulkanResidentModelPackageManifest,
+    VulkanResidentRuntimeModel, VulkanResidentTargetedExecutionSession,
+    VulkanResidentTargetedModelPackageDeviceSlice, VulkanTargetedComponentExecutionPhase,
+    VulkanTargetedComponentExecutionScope,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v4";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v4";
+const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v5";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v5";
 const AMD_VENDOR_ID: u32 = 0x1002;
 const UNMOUNTED_LOGICAL_DEVICE_ID: &str = "optimizer:unmounted";
 
@@ -43,6 +44,7 @@ enum ExecutorCommand {
     Execute {
         schema: String,
         request_id: String,
+        measurement_phase: ExecutorMeasurementPhase,
         useful_units: usize,
         sustained_window_count: usize,
         seed: u32,
@@ -55,6 +57,21 @@ enum ExecutorCommand {
         schema: String,
         request_id: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ExecutorMeasurementPhase {
+    Warmup,
+    Measured,
+    Validation,
+}
+
+#[derive(Default)]
+struct ExecutorMeasurementState {
+    prepared_after_warmup: bool,
+    terminal_execution_completed: bool,
+    pending_preparation: Option<VulkanCompiledResourceRepresentationReport>,
 }
 
 struct MountCommand {
@@ -239,6 +256,7 @@ fn execute_session(
         }),
     )?;
 
+    let mut measurement_state = ExecutorMeasurementState::default();
     let close_request_id = loop {
         let command = read_command(input)?.ok_or_else(|| {
             invalid_input("executor input ended without an explicit close command")
@@ -247,24 +265,23 @@ fn execute_session(
             ExecutorCommand::Execute {
                 schema,
                 request_id,
+                measurement_phase,
                 useful_units,
                 sustained_window_count,
                 seed,
             } => {
                 require_schema(&schema)?;
-                let report = session.execute(
+                let report = execute_targeted_measurement(
+                    &session,
                     &device,
+                    measurement_phase,
                     useful_units,
                     sustained_window_count,
                     seed,
                     mount.maximum_quantum_wait,
+                    &mut measurement_state,
                 )?;
-                write_response(
-                    output,
-                    &request_id,
-                    "completed",
-                    serde_json::to_value(report)?,
-                )?;
+                write_response(output, &request_id, "completed", report)?;
             }
             ExecutorCommand::Close { schema, request_id } => {
                 require_schema(&schema)?;
@@ -300,6 +317,140 @@ fn execute_session(
         }),
     )?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_targeted_measurement(
+    session: &VulkanResidentTargetedExecutionSession,
+    device: &VulkanComputeDevice,
+    measurement_phase: ExecutorMeasurementPhase,
+    useful_units: usize,
+    sustained_window_count: usize,
+    seed: u32,
+    maximum_quantum_wait: Duration,
+    state: &mut ExecutorMeasurementState,
+) -> Result<Value, Box<dyn Error>> {
+    if state.terminal_execution_completed {
+        return Err(invalid_input(
+            "executor session cannot execute after its measured or validation call",
+        )
+        .into());
+    }
+    match measurement_phase {
+        ExecutorMeasurementPhase::Warmup => {
+            let report = session.execute(
+                device,
+                useful_units,
+                sustained_window_count,
+                seed,
+                maximum_quantum_wait,
+            )?;
+            if !state.prepared_after_warmup {
+                state.pending_preparation =
+                    Some(session.prepare_loaded_representations_for_measurement(device)?);
+                state.prepared_after_warmup = true;
+            }
+            execution_report_payload(
+                report,
+                VulkanCompiledResourceRepresentationReport::default(),
+            )
+        }
+        ExecutorMeasurementPhase::Measured => {
+            let initial = session.execute(
+                device,
+                useful_units,
+                sustained_window_count,
+                seed,
+                maximum_quantum_wait,
+            )?;
+            let (report, preparation) = if state.prepared_after_warmup {
+                (
+                    initial,
+                    state.pending_preparation.take().unwrap_or_default(),
+                )
+            } else {
+                let preparation = session.prepare_loaded_representations_for_measurement(device)?;
+                let report = if preparation.promoted_group_count > 0 {
+                    session.execute(
+                        device,
+                        useful_units,
+                        sustained_window_count,
+                        seed,
+                        maximum_quantum_wait,
+                    )?
+                } else {
+                    initial
+                };
+                (report, preparation)
+            };
+            state.terminal_execution_completed = true;
+            execution_report_payload(report, preparation)
+        }
+        ExecutorMeasurementPhase::Validation => {
+            if state.prepared_after_warmup {
+                return Err(invalid_input(
+                    "validation execution cannot follow benchmark warmup in one session",
+                )
+                .into());
+            }
+            let initial = session.execute(
+                device,
+                useful_units,
+                sustained_window_count,
+                seed,
+                maximum_quantum_wait,
+            )?;
+            let preparation = session.prepare_loaded_representations_for_measurement(device)?;
+            let report = if preparation.promoted_group_count > 0 {
+                session.execute(
+                    device,
+                    useful_units,
+                    sustained_window_count,
+                    seed,
+                    maximum_quantum_wait,
+                )?
+            } else {
+                initial
+            };
+            state.terminal_execution_completed = true;
+            execution_report_payload(report, preparation)
+        }
+    }
+}
+
+fn execution_report_payload(
+    report: nerve_runtime::VulkanTargetedComponentExecutionReport,
+    preparation: VulkanCompiledResourceRepresentationReport,
+) -> Result<Value, Box<dyn Error>> {
+    let conversion_bytes = preparation
+        .promoted_source_bytes
+        .checked_add(preparation.promoted_resident_bytes)
+        .ok_or_else(|| invalid_input("representation conversion byte count overflowed"))?;
+    let resident_parameter_bytes = report
+        .resident_parameter_bytes
+        .checked_add(preparation.promoted_resident_bytes)
+        .ok_or_else(|| invalid_input("resident representation byte count overflowed"))?;
+    let mut payload = serde_json::to_value(report)?;
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| invalid_input("targeted execution report did not serialize as an object"))?;
+    object.insert(
+        "resident_parameter_bytes".to_string(),
+        json!(resident_parameter_bytes),
+    );
+    object.insert(
+        "representation_conversion_bytes".to_string(),
+        json!(conversion_bytes),
+    );
+    object.insert(
+        "representation_conversion_ns".to_string(),
+        json!(preparation.elapsed_ns),
+    );
+    object.insert(
+        "representation_boundary_count".to_string(),
+        json!(preparation.promoted_group_count),
+    );
+    Ok(payload)
 }
 
 impl ExecutorHost {
@@ -826,6 +977,80 @@ mod tests {
         );
         let error = read_command(&mut input.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn optimizer_executor_protocol_requires_a_typed_measurement_phase() {
+        let valid = format!(
+            "{{\"command\":\"execute\",\"schema\":\"{COMMAND_SCHEMA}\",\"request_id\":\"execute-1\",\"measurement_phase\":\"warmup\",\"useful_units\":2,\"sustained_window_count\":1,\"seed\":7}}\n"
+        );
+        assert!(matches!(
+            read_command(&mut valid.as_bytes()).unwrap(),
+            Some(ExecutorCommand::Execute {
+                measurement_phase: ExecutorMeasurementPhase::Warmup,
+                ..
+            }),
+        ));
+
+        let missing = format!(
+            "{{\"command\":\"execute\",\"schema\":\"{COMMAND_SCHEMA}\",\"request_id\":\"execute-1\",\"useful_units\":2,\"sustained_window_count\":1,\"seed\":7}}\n"
+        );
+        let error = read_command(&mut missing.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("measurement_phase"), "{error}");
+
+        let unknown = format!(
+            "{{\"command\":\"execute\",\"schema\":\"{COMMAND_SCHEMA}\",\"request_id\":\"execute-1\",\"measurement_phase\":\"benchmark\",\"useful_units\":2,\"sustained_window_count\":1,\"seed\":7}}\n"
+        );
+        let error = read_command(&mut unknown.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+
+    #[test]
+    fn optimizer_executor_reports_real_representation_lifecycle_resources() {
+        let report = nerve_runtime::VulkanTargetedComponentExecutionReport {
+            component_id: "layer_1".to_string(),
+            node_id: "expert".to_string(),
+            op: "linear".to_string(),
+            phase: "decode".to_string(),
+            activation_batch_width: 1,
+            useful_units: 2,
+            execution_ns: 11,
+            output_digest: "output".to_string(),
+            output_values_f32_le_hex: None,
+            captured_outputs: None,
+            state_digest: "state".to_string(),
+            throughput_windows: vec![nerve_runtime::VulkanTargetedComponentThroughputWindow {
+                index: 0,
+                start_unit: 0,
+                end_unit: 2,
+                duration_ns: 11,
+            }],
+            resident_parameter_bytes: 1_024,
+            resident_transient_bytes: 256,
+            physical_dispatch_count: 1,
+            queue_submission_count: 1,
+            synchronization_wait_count: 1,
+            synchronization_wait_ns: 3,
+            queue_wait_ns: 2,
+        };
+        let payload = execution_report_payload(
+            report,
+            VulkanCompiledResourceRepresentationReport {
+                considered_group_count: 2,
+                promoted_group_count: 2,
+                promoted_source_bytes: 128,
+                promoted_resident_bytes: 512,
+                skipped_unstable_load_interval: false,
+                skipped_capacity_bytes: 0,
+                elapsed_ns: 17,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(payload["resident_parameter_bytes"], 1_536);
+        assert_eq!(payload["representation_conversion_bytes"], 640);
+        assert_eq!(payload["representation_conversion_ns"], 17);
+        assert_eq!(payload["representation_boundary_count"], 2);
     }
 
     #[test]

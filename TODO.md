@@ -787,8 +787,17 @@ For every numbered item below:
   transient peak, and current headroom—not an isolated kernel or advertised
   TOPS figure. The current joint candidate graph uses measured complete-region
   execution, identity-bound steady-state representation-cache quotas, and
-  capacity vectors; conversion and lazy-reload latency must still become direct
-  optimizer resources rather than remaining only compiler-selection metrics.
+  capacity vectors. The targeted optimizer now carries an explicit
+  warmup/measured/validation protocol: a discarded warmup loads the exact
+  selected groups, an optimizer-only boundary derives every eligible warmed
+  representation, partial or capacity-skipped preparation fails closed, and
+  only the derived path supplies measured candidate output. Cold measurements
+  and behavioral validation replay the work after derivation instead of
+  accepting the compact-source result. Conversion read/write bytes, elapsed
+  time, representation boundaries, and retained derived residency now flow
+  into benchmark observations and records rather than being hardcoded to zero.
+  Lazy-reload latency must still become a direct optimizer resource rather than
+  remaining only a compiler-selection metric.
 - Reuse the mechanism for unseen compatible models; no DeepSeek, Qwen, vendor,
   or device-name branches belong in runtime selection.
 

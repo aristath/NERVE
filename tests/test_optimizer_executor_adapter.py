@@ -94,6 +94,7 @@ class FixtureExecutor:
             }
             status = "mounted"
         elif command == "execute":
+            warmed = document["measurement_phase"] == "warmup"
             window_count = document["sustained_window_count"]
             window_width = document["useful_units"] // window_count
             windows = []
@@ -131,8 +132,11 @@ class FixtureExecutor:
                 "output_digest": _artifact_digest(b"output"),
                 "state_digest": _artifact_digest(b"state"),
                 "throughput_windows": windows,
-                "resident_parameter_bytes": 4_096,
+                "resident_parameter_bytes": 4_096 if warmed else 4_224,
                 "resident_transient_bytes": 512,
+                "representation_conversion_bytes": 0 if warmed else 192,
+                "representation_conversion_ns": 0 if warmed else 37,
+                "representation_boundary_count": 0 if warmed else 1,
                 "physical_dispatch_count": 1,
                 "queue_submission_count": 1,
                 "synchronization_wait_count": 1,
@@ -268,6 +272,7 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     )
     assert executor.commands[1]["useful_units"] == 8
     assert executor.commands[1]["sustained_window_count"] == 2
+    assert executor.commands[1]["measurement_phase"] == "measured"
     assert [command["command"] for command in executor.commands] == [
         "mount",
         "execute",
@@ -279,6 +284,12 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     assert observation["device"]["busy_ns"] == 400
     assert observation["timing"]["queue_wait_ns"] == 100
     assert observation["synchronization"]["wait_ns"] == 500
+    assert observation["representation"] == {
+        "conversion_bytes": 192,
+        "conversion_ns": 37,
+        "boundary_count": 1,
+    }
+    assert observation["memory"]["permanent_bytes"] == 4_224
     assert observation["transport"]["bytes"] > 0
     assert observation["default_statistics"]["physical_dispatch_count"] == 1
     assert set(observation["traces"]) == {
@@ -342,6 +353,66 @@ def test_resident_component_adapter_reuses_executor_and_candidate_seal_per_run(
     ]
     assert executor.closed is True
     assert executor.aborted is False
+
+
+def test_resident_component_adapter_propagates_warmup_and_measured_phases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, executor, _, _ = _adapter_fixture(tmp_path, monkeypatch)
+    mount_request, execution_request, _ = _requests(tmp_path)
+
+    session = adapter.open_session(mount_request)
+    warmup = session.execute(replace(execution_request, phase="warmup"))
+    measured = session.execute(execution_request)
+    session.close()
+
+    assert [
+        command["measurement_phase"]
+        for command in executor.commands
+        if command["command"] == "execute"
+    ] == ["warmup", "measured"]
+    warmup = BenchmarkObservation.from_json(warmup).to_json()
+    measured = BenchmarkObservation.from_json(measured).to_json()
+    assert warmup["phase"] == "warmup"
+    assert measured["phase"] == "measured"
+    assert warmup["representation"] == {
+        "conversion_bytes": 0,
+        "conversion_ns": 0,
+        "boundary_count": 0,
+    }
+    assert measured["representation"] == {
+        "conversion_bytes": 192,
+        "conversion_ns": 37,
+        "boundary_count": 1,
+    }
+
+
+def test_resident_component_adapter_rejects_missing_conversion_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, executor, _, _ = _adapter_fixture(tmp_path, monkeypatch)
+    mount_request, execution_request, _ = _requests(tmp_path)
+    original_request = executor.request
+
+    def omit_conversion(document: Json, *, cancel_requested=None) -> Json:
+        response = original_request(
+            document,
+            cancel_requested=cancel_requested,
+        )
+        if document["command"] == "execute":
+            del response["payload"]["representation_conversion_ns"]
+        return response
+
+    executor.request = omit_conversion  # type: ignore[method-assign]
+    session = adapter.open_session(mount_request)
+    with pytest.raises(
+        ModelCompileError,
+        match="representation_conversion_ns",
+    ):
+        session.execute(execution_request)
+    session.close()
 
 
 def test_resident_component_benchmark_scope_aborts_executor_on_failure(
@@ -633,6 +704,7 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         == 8_192
     )
     assert executor.commands[1]["useful_units"] == 8
+    assert executor.commands[1]["measurement_phase"] == "validation"
     assert [
         command["command"] for command in executor.commands
     ] == [*(["mount", "execute", "close"] * 2), "shutdown"]

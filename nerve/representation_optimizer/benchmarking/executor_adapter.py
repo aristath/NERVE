@@ -363,6 +363,7 @@ class ResidentComponentExecutionSession:
             request.workload["useful_work"]["sustained_window_count"]
         )
         execution = self.executor_session.execute(
+            measurement_phase=request.phase,
             useful_units=useful_units,
             sustained_window_count=sustained_window_count,
             seed=request.seed,
@@ -521,9 +522,18 @@ class ResidentComponentExecutionSession:
                 "resident_after_bytes": resident_bytes,
             },
             "representation": {
-                "conversion_bytes": 0,
-                "conversion_ns": 0,
-                "boundary_count": 0,
+                "conversion_bytes": nonnegative_integer(
+                    report.get("representation_conversion_bytes"),
+                    "executor report representation_conversion_bytes",
+                ),
+                "conversion_ns": nonnegative_integer(
+                    report.get("representation_conversion_ns"),
+                    "executor report representation_conversion_ns",
+                ),
+                "boundary_count": nonnegative_integer(
+                    report.get("representation_boundary_count"),
+                    "executor report representation_boundary_count",
+                ),
             },
             "device": {
                 "measurement_ns": measurement_ns,

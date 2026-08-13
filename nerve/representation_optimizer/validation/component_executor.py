@@ -258,6 +258,7 @@ class ResidentComponentValidationSession:
                 "horizon"
             )
         execution = self.executor_session.execute(
+            measurement_phase="validation",
             useful_units=useful_units,
             sustained_window_count=1,
             seed=request.seed,

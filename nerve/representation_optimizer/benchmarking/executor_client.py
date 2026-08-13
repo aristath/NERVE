@@ -261,6 +261,7 @@ class ResidentExecutorSession:
     def execute(
         self,
         *,
+        measurement_phase: str,
         useful_units: int,
         sustained_window_count: int,
         seed: int,
@@ -268,6 +269,10 @@ class ResidentExecutorSession:
     ) -> ResidentExecutorExecution:
         if self.closed:
             raise ModelCompileError("resident executor session is closed")
+        if measurement_phase not in {"warmup", "measured", "validation"}:
+            raise ModelCompileError(
+                "resident executor measurement phase is invalid"
+            )
         positive_integer(useful_units, "resident executor useful units")
         positive_integer(
             sustained_window_count,
@@ -281,6 +286,7 @@ class ResidentExecutorSession:
             "schema": EXECUTOR_COMMAND_SCHEMA,
             "command": "execute",
             "request_id": request_id("execute", request_identity),
+            "measurement_phase": measurement_phase,
             "useful_units": useful_units,
             "sustained_window_count": sustained_window_count,
             "seed": seed,
@@ -469,6 +475,9 @@ def _validate_execution_report(
     for field in (
         "resident_parameter_bytes",
         "resident_transient_bytes",
+        "representation_conversion_bytes",
+        "representation_conversion_ns",
+        "representation_boundary_count",
         "synchronization_wait_ns",
         "queue_wait_ns",
     ):
