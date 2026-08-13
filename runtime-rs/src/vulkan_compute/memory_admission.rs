@@ -112,7 +112,6 @@ impl VulkanHostMemoryPermit {
         }))
     }
 
-    #[cfg(test)]
     fn remaining_byte_count(&self) -> usize {
         self.byte_count
     }
@@ -153,7 +152,6 @@ impl VulkanDeviceLocalMemoryPermitPool {
         })?)
     }
 
-    #[cfg(test)]
     fn remaining_byte_count(&self) -> usize {
         usize::try_from(self.permit.remaining_byte_count()).unwrap_or(usize::MAX)
     }
@@ -169,7 +167,6 @@ impl VulkanHostMemoryPermitPool {
         self.permit.take(byte_count)
     }
 
-    #[cfg(test)]
     fn remaining_byte_count(&self) -> usize {
         self.permit.remaining_byte_count()
     }
@@ -293,6 +290,48 @@ impl VulkanMemoryAdmission {
             id: self.id,
             _not_send: std::marker::PhantomData,
         }
+    }
+
+    pub(crate) fn ensure_fully_consumed(&self, concern: &str) -> Result<(), VulkanError> {
+        if concern.trim().is_empty() {
+            return Err(VulkanError(
+                "memory admission consumption check requires a concern".to_string(),
+            ));
+        }
+        let mut remaining_device_bytes = 0usize;
+        for pool in self.device_pools.values() {
+            remaining_device_bytes = remaining_device_bytes
+                .checked_add(
+                    pool.lock()
+                        .map_err(|_| {
+                            VulkanError(format!(
+                                "{concern} device admission pool is poisoned",
+                            ))
+                        })?
+                        .remaining_byte_count(),
+                )
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "{concern} remaining device admission bytes overflowed",
+                    ))
+                })?;
+        }
+        let remaining_host_bytes = self
+            .host_pool
+            .as_ref()
+            .map(|(_, pool)| {
+                pool.lock()
+                    .map(|pool| pool.remaining_byte_count())
+                    .map_err(|_| VulkanError(format!("{concern} host admission pool is poisoned")))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if remaining_device_bytes == 0 && remaining_host_bytes == 0 {
+            return Ok(());
+        }
+        Err(VulkanError(format!(
+            "{concern} left {remaining_device_bytes} device bytes and {remaining_host_bytes} host bytes as unexplained admission credit",
+        )))
     }
 
     #[cfg(test)]

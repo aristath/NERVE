@@ -684,6 +684,107 @@ fn stream_memory_admission_scopes_exact_device_and_host_children() {
 }
 
 #[test]
+fn eager_stream_memory_admission_accepts_exactly_consumed_credit() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let device = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let device_key = Arc::as_ptr(&device) as usize;
+    let host_key = Arc::as_ptr(&host) as usize;
+    let admission = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            device_key,
+            VulkanDeviceLocalMemoryPermit::acquire(&device, 1_000_000, 100_000).unwrap(),
+        )],
+        Some((
+            host_key,
+            VulkanHostMemoryPermit::acquire(&host, 1_000_000, 50_000).unwrap(),
+        )),
+    );
+
+    let device_allocation;
+    let host_allocation;
+    {
+        let _scope = admission.enter();
+        device_allocation = take_scoped_device_local_memory_capacity(&device, 100_000)
+            .expect("device is in the eager admission")
+            .unwrap()
+            .commit(100_000)
+            .unwrap();
+        host_allocation = take_scoped_host_memory_capacity(&host, 50_000)
+            .expect("host is in the eager admission")
+            .unwrap()
+            .commit(50_000)
+            .unwrap();
+    }
+
+    admission
+        .ensure_fully_consumed("eager fixture")
+        .expect("every admitted byte was consumed");
+    drop(admission);
+    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
+    drop(device_allocation);
+    drop(host_allocation);
+    assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
+fn eager_stream_memory_admission_rejects_unexplained_device_and_host_credit() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let device = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let device_key = Arc::as_ptr(&device) as usize;
+    let host_key = Arc::as_ptr(&host) as usize;
+    let admission = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            device_key,
+            VulkanDeviceLocalMemoryPermit::acquire(&device, 1_000_000, 100_000).unwrap(),
+        )],
+        Some((
+            host_key,
+            VulkanHostMemoryPermit::acquire(&host, 1_000_000, 50_000).unwrap(),
+        )),
+    );
+
+    let device_allocation;
+    let host_allocation;
+    {
+        let _scope = admission.enter();
+        device_allocation = take_scoped_device_local_memory_capacity(&device, 90_000)
+            .expect("device is in the eager admission")
+            .unwrap()
+            .commit(90_000)
+            .unwrap();
+        host_allocation = take_scoped_host_memory_capacity(&host, 40_000)
+            .expect("host is in the eager admission")
+            .unwrap()
+            .commit(40_000)
+            .unwrap();
+    }
+
+    let error = admission
+        .ensure_fully_consumed("eager fixture")
+        .expect_err("unconsumed credit must fail closed");
+    assert!(error.to_string().contains("10000 device bytes"));
+    assert!(error.to_string().contains("10000 host bytes"));
+    assert!(error.to_string().contains("unexplained admission credit"));
+    assert!(admission.ensure_fully_consumed("  ").is_err());
+
+    drop(admission);
+    drop(device_allocation);
+    drop(host_allocation);
+    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
 fn host_memory_permits_contend_and_roll_back_without_leaking_capacity() {
     let tracker = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
     let first = VulkanHostMemoryPermit::acquire(&tracker, 1_000_000, 600_000).unwrap();

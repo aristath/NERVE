@@ -669,7 +669,6 @@ impl VulkanDeviceLocalMemoryPermit {
         })
     }
 
-    #[cfg(test)]
     fn remaining_byte_count(&self) -> u64 {
         self.byte_count
     }

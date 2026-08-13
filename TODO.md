@@ -560,10 +560,14 @@ For every numbered item below:
   allocation and each device-local source history at the mounted feedback
   window capacity; the allocation plan is built before allocation, the buffers
   consume only that scoped reservation, and materialization independently
-  reconstructs and compares per-device totals. An ineligible feedback loop or a
-  stream with no parallel decoder reserves nothing. The remaining completion
-  work is the exact consumed-credit proof across the complete local, staged,
-  speculative, and TP stream shapes plus the explicitly authorized live gate.
+  reconstructs and compares per-device totals. The eager feedback transaction
+  now also fails closed unless every exact physical device/host permit byte is
+  consumed, so a requirement/alignment mismatch cannot survive as unexplained
+  credit. An ineligible feedback loop or a stream with no parallel decoder
+  reserves nothing. The remaining completion work is the exact consumed-credit
+  proof for the main stream's intentionally deferred allocations across the
+  complete local, staged, speculative, and TP shapes plus the explicitly
+  authorized live gate.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

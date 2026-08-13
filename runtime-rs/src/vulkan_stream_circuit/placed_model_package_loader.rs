@@ -2004,6 +2004,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .transpose()?
                 .unwrap_or_default();
             validate_parallel_speculative_feedback_allocation_totals(&expected, &actual)?;
+            if let Some(admission) = &parallel_speculative_feedback_memory_admission {
+                admission
+                    .ensure_fully_consumed("parallel speculative feedback")
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            }
             state
         } else {
             None
