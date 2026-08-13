@@ -19,6 +19,7 @@ pub struct VulkanHybridResourceClaim {
     pub target: VulkanHybridResourceTarget,
     pub class: VulkanHybridResourceClass,
     pub byte_count: usize,
+    pub shared: bool,
 }
 
 impl VulkanHybridResourceClaim {
@@ -33,6 +34,7 @@ impl VulkanHybridResourceClaim {
             target: VulkanHybridResourceTarget::Device(device),
             class,
             byte_count,
+            shared: true,
         }
     }
 
@@ -46,7 +48,29 @@ impl VulkanHybridResourceClaim {
             target: VulkanHybridResourceTarget::Host,
             class,
             byte_count,
+            shared: true,
         }
+    }
+
+    pub fn exclusive_device(
+        claim_id: impl Into<String>,
+        device: VulkanPlacementDeviceExecutionIdentity,
+        class: VulkanHybridResourceClass,
+        byte_count: usize,
+    ) -> Self {
+        let mut claim = Self::device(claim_id, device, class, byte_count);
+        claim.shared = false;
+        claim
+    }
+
+    pub fn exclusive_host(
+        claim_id: impl Into<String>,
+        class: VulkanHybridResourceClass,
+        byte_count: usize,
+    ) -> Self {
+        let mut claim = Self::host(claim_id, class, byte_count);
+        claim.shared = false;
+        claim
     }
 }
 
@@ -103,7 +127,8 @@ impl VulkanHybridResourceBytes {
 pub struct VulkanHybridResourceReservations {
     pub device_bytes: BTreeMap<VulkanPlacementDeviceExecutionIdentity, VulkanHybridResourceBytes>,
     pub host_bytes: VulkanHybridResourceBytes,
-    claims_by_id: BTreeMap<String, VulkanHybridResourceClaim>,
+    shared_claims_by_id: BTreeMap<String, VulkanHybridResourceClaim>,
+    exclusive_claim_ids: BTreeSet<String>,
 }
 
 impl VulkanHybridResourceReservations {
@@ -115,17 +140,24 @@ impl VulkanHybridResourceReservations {
         let mut next = self.clone();
         for claim in &resources.claims {
             validate_hybrid_resource_claim(claim)?;
-            if let Some(existing) = next.claims_by_id.get(&claim.claim_id) {
-                if existing != claim {
-                    return Err(VulkanHybridResourceError(format!(
-                        "hybrid resource claim {:?} has conflicting definitions",
-                        claim.claim_id,
-                    )));
+            if claim.shared {
+                if let Some(existing) = next.shared_claims_by_id.get(&claim.claim_id) {
+                    if existing != claim {
+                        return Err(VulkanHybridResourceError(format!(
+                            "hybrid resource claim {:?} has conflicting definitions",
+                            claim.claim_id,
+                        )));
+                    }
+                    continue;
                 }
-                continue;
+                next.shared_claims_by_id
+                    .insert(claim.claim_id.clone(), claim.clone());
+            } else if !next.exclusive_claim_ids.insert(claim.claim_id.clone()) {
+                return Err(VulkanHybridResourceError(format!(
+                    "hybrid exclusive resource claim {:?} was reserved twice",
+                    claim.claim_id,
+                )));
             }
-            next.claims_by_id
-                .insert(claim.claim_id.clone(), claim.clone());
             let bytes = match &claim.target {
                 VulkanHybridResourceTarget::Device(device) => {
                     if !capacity.available_bytes_by_device.contains_key(device) {
@@ -158,27 +190,53 @@ impl VulkanHybridResourceReservations {
     }
 
     fn claims_are_subset_of(&self, other: &Self) -> bool {
-        self.claims_by_id
+        self.shared_claims_by_id
             .iter()
-            .all(|(claim_id, claim)| other.claims_by_id.get(claim_id) == Some(claim))
+            .all(|(claim_id, claim)| other.shared_claims_by_id.get(claim_id) == Some(claim))
+            && self.resources_no_greater_than(other)
+    }
+
+    fn resources_no_greater_than(&self, other: &Self) -> bool {
+        let devices = self
+            .device_bytes
+            .keys()
+            .chain(other.device_bytes.keys())
+            .collect::<BTreeSet<_>>();
+        devices.into_iter().all(|device| {
+            self.device_bytes
+                .get(device)
+                .cloned()
+                .unwrap_or_default()
+                .no_greater_than(&other.device_bytes.get(device).cloned().unwrap_or_default())
+        }) && self.host_bytes.no_greater_than(&other.host_bytes)
     }
 
     fn ordering_totals(&self) -> (usize, usize, usize, usize) {
-        let (device_retained, device_transient) = self.device_bytes.values().fold(
-            (0usize, 0usize),
-            |(retained, transient), bytes| {
-                (
-                    retained.saturating_add(bytes.retained_bytes().unwrap_or(usize::MAX)),
-                    transient.saturating_add(bytes.execution_transient_peak_bytes),
-                )
-            },
-        );
+        let (device_retained, device_transient) =
+            self.device_bytes
+                .values()
+                .fold((0usize, 0usize), |(retained, transient), bytes| {
+                    (
+                        retained.saturating_add(bytes.retained_bytes().unwrap_or(usize::MAX)),
+                        transient.saturating_add(bytes.execution_transient_peak_bytes),
+                    )
+                });
         (
             device_retained,
             device_transient,
             self.host_bytes.retained_bytes().unwrap_or(usize::MAX),
             self.host_bytes.execution_transient_peak_bytes,
         )
+    }
+}
+
+impl VulkanHybridResourceBytes {
+    fn no_greater_than(&self, other: &Self) -> bool {
+        self.permanent_bytes <= other.permanent_bytes
+            && self.mutable_state_bytes <= other.mutable_state_bytes
+            && self.cache_quota_bytes <= other.cache_quota_bytes
+            && self.atomic_load_wave_bytes <= other.atomic_load_wave_bytes
+            && self.execution_transient_peak_bytes <= other.execution_transient_peak_bytes
     }
 }
 
@@ -260,28 +318,24 @@ mod hybrid_placement_resource_tests {
     fn shared_claim_identity_requires_one_immutable_definition() {
         let initial = VulkanHybridResourceReservations::default()
             .reserve(
-                &VulkanHybridCandidateResources::new(vec![
-                    VulkanHybridResourceClaim::device(
-                        "shared",
-                        device("gpu0"),
-                        VulkanHybridResourceClass::Permanent,
-                        10,
-                    ),
-                ]),
+                &VulkanHybridCandidateResources::new(vec![VulkanHybridResourceClaim::device(
+                    "shared",
+                    device("gpu0"),
+                    VulkanHybridResourceClass::Permanent,
+                    10,
+                )]),
                 &capacity(),
             )
             .unwrap()
             .unwrap();
         let error = initial
             .reserve(
-                &VulkanHybridCandidateResources::new(vec![
-                    VulkanHybridResourceClaim::device(
-                        "shared",
-                        device("gpu0"),
-                        VulkanHybridResourceClass::Permanent,
-                        11,
-                    ),
-                ]),
+                &VulkanHybridCandidateResources::new(vec![VulkanHybridResourceClaim::device(
+                    "shared",
+                    device("gpu0"),
+                    VulkanHybridResourceClass::Permanent,
+                    11,
+                )]),
                 &capacity(),
             )
             .unwrap_err();
@@ -292,11 +346,7 @@ mod hybrid_placement_resource_tests {
     #[test]
     fn host_state_and_transient_share_the_final_capacity_envelope() {
         let resources = VulkanHybridCandidateResources::new(vec![
-            VulkanHybridResourceClaim::host(
-                "state",
-                VulkanHybridResourceClass::MutableState,
-                70,
-            ),
+            VulkanHybridResourceClaim::host("state", VulkanHybridResourceClass::MutableState, 70),
             VulkanHybridResourceClaim::host(
                 "scratch",
                 VulkanHybridResourceClass::ExecutionTransient,

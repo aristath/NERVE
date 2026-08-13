@@ -107,7 +107,7 @@ fn hybrid_calibration_candidate_resources(
                 )
             })?;
         if resident > 0 {
-            claims.push(VulkanHybridResourceClaim::device(
+            claims.push(VulkanHybridResourceClaim::exclusive_device(
                 format!("{namespace}:device:{physical_device_id}:resident"),
                 device.clone(),
                 VulkanHybridResourceClass::Permanent,
@@ -125,7 +125,7 @@ fn hybrid_calibration_candidate_resources(
                 )
             })?;
         if transient > 0 {
-            claims.push(VulkanHybridResourceClaim::device(
+            claims.push(VulkanHybridResourceClaim::exclusive_device(
                 format!("{namespace}:device:{physical_device_id}:transient"),
                 device.clone(),
                 VulkanHybridResourceClass::ExecutionTransient,
@@ -134,14 +134,14 @@ fn hybrid_calibration_candidate_resources(
         }
     }
     if observation.host_resident_bytes > 0 {
-        claims.push(VulkanHybridResourceClaim::host(
+        claims.push(VulkanHybridResourceClaim::exclusive_host(
             format!("{namespace}:host:resident"),
             VulkanHybridResourceClass::Permanent,
             observation.host_resident_bytes,
         ));
     }
     if observation.host_transient_peak_bytes > 0 {
-        claims.push(VulkanHybridResourceClaim::host(
+        claims.push(VulkanHybridResourceClaim::exclusive_host(
             format!("{namespace}:host:transient"),
             VulkanHybridResourceClass::ExecutionTransient,
             observation.host_transient_peak_bytes,
@@ -294,6 +294,26 @@ pub fn try_plan_vulkan_hybrid_ordered_graph_with_resources(
     resources: &VulkanHybridCandidateResourceCatalog,
     capacity: &VulkanPlacementCapacityEnvelope,
 ) -> Result<Option<VulkanHybridPlacementPlan>, VulkanHybridPlacementError> {
+    Ok(plan_vulkan_hybrid_ordered_graph_candidates_with_resources(
+        catalog,
+        component_count,
+        region_candidates,
+        boundary_candidates,
+        resources,
+        capacity,
+    )?
+    .into_iter()
+    .next())
+}
+
+pub fn plan_vulkan_hybrid_ordered_graph_candidates_with_resources(
+    catalog: &VulkanPlacementCalibrationCatalog,
+    component_count: usize,
+    region_candidates: &[VulkanHybridRegionCandidate],
+    boundary_candidates: &[VulkanHybridBoundaryCandidate],
+    resources: &VulkanHybridCandidateResourceCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+) -> Result<Vec<VulkanHybridPlacementPlan>, VulkanHybridPlacementError> {
     if component_count == 0 {
         return Err(VulkanHybridPlacementError(
             "hybrid placement requires a nonempty ordered graph".to_string(),
@@ -301,7 +321,7 @@ pub fn try_plan_vulkan_hybrid_ordered_graph_with_resources(
     }
     validate_hybrid_capacity_envelope(capacity)?;
     if region_candidates.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     let mut candidate_ids = BTreeSet::new();
@@ -499,21 +519,22 @@ pub fn try_plan_vulkan_hybrid_ordered_graph_with_resources(
         }
     }
 
-    let Some(best) = states_by_cursor
+    let mut complete = states_by_cursor
         .pop()
         .expect("a state bucket exists for the graph terminus")
         .into_iter()
-        .min_by(|left, right| {
-            hybrid_state_ordering_key(left).cmp(&hybrid_state_ordering_key(right))
+        .collect::<Vec<_>>();
+    complete.sort_by(|left, right| {
+        hybrid_state_ordering_key(left).cmp(&hybrid_state_ordering_key(right))
+    });
+    Ok(complete
+        .into_iter()
+        .map(|state| VulkanHybridPlacementPlan {
+            steps: state.steps,
+            predicted_duration_ns_per_activation: state.predicted_duration_ns_per_activation,
+            resource_reservations: state.resource_reservations,
         })
-    else {
-        return Ok(None);
-    };
-    Ok(Some(VulkanHybridPlacementPlan {
-        steps: best.steps,
-        predicted_duration_ns_per_activation: best.predicted_duration_ns_per_activation,
-        resource_reservations: best.resource_reservations,
-    }))
+        .collect())
 }
 
 fn validate_hybrid_capacity_envelope(
@@ -1468,41 +1489,62 @@ mod hybrid_placement_optimizer_tests {
             ),
         );
 
-        let plan = plan_vulkan_hybrid_ordered_graph(
+        let candidates = [
+            VulkanHybridRegionCandidate {
+                candidate_id: "fast-high-transient".to_string(),
+                component_start: 0,
+                component_end: 1,
+                semantic_contract_id: "first".to_string(),
+                execution_case: fast,
+            },
+            VulkanHybridRegionCandidate {
+                candidate_id: "slow-low-transient".to_string(),
+                component_start: 0,
+                component_end: 1,
+                semantic_contract_id: "first".to_string(),
+                execution_case: slower,
+            },
+            VulkanHybridRegionCandidate {
+                candidate_id: "second".to_string(),
+                component_start: 1,
+                component_end: 2,
+                semantic_contract_id: "second".to_string(),
+                execution_case: second,
+            },
+        ];
+        let resources =
+            VulkanHybridCandidateResourceCatalog::from_calibration(&catalog, &candidates, &[])
+                .unwrap();
+        let alternatives = plan_vulkan_hybrid_ordered_graph_candidates_with_resources(
             &catalog,
             2,
-            &[
-                VulkanHybridRegionCandidate {
-                    candidate_id: "fast-high-transient".to_string(),
-                    component_start: 0,
-                    component_end: 1,
-                    semantic_contract_id: "first".to_string(),
-                    execution_case: fast,
-                },
-                VulkanHybridRegionCandidate {
-                    candidate_id: "slow-low-transient".to_string(),
-                    component_start: 0,
-                    component_end: 1,
-                    semantic_contract_id: "first".to_string(),
-                    execution_case: slower,
-                },
-                VulkanHybridRegionCandidate {
-                    candidate_id: "second".to_string(),
-                    component_start: 1,
-                    component_end: 2,
-                    semantic_contract_id: "second".to_string(),
-                    execution_case: second,
-                },
-            ],
+            &candidates,
             &[],
+            &resources,
+            &capacity(2, 200, 100),
+        )
+        .unwrap();
+        assert_eq!(alternatives.len(), 2);
+        assert_eq!(
+            selected_region_ids(&alternatives[0]),
+            ["fast-high-transient", "second"]
+        );
+        assert_eq!(
+            selected_region_ids(&alternatives[1]),
+            ["slow-low-transient", "second"]
+        );
+
+        let plan = plan_vulkan_hybrid_ordered_graph_with_resources(
+            &catalog,
+            2,
+            &candidates,
+            &[],
+            &resources,
             &capacity(2, 100, 100),
         )
         .unwrap();
 
-        assert_eq!(
-            selected_region_ids(&plan),
-            ["slow-low-transient", "second"]
-        );
+        assert_eq!(selected_region_ids(&plan), ["slow-low-transient", "second"]);
         assert_eq!(plan.predicted_duration_ns_per_activation, 13);
         assert_eq!(
             plan.resource_reservations.device_bytes[&device("gpu0", 2)].permanent_bytes,
@@ -1573,12 +1615,9 @@ mod hybrid_placement_optimizer_tests {
             VulkanHybridResourceClass::AtomicLoadWave,
             60,
         );
-        let mut resources = VulkanHybridCandidateResourceCatalog::from_calibration(
-            &catalog,
-            &candidates,
-            &[],
-        )
-        .unwrap();
+        let mut resources =
+            VulkanHybridCandidateResourceCatalog::from_calibration(&catalog, &candidates, &[])
+                .unwrap();
         resources
             .replace_region_claims(
                 "first",
