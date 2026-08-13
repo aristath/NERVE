@@ -37,30 +37,7 @@ impl VulkanResidentPackageCircuitGraph {
                         component.component_id
                     ))
                 })?;
-            for node in &mut component.circuit.nodes {
-                let kernel = execution
-                    .kernels
-                    .iter()
-                    .find(|kernel| kernel.node_id == node.id && kernel.op == node.op)
-                    .ok_or_else(|| {
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "signal processor {} node {} has no matching compiled kernel contract",
-                            component.component_id, node.id
-                        ))
-                    })?;
-                let attrs = node.attrs.as_object_mut().ok_or_else(|| {
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "signal processor {} node {} attributes are not an object",
-                        component.component_id, node.id
-                    ))
-                })?;
-                attrs.insert(
-                    "stream_control_binding".to_string(),
-                    kernel
-                        .stream_control_binding
-                        .map_or(Value::Null, |binding| Value::Number(binding.into())),
-                );
-            }
+            attach_component_kernel_runtime_contracts(component, execution)?;
         }
         Ok(graph)
     }
@@ -312,6 +289,48 @@ impl VulkanResidentPackageCircuitGraph {
             .into_iter()
             .collect()
     }
+}
+
+pub(super) fn attach_component_kernel_runtime_contracts(
+    component: &mut VulkanResidentPackageComponentCircuit,
+    execution: &VulkanResidentComponentExecutionSpec,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    attach_node_kernel_runtime_contracts(
+        &component.component_id,
+        &mut component.circuit.nodes,
+        &execution.kernels,
+    )
+}
+
+pub(super) fn attach_node_kernel_runtime_contracts(
+    component_id: &str,
+    nodes: &mut [crate::stream_circuit::CircuitNode],
+    kernels: &[VulkanResidentComponentKernelSpec],
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    for node in nodes {
+        let kernel = kernels
+            .iter()
+            .find(|kernel| kernel.node_id == node.id && kernel.op == node.op)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "signal processor {} node {} has no matching compiled kernel contract",
+                    component_id, node.id
+                ))
+            })?;
+        let attrs = node.attrs.as_object_mut().ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "signal processor {} node {} attributes are not an object",
+                component_id, node.id
+            ))
+        })?;
+        attrs.insert(
+            "stream_control_binding".to_string(),
+            kernel
+                .stream_control_binding
+                .map_or(Value::Null, |binding| Value::Number(binding.into())),
+        );
+    }
+    Ok(())
 }
 
 fn runtime_transducer_parameter_metadata(

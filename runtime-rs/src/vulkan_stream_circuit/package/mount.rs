@@ -442,7 +442,7 @@ pub(crate) fn attach_generation_node_devices_for_vulkan(
     Ok(runtime_graph)
 }
 
-fn apply_runtime_graph_state_policy(
+pub(super) fn apply_runtime_graph_state_policy(
     component: &mut VulkanResidentPackageComponentCircuit,
     runtime_graph: &StreamCircuitRuntimeGraph,
     instance: &crate::stream_circuit::StreamCircuitNodeInstance,

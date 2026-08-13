@@ -284,6 +284,107 @@ fn component_region_overlay_composes_after_an_unrelated_full_overlay() {
 }
 
 #[test]
+fn disjoint_component_region_overlays_compose_at_their_own_source_anchors() {
+    let (root, package_root, _candidate_root, mut runtime_model) =
+        staged_runtime_candidate_fixture();
+    let source_component = runtime_model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let source_execution = runtime_model
+        .package
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    assert_eq!(source_component.circuit.nodes.len(), 10);
+    assert_eq!(source_execution.kernels.len(), 10);
+
+    let region = |indices: &[usize], shader_path: &str| {
+        let source_nodes = indices
+            .iter()
+            .map(|index| source_component.circuit.nodes[*index].clone())
+            .collect::<Vec<_>>();
+        let source_kernels = indices
+            .iter()
+            .map(|index| source_execution.kernels[*index].clone())
+            .collect::<Vec<_>>();
+        let mut replacement_kernel = source_kernels.last().unwrap().clone();
+        replacement_kernel.shader_path = shader_path.to_string();
+        VulkanRuntimeComponentRegionOverlay {
+            schema: crate::VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA.to_string(),
+            source_component_id: "layer_00".to_string(),
+            source: VulkanRuntimeComponentRegion {
+                nodes: source_nodes.clone(),
+                kernels: source_kernels,
+            },
+            replacement: VulkanRuntimeComponentRegion {
+                nodes: vec![source_nodes.last().unwrap().clone()],
+                kernels: vec![replacement_kernel],
+            },
+        }
+    };
+    mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        region(&[0, 1, 2], "/candidate/attention-fusion.spv"),
+        &package_root,
+    )
+    .unwrap();
+    mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        region(&[5, 6, 8], "/candidate/feed-forward-fusion.spv"),
+        &package_root,
+    )
+    .unwrap();
+
+    let mounted_component = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap();
+    let expected_node_ids = [2, 3, 4, 8, 7, 9]
+        .into_iter()
+        .map(|index| source_component.circuit.nodes[index].id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mounted_component
+            .circuit
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>(),
+        expected_node_ids
+    );
+    let mounted_execution = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap();
+    assert_eq!(
+        mounted_execution.kernels[0].shader_path,
+        "/candidate/attention-fusion.spv"
+    );
+    assert_eq!(
+        mounted_execution.kernels[3].shader_path,
+        "/candidate/feed-forward-fusion.spv"
+    );
+    assert!(mounted_execution
+        .kernels
+        .iter()
+        .enumerate()
+        .all(|(index, kernel)| kernel.execution_index == index));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn component_region_overlay_rejects_a_stale_or_colliding_source_anchor() {
     let (root, package_root, _candidate_root, mut runtime_model) =
         staged_runtime_candidate_fixture();

@@ -1895,10 +1895,29 @@ fn mount_runtime_component_overlay(
     runtime_instance_id: &str,
     mut overlay: VulkanRuntimeComponentOverlay,
 ) -> Result<(), VulkanResidentTokenModelPackageError> {
+    package::attach_component_kernel_runtime_contracts(
+        &mut overlay.component,
+        &overlay.execution,
+    )?;
     overlay.component.component_id = runtime_instance_id.to_string();
     overlay.component.circuit.source.component_id =
         runtime_instance_id.to_string();
     overlay.execution.component_id = runtime_instance_id.to_string();
+    let instance = runtime_model
+        .runtime_graph
+        .instances
+        .iter()
+        .find(|instance| instance.instance_id == runtime_instance_id)
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "runtime implementation cannot find graph instance {runtime_instance_id:?}"
+            ))
+        })?;
+    package::apply_runtime_graph_state_policy(
+        &mut overlay.component,
+        &runtime_model.runtime_graph,
+        instance,
+    );
     let component = runtime_model
         .circuit_graph
         .components
@@ -1926,9 +1945,13 @@ fn mount_runtime_component_overlay(
 fn mount_runtime_component_region_overlay(
     runtime_model: &mut VulkanResidentRuntimeModel,
     runtime_instance_id: &str,
-    overlay: VulkanRuntimeComponentRegionOverlay,
+    mut overlay: VulkanRuntimeComponentRegionOverlay,
     package_root: &Path,
 ) -> Result<(), VulkanResidentTokenModelPackageError> {
+    let (source_nodes, replacement_nodes) =
+        executable_component_region_nodes(runtime_model, &overlay)?;
+    overlay.source.nodes = source_nodes;
+    overlay.replacement.nodes = replacement_nodes;
     let component = runtime_model
         .circuit_graph
         .components
@@ -2038,6 +2061,42 @@ fn mount_runtime_component_region_overlay(
         kernel.execution_index = execution_index;
     }
     Ok(())
+}
+
+fn executable_component_region_nodes(
+    runtime_model: &VulkanResidentRuntimeModel,
+    overlay: &VulkanRuntimeComponentRegionOverlay,
+) -> Result<
+    (
+        Vec<crate::stream_circuit::CircuitNode>,
+        Vec<crate::stream_circuit::CircuitNode>,
+    ),
+    VulkanResidentTokenModelPackageError,
+> {
+    let source_execution = runtime_model
+        .package
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == overlay.source_component_id)
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "runtime component-region source execution {:?} is unavailable",
+                overlay.source_component_id
+            ))
+        })?;
+    let mut source_nodes = overlay.source.nodes.clone();
+    package::attach_node_kernel_runtime_contracts(
+        &overlay.source_component_id,
+        &mut source_nodes,
+        &source_execution.kernels,
+    )?;
+    let mut replacement_nodes = overlay.replacement.nodes.clone();
+    package::attach_node_kernel_runtime_contracts(
+        &overlay.source_component_id,
+        &mut replacement_nodes,
+        &overlay.replacement.kernels,
+    )?;
+    Ok((source_nodes, replacement_nodes))
 }
 
 fn runtime_kernel_matches_region_source(
