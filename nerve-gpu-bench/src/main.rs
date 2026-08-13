@@ -68,19 +68,36 @@ fn run() -> Result<(), Box<dyn Error>> {
             prefill_widths,
             maximum_group_size,
             runtime,
+            dry_plan,
             output,
         } => {
             if target_ids.is_empty() {
                 target_ids = executable_vulkan_target_ids(discover_targets());
             }
-            calibration_suite::run_calibration_suite(
-                &package,
-                &target_ids,
-                &prefill_widths,
-                maximum_group_size,
-                runtime,
-                &output,
-            )?;
+            if dry_plan {
+                let payload = calibration_suite::dry_plan_calibration_suite(
+                    &package,
+                    &target_ids,
+                    &prefill_widths,
+                    maximum_group_size,
+                    runtime,
+                )?;
+                if let Some(output) = output {
+                    output::write_atomic(&output, &payload)?;
+                } else {
+                    io::stdout().write_all(&payload)?;
+                    io::stdout().write_all(b"\n")?;
+                }
+            } else {
+                calibration_suite::run_calibration_suite(
+                    &package,
+                    &target_ids,
+                    &prefill_widths,
+                    maximum_group_size,
+                    runtime,
+                    output.as_deref().expect("live calibration requires output"),
+                )?;
+            }
         }
         Command::CalibratePackage {
             package,

@@ -112,7 +112,7 @@ cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- summarize \
 ```
 
 The validator and summarizer also accept NERVE's exact
-`nerve.vulkan_placement_calibration_catalog.v11` catalogs. Those catalogs retain
+`nerve.vulkan_placement_calibration_catalog.v12` catalogs. Those catalogs retain
 compiler artifact, contract, phase, geometry, device UUID, driver, shard,
 owner, endpoint, transport, resource, output, state, and compiler-declared
 equivalence identity. Numerically tolerant distributed outputs retain their
@@ -136,6 +136,29 @@ cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
   --residency-policy demand-paged \
   --output /path/to/compiled/optimization/placement-calibration-catalog.json
 ```
+
+Before executing any calibration workload, resolve that same package-specific
+plan without opening compute devices or submitting GPU work:
+
+```sh
+cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
+  calibrate-suite \
+  --package /path/to/compiled/vulkan_resident_package.json \
+  --prefill-width 4 \
+  --context-size 131072 \
+  --residency-policy demand-paged \
+  --dry-plan \
+  --output /tmp/nerve-calibration-plan.json
+```
+
+The dry plan resolves hardware-specific representation variants, exact
+compiler contracts, distributed candidate strategies, target orders, boundary
+cases, and selected-resource load-wave cases. Its JSON states
+`executes_workloads: false` and `opens_compute_devices: false`, and reports any
+explicitly requested prefill widths that the complete compiled graph cannot
+calibrate. Omitting `--output` prints the dry plan to stdout. A non-dry suite
+still requires `--output` and retains the transactional publication behavior
+described below.
 
 With no `--target`, the suite discovers every current Vulkan compute target.
 Repeated `--target vulkan-uuid:...` arguments restrict a run explicitly.

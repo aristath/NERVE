@@ -6,10 +6,11 @@ use std::path::Path;
 use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, VulkanPlacementExecutionStrategy,
     VulkanRuntimeDistributedPlacementCalibrationReport, VulkanRuntimePlacementCalibrationTarget,
-    VulkanTargetedComponentExecutionPhase,
+    VulkanTargetedComponentExecutionPhase, vulkan_runtime_distributed_contract_candidates,
     vulkan_runtime_placement_calibration_target_for_component,
     vulkan_runtime_placement_transfer_byte_counts,
 };
+use serde::Serialize;
 
 use crate::boundary_calibration::measure_boundary_candidate_for_byte_counts;
 use crate::calibration_device_state::discover_calibration_hardware_profiles;
@@ -21,6 +22,61 @@ use crate::output::write_atomic;
 use crate::package_calibration::measure_package_candidates_for_runtime_model;
 use crate::region_calibration::measure_region_candidates_for_runtime_model;
 use crate::selected_resource_calibration::measure_selected_resource_classes_for_runtime_model;
+
+pub const CALIBRATION_SUITE_DRY_PLAN_SCHEMA: &str = "nerve.calibration_suite_dry_plan.v1";
+
+struct PreparedCalibrationSuite {
+    package: CalibrationPackage,
+    runtime_models: BTreeMap<String, Vec<nerve_runtime::VulkanResidentRuntimeModel>>,
+    plans: BTreeMap<(String, usize), crate::calibration_suite_plan::CalibrationSuitePlan>,
+}
+
+#[derive(Debug, Serialize)]
+struct CalibrationSuiteDryPlanReport {
+    schema: &'static str,
+    executes_workloads: bool,
+    opens_compute_devices: bool,
+    package: String,
+    package_id: String,
+    target_ids: Vec<String>,
+    context_size: usize,
+    speculative_draft_tokens: usize,
+    residency_policy: String,
+    requested_prefill_widths: Vec<usize>,
+    unsupported_requested_prefill_widths: Vec<usize>,
+    phase_component_case_counts: BTreeMap<String, usize>,
+    maximum_group_size: usize,
+    initial_target_orders: Vec<Vec<String>>,
+    component_cases: Vec<CalibrationSuiteDryPlanComponentCase>,
+    component_case_count: usize,
+    component_occurrence_count: usize,
+    distributed_candidate_count: usize,
+    distributed_contract_count: usize,
+    candidate_strategy_counts: BTreeMap<String, usize>,
+    boundary_case_count: usize,
+    selected_resource_load_wave_case_count: usize,
+    representation_variant_count: usize,
+    runtime_variant_equivalence_class_count: usize,
+    adaptive_expansion: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CalibrationSuiteDryPlanComponentCase {
+    owner_target_id: String,
+    runtime_variant_index: usize,
+    phase: &'static str,
+    activation_batch_width: usize,
+    signature_id: String,
+    representative_component_id: String,
+    occurrence_count: usize,
+    distributed_candidates: Vec<CalibrationSuiteDryPlanContractCandidate>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CalibrationSuiteDryPlanContractCandidate {
+    contract_ids: Vec<String>,
+    strategies: Vec<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MeasuredTargetOrder {
@@ -68,37 +124,18 @@ pub fn run_calibration_suite(
     runtime: CalibrationRuntimeConfig,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let package = CalibrationPackage::load(package_path)?;
+    let PreparedCalibrationSuite {
+        package,
+        runtime_models,
+        plans,
+    } = prepare_calibration_suite(
+        package_path,
+        target_ids,
+        prefill_widths,
+        maximum_group_size,
+        runtime,
+    )?;
     package.reject_output_collision(output)?;
-    let hardware_profiles = discover_calibration_hardware_profiles(target_ids)?;
-    let runtime_models = target_ids
-        .iter()
-        .map(|owner_target_id| {
-            let profile = hardware_profiles
-                .get(owner_target_id)
-                .expect("every requested calibration target has a profile");
-            package
-                .runtime_models_for_owner(owner_target_id, profile, runtime)
-                .map(|models| (owner_target_id.clone(), models))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let plans = runtime_models
-        .iter()
-        .flat_map(|(owner_target_id, runtime_models)| {
-            runtime_models
-                .iter()
-                .enumerate()
-                .map(move |(runtime_variant_index, runtime_model)| {
-                    plan_calibration_suite(
-                        runtime_model,
-                        target_ids,
-                        prefill_widths,
-                        maximum_group_size,
-                    )
-                    .map(|plan| ((owner_target_id.clone(), runtime_variant_index), plan))
-                })
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let reference_plan = plans.values().next().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -259,6 +296,412 @@ pub fn run_calibration_suite(
         output.display(),
     );
     Ok(())
+}
+
+fn prepare_calibration_suite(
+    package_path: &Path,
+    target_ids: &[String],
+    prefill_widths: &[usize],
+    maximum_group_size: Option<usize>,
+    runtime: CalibrationRuntimeConfig,
+) -> Result<PreparedCalibrationSuite, Box<dyn Error>> {
+    let package = CalibrationPackage::load(package_path)?;
+    let hardware_profiles = discover_calibration_hardware_profiles(target_ids)?;
+    let runtime_models = target_ids
+        .iter()
+        .map(|owner_target_id| {
+            let profile = hardware_profiles
+                .get(owner_target_id)
+                .expect("every requested calibration target has a profile");
+            package
+                .runtime_models_for_owner(owner_target_id, profile, runtime)
+                .map(|models| (owner_target_id.clone(), models))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let plans = runtime_models
+        .iter()
+        .flat_map(|(owner_target_id, runtime_models)| {
+            runtime_models
+                .iter()
+                .enumerate()
+                .map(move |(runtime_variant_index, runtime_model)| {
+                    plan_calibration_suite(
+                        runtime_model,
+                        target_ids,
+                        prefill_widths,
+                        maximum_group_size,
+                    )
+                    .map(|plan| ((owner_target_id.clone(), runtime_variant_index), plan))
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    Ok(PreparedCalibrationSuite {
+        package,
+        runtime_models,
+        plans,
+    })
+}
+
+pub fn dry_plan_calibration_suite(
+    package_path: &Path,
+    target_ids: &[String],
+    prefill_widths: &[usize],
+    maximum_group_size: Option<usize>,
+    runtime: CalibrationRuntimeConfig,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let package = CalibrationPackage::load(package_path)?;
+    let package_source_path = package.source_path().to_path_buf();
+    let envelope = package.execution_envelope(runtime)?;
+    let profiles = discover_calibration_hardware_profiles(target_ids)?;
+    let profile_specific_variants = package.has_runtime_implementation_alternatives()?;
+    let mut capability_group_index = BTreeMap::<String, usize>::new();
+    let mut capability_groups = Vec::<Vec<String>>::new();
+    for target_id in target_ids {
+        let profile = profiles.get(target_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("calibration dry plan target {target_id:?} has no profile"),
+            )
+        })?;
+        let variant_equivalence_key = if profile_specific_variants {
+            profile.profile_id.as_str()
+        } else {
+            "exact_baseline_without_alternatives"
+        };
+        let group_index = if let Some(index) = capability_group_index.get(variant_equivalence_key) {
+            *index
+        } else {
+            let index = capability_groups.len();
+            capability_group_index.insert(variant_equivalence_key.to_string(), index);
+            capability_groups.push(Vec::new());
+            index
+        };
+        capability_groups[group_index].push(target_id.clone());
+    }
+
+    let mut package = Some(package);
+    let mut package_id = None;
+    let mut reference_plan = None;
+    let mut component_cases = Vec::new();
+    let mut selected_resource_load_wave_case_count = 0usize;
+    let mut representation_variant_count = 0usize;
+    for group in &capability_groups {
+        let representative = group
+            .first()
+            .expect("capability groups are created from concrete targets");
+        let profile = profiles
+            .get(representative)
+            .expect("representative target has a discovered profile");
+        let runtime_models = if profile_specific_variants {
+            package
+                .as_ref()
+                .expect("profile-specific planning retains its source package")
+                .runtime_models_for_owner(representative, profile, runtime)?
+        } else {
+            package
+                .take()
+                .expect("exact-baseline planning consumes its package once")
+                .into_runtime_models_for_owner(representative, profile, runtime)?
+        };
+        let plans = runtime_models
+            .iter()
+            .enumerate()
+            .map(|(runtime_variant_index, runtime_model)| {
+                plan_calibration_suite(
+                    runtime_model,
+                    target_ids,
+                    prefill_widths,
+                    maximum_group_size,
+                )
+                .map(|plan| ((representative.clone(), runtime_variant_index), plan))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let first_plan = plans.values().next().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "calibration dry plan capability class has no runtime variant",
+            )
+        })?;
+        reference_plan.get_or_insert_with(|| first_plan.clone());
+        let variant_count = runtime_models.len();
+        package_id.get_or_insert_with(|| runtime_models[0].package.package_id.clone());
+        let runtime_models = BTreeMap::from([(representative.clone(), runtime_models)]);
+        let local_cases = calibration_suite_dry_plan_component_cases(&runtime_models, &plans)?;
+        let local_load_wave_case_count = selected_load_wave_calibration_cases(&plans).len();
+        for owner_target_id in group {
+            component_cases.extend(local_cases.iter().cloned().map(|mut case| {
+                case.owner_target_id = owner_target_id.clone();
+                case
+            }));
+        }
+        selected_resource_load_wave_case_count = selected_resource_load_wave_case_count
+            .checked_add(
+                local_load_wave_case_count
+                    .checked_mul(group.len())
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "calibration dry plan load-wave count overflowed",
+                        )
+                    })?,
+            )
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "calibration dry plan load-wave count overflowed",
+                )
+            })?;
+        representation_variant_count = representation_variant_count
+            .checked_add(variant_count.checked_mul(group.len()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "calibration dry plan representation count overflowed",
+                )
+            })?)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "calibration dry plan representation count overflowed",
+                )
+            })?;
+    }
+    let report = finalize_calibration_suite_dry_plan_report(
+        &package_source_path,
+        package_id
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no runtime variants"))?,
+        target_ids.to_vec(),
+        envelope.context_activations.maximum,
+        envelope.speculative_draft_tokens,
+        envelope.residency_policy,
+        prefill_widths,
+        reference_plan.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "calibration suite has no target plan",
+            )
+        })?,
+        component_cases,
+        selected_resource_load_wave_case_count,
+        representation_variant_count,
+        capability_groups.len(),
+    )?;
+    Ok(serde_json::to_vec_pretty(&report)?)
+}
+
+#[cfg(test)]
+fn calibration_suite_dry_plan_report(
+    prepared: &PreparedCalibrationSuite,
+    context_size: usize,
+    speculative_draft_tokens: usize,
+    residency_policy: String,
+    requested_prefill_widths: &[usize],
+) -> Result<CalibrationSuiteDryPlanReport, Box<dyn Error>> {
+    let reference_plan = prepared.plans.values().next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "calibration suite has no target plan",
+        )
+    })?;
+    let component_cases =
+        calibration_suite_dry_plan_component_cases(&prepared.runtime_models, &prepared.plans)?;
+    Ok(finalize_calibration_suite_dry_plan_report(
+        prepared.package.source_path(),
+        prepared
+            .runtime_models
+            .values()
+            .flatten()
+            .next()
+            .map(|model| model.package.package_id.clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no runtime variants"))?,
+        prepared.runtime_models.keys().cloned().collect(),
+        context_size,
+        speculative_draft_tokens,
+        residency_policy,
+        requested_prefill_widths,
+        reference_plan.clone(),
+        component_cases,
+        selected_load_wave_calibration_cases(&prepared.plans).len(),
+        prepared.runtime_models.values().map(Vec::len).sum(),
+        prepared.runtime_models.len(),
+    )?)
+}
+
+fn calibration_suite_dry_plan_component_cases(
+    runtime_models: &BTreeMap<String, Vec<nerve_runtime::VulkanResidentRuntimeModel>>,
+    plans: &BTreeMap<(String, usize), crate::calibration_suite_plan::CalibrationSuitePlan>,
+) -> Result<Vec<CalibrationSuiteDryPlanComponentCase>, Box<dyn Error>> {
+    let selected_cases = selected_component_calibration_cases(plans);
+    let mut component_cases = Vec::with_capacity(selected_cases.len());
+
+    for case in selected_cases {
+        let runtime_model = runtime_models
+            .get(&case.owner_target_id)
+            .and_then(|variants| variants.get(case.runtime_variant_index))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "calibration dry plan references absent runtime variant {} for owner {:?}",
+                        case.runtime_variant_index, case.owner_target_id,
+                    ),
+                )
+            })?;
+        let execution = runtime_model
+            .component_executions
+            .iter()
+            .find(|execution| execution.component_id == case.target.component_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "calibration dry plan found no execution for component {:?}",
+                        case.target.component_id,
+                    ),
+                )
+            })?;
+        let strategies_by_contract = execution
+            .kernels
+            .iter()
+            .flat_map(|kernel| &kernel.physical_execution_contracts)
+            .map(|contract| (contract.contract_id.as_str(), contract.strategy))
+            .collect::<BTreeMap<_, _>>();
+        let runtime_phase = match case.phase {
+            crate::cli::PackageCalibrationPhase::Decode => {
+                VulkanTargetedComponentExecutionPhase::Decode
+            }
+            crate::cli::PackageCalibrationPhase::Prefill {
+                activation_batch_width,
+            } => VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width,
+            },
+        };
+        let distributed_candidates = vulkan_runtime_distributed_contract_candidates(
+            runtime_model,
+            &case.target,
+            runtime_phase,
+        )?
+        .into_iter()
+        .map(|candidate| {
+            let mut strategies = BTreeSet::new();
+            for contract_id in &candidate.contract_ids {
+                let strategy = strategies_by_contract.get(contract_id.as_str()).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "calibration dry plan candidate references unknown contract {contract_id:?}",
+                        ),
+                    )
+                })?;
+                strategies.insert(execution_strategy_name(*strategy).to_string());
+            }
+            Ok(CalibrationSuiteDryPlanContractCandidate {
+                contract_ids: candidate.contract_ids.into_iter().collect(),
+                strategies: strategies.into_iter().collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, io::Error>>()?;
+        let (phase, activation_batch_width) = phase_key(case.phase);
+        component_cases.push(CalibrationSuiteDryPlanComponentCase {
+            owner_target_id: case.owner_target_id,
+            runtime_variant_index: case.runtime_variant_index,
+            phase,
+            activation_batch_width,
+            signature_id: case.target.signature_id,
+            representative_component_id: case.target.component_id,
+            occurrence_count: case.target.component_ids.len(),
+            distributed_candidates,
+        });
+    }
+    Ok(component_cases)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_calibration_suite_dry_plan_report(
+    package_path: &Path,
+    package_id: String,
+    target_ids: Vec<String>,
+    context_size: usize,
+    speculative_draft_tokens: usize,
+    residency_policy: String,
+    requested_prefill_widths: &[usize],
+    reference_plan: crate::calibration_suite_plan::CalibrationSuitePlan,
+    component_cases: Vec<CalibrationSuiteDryPlanComponentCase>,
+    selected_resource_load_wave_case_count: usize,
+    representation_variant_count: usize,
+    runtime_variant_equivalence_class_count: usize,
+) -> Result<CalibrationSuiteDryPlanReport, io::Error> {
+    let mut all_contract_ids = BTreeSet::new();
+    let mut candidate_strategy_counts = BTreeMap::<String, usize>::new();
+    let mut distributed_candidate_count = 0usize;
+    let mut component_occurrence_count = 0usize;
+    let mut phase_component_case_counts = BTreeMap::<String, usize>::new();
+    for case in &component_cases {
+        let phase_key = format!("{}:{}", case.phase, case.activation_batch_width);
+        *phase_component_case_counts.entry(phase_key).or_default() += 1;
+        component_occurrence_count = component_occurrence_count
+            .checked_add(case.occurrence_count)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "component count overflow")
+            })?;
+        for candidate in &case.distributed_candidates {
+            distributed_candidate_count =
+                distributed_candidate_count.checked_add(1).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "candidate count overflow")
+                })?;
+            all_contract_ids.extend(candidate.contract_ids.iter().cloned());
+            for strategy in &candidate.strategies {
+                *candidate_strategy_counts
+                    .entry(strategy.clone())
+                    .or_default() += 1;
+            }
+        }
+    }
+    let mut requested_prefill_widths = requested_prefill_widths.to_vec();
+    requested_prefill_widths.sort_unstable();
+    requested_prefill_widths.dedup();
+    let unsupported_requested_prefill_widths = requested_prefill_widths
+        .iter()
+        .copied()
+        .filter(|width| !phase_component_case_counts.contains_key(&format!("prefill:{width}")))
+        .collect();
+    Ok(CalibrationSuiteDryPlanReport {
+        schema: CALIBRATION_SUITE_DRY_PLAN_SCHEMA,
+        executes_workloads: false,
+        opens_compute_devices: false,
+        package: package_path.display().to_string(),
+        package_id,
+        target_ids,
+        context_size,
+        speculative_draft_tokens,
+        residency_policy,
+        requested_prefill_widths,
+        unsupported_requested_prefill_widths,
+        phase_component_case_counts,
+        maximum_group_size: reference_plan.maximum_group_size,
+        initial_target_orders: reference_plan.initial_target_orders,
+        component_case_count: component_cases.len(),
+        component_occurrence_count,
+        distributed_candidate_count,
+        distributed_contract_count: all_contract_ids.len(),
+        candidate_strategy_counts,
+        boundary_case_count: reference_plan.boundary_cases.len(),
+        selected_resource_load_wave_case_count,
+        representation_variant_count,
+        runtime_variant_equivalence_class_count,
+        adaptive_expansion: "measurement_driven_after_singletons_and_directed_pairs",
+        component_cases,
+    })
+}
+
+fn execution_strategy_name(strategy: nerve_execution_contracts::ExecutionStrategy) -> &'static str {
+    match strategy {
+        nerve_execution_contracts::ExecutionStrategy::SingleDevice => "single_device",
+        nerve_execution_contracts::ExecutionStrategy::TensorParallel => "tensor_parallel",
+        nerve_execution_contracts::ExecutionStrategy::ExpertParallel => "expert_parallel",
+        nerve_execution_contracts::ExecutionStrategy::TensorParallelExpert => {
+            "tensor_parallel_expert"
+        }
+    }
 }
 
 fn selected_component_calibration_cases(
@@ -535,6 +978,60 @@ mod tests {
             region_cases[0].phase,
             crate::cli::PackageCalibrationPhase::Decode
         );
+    }
+
+    #[test]
+    fn dry_plan_reports_exact_distributed_candidates_without_workloads() {
+        let package_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../runtime-rs/test-fixtures/tiny_model/vulkan_resident_package.json");
+        let package = CalibrationPackage::load(&package_path).unwrap();
+        let model = tiny_runtime_model();
+        let targets = ["owner-a".to_string(), "owner-b".to_string()];
+        let plan = plan_calibration_suite(&model, &targets, &[4], Some(2)).unwrap();
+        let prepared = PreparedCalibrationSuite {
+            package,
+            runtime_models: BTreeMap::from([
+                (targets[0].clone(), vec![model.clone()]),
+                (targets[1].clone(), vec![model]),
+            ]),
+            plans: BTreeMap::from([
+                ((targets[0].clone(), 0), plan.clone()),
+                ((targets[1].clone(), 0), plan),
+            ]),
+        };
+
+        let report =
+            calibration_suite_dry_plan_report(&prepared, 128, 0, "demand_paged".to_string(), &[4])
+                .unwrap();
+
+        assert_eq!(report.schema, CALIBRATION_SUITE_DRY_PLAN_SCHEMA);
+        assert!(!report.executes_workloads);
+        assert!(!report.opens_compute_devices);
+        assert_eq!(report.target_ids, targets);
+        assert_eq!(report.maximum_group_size, 2);
+        assert_eq!(report.requested_prefill_widths, [4]);
+        assert!(report.unsupported_requested_prefill_widths.is_empty());
+        assert!(report.phase_component_case_counts.contains_key("decode:1"));
+        assert!(report.phase_component_case_counts.contains_key("prefill:4"));
+        assert_eq!(report.representation_variant_count, 2);
+        assert_eq!(report.component_case_count, report.component_cases.len());
+        assert!(report.component_occurrence_count > 0);
+        assert!(report.distributed_candidate_count > 0);
+        assert!(report.distributed_contract_count > 0);
+        assert!(
+            report
+                .candidate_strategy_counts
+                .contains_key("tensor_parallel")
+        );
+        assert!(report.component_cases.iter().any(|case| {
+            case.distributed_candidates.iter().any(|candidate| {
+                !candidate.contract_ids.is_empty()
+                    && candidate.strategies == ["tensor_parallel".to_string()]
+            })
+        }));
+        let encoded = serde_json::to_value(&report).unwrap();
+        assert_eq!(encoded["executes_workloads"], false);
+        assert_eq!(encoded["opens_compute_devices"], false);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use nerve_runtime::{
     HardwareProcessProfile, ResourceResidencyPolicy, RuntimeExecutionEnvelope,
     RuntimeInclusiveRange, VulkanResidentModelPackageManifest, VulkanResidentRuntimeModel,
     vulkan_runtime_model_with_component_placement,
+    vulkan_runtime_model_with_component_placement_owned,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +66,13 @@ impl CalibrationPackage {
         &self.manifest_dir
     }
 
+    pub fn has_runtime_implementation_alternatives(&self) -> Result<bool, io::Error> {
+        self.runtime_model
+            .package
+            .implementation_catalog(&self.manifest_dir)
+            .map(|catalog| !catalog.implementations.is_empty())
+    }
+
     pub fn runtime_model_for_owner(
         &self,
         owner_physical_device_id: &str,
@@ -107,6 +115,32 @@ impl CalibrationPackage {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
     }
 
+    pub fn into_runtime_models_for_owner(
+        self,
+        owner_physical_device_id: &str,
+        hardware_profile: &HardwareProcessProfile,
+        config: CalibrationRuntimeConfig,
+    ) -> Result<Vec<VulkanResidentRuntimeModel>, io::Error> {
+        let execution = self.execution_envelope(config)?;
+        let has_alternatives = self.has_runtime_implementation_alternatives()?;
+        let manifest_dir = self.manifest_dir.clone();
+        let placed =
+            self.into_placed_runtime_model_for_owner(owner_physical_device_id, hardware_profile)?;
+        if !has_alternatives {
+            return Ok(vec![placed]);
+        }
+        placed
+            .applicable_runtime_implementation_variants(
+                &manifest_dir,
+                &BTreeMap::from([(
+                    owner_physical_device_id.to_string(),
+                    hardware_profile.clone(),
+                )]),
+                execution,
+            )
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+    }
+
     fn placed_runtime_model_for_owner(
         &self,
         owner_physical_device_id: &str,
@@ -139,6 +173,39 @@ impl CalibrationPackage {
         )
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         Ok(placed)
+    }
+
+    fn into_placed_runtime_model_for_owner(
+        self,
+        owner_physical_device_id: &str,
+        hardware_profile: &HardwareProcessProfile,
+    ) -> Result<VulkanResidentRuntimeModel, io::Error> {
+        if owner_physical_device_id.is_empty()
+            || hardware_profile.hardware_identity.stable_device_id != owner_physical_device_id
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "calibration representation selection requires the exact owner hardware profile",
+            ));
+        }
+        let placement = self
+            .runtime_model
+            .runtime_graph
+            .instances
+            .iter()
+            .map(|instance| {
+                (
+                    instance.instance_id.clone(),
+                    owner_physical_device_id.to_string(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        vulkan_runtime_model_with_component_placement_owned(
+            self.runtime_model,
+            owner_physical_device_id,
+            &placement,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
     }
 
     pub fn execution_envelope(
@@ -336,5 +403,26 @@ mod tests {
             .unwrap();
         assert_eq!(variants.len(), 1);
         assert!(variants[0].implementation_selection.is_none());
+    }
+
+    #[test]
+    fn consuming_exact_package_variants_preserves_the_borrowed_result() {
+        let profile = nerve_runtime::discover_cpu_hardware_profile().unwrap();
+        let owner = profile.hardware_identity.stable_device_id.clone();
+        let runtime = CalibrationRuntimeConfig {
+            context_size: Some(8),
+            speculative_draft_tokens: Some(0),
+            residency_policy: ResourceResidencyPolicy::DemandPaged,
+        };
+        let borrowed = CalibrationPackage::load(&tiny_package_manifest())
+            .unwrap()
+            .runtime_models_for_owner(&owner, &profile, runtime)
+            .unwrap();
+        let owned = CalibrationPackage::load(&tiny_package_manifest())
+            .unwrap()
+            .into_runtime_models_for_owner(&owner, &profile, runtime)
+            .unwrap();
+
+        assert_eq!(owned, borrowed);
     }
 }

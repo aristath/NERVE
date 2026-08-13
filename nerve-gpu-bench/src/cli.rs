@@ -34,7 +34,8 @@ pub enum Command {
         prefill_widths: Vec<usize>,
         maximum_group_size: Option<usize>,
         runtime: CalibrationRuntimeConfig,
-        output: PathBuf,
+        dry_plan: bool,
+        output: Option<PathBuf>,
     },
     CalibratePackage {
         package: PathBuf,
@@ -228,6 +229,7 @@ fn parse_calibrate_suite(arguments: Vec<String>) -> Result<Command, CliError> {
     let mut prefill_widths = Vec::new();
     let mut maximum_group_size = None;
     let mut runtime = CalibrationRuntimeArguments::default();
+    let mut dry_plan = false;
     let mut output = None;
     let mut index = 0;
     while index < arguments.len() {
@@ -263,6 +265,7 @@ fn parse_calibrate_suite(arguments: Vec<String>) -> Result<Command, CliError> {
                     ));
                 }
             }
+            "--dry-plan" => dry_plan = true,
             "--output" => set_once_path(&mut output, &arguments, &mut index, "--output")?,
             other => {
                 if !runtime.parse_option(other, &arguments, &mut index)? {
@@ -295,14 +298,18 @@ fn parse_calibrate_suite(arguments: Vec<String>) -> Result<Command, CliError> {
     }
     prefill_widths.sort_unstable();
     prefill_widths.dedup();
-    let output =
-        output.ok_or_else(|| CliError("calibrate-suite requires --output PATH".to_string()))?;
+    if !dry_plan && output.is_none() {
+        return Err(CliError(
+            "calibrate-suite requires --output PATH unless --dry-plan is used".to_string(),
+        ));
+    }
     Ok(Command::CalibrateSuite {
         package,
         target_ids,
         prefill_widths,
         maximum_group_size,
         runtime: runtime.finish(),
+        dry_plan,
         output,
     })
 }
@@ -871,7 +878,7 @@ fn parse_usize_allow_zero(value: &str, option: &str) -> Result<usize, CliError> 
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-suite --package PACKAGE.json [--target VULKAN_UUID ...] [--prefill-width N ...] [--max-group-size N] [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-load-wave --package PACKAGE.json --component ID --selector ID --phase decode|prefill [--batch-width N] --resource-index N ... --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-suite --package PACKAGE.json [--target VULKAN_UUID ...] [--prefill-width N ...] [--max-group-size N] [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] [--dry-plan] [--output CATALOG_OR_PLAN.json]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-load-wave --package PACKAGE.json --component ID --selector ID --phase decode|prefill [--batch-width N] --resource-index N ... --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -1099,7 +1106,10 @@ mod tests {
                 prefill_widths: vec![8, 64],
                 maximum_group_size: Some(2),
                 runtime: CalibrationRuntimeConfig::default(),
-                output: PathBuf::from("optimization/placement-calibration-catalog.json"),
+                dry_plan: false,
+                output: Some(PathBuf::from(
+                    "optimization/placement-calibration-catalog.json",
+                )),
             },
         );
     }
@@ -1124,8 +1134,35 @@ mod tests {
                 prefill_widths: Vec::new(),
                 maximum_group_size: None,
                 runtime: CalibrationRuntimeConfig::default(),
-                output: PathBuf::from("catalog.json"),
+                dry_plan: false,
+                output: Some(PathBuf::from("catalog.json")),
             },
+        );
+    }
+
+    #[test]
+    fn calibration_suite_dry_plan_cannot_accidentally_execute() {
+        assert_eq!(
+            parse_args(
+                ["calibrate-suite", "--package", "package.json", "--dry-plan",].map(str::to_string),
+            )
+            .unwrap(),
+            Command::CalibrateSuite {
+                package: PathBuf::from("package.json"),
+                target_ids: Vec::new(),
+                prefill_widths: Vec::new(),
+                maximum_group_size: None,
+                runtime: CalibrationRuntimeConfig::default(),
+                dry_plan: true,
+                output: None,
+            },
+        );
+
+        assert!(
+            parse_args(["calibrate-suite", "--package", "package.json"].map(str::to_string),)
+                .unwrap_err()
+                .to_string()
+                .contains("unless --dry-plan is used")
         );
     }
 
