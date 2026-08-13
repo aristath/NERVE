@@ -170,6 +170,7 @@ include!("vulkan_stream_circuit/component_batch_execution_scope.rs");
 include!("vulkan_stream_circuit/speculative_source_taps.rs");
 include!("vulkan_stream_circuit/component_batch_buffers.rs");
 include!("vulkan_stream_circuit/component_batch_kernel_selection.rs");
+include!("vulkan_stream_circuit/component_batch_residency_plan.rs");
 include!("vulkan_stream_circuit/component_batch_slice_runner.rs");
 include!("vulkan_stream_circuit/component_batch_distributed.rs");
 include!("vulkan_stream_circuit/component_batch_distributed_residency.rs");

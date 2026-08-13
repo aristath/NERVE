@@ -101,16 +101,84 @@ fn component_batch_signal_buffer_plan_for_dispatches_retaining<'a>(
     ),
     VulkanResidentInProcessPlacedRuntimeError,
 > {
-    let dispatches = dispatches.into_iter().collect::<Vec<_>>();
-    let dispatch_count = dispatches.len();
+    let dispatch_signals = dispatches
+        .into_iter()
+        .map(|dispatch| {
+            dispatch
+                .descriptors
+                .iter()
+                .filter_map(|descriptor| {
+                    component_batch_signal_target_with_mounted(mounted, descriptor).transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    component_batch_signal_buffer_plan_from_dispatch_signals(
+        &mounted.placed_plan,
+        dispatch_signals,
+        retained_signal_keys,
+    )
+    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+}
+
+fn component_batch_signal_buffer_plan_from_prepared_dispatches_retaining<'a>(
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
+    dispatches: impl IntoIterator<Item = &'a VulkanPreparedDispatch>,
+    retained_signal_keys: &BTreeSet<VulkanComponentBatchSignalKey>,
+) -> Result<
+    (
+        BTreeMap<VulkanComponentBatchSignalKey, usize>,
+        Vec<VulkanComponentBatchSignalBufferPlan>,
+    ),
+    VulkanError,
+> {
+    let boundary_plan = VulkanModelBoundaryBufferPlan::from_placed_plan(placed_plan)
+        .map_err(|error| VulkanError(error.to_string()))?;
+    let edge_plan = VulkanPlacedEdgeIoPlan::from_placed_resident_plan(
+        &placed_plan.placed_resident_plan,
+    )
+    .map_err(|error| VulkanError(error.to_string()))?;
+    let dispatch_signals = dispatches
+        .into_iter()
+        .map(|dispatch| {
+            dispatch
+                .descriptors
+                .iter()
+                .filter_map(|descriptor| {
+                    component_batch_prepared_signal_target(
+                        placed_plan,
+                        &boundary_plan,
+                        &edge_plan,
+                        dispatch,
+                        descriptor,
+                    )
+                    .transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    component_batch_signal_buffer_plan_from_dispatch_signals(
+        placed_plan,
+        dispatch_signals,
+        retained_signal_keys,
+    )
+}
+
+fn component_batch_signal_buffer_plan_from_dispatch_signals(
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
+    dispatch_signals: Vec<Vec<(VulkanComponentBatchSignalKey, usize)>>,
+    retained_signal_keys: &BTreeSet<VulkanComponentBatchSignalKey>,
+) -> Result<
+    (
+        BTreeMap<VulkanComponentBatchSignalKey, usize>,
+        Vec<VulkanComponentBatchSignalBufferPlan>,
+    ),
+    VulkanError,
+> {
+    let dispatch_count = dispatch_signals.len();
     let mut lifetimes = BTreeMap::<VulkanComponentBatchSignalKey, (usize, bool, usize, usize)>::new();
-    for (dispatch_index, dispatch) in dispatches.iter().enumerate() {
-        for descriptor in &dispatch.descriptors {
-            let Some((key, frame_byte_capacity)) =
-                component_batch_signal_target_with_mounted(mounted, descriptor)?
-            else {
-                continue;
-            };
+    for (dispatch_index, signals) in dispatch_signals.iter().enumerate() {
+        for (key, frame_byte_capacity) in signals {
             // Component-batch activations remain device-local. A cross-device
             // edge uses a dedicated transfer route rather than forcing every
             // producer and consumer dispatch to operate directly on system
@@ -121,7 +189,7 @@ fn component_batch_signal_buffer_plan_for_dispatches_retaining<'a>(
                 VulkanComponentBatchSignalKey::ModelInput(_)
                     | VulkanComponentBatchSignalKey::IncomingEdge(_)
             );
-            let external_sink = component_batch_signal_is_external_sink(mounted, &key);
+            let external_sink = component_batch_signal_is_external_sink(placed_plan, key);
             let first_dispatch = if external_source { 0 } else { dispatch_index };
             let last_dispatch = if external_sink {
                 dispatch_count
@@ -130,8 +198,8 @@ fn component_batch_signal_buffer_plan_for_dispatches_retaining<'a>(
             };
             merge_component_batch_signal_lifetime(
                 &mut lifetimes,
-                key,
-                frame_byte_capacity,
+                key.clone(),
+                *frame_byte_capacity,
                 host_visible,
                 first_dispatch,
                 last_dispatch,
@@ -154,19 +222,17 @@ fn component_batch_signal_buffer_plan_for_dispatches_retaining<'a>(
         .collect::<Vec<_>>();
     let canonical_retained_signal_keys = retained_signal_keys
         .iter()
-        .map(|key| canonical_component_batch_signal_key(mounted, key))
+        .map(|key| canonical_component_batch_signal_key(placed_plan, key))
         .collect::<Result<BTreeSet<_>, _>>()?;
     retain_component_batch_signal_lifetimes(
         &mut lifetimes,
         &canonical_retained_signal_keys,
         dispatch_count,
     )
-    .map_err(|error| {
-        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(error)
-    })?;
+    ?;
     let (mut signal_buffer_indices, buffer_plan) =
         allocate_component_batch_signal_lifetimes(lifetimes);
-    install_component_batch_edge_aliases(mounted, &mut signal_buffer_indices)?;
+    install_component_batch_edge_aliases(placed_plan, &mut signal_buffer_indices)?;
     Ok((signal_buffer_indices, buffer_plan))
 }
 
@@ -177,7 +243,7 @@ fn merge_component_batch_signal_lifetime(
     host_visible: bool,
     first_dispatch: usize,
     last_dispatch: usize,
-) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+) -> Result<(), VulkanError> {
     match lifetimes.entry(key.clone()) {
         std::collections::btree_map::Entry::Vacant(entry) => {
             entry.insert((
@@ -192,11 +258,9 @@ fn merge_component_batch_signal_lifetime(
             if *existing_capacity != frame_byte_capacity
                 || *existing_visibility != host_visible
             {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                    VulkanError(format!(
+                return Err(VulkanError(format!(
                         "component batch signal {key:?} has incompatible physical requirements"
-                    )),
-                ));
+                    )));
             }
             *first = (*first).min(first_dispatch);
             *last = (*last).max(last_dispatch);
@@ -215,11 +279,236 @@ fn produced_port_signal_key(
     }
 }
 
+fn component_batch_prepared_signal_target(
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
+    boundary_plan: &VulkanModelBoundaryBufferPlan,
+    edge_plan: &VulkanPlacedEdgeIoPlan,
+    dispatch: &VulkanPreparedDispatch,
+    descriptor: &VulkanResolvedDescriptorBinding,
+) -> Result<Option<(VulkanComponentBatchSignalKey, usize)>, VulkanError> {
+    match &descriptor.resource {
+        VulkanDescriptorResourceAddress::ActivationSlot {
+            component_id,
+            signal_id,
+            signal_byte_capacity,
+            ..
+        } => Ok(Some((
+            VulkanComponentBatchSignalKey::Activation {
+                component_id: component_id.clone(),
+                signal_id: signal_id.clone(),
+            },
+            *signal_byte_capacity,
+        ))),
+        VulkanDescriptorResourceAddress::BoundaryInput { signal_id } => {
+            if let Some(edge) = placed_plan
+                .placed_resident_plan
+                .local_edges
+                .iter()
+                .find(|edge| {
+                    edge.destination_component_id == dispatch.component_id
+                        && edge.destination_port_id == *signal_id
+                })
+            {
+                let allocation = edge_plan
+                    .local_edges
+                    .iter()
+                    .find(|allocation| allocation.edge_index == edge.edge_index)
+                    .ok_or_else(|| {
+                        VulkanError(format!(
+                            "component batch prepared input references absent local edge {}",
+                            edge.edge_index,
+                        ))
+                    })?;
+                let byte_capacity = allocation.byte_capacity.ok_or_else(|| {
+                    VulkanError(format!(
+                        "component batch local edge {} has unresolved byte capacity",
+                        edge.edge_index,
+                    ))
+                })?;
+                return Ok(Some((
+                    produced_port_signal_key(&edge.source_component_id, &edge.source_port_id),
+                    component_batch_planned_edge_frame_byte_capacity(
+                        &edge.connection,
+                        byte_capacity,
+                    )?,
+                )));
+            }
+            if let Some(edge) = placed_plan
+                .placed_resident_plan
+                .incoming_edges
+                .iter()
+                .find(|edge| {
+                    edge.destination_component_id == dispatch.component_id
+                        && edge.destination_port_id == *signal_id
+                })
+            {
+                let allocation = edge_plan
+                    .endpoint(VulkanPlacedEdgeDirection::Incoming, edge.edge_index)
+                    .ok_or_else(|| {
+                        VulkanError(format!(
+                            "component batch prepared input references absent incoming edge {}",
+                            edge.edge_index,
+                        ))
+                    })?;
+                let byte_capacity = allocation.byte_capacity.ok_or_else(|| {
+                    VulkanError(format!(
+                        "component batch incoming edge {} has unresolved byte capacity",
+                        edge.edge_index,
+                    ))
+                })?;
+                return Ok(Some((
+                    VulkanComponentBatchSignalKey::IncomingEdge(edge.edge_index),
+                    component_batch_planned_edge_frame_byte_capacity(
+                        &edge.connection,
+                        byte_capacity,
+                    )?,
+                )));
+            }
+            let boundary = boundary_plan
+                .inputs
+                .iter()
+                .find(|boundary| {
+                    boundary.component_id == dispatch.component_id
+                        && boundary.signal_id == *signal_id
+                })
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "component batch has no planned model input {}.{signal_id}",
+                        dispatch.component_id,
+                    ))
+                })?;
+            Ok(Some((
+                VulkanComponentBatchSignalKey::ModelInput(signal_id.clone()),
+                boundary.byte_capacity.ok_or_else(|| {
+                    VulkanError(format!(
+                        "component batch model input {}.{signal_id} has unresolved byte capacity",
+                        dispatch.component_id,
+                    ))
+                })?,
+            )))
+        }
+        VulkanDescriptorResourceAddress::BoundaryOutput { signal_id } => {
+            let local_edges = placed_plan
+                .placed_resident_plan
+                .local_edges
+                .iter()
+                .filter(|edge| {
+                    edge.source_component_id == dispatch.component_id
+                        && edge.source_port_id == *signal_id
+                });
+            let outgoing_edges = placed_plan
+                .placed_resident_plan
+                .outgoing_edges
+                .iter()
+                .filter(|edge| {
+                    edge.source_component_id == dispatch.component_id
+                        && edge.source_port_id == *signal_id
+                });
+            let mut frame_capacities = local_edges
+                .map(|edge| {
+                    let allocation = edge_plan
+                        .local_edges
+                        .iter()
+                        .find(|allocation| allocation.edge_index == edge.edge_index)
+                        .ok_or_else(|| {
+                            VulkanError(format!(
+                                "component batch prepared output references absent local edge {}",
+                                edge.edge_index,
+                            ))
+                        })?;
+                    component_batch_planned_edge_frame_byte_capacity(
+                        &edge.connection,
+                        allocation.byte_capacity.ok_or_else(|| {
+                            VulkanError(format!(
+                                "component batch local edge {} has unresolved byte capacity",
+                                edge.edge_index,
+                            ))
+                        })?,
+                    )
+                })
+                .chain(outgoing_edges.map(|edge| {
+                    let allocation = edge_plan
+                        .endpoint(VulkanPlacedEdgeDirection::Outgoing, edge.edge_index)
+                        .ok_or_else(|| {
+                            VulkanError(format!(
+                                "component batch prepared output references absent outgoing edge {}",
+                                edge.edge_index,
+                            ))
+                        })?;
+                    component_batch_planned_edge_frame_byte_capacity(
+                        &edge.connection,
+                        allocation.byte_capacity.ok_or_else(|| {
+                            VulkanError(format!(
+                                "component batch outgoing edge {} has unresolved byte capacity",
+                                edge.edge_index,
+                            ))
+                        })?,
+                    )
+                }));
+            if let Some(frame_byte_capacity) = frame_capacities.next().transpose()? {
+                for candidate in frame_capacities {
+                    if candidate? != frame_byte_capacity {
+                        return Err(VulkanError(format!(
+                            "component batch produced port {}.{signal_id} has incompatible frame capacities",
+                            dispatch.component_id,
+                        )));
+                    }
+                }
+                return Ok(Some((
+                    produced_port_signal_key(&dispatch.component_id, signal_id),
+                    frame_byte_capacity,
+                )));
+            }
+            let boundary = boundary_plan
+                .outputs
+                .iter()
+                .find(|boundary| {
+                    boundary.component_id == dispatch.component_id
+                        && boundary.signal_id == *signal_id
+                })
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "component batch has no planned model output {}.{signal_id}",
+                        dispatch.component_id,
+                    ))
+                })?;
+            Ok(Some((
+                VulkanComponentBatchSignalKey::ModelOutput(signal_id.clone()),
+                boundary.byte_capacity.ok_or_else(|| {
+                    VulkanError(format!(
+                        "component batch model output {}.{signal_id} has unresolved byte capacity",
+                        dispatch.component_id,
+                    ))
+                })?,
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn component_batch_planned_edge_frame_byte_capacity(
+    connection: &StreamCircuitConnection,
+    byte_capacity: usize,
+) -> Result<usize, VulkanError> {
+    match connection {
+        StreamCircuitConnection::ParallelBlockScatter { width }
+        | StreamCircuitConnection::ParallelBlockGather { width } => {
+            if *width == 0 || byte_capacity % width != 0 {
+                return Err(VulkanError(format!(
+                    "parallel-block edge capacity {byte_capacity} is not divisible by width {width}"
+                )));
+            }
+            Ok(byte_capacity / width)
+        }
+        _ => Ok(byte_capacity),
+    }
+}
+
 fn canonical_component_batch_signal_key(
-    mounted: &VulkanMountedPlacedStreamCircuit,
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
     key: &VulkanComponentBatchSignalKey,
-) -> Result<VulkanComponentBatchSignalKey, VulkanResidentInProcessPlacedRuntimeError> {
-    let resident_plan = &mounted.placed_plan.placed_resident_plan;
+) -> Result<VulkanComponentBatchSignalKey, VulkanError> {
+    let resident_plan = &placed_plan.placed_resident_plan;
     match key {
         VulkanComponentBatchSignalKey::LocalEdge(edge_index) => {
             let edge = resident_plan
@@ -227,9 +516,9 @@ fn canonical_component_batch_signal_key(
                 .iter()
                 .find(|edge| edge.edge_index == *edge_index)
                 .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    VulkanError(format!(
                         "component batch local edge alias references absent edge {edge_index}"
-                    )))
+                    ))
                 })?;
             Ok(produced_port_signal_key(
                 &edge.source_component_id,
@@ -242,9 +531,9 @@ fn canonical_component_batch_signal_key(
                 .iter()
                 .find(|edge| edge.edge_index == *edge_index)
                 .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    VulkanError(format!(
                         "component batch outgoing edge alias references absent edge {edge_index}"
-                    )))
+                    ))
                 })?;
             Ok(produced_port_signal_key(
                 &edge.source_component_id,
@@ -256,7 +545,7 @@ fn canonical_component_batch_signal_key(
 }
 
 fn component_batch_signal_is_external_sink(
-    mounted: &VulkanMountedPlacedStreamCircuit,
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
     key: &VulkanComponentBatchSignalKey,
 ) -> bool {
     match key {
@@ -264,8 +553,7 @@ fn component_batch_signal_is_external_sink(
         VulkanComponentBatchSignalKey::ProducedPort {
             component_id,
             port_id,
-        } => mounted
-            .placed_plan
+        } => placed_plan
             .placed_resident_plan
             .outgoing_edges
             .iter()
@@ -278,17 +566,17 @@ fn component_batch_signal_is_external_sink(
 }
 
 fn install_component_batch_edge_aliases(
-    mounted: &VulkanMountedPlacedStreamCircuit,
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
     signal_buffer_indices: &mut BTreeMap<VulkanComponentBatchSignalKey, usize>,
-) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+) -> Result<(), VulkanError> {
     let mut aliases = Vec::new();
-    for edge in &mounted.placed_plan.placed_resident_plan.local_edges {
+    for edge in &placed_plan.placed_resident_plan.local_edges {
         aliases.push((
             VulkanComponentBatchSignalKey::LocalEdge(edge.edge_index),
             produced_port_signal_key(&edge.source_component_id, &edge.source_port_id),
         ));
     }
-    for edge in &mounted.placed_plan.placed_resident_plan.outgoing_edges {
+    for edge in &placed_plan.placed_resident_plan.outgoing_edges {
         aliases.push((
             VulkanComponentBatchSignalKey::OutgoingEdge(edge.edge_index),
             produced_port_signal_key(&edge.source_component_id, &edge.source_port_id),
@@ -301,11 +589,9 @@ fn install_component_batch_edge_aliases(
         if let Some(existing) = signal_buffer_indices.insert(alias.clone(), buffer_index)
             && existing != buffer_index
         {
-            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                VulkanError(format!(
+            return Err(VulkanError(format!(
                     "component batch signal alias {alias:?} maps to incompatible physical buffers {existing} and {buffer_index}"
-                )),
-            ));
+                )));
         }
     }
     Ok(())

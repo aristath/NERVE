@@ -80,6 +80,18 @@ impl VulkanResidentPlacedComponentBatchRunner {
         execution_mode: VulkanComponentBatchExecutionMode,
         execution_scope: VulkanComponentBatchExecutionScope,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        let expected_residency = VulkanComponentBatchResidentAllocationPlan::for_single_device(
+            &slice.package_slice.placed_plan,
+            &slice.package_slice.prepared_plan,
+            &slice.package_slice.batch_kernels,
+            lane_capacity,
+            execution_mode,
+            &execution_scope,
+            &BTreeSet::new(),
+            false,
+            slice.demand_residency_context.is_some(),
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let devices = BTreeMap::new();
         let distributed_execution_plan = VulkanDistributedExecutionPlan {
             device_ids: Vec::new(),
@@ -147,14 +159,29 @@ impl VulkanResidentPlacedComponentBatchRunner {
             lane_capacity,
             execution_mode,
         )?;
-        Ok(Self {
+        let runner = Self {
             distributed_dispatches,
             lane_capacity,
             device_ids: vec![slice.device_id.clone()],
             slices,
             edge_transfers: Vec::new(),
             demand_pipeline_predicates: pipeline_continuation_predicate.map(|buffer| vec![buffer]),
-        })
+        };
+        let actual_residency = runner
+            .resident_transient_bytes_by_device()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        if actual_residency.len() != 1
+            || actual_residency.get(&slice.device_id).copied()
+                != Some(expected_residency.total_byte_capacity)
+        {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "component batch residency plan declares {} bytes on {:?}, materialization reports {actual_residency:?}",
+                    expected_residency.total_byte_capacity, slice.device_id,
+                )),
+            ));
+        }
+        Ok(runner)
     }
 
     fn new(

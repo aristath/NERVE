@@ -638,12 +638,34 @@ impl VulkanResidentComponentBatchSliceRunner {
                 execution_scope.includes_dispatch(&dispatch.component_id, &dispatch.node_id)
             })
             .collect::<Vec<_>>();
+        let selected_prepared_dispatches = slice
+            .package_slice
+            .prepared_plan
+            .dispatches
+            .iter()
+            .filter(|dispatch| {
+                execution_scope.includes_dispatch(&dispatch.component_id, &dispatch.node_id)
+            })
+            .collect::<Vec<_>>();
+        if selected_prepared_dispatches.len() != selected_dispatches.len()
+            || selected_prepared_dispatches
+                .iter()
+                .zip(&selected_dispatches)
+                .any(|(prepared, mounted)| prepared.dispatch_index != mounted.dispatch_index)
+        {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(
+                    "component batch prepared and mounted execution scopes diverge".to_string(),
+                ),
+            ));
+        }
         let (signal_buffer_indices, signal_buffer_plan) =
-            component_batch_signal_buffer_plan_for_dispatches_retaining(
-                &slice.mounted,
-                selected_dispatches.iter().copied(),
+            component_batch_signal_buffer_plan_from_prepared_dispatches_retaining(
+                &slice.package_slice.placed_plan,
+                selected_prepared_dispatches.iter().copied(),
                 retained_signal_keys,
-            )?;
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let private_distributed_activations =
             distributed_component_batch_private_activation_specs(distributed_execution_plan)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;

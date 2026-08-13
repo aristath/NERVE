@@ -212,26 +212,65 @@ fn selected_component_batch_kernel_artifact_for_dispatch<'a>(
     execution_mode: VulkanComponentBatchExecutionMode,
     lane_capacity: usize,
 ) -> Option<&'a VulkanResidentComponentBatchKernelArtifact> {
-    select_component_batch_kernel_artifact(
+    selected_component_batch_kernel_artifact_for_interface(
         artifacts,
         &dispatch.component_id,
         &dispatch.node_id,
+        &dispatch.push_constants,
+        dispatch.stream_control_binding,
+        dispatch.descriptors.iter().map(|descriptor| &descriptor.usage),
+        execution_mode,
+        lane_capacity,
+    )
+}
+
+fn selected_component_batch_kernel_artifact_for_prepared_dispatch<'a>(
+    artifacts: &'a [VulkanResidentComponentBatchKernelArtifact],
+    dispatch: &VulkanPreparedDispatch,
+    execution_mode: VulkanComponentBatchExecutionMode,
+    lane_capacity: usize,
+) -> Option<&'a VulkanResidentComponentBatchKernelArtifact> {
+    selected_component_batch_kernel_artifact_for_interface(
+        artifacts,
+        &dispatch.component_id,
+        &dispatch.node_id,
+        &dispatch.push_constants,
+        dispatch.stream_control_binding,
+        dispatch.descriptors.iter().map(|descriptor| &descriptor.usage),
+        execution_mode,
+        lane_capacity,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_component_batch_kernel_artifact_for_interface<'a, 'b>(
+    artifacts: &'a [VulkanResidentComponentBatchKernelArtifact],
+    component_id: &str,
+    node_id: &str,
+    push_constants: &[VulkanKernelScalarBinding],
+    stream_control_binding: Option<u32>,
+    descriptor_usages: impl IntoIterator<Item = &'b VulkanKernelDescriptorUsage>,
+    execution_mode: VulkanComponentBatchExecutionMode,
+    lane_capacity: usize,
+) -> Option<&'a VulkanResidentComponentBatchKernelArtifact> {
+    let descriptor_usages = descriptor_usages.into_iter().collect::<Vec<_>>();
+    select_component_batch_kernel_artifact(
+        artifacts,
+        component_id,
+        node_id,
         execution_mode,
         lane_capacity,
     )
     .filter(|artifact| {
-        component_batch_stages_replace_push_constants(
-            &artifact.stages,
-            &dispatch.push_constants,
-        )
+        component_batch_stages_replace_push_constants(&artifact.stages, push_constants)
     })
     .filter(|artifact| {
         execution_mode == VulkanComponentBatchExecutionMode::CausalSequence
             || artifact.batch_mode != VulkanResidentComponentKernelBatchMode::WeightShared
-            || (dispatch.stream_control_binding.is_none()
-                && !dispatch.descriptors.iter().any(|descriptor| {
+            || (stream_control_binding.is_none()
+                && !descriptor_usages.iter().any(|usage| {
                     matches!(
-                        descriptor.usage,
+                        usage,
                         VulkanKernelDescriptorUsage::StateRead
                             | VulkanKernelDescriptorUsage::StateWrite
                             | VulkanKernelDescriptorUsage::StateView

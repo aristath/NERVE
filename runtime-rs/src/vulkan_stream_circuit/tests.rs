@@ -6,6 +6,7 @@ fn sampled_token(token_id: u32) -> VulkanResidentSampledToken {
 }
 
 include!("tests/package_batch.rs");
+include!("tests/component_batch_residency_plan.rs");
 include!("tests/demand_resident_feedback.rs");
 include!("tests/speculative_catch_up.rs");
 include!("tests/parallel_speculative_state.rs");

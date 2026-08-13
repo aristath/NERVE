@@ -532,9 +532,15 @@ For every numbered item below:
   auxiliary buffer now retains both its decoder scope and allocation identity.
   This exposed and fixed two undercounts: draft selection telemetry was absent,
   and autoregressive execution reserves two alternating pending target-hidden
-  buffers rather than one. The lazily cached autoregressive catch-up batch
-  runners and the permanently mounted parallel-block proposal,
-  committed-context, state-ingestion, history, and readback buffers do not yet
+  buffers rather than one. The autoregressive catch-up cache currently keys
+  retained copy command buffers by a borrowed source-buffer address without
+  retaining that source's ownership; replacing a causal verification runner can
+  therefore destroy a source while an executable command buffer still refers to
+  it. Replace that address cache with an explicitly owned or invalidated source
+  lifetime and test runner replacement before live execution. The lazily cached
+  autoregressive catch-up batch runners and the permanently mounted
+  parallel-block proposal, committed-context, state-ingestion, history, and
+  readback buffers do not yet
   have workload-free allocation plans; terminal admission must cover those
   actual allocations before speculative TP can enter the live gate.
   The stream-control allocation now follows its actual physical memory domain:
