@@ -72,6 +72,13 @@ the local placement calibration, and the mounted graph.
   15.123 ms in state commit, 11.840 ms in attention score, 10.081 ms in expert
   down, and 9.805 ms in dense projection. The 17 tok/s target requires about
   58.8 ms per useful token; 20 tok/s requires 50 ms.
+- The 15.123 ms `state_commit` bucket is not primarily a state-copy kernel. The
+  normal chat transaction generates on a rollback branch, validates and
+  canonicalizes the assistant message, discards the generation state, and then
+  executes the canonical assistant token delta through the complete model a
+  second time. This is required when private reasoning or malformed/tool
+  protocol tokens are removed from future-turn history, but performing the
+  entire canonical pass only after generation serializes avoidable latency.
 - NVMe paging is not the warm steady-state limiter. Lazy expert loading remains
   required for capacity and cold execution, but warm decode optimization must
   focus on the device execution graph and its critical path.
@@ -802,9 +809,25 @@ For every numbered item below:
   reject any candidate that only improves an isolated shader. Do not split
   score and value into independently scheduled kernels when the complete
   stream loses.
-- Reduce state-commit cost by publishing only authoritative causal changes
-  through the persistent transaction. Do not reintroduce full-state baseline
-  copies, clean replay, or hot-path completion polling.
+- Replace serialized canonical replay with an exact canonical-shadow
+  transaction. Fork the post-user state through bounded COW storage; execute
+  generation and canonical branches as independent streams over the same
+  immutable model package; and let a compiler-declared streaming chat
+  transducer publish only token prefixes proven stable in the final canonical
+  assistant rendering. For reasoning models, the canonical branch may consume
+  the known assistant/non-reasoning prefix immediately, discard private
+  reasoning, and consume answer content after the reasoning boundary. Buffer
+  tool markup or any other structurally uncertain suffix until complete parse
+  and exact re-render. At success, atomically retain the canonical branch and
+  discard generation state; on malformed output, cancellation, tokenization
+  boundary mismatch, or resource failure, restore the pre-turn state exactly.
+  Templates without a proven streaming transduction contract must retain the
+  current exact replay rather than guess. Measure COW bytes, added concurrent
+  activation pressure, generation contention, end-of-turn tail latency, and
+  complete product-token throughput; promote only when total turn latency wins
+  without changing the canonical token/state digest. Do not retain private
+  reasoning merely to make generation state reusable, copy full state
+  capacity, or introduce hot-path host polling.
 - Re-evaluate dense projections inside the surrounding island so local outputs
   can feed their next consumer without unnecessary publication or conversion.
 
