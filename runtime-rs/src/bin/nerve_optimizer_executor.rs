@@ -7,11 +7,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use nerve_runtime::{
-    RuntimeStagedCandidate, VulkanCompiledResourceRepresentationReport, VulkanComputeDevice,
-    VulkanComputeDeviceCatalog, VulkanResidentBufferPool, VulkanResidentModelPackageManifest,
-    VulkanResidentRuntimeModel, VulkanResidentTargetedExecutionSession,
-    VulkanResidentTargetedModelPackageDeviceSlice, VulkanTargetedComponentExecutionPhase,
-    VulkanTargetedComponentExecutionScope,
+    RuntimeStagedCandidate, VulkanCompiledResourceLoadStatistics,
+    VulkanCompiledResourceRepresentationReport, VulkanComputeDevice, VulkanComputeDeviceCatalog,
+    VulkanResidentBufferPool, VulkanResidentModelPackageManifest, VulkanResidentRuntimeModel,
+    VulkanResidentTargetedExecutionSession, VulkanResidentTargetedModelPackageDeviceSlice,
+    VulkanTargetedComponentExecutionPhase, VulkanTargetedComponentExecutionScope,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -72,6 +72,7 @@ struct ExecutorMeasurementState {
     prepared_after_warmup: bool,
     terminal_execution_completed: bool,
     pending_preparation: Option<VulkanCompiledResourceRepresentationReport>,
+    pending_resource_loading: VulkanCompiledResourceLoadStatistics,
 }
 
 struct MountCommand {
@@ -338,7 +339,7 @@ fn execute_targeted_measurement(
     }
     match measurement_phase {
         ExecutorMeasurementPhase::Warmup => {
-            let report = session.execute(
+            let mut report = session.execute(
                 device,
                 useful_units,
                 sustained_window_count,
@@ -350,13 +351,17 @@ fn execute_targeted_measurement(
                     Some(session.prepare_loaded_representations_for_measurement(device)?);
                 state.prepared_after_warmup = true;
             }
+            state
+                .pending_resource_loading
+                .checked_accumulate(report.resource_loading)?;
+            report.resource_loading = VulkanCompiledResourceLoadStatistics::default();
             execution_report_payload(
                 report,
                 VulkanCompiledResourceRepresentationReport::default(),
             )
         }
         ExecutorMeasurementPhase::Measured => {
-            let initial = session.execute(
+            let mut initial = session.execute(
                 device,
                 useful_units,
                 sustained_window_count,
@@ -364,6 +369,10 @@ fn execute_targeted_measurement(
                 maximum_quantum_wait,
             )?;
             let (report, preparation) = if state.prepared_after_warmup {
+                initial
+                    .resource_loading
+                    .checked_accumulate(state.pending_resource_loading)?;
+                state.pending_resource_loading = VulkanCompiledResourceLoadStatistics::default();
                 (
                     initial,
                     state.pending_preparation.take().unwrap_or_default(),
@@ -371,13 +380,17 @@ fn execute_targeted_measurement(
             } else {
                 let preparation = session.prepare_loaded_representations_for_measurement(device)?;
                 let report = if preparation.promoted_group_count > 0 {
-                    session.execute(
+                    let mut replay = session.execute(
                         device,
                         useful_units,
                         sustained_window_count,
                         seed,
                         maximum_quantum_wait,
-                    )?
+                    )?;
+                    replay
+                        .resource_loading
+                        .checked_accumulate(initial.resource_loading)?;
+                    replay
                 } else {
                     initial
                 };
@@ -402,13 +415,17 @@ fn execute_targeted_measurement(
             )?;
             let preparation = session.prepare_loaded_representations_for_measurement(device)?;
             let report = if preparation.promoted_group_count > 0 {
-                session.execute(
+                let mut replay = session.execute(
                     device,
                     useful_units,
                     sustained_window_count,
                     seed,
                     maximum_quantum_wait,
-                )?
+                )?;
+                replay
+                    .resource_loading
+                    .checked_accumulate(initial.resource_loading)?;
+                replay
             } else {
                 initial
             };
@@ -1027,6 +1044,17 @@ mod tests {
             }],
             resident_parameter_bytes: 1_024,
             resident_transient_bytes: 256,
+            resource_loading: VulkanCompiledResourceLoadStatistics {
+                load_count: 2,
+                reload_count: 1,
+                physical_read_bytes: 128,
+                resident_bytes_produced: 512,
+                uploaded_bytes: 512,
+                read_ns: 3,
+                derivation_ns: 5,
+                upload_ns: 7,
+                blocking_ns: 17,
+            },
             physical_dispatch_count: 1,
             queue_submission_count: 1,
             synchronization_wait_count: 1,
@@ -1051,6 +1079,20 @@ mod tests {
         assert_eq!(payload["representation_conversion_bytes"], 640);
         assert_eq!(payload["representation_conversion_ns"], 17);
         assert_eq!(payload["representation_boundary_count"], 2);
+        assert_eq!(
+            payload["resource_loading"],
+            json!({
+                "load_count": 2,
+                "reload_count": 1,
+                "physical_read_bytes": 128,
+                "resident_bytes_produced": 512,
+                "uploaded_bytes": 512,
+                "read_ns": 3,
+                "derivation_ns": 5,
+                "upload_ns": 7,
+                "blocking_ns": 17,
+            })
+        );
     }
 
     #[test]

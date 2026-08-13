@@ -59,11 +59,11 @@ non-finite number, or internally inconsistent contract.
 | `source_package_seal.v2` | Immutable baseline, stage, package-integrity, and source-input evidence |
 | `staged_candidate_integrity.v1` | Complete byte coverage for one atomically ready candidate |
 | `benchmark_workload.v1` | Immutable input, state, randomness, useful work, and validity regime |
-| `benchmark_plan.v1` | Counterbalanced matched reference/candidate experiment |
-| `benchmark_observation.v1` | One normal-runtime timing, work, resource, and trace observation |
-| `benchmark_residency_event.v1` | Mount/unmount cost and device-state evidence |
-| `benchmark_run.v1` | Ordered raw observations and residency lifecycle |
-| `benchmark_record.v2` | Binary matched-speed result and measured evidence |
+| `benchmark_plan.v5` | Counterbalanced matched reference/candidate experiment |
+| `benchmark_observation.v3` | One normal-runtime timing, work, representation conversion, demand-load, resource, and trace observation |
+| `benchmark_residency_event.v2` | Mount/unmount cost and device-state evidence |
+| `benchmark_run.v5` | Ordered raw observations and residency lifecycle |
+| `benchmark_record.v3` | Binary matched-speed result and measured lifecycle evidence |
 | `benchmark_evidence_integrity.v1` | Complete byte coverage of benchmark evidence |
 | `behavioral_error_contract.v1` | Approximation validity predicates, metric limits, and correction policy |
 | `validation_requirements.v1` | Proof verifiers, behavioral checks, applicability map, and counterexamples |

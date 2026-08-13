@@ -796,8 +796,21 @@ For every numbered item below:
   accepting the compact-source result. Conversion read/write bytes, elapsed
   time, representation boundaries, and retained derived residency now flow
   into benchmark observations and records rather than being hardcoded to zero.
-  Lazy-reload latency must still become a direct optimizer resource rather than
-  remaining only a compiler-selection metric.
+  Demand loading is now a direct optimizer resource too. Every targeted
+  execution snapshots successful loads, reloads, physical source bytes,
+  produced/uploaded resident bytes, and read/derivation/upload/blocking time.
+  Discarded warmup discovery and cold preparation/replay retain that evidence
+  on the measured lifecycle instead of losing it with the discarded output.
+  Benchmark observation/run/record schemas v3/v5/v3 carry the exact counters
+  into the implementation catalog. Selection preserves one coherent worst
+  measured lifecycle vector, reports exact per-application and aggregate load
+  resources, and—after measured execution savings—prefers fewer reloads, less
+  blocking, fewer physical reads, and fewer loads before conversion or lexical
+  tie-breaks. It does not subtract blocking time from the already measured
+  execution latency a second time. Counter regression, overflow, malformed
+  executor evidence, aggregation, cold-evidence retention, and selection are
+  covered by sequential hardware-neutral tests. Mounted real-model behavior
+  and performance remain part of the authorized live proof above.
 - Reuse the mechanism for unseen compatible models; no DeepSeek, Qwen, vendor,
   or device-name branches belong in runtime selection.
 

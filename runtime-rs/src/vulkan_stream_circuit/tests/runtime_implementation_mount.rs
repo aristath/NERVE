@@ -578,6 +578,15 @@ fn selected_runtime_component_overlay_mounts_only_its_independent_region() {
         conversion_ns: 0,
         conversion_bytes: 0,
         boundary_count: 0,
+        resource_load_count: 0,
+        resource_reload_count: 0,
+        resource_physical_read_bytes: 0,
+        resource_resident_bytes_produced: 0,
+        resource_uploaded_bytes: 0,
+        resource_read_ns: 0,
+        resource_derivation_ns: 0,
+        resource_upload_ns: 0,
+        resource_blocking_ns: 0,
         decision_reason: "verified fixture alternative".to_string(),
     };
     let semantic_contract_id =
@@ -622,6 +631,15 @@ fn selected_runtime_component_overlay_mounts_only_its_independent_region() {
         total_conversion_ns: 0,
         total_conversion_bytes: 0,
         total_boundary_count: 0,
+        total_resource_load_count: 0,
+        total_resource_reload_count: 0,
+        total_resource_physical_read_bytes: 0,
+        total_resource_resident_bytes_produced: 0,
+        total_resource_uploaded_bytes: 0,
+        total_resource_read_ns: 0,
+        total_resource_derivation_ns: 0,
+        total_resource_upload_ns: 0,
+        total_resource_blocking_ns: 0,
     };
 
     let mounted = runtime_model

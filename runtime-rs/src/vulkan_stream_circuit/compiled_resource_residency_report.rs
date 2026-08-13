@@ -146,6 +146,143 @@ pub struct VulkanCompiledResourceResidencyTotalsReport {
     pub retiering_time_ns: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct VulkanCompiledResourceLoadStatistics {
+    pub load_count: u64,
+    pub reload_count: u64,
+    pub physical_read_bytes: u64,
+    pub resident_bytes_produced: u64,
+    pub uploaded_bytes: u64,
+    pub read_ns: u64,
+    pub derivation_ns: u64,
+    pub upload_ns: u64,
+    pub blocking_ns: u64,
+}
+
+impl VulkanCompiledResourceLoadStatistics {
+    pub fn checked_delta_since(
+        self,
+        previous: Self,
+    ) -> Result<Self, VulkanCompiledResourceDeviceStoreError> {
+        macro_rules! delta {
+            ($field:ident) => {
+                self.$field.checked_sub(previous.$field).ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(format!(
+                        "compiled resource load counter {} regressed from {} to {}",
+                        stringify!($field),
+                        previous.$field,
+                        self.$field,
+                    ))
+                })?
+            };
+        }
+        Ok(Self {
+            load_count: delta!(load_count),
+            reload_count: delta!(reload_count),
+            physical_read_bytes: delta!(physical_read_bytes),
+            resident_bytes_produced: delta!(resident_bytes_produced),
+            uploaded_bytes: delta!(uploaded_bytes),
+            read_ns: delta!(read_ns),
+            derivation_ns: delta!(derivation_ns),
+            upload_ns: delta!(upload_ns),
+            blocking_ns: delta!(blocking_ns),
+        })
+    }
+
+    pub fn checked_accumulate(
+        &mut self,
+        other: Self,
+    ) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
+        macro_rules! accumulate {
+            ($field:ident) => {
+                self.$field = self.$field.checked_add(other.$field).ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(format!(
+                        "compiled resource load counter {} overflowed",
+                        stringify!($field),
+                    ))
+                })?;
+            };
+        }
+        accumulate!(load_count);
+        accumulate!(reload_count);
+        accumulate!(physical_read_bytes);
+        accumulate!(resident_bytes_produced);
+        accumulate!(uploaded_bytes);
+        accumulate!(read_ns);
+        accumulate!(derivation_ns);
+        accumulate!(upload_ns);
+        accumulate!(blocking_ns);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod load_statistics_tests {
+    use super::VulkanCompiledResourceLoadStatistics;
+
+    fn statistics(base: u64) -> VulkanCompiledResourceLoadStatistics {
+        VulkanCompiledResourceLoadStatistics {
+            load_count: base,
+            reload_count: base + 1,
+            physical_read_bytes: base + 2,
+            resident_bytes_produced: base + 3,
+            uploaded_bytes: base + 4,
+            read_ns: base + 5,
+            derivation_ns: base + 6,
+            upload_ns: base + 7,
+            blocking_ns: base + 8,
+        }
+    }
+
+    #[test]
+    fn load_statistics_delta_preserves_every_counter() {
+        let delta = statistics(20).checked_delta_since(statistics(7)).unwrap();
+
+        assert_eq!(
+            delta,
+            VulkanCompiledResourceLoadStatistics {
+                load_count: 13,
+                reload_count: 13,
+                physical_read_bytes: 13,
+                resident_bytes_produced: 13,
+                uploaded_bytes: 13,
+                read_ns: 13,
+                derivation_ns: 13,
+                upload_ns: 13,
+                blocking_ns: 13,
+            }
+        );
+    }
+
+    #[test]
+    fn load_statistics_delta_rejects_a_regressed_counter() {
+        let mut current = statistics(20);
+        let previous = statistics(7);
+        current.uploaded_bytes = previous.uploaded_bytes - 1;
+
+        let error = current.checked_delta_since(previous).unwrap_err();
+
+        assert!(error.to_string().contains("uploaded_bytes regressed"));
+    }
+
+    #[test]
+    fn load_statistics_accumulation_rejects_overflow() {
+        let mut total = VulkanCompiledResourceLoadStatistics {
+            blocking_ns: u64::MAX,
+            ..VulkanCompiledResourceLoadStatistics::default()
+        };
+
+        let error = total
+            .checked_accumulate(VulkanCompiledResourceLoadStatistics {
+                blocking_ns: 1,
+                ..VulkanCompiledResourceLoadStatistics::default()
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("blocking_ns overflowed"));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VulkanCompiledResourceResidencyReport {
     pub schema: String,

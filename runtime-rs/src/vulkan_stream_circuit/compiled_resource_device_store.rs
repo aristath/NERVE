@@ -1720,6 +1720,26 @@ impl VulkanCompiledResourceDeviceStore {
             .map_err(compiled_device_store_residency_error)
     }
 
+    pub fn load_statistics(
+        &self,
+    ) -> Result<VulkanCompiledResourceLoadStatistics, VulkanCompiledResourceDeviceStoreError> {
+        use std::sync::atomic::Ordering;
+
+        let residency = self.statistics()?;
+        let backing = self.backing_store.statistics();
+        Ok(VulkanCompiledResourceLoadStatistics {
+            load_count: residency.successful_load_count,
+            reload_count: residency.reload_count,
+            physical_read_bytes: backing.physical_bytes,
+            resident_bytes_produced: backing.resident_bytes,
+            uploaded_bytes: self.instrumentation.uploaded_bytes.load(Ordering::Relaxed),
+            read_ns: backing.read_time_ns,
+            derivation_ns: backing.derivation_time_ns,
+            upload_ns: self.instrumentation.upload_time_ns.load(Ordering::Relaxed),
+            blocking_ns: self.instrumentation.blocking_time_ns.load(Ordering::Relaxed),
+        })
+    }
+
     pub fn mark_mount_complete(&self) -> Result<(), VulkanCompiledResourceDeviceStoreError> {
         let residency = self.statistics()?;
         let arena = self

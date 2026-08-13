@@ -18,9 +18,9 @@ from nerve.representation_optimizer.contracts import (
 
 BENCHMARK_WORKLOAD_SCHEMA = "nerve.optimizer.benchmark_workload.v1"
 BENCHMARK_PLAN_SCHEMA = "nerve.optimizer.benchmark_plan.v5"
-BENCHMARK_OBSERVATION_SCHEMA = "nerve.optimizer.benchmark_observation.v2"
+BENCHMARK_OBSERVATION_SCHEMA = "nerve.optimizer.benchmark_observation.v3"
 BENCHMARK_RESIDENCY_EVENT_SCHEMA = "nerve.optimizer.benchmark_residency_event.v2"
-BENCHMARK_RUN_SCHEMA = "nerve.optimizer.benchmark_run.v4"
+BENCHMARK_RUN_SCHEMA = "nerve.optimizer.benchmark_run.v5"
 BENCHMARK_EVIDENCE_INTEGRITY_SCHEMA = "nerve.optimizer.benchmark_evidence_integrity.v1"
 
 _ARTIFACT_DIGEST_PREFIX = "nerve.optimizer.artifact_sha256.v1:"
@@ -520,6 +520,7 @@ def validate_benchmark_observation(document: Json) -> None:
             "work",
             "memory",
             "representation",
+            "resource_loading",
             "device",
             "synchronization",
             "transport",
@@ -636,6 +637,27 @@ def validate_benchmark_observation(document: Json) -> None:
     )
     for field, value in representation.items():
         _nonnegative(value, f"representation.{field}")
+    resource_loading = _object(
+        document["resource_loading"],
+        "resource_loading",
+    )
+    _fields(
+        resource_loading,
+        {
+            "load_count",
+            "reload_count",
+            "physical_read_bytes",
+            "resident_bytes_produced",
+            "uploaded_bytes",
+            "read_ns",
+            "derivation_ns",
+            "upload_ns",
+            "blocking_ns",
+        },
+        "resource_loading",
+    )
+    for field, value in resource_loading.items():
+        _nonnegative(value, f"resource_loading.{field}")
     device = _object(document["device"], "device")
     _fields(
         device,
@@ -1300,6 +1322,15 @@ def _role_summary(value: Any, path: str) -> None:
             "conversion_bytes",
             "conversion_ns",
             "boundary_count",
+            "resource_load_count",
+            "resource_reload_count",
+            "resource_physical_read_bytes",
+            "resource_resident_bytes_produced",
+            "resource_uploaded_bytes",
+            "resource_read_ns",
+            "resource_derivation_ns",
+            "resource_upload_ns",
+            "resource_blocking_ns",
             "utilization_ppm",
             "synchronization_wait_ns",
             "transport_bytes",
@@ -1325,6 +1356,15 @@ def _role_summary(value: Any, path: str) -> None:
         "conversion_bytes",
         "conversion_ns",
         "boundary_count",
+        "resource_load_count",
+        "resource_reload_count",
+        "resource_physical_read_bytes",
+        "resource_resident_bytes_produced",
+        "resource_uploaded_bytes",
+        "resource_read_ns",
+        "resource_derivation_ns",
+        "resource_upload_ns",
+        "resource_blocking_ns",
         "utilization_ppm",
         "synchronization_wait_ns",
         "transport_bytes",
@@ -1402,6 +1442,15 @@ def _resource_role(value: Any, path: str) -> None:
             "conversion_bytes",
             "conversion_ns",
             "boundary_count",
+            "resource_load_count",
+            "resource_reload_count",
+            "resource_physical_read_bytes",
+            "resource_resident_bytes_produced",
+            "resource_uploaded_bytes",
+            "resource_read_ns",
+            "resource_derivation_ns",
+            "resource_upload_ns",
+            "resource_blocking_ns",
             "device_measurement_ns",
             "device_busy_ns",
             "utilization_ppm",

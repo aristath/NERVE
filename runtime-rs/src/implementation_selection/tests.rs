@@ -273,6 +273,15 @@ fn loaded_implementation(
             conversion_ns,
             conversion_bytes: conversion_ns,
             boundary_count: u64::from(conversion_ns > 0),
+            resource_load_count: 0,
+            resource_reload_count: 0,
+            resource_physical_read_bytes: 0,
+            resource_resident_bytes_produced: 0,
+            resource_uploaded_bytes: 0,
+            resource_read_ns: 0,
+            resource_derivation_ns: 0,
+            resource_upload_ns: 0,
+            resource_blocking_ns: 0,
             speedup_ppm: compared.paired.speedup_ppm,
         }],
         candidate_root: PathBuf::from(format!("/fixture/{implementation_id}/candidate")),
@@ -453,6 +462,16 @@ fn selector_uses_the_weakest_measured_anchor_across_a_sustained_regime() {
         800,
         4,
     );
+    let cold_metrics = &mut implementation.workload_metrics[0];
+    cold_metrics.resource_load_count = 2;
+    cold_metrics.resource_reload_count = 1;
+    cold_metrics.resource_physical_read_bytes = 128;
+    cold_metrics.resource_resident_bytes_produced = 192;
+    cold_metrics.resource_uploaded_bytes = 192;
+    cold_metrics.resource_read_ns = 13;
+    cold_metrics.resource_derivation_ns = 17;
+    cold_metrics.resource_upload_ns = 19;
+    cold_metrics.resource_blocking_ns = 53;
     implementation
         .workload_metrics
         .push(RuntimeImplementationWorkloadMetrics {
@@ -466,6 +485,15 @@ fn selector_uses_the_weakest_measured_anchor_across_a_sustained_regime() {
             conversion_ns: 9,
             conversion_bytes: 9,
             boundary_count: 1,
+            resource_load_count: 0,
+            resource_reload_count: 0,
+            resource_physical_read_bytes: 0,
+            resource_resident_bytes_produced: 0,
+            resource_uploaded_bytes: 0,
+            resource_read_ns: 99,
+            resource_derivation_ns: 0,
+            resource_upload_ns: 0,
+            resource_blocking_ns: 0,
             speedup_ppm: 12_500,
         });
     let catalog = RuntimeImplementationCatalog {
@@ -492,6 +520,76 @@ fn selector_uses_the_weakest_measured_anchor_across_a_sustained_regime() {
     assert_eq!(report.selected[0].estimated_saved_ns, 25);
     assert_eq!(report.selected[0].speedup_ppm, 12_500);
     assert_eq!(report.selected[0].conversion_ns, 9);
+    assert_eq!(report.selected[0].resource_load_count, 2);
+    assert_eq!(report.selected[0].resource_reload_count, 1);
+    assert_eq!(report.selected[0].resource_physical_read_bytes, 128);
+    assert_eq!(report.selected[0].resource_resident_bytes_produced, 192);
+    assert_eq!(report.selected[0].resource_uploaded_bytes, 192);
+    assert_eq!(report.selected[0].resource_read_ns, 13);
+    assert_eq!(report.selected[0].resource_derivation_ns, 17);
+    assert_eq!(report.selected[0].resource_upload_ns, 19);
+    assert_eq!(report.selected[0].resource_blocking_ns, 53);
+    assert_eq!(report.total_resource_load_count, 2);
+    assert_eq!(report.total_resource_blocking_ns, 53);
+}
+
+#[test]
+fn selector_prefers_lower_measured_reload_cost_when_savings_are_equal() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu-a", "gfx-fixture", "vulkan");
+    let target = predicate(&[&gpu], "local");
+    let mut reload_heavy = loaded_implementation(
+        "implementation_a_reload_heavy",
+        &["layer"],
+        &["scope_layer"],
+        target.clone(),
+        1_000,
+        800,
+        4,
+    );
+    reload_heavy.workload_metrics[0].resource_load_count = 4;
+    reload_heavy.workload_metrics[0].resource_reload_count = 3;
+    reload_heavy.workload_metrics[0].resource_physical_read_bytes = 512;
+    reload_heavy.workload_metrics[0].resource_blocking_ns = 80;
+    let mut resident = loaded_implementation(
+        "implementation_z_resident",
+        &["layer"],
+        &["scope_layer"],
+        target,
+        1_000,
+        800,
+        4,
+    );
+    resident.workload_metrics[0].resource_load_count = 1;
+    resident.workload_metrics[0].resource_physical_read_bytes = 128;
+    resident.workload_metrics[0].resource_blocking_ns = 20;
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        scopes: BTreeMap::new(),
+        implementations: vec![reload_heavy, resident],
+    };
+    let request = request(
+        vec![selection_device("gpu0", gpu)],
+        &[("layer0", "layer", &["gpu0"])],
+        &[],
+    );
+
+    let report = catalog.select(&request).unwrap();
+
+    assert_eq!(report.selected.len(), 1);
+    assert_eq!(
+        report.selected[0].implementation_id,
+        "implementation_z_resident"
+    );
+    assert_eq!(report.total_estimated_saved_ns, 200);
+    assert_eq!(report.total_resource_reload_count, 0);
+    assert_eq!(report.total_resource_blocking_ns, 20);
 }
 
 #[test]

@@ -34,6 +34,7 @@ from nerve.representation_optimizer.benchmarking.executor_protocol import (
     positive_integer,
     required_digest,
     required_device_state_digest,
+    required_object,
     required_text,
     validated_windows,
 )
@@ -478,6 +479,7 @@ class ResidentComponentExecutionSession:
             report.get("queue_submission_count"),
             "executor report queue_submission_count",
         )
+        resource_loading = required_object(report, "resource_loading")
         document = {
             "schema": BENCHMARK_OBSERVATION_SCHEMA,
             "observation_id": "",
@@ -534,6 +536,23 @@ class ResidentComponentExecutionSession:
                     report.get("representation_boundary_count"),
                     "executor report representation_boundary_count",
                 ),
+            },
+            "resource_loading": {
+                field: nonnegative_integer(
+                    resource_loading.get(field),
+                    f"executor report resource_loading.{field}",
+                )
+                for field in (
+                    "load_count",
+                    "reload_count",
+                    "physical_read_bytes",
+                    "resident_bytes_produced",
+                    "uploaded_bytes",
+                    "read_ns",
+                    "derivation_ns",
+                    "upload_ns",
+                    "blocking_ns",
+                )
             },
             "device": {
                 "measurement_ns": measurement_ns,

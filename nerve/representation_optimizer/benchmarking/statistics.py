@@ -491,6 +491,42 @@ def _role_summary(observations: list[Json]) -> Json:
             observation["representation"]["boundary_count"]
             for observation in observations
         ),
+        "resource_load_count": sum(
+            observation["resource_loading"]["load_count"]
+            for observation in observations
+        ),
+        "resource_reload_count": sum(
+            observation["resource_loading"]["reload_count"]
+            for observation in observations
+        ),
+        "resource_physical_read_bytes": sum(
+            observation["resource_loading"]["physical_read_bytes"]
+            for observation in observations
+        ),
+        "resource_resident_bytes_produced": sum(
+            observation["resource_loading"]["resident_bytes_produced"]
+            for observation in observations
+        ),
+        "resource_uploaded_bytes": sum(
+            observation["resource_loading"]["uploaded_bytes"]
+            for observation in observations
+        ),
+        "resource_read_ns": sum(
+            observation["resource_loading"]["read_ns"]
+            for observation in observations
+        ),
+        "resource_derivation_ns": sum(
+            observation["resource_loading"]["derivation_ns"]
+            for observation in observations
+        ),
+        "resource_upload_ns": sum(
+            observation["resource_loading"]["upload_ns"]
+            for observation in observations
+        ),
+        "resource_blocking_ns": sum(
+            observation["resource_loading"]["blocking_ns"]
+            for observation in observations
+        ),
         "utilization_ppm": (
             round(busy_ns * 1_000_000 / measurement_ns) if measurement_ns else 0
         ),
@@ -607,6 +643,42 @@ def _resource_measurements(construction: Json, run: Json) -> Json:
             ),
             "boundary_count": sum(
                 observation["representation"]["boundary_count"]
+                for observation in observations
+            ),
+            "resource_load_count": sum(
+                observation["resource_loading"]["load_count"]
+                for observation in observations
+            ),
+            "resource_reload_count": sum(
+                observation["resource_loading"]["reload_count"]
+                for observation in observations
+            ),
+            "resource_physical_read_bytes": sum(
+                observation["resource_loading"]["physical_read_bytes"]
+                for observation in observations
+            ),
+            "resource_resident_bytes_produced": sum(
+                observation["resource_loading"]["resident_bytes_produced"]
+                for observation in observations
+            ),
+            "resource_uploaded_bytes": sum(
+                observation["resource_loading"]["uploaded_bytes"]
+                for observation in observations
+            ),
+            "resource_read_ns": sum(
+                observation["resource_loading"]["read_ns"]
+                for observation in observations
+            ),
+            "resource_derivation_ns": sum(
+                observation["resource_loading"]["derivation_ns"]
+                for observation in observations
+            ),
+            "resource_upload_ns": sum(
+                observation["resource_loading"]["upload_ns"]
+                for observation in observations
+            ),
+            "resource_blocking_ns": sum(
+                observation["resource_loading"]["blocking_ns"]
                 for observation in observations
             ),
             "device_measurement_ns": measured_ns,

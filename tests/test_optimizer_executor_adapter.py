@@ -137,6 +137,17 @@ class FixtureExecutor:
                 "representation_conversion_bytes": 0 if warmed else 192,
                 "representation_conversion_ns": 0 if warmed else 37,
                 "representation_boundary_count": 0 if warmed else 1,
+                "resource_loading": {
+                    "load_count": 0 if warmed else 2,
+                    "reload_count": 0 if warmed else 1,
+                    "physical_read_bytes": 0 if warmed else 128,
+                    "resident_bytes_produced": 0 if warmed else 192,
+                    "uploaded_bytes": 0 if warmed else 192,
+                    "read_ns": 0 if warmed else 13,
+                    "derivation_ns": 0 if warmed else 17,
+                    "upload_ns": 0 if warmed else 19,
+                    "blocking_ns": 0 if warmed else 53,
+                },
                 "physical_dispatch_count": 1,
                 "queue_submission_count": 1,
                 "synchronization_wait_count": 1,
@@ -289,6 +300,17 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
         "conversion_ns": 37,
         "boundary_count": 1,
     }
+    assert observation["resource_loading"] == {
+        "load_count": 2,
+        "reload_count": 1,
+        "physical_read_bytes": 128,
+        "resident_bytes_produced": 192,
+        "uploaded_bytes": 192,
+        "read_ns": 13,
+        "derivation_ns": 17,
+        "upload_ns": 19,
+        "blocking_ns": 53,
+    }
     assert observation["memory"]["permanent_bytes"] == 4_224
     assert observation["transport"]["bytes"] > 0
     assert observation["default_statistics"]["physical_dispatch_count"] == 1
@@ -411,6 +433,49 @@ def test_resident_component_adapter_rejects_missing_conversion_evidence(
         ModelCompileError,
         match="representation_conversion_ns",
     ):
+        session.execute(execution_request)
+    session.close()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda loading: loading.pop("blocking_ns"),
+            "resource_loading fields are invalid",
+        ),
+        (
+            lambda loading: loading.__setitem__("reload_count", -1),
+            "resource_loading.reload_count must be a non-negative integer",
+        ),
+        (
+            lambda loading: loading.__setitem__("load_count", True),
+            "resource_loading.load_count must be a non-negative integer",
+        ),
+    ],
+)
+def test_resident_component_adapter_rejects_invalid_resource_loading_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation,
+    message: str,
+) -> None:
+    adapter, executor, _, _ = _adapter_fixture(tmp_path, monkeypatch)
+    mount_request, execution_request, _ = _requests(tmp_path)
+    original_request = executor.request
+
+    def corrupt_loading(document: Json, *, cancel_requested=None) -> Json:
+        response = original_request(
+            document,
+            cancel_requested=cancel_requested,
+        )
+        if document["command"] == "execute":
+            mutation(response["payload"]["resource_loading"])
+        return response
+
+    executor.request = corrupt_loading  # type: ignore[method-assign]
+    session = adapter.open_session(mount_request)
+    with pytest.raises(ModelCompileError, match=message):
         session.execute(execution_request)
     session.close()
 

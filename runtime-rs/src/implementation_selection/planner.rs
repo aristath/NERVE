@@ -1,8 +1,8 @@
 use super::{
     LoadedRuntimeImplementation, RuntimeImplementationCatalog,
-    RuntimeImplementationSelectionReport, RuntimeRejectedImplementation,
-    RuntimeSelectedImplementation, RuntimeSelectionDevice, RuntimeSelectionInstance,
-    RuntimeSelectionRequest,
+    RuntimeImplementationSelectionReport, RuntimeImplementationWorkloadMetrics,
+    RuntimeRejectedImplementation, RuntimeSelectedImplementation, RuntimeSelectionDevice,
+    RuntimeSelectionInstance, RuntimeSelectionRequest,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -129,6 +129,58 @@ impl RuntimeImplementationCatalog {
             selected.iter().map(|selection| selection.boundary_count),
             "representation boundary count",
         )?;
+        let total_resource_load_count = checked_metric_sum(
+            selected
+                .iter()
+                .map(|selection| selection.resource_load_count),
+            "resource load count",
+        )?;
+        let total_resource_reload_count = checked_metric_sum(
+            selected
+                .iter()
+                .map(|selection| selection.resource_reload_count),
+            "resource reload count",
+        )?;
+        let total_resource_physical_read_bytes = checked_metric_sum(
+            selected
+                .iter()
+                .map(|selection| selection.resource_physical_read_bytes),
+            "resource physical read bytes",
+        )?;
+        let total_resource_resident_bytes_produced = checked_metric_sum(
+            selected
+                .iter()
+                .map(|selection| selection.resource_resident_bytes_produced),
+            "resource resident bytes produced",
+        )?;
+        let total_resource_uploaded_bytes = checked_metric_sum(
+            selected
+                .iter()
+                .map(|selection| selection.resource_uploaded_bytes),
+            "resource uploaded bytes",
+        )?;
+        let total_resource_read_ns = checked_metric_sum(
+            selected.iter().map(|selection| selection.resource_read_ns),
+            "resource read time",
+        )?;
+        let total_resource_derivation_ns = checked_metric_sum(
+            selected
+                .iter()
+                .map(|selection| selection.resource_derivation_ns),
+            "resource derivation time",
+        )?;
+        let total_resource_upload_ns = checked_metric_sum(
+            selected
+                .iter()
+                .map(|selection| selection.resource_upload_ns),
+            "resource upload time",
+        )?;
+        let total_resource_blocking_ns = checked_metric_sum(
+            selected
+                .iter()
+                .map(|selection| selection.resource_blocking_ns),
+            "resource blocking time",
+        )?;
         Ok(RuntimeImplementationSelectionReport {
             package_id: self.package_id.clone(),
             execution: request.execution.clone(),
@@ -136,6 +188,15 @@ impl RuntimeImplementationCatalog {
             total_conversion_ns,
             total_conversion_bytes,
             total_boundary_count,
+            total_resource_load_count,
+            total_resource_reload_count,
+            total_resource_physical_read_bytes,
+            total_resource_resident_bytes_produced,
+            total_resource_uploaded_bytes,
+            total_resource_read_ns,
+            total_resource_derivation_ns,
+            total_resource_upload_ns,
+            total_resource_blocking_ns,
             selected,
             exact_instance_ids,
             rejected,
@@ -314,6 +375,60 @@ impl RuntimeImplementationCatalog {
                     .map(|application| application.boundary_count),
                 "representation boundary count",
             )?,
+            total_resource_load_count: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.resource_load_count),
+                "resource load count",
+            )?,
+            total_resource_reload_count: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.resource_reload_count),
+                "resource reload count",
+            )?,
+            total_resource_physical_read_bytes: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.resource_physical_read_bytes),
+                "resource physical read bytes",
+            )?,
+            total_resource_resident_bytes_produced: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.resource_resident_bytes_produced),
+                "resource resident bytes produced",
+            )?,
+            total_resource_uploaded_bytes: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.resource_uploaded_bytes),
+                "resource uploaded bytes",
+            )?,
+            total_resource_read_ns: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.resource_read_ns),
+                "resource read time",
+            )?,
+            total_resource_derivation_ns: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.resource_derivation_ns),
+                "resource derivation time",
+            )?,
+            total_resource_upload_ns: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.resource_upload_ns),
+                "resource upload time",
+            )?,
+            total_resource_blocking_ns: checked_metric_sum(
+                selected
+                    .iter()
+                    .map(|application| application.resource_blocking_ns),
+                "resource blocking time",
+            )?,
             selected,
             exact_instance_ids,
             rejected,
@@ -402,6 +517,15 @@ fn eligible_applications<'a>(
                     conversion_ns: metrics.conversion_ns,
                     conversion_bytes: metrics.conversion_bytes,
                     boundary_count: metrics.boundary_count,
+                    resource_load_count: metrics.resource_load_count,
+                    resource_reload_count: metrics.resource_reload_count,
+                    resource_physical_read_bytes: metrics.resource_physical_read_bytes,
+                    resource_resident_bytes_produced: metrics.resource_resident_bytes_produced,
+                    resource_uploaded_bytes: metrics.resource_uploaded_bytes,
+                    resource_read_ns: metrics.resource_read_ns,
+                    resource_derivation_ns: metrics.resource_derivation_ns,
+                    resource_upload_ns: metrics.resource_upload_ns,
+                    resource_blocking_ns: metrics.resource_blocking_ns,
                     decision_reason: loaded.implementation.decision_reason.clone(),
                 },
             });
@@ -457,6 +581,15 @@ fn selection_report_for_independent_application(
         total_conversion_ns: selected.conversion_ns,
         total_conversion_bytes: selected.conversion_bytes,
         total_boundary_count: selected.boundary_count,
+        total_resource_load_count: selected.resource_load_count,
+        total_resource_reload_count: selected.resource_reload_count,
+        total_resource_physical_read_bytes: selected.resource_physical_read_bytes,
+        total_resource_resident_bytes_produced: selected.resource_resident_bytes_produced,
+        total_resource_uploaded_bytes: selected.resource_uploaded_bytes,
+        total_resource_read_ns: selected.resource_read_ns,
+        total_resource_derivation_ns: selected.resource_derivation_ns,
+        total_resource_upload_ns: selected.resource_upload_ns,
+        total_resource_blocking_ns: selected.resource_blocking_ns,
         selected: vec![selected],
         exact_instance_ids,
         rejected,
@@ -785,6 +918,35 @@ fn select_metrics(
         selected.iter().map(|metrics| metrics.boundary_count),
         "representation boundary count",
     )?;
+    let lifecycle_metrics = loaded
+        .workload_metrics
+        .iter()
+        .filter(|metrics| {
+            request.execution.phases.contains(&metrics.phase)
+                && loaded
+                    .implementation
+                    .runtime_predicate
+                    .execution
+                    .alternative_phases
+                    .contains(&metrics.phase)
+        })
+        .max_by_key(|metrics| {
+            (
+                metrics.resource_reload_count,
+                metrics.resource_blocking_ns,
+                metrics.resource_physical_read_bytes,
+                metrics.resource_load_count,
+                metrics.resource_resident_bytes_produced,
+                metrics.resource_uploaded_bytes,
+                metrics.resource_read_ns,
+                metrics.resource_derivation_ns,
+                metrics.resource_upload_ns,
+                metrics.workload_id.as_str(),
+            )
+        });
+    let lifecycle = |field: fn(&RuntimeImplementationWorkloadMetrics) -> u64| {
+        lifecycle_metrics.map(field).unwrap_or_default()
+    };
     Ok(AggregatedMetrics {
         speedup_ppm: selected
             .iter()
@@ -795,6 +957,17 @@ fn select_metrics(
         conversion_ns,
         conversion_bytes,
         boundary_count,
+        resource_load_count: lifecycle(|metrics| metrics.resource_load_count),
+        resource_reload_count: lifecycle(|metrics| metrics.resource_reload_count),
+        resource_physical_read_bytes: lifecycle(|metrics| metrics.resource_physical_read_bytes),
+        resource_resident_bytes_produced: lifecycle(|metrics| {
+            metrics.resource_resident_bytes_produced
+        }),
+        resource_uploaded_bytes: lifecycle(|metrics| metrics.resource_uploaded_bytes),
+        resource_read_ns: lifecycle(|metrics| metrics.resource_read_ns),
+        resource_derivation_ns: lifecycle(|metrics| metrics.resource_derivation_ns),
+        resource_upload_ns: lifecycle(|metrics| metrics.resource_upload_ns),
+        resource_blocking_ns: lifecycle(|metrics| metrics.resource_blocking_ns),
     })
 }
 
@@ -804,6 +977,15 @@ struct AggregatedMetrics {
     conversion_ns: u64,
     conversion_bytes: u64,
     boundary_count: u64,
+    resource_load_count: u64,
+    resource_reload_count: u64,
+    resource_physical_read_bytes: u64,
+    resource_resident_bytes_produced: u64,
+    resource_uploaded_bytes: u64,
+    resource_read_ns: u64,
+    resource_derivation_ns: u64,
+    resource_upload_ns: u64,
+    resource_blocking_ns: u64,
 }
 
 fn application_order(left: &EligibleApplication<'_>, right: &EligibleApplication<'_>) -> Ordering {
@@ -848,6 +1030,10 @@ fn optimal_nonoverlapping_applications(
 struct SelectionSet {
     indices: Vec<usize>,
     savings: u64,
+    resource_reloads: u64,
+    resource_blocking_ns: u64,
+    resource_physical_read_bytes: u64,
+    resource_loads: u64,
     conversions: u64,
     feasible: bool,
 }
@@ -884,6 +1070,18 @@ fn search_selection_sets(
         current.savings = current
             .savings
             .saturating_add(application.selected.estimated_saved_ns);
+        current.resource_reloads = current
+            .resource_reloads
+            .saturating_add(application.selected.resource_reload_count);
+        current.resource_blocking_ns = current
+            .resource_blocking_ns
+            .saturating_add(application.selected.resource_blocking_ns);
+        current.resource_physical_read_bytes = current
+            .resource_physical_read_bytes
+            .saturating_add(application.selected.resource_physical_read_bytes);
+        current.resource_loads = current
+            .resource_loads
+            .saturating_add(application.selected.resource_load_count);
         current.conversions = current
             .conversions
             .saturating_add(application.selected.conversion_ns);
@@ -900,6 +1098,18 @@ fn search_selection_sets(
         current.savings = current
             .savings
             .saturating_sub(application.selected.estimated_saved_ns);
+        current.resource_reloads = current
+            .resource_reloads
+            .saturating_sub(application.selected.resource_reload_count);
+        current.resource_blocking_ns = current
+            .resource_blocking_ns
+            .saturating_sub(application.selected.resource_blocking_ns);
+        current.resource_physical_read_bytes = current
+            .resource_physical_read_bytes
+            .saturating_sub(application.selected.resource_physical_read_bytes);
+        current.resource_loads = current
+            .resource_loads
+            .saturating_sub(application.selected.resource_load_count);
         current.conversions = current
             .conversions
             .saturating_sub(application.selected.conversion_ns);
@@ -928,6 +1138,18 @@ fn selection_set_is_better(
     }
     if candidate.savings != current.savings {
         return candidate.savings > current.savings;
+    }
+    if candidate.resource_reloads != current.resource_reloads {
+        return candidate.resource_reloads < current.resource_reloads;
+    }
+    if candidate.resource_blocking_ns != current.resource_blocking_ns {
+        return candidate.resource_blocking_ns < current.resource_blocking_ns;
+    }
+    if candidate.resource_physical_read_bytes != current.resource_physical_read_bytes {
+        return candidate.resource_physical_read_bytes < current.resource_physical_read_bytes;
+    }
+    if candidate.resource_loads != current.resource_loads {
+        return candidate.resource_loads < current.resource_loads;
     }
     if candidate.conversions != current.conversions {
         return candidate.conversions < current.conversions;

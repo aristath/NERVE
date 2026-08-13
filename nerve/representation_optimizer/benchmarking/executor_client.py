@@ -486,3 +486,25 @@ def _validate_execution_report(
             raise ModelCompileError(
                 f"executor report {field} must be a non-negative integer"
             )
+    loading = required_object(report, "resource_loading")
+    expected_loading_fields = {
+        "load_count",
+        "reload_count",
+        "physical_read_bytes",
+        "resident_bytes_produced",
+        "uploaded_bytes",
+        "read_ns",
+        "derivation_ns",
+        "upload_ns",
+        "blocking_ns",
+    }
+    if set(loading) != expected_loading_fields:
+        raise ModelCompileError(
+            "executor report resource_loading fields are invalid"
+        )
+    for field in sorted(expected_loading_fields):
+        value = loading[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ModelCompileError(
+                f"executor report resource_loading.{field} must be a non-negative integer"
+            )

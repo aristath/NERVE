@@ -10,7 +10,7 @@ pub const OPTIMIZATION_SCOPE_CATALOG_SCHEMA: &str = "nerve.optimizer.optimizatio
 pub const RUNTIME_IMPLEMENTATION_PREDICATE_SCHEMA: &str =
     "nerve.optimizer.runtime_implementation_predicate.v6";
 pub const PROMOTION_DECISION_SCHEMA: &str = "nerve.optimizer.promotion_decision.v2";
-pub const BENCHMARK_RECORD_SCHEMA: &str = "nerve.optimizer.benchmark_record.v2";
+pub const BENCHMARK_RECORD_SCHEMA: &str = "nerve.optimizer.benchmark_record.v3";
 pub const VALIDATION_RECORD_SCHEMA: &str = "nerve.optimizer.validation_record.v2";
 pub const RUNTIME_MOUNT_PLAN_SCHEMA: &str = "nerve.optimizer.runtime_mount_plan.v3";
 pub const VULKAN_COMPONENT_OVERLAY_SCHEMA: &str = "nerve.optimizer.vulkan_component_overlay.v2";
@@ -196,6 +196,15 @@ pub struct RuntimeImplementationWorkloadMetrics {
     pub conversion_ns: u64,
     pub conversion_bytes: u64,
     pub boundary_count: u64,
+    pub resource_load_count: u64,
+    pub resource_reload_count: u64,
+    pub resource_physical_read_bytes: u64,
+    pub resource_resident_bytes_produced: u64,
+    pub resource_uploaded_bytes: u64,
+    pub resource_read_ns: u64,
+    pub resource_derivation_ns: u64,
+    pub resource_upload_ns: u64,
+    pub resource_blocking_ns: u64,
     pub speedup_ppm: i64,
 }
 
@@ -368,6 +377,15 @@ pub struct RuntimeSelectedImplementation {
     pub conversion_ns: u64,
     pub conversion_bytes: u64,
     pub boundary_count: u64,
+    pub resource_load_count: u64,
+    pub resource_reload_count: u64,
+    pub resource_physical_read_bytes: u64,
+    pub resource_resident_bytes_produced: u64,
+    pub resource_uploaded_bytes: u64,
+    pub resource_read_ns: u64,
+    pub resource_derivation_ns: u64,
+    pub resource_upload_ns: u64,
+    pub resource_blocking_ns: u64,
     pub decision_reason: String,
 }
 
@@ -389,4 +407,13 @@ pub struct RuntimeImplementationSelectionReport {
     pub total_conversion_ns: u64,
     pub total_conversion_bytes: u64,
     pub total_boundary_count: u64,
+    pub total_resource_load_count: u64,
+    pub total_resource_reload_count: u64,
+    pub total_resource_physical_read_bytes: u64,
+    pub total_resource_resident_bytes_produced: u64,
+    pub total_resource_uploaded_bytes: u64,
+    pub total_resource_read_ns: u64,
+    pub total_resource_derivation_ns: u64,
+    pub total_resource_upload_ns: u64,
+    pub total_resource_blocking_ns: u64,
 }

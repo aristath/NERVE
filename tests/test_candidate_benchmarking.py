@@ -327,6 +327,17 @@ class FixtureExecutionSession:
                 "conversion_ns": 1_000 if request.role == "candidate" else 0,
                 "boundary_count": 1 if request.role == "candidate" else 0,
             },
+            "resource_loading": {
+                "load_count": 1 if request.role == "candidate" else 0,
+                "reload_count": 0,
+                "physical_read_bytes": 32 if request.role == "candidate" else 0,
+                "resident_bytes_produced": 48 if request.role == "candidate" else 0,
+                "uploaded_bytes": 48 if request.role == "candidate" else 0,
+                "read_ns": 100 if request.role == "candidate" else 0,
+                "derivation_ns": 200 if request.role == "candidate" else 0,
+                "upload_ns": 300 if request.role == "candidate" else 0,
+                "blocking_ns": 700 if request.role == "candidate" else 0,
+            },
             "device": {
                 "measurement_ns": duration,
                 "busy_ns": busy_ns,
@@ -574,6 +585,15 @@ def test_matched_benchmark_promotes_only_measured_material_speedup(
     assert candidate_resources["queue_wait_ns"] > 0
     assert candidate_resources["transport_bytes"] > 0
     assert candidate_resources["boundary_count"] > 0
+    assert candidate_resources["resource_load_count"] > 0
+    assert candidate_resources["resource_reload_count"] == 0
+    assert candidate_resources["resource_physical_read_bytes"] > 0
+    assert candidate_resources["resource_resident_bytes_produced"] > 0
+    assert candidate_resources["resource_uploaded_bytes"] > 0
+    assert candidate_resources["resource_read_ns"] > 0
+    assert candidate_resources["resource_derivation_ns"] > 0
+    assert candidate_resources["resource_upload_ns"] > 0
+    assert candidate_resources["resource_blocking_ns"] > 0
     assert candidate_resources["resident_peak_bytes"] >= max(
         candidate_resources["resident_before_bytes"],
         candidate_resources["resident_after_bytes"],

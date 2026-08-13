@@ -521,6 +521,51 @@ fn load_workload_metrics(
                 "boundary_count",
                 "candidate workload metrics",
             )?,
+            resource_load_count: unsigned_u64(
+                candidate,
+                "resource_load_count",
+                "candidate workload metrics",
+            )?,
+            resource_reload_count: unsigned_u64(
+                candidate,
+                "resource_reload_count",
+                "candidate workload metrics",
+            )?,
+            resource_physical_read_bytes: unsigned_u64(
+                candidate,
+                "resource_physical_read_bytes",
+                "candidate workload metrics",
+            )?,
+            resource_resident_bytes_produced: unsigned_u64(
+                candidate,
+                "resource_resident_bytes_produced",
+                "candidate workload metrics",
+            )?,
+            resource_uploaded_bytes: unsigned_u64(
+                candidate,
+                "resource_uploaded_bytes",
+                "candidate workload metrics",
+            )?,
+            resource_read_ns: unsigned_u64(
+                candidate,
+                "resource_read_ns",
+                "candidate workload metrics",
+            )?,
+            resource_derivation_ns: unsigned_u64(
+                candidate,
+                "resource_derivation_ns",
+                "candidate workload metrics",
+            )?,
+            resource_upload_ns: unsigned_u64(
+                candidate,
+                "resource_upload_ns",
+                "candidate workload metrics",
+            )?,
+            resource_blocking_ns: unsigned_u64(
+                candidate,
+                "resource_blocking_ns",
+                "candidate workload metrics",
+            )?,
             speedup_ppm: comparison.paired.speedup_ppm,
         });
     }

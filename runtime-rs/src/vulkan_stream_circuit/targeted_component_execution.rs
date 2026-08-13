@@ -50,6 +50,7 @@ pub struct VulkanTargetedComponentExecutionReport {
     pub throughput_windows: Vec<VulkanTargetedComponentThroughputWindow>,
     pub resident_parameter_bytes: usize,
     pub resident_transient_bytes: usize,
+    pub resource_loading: VulkanCompiledResourceLoadStatistics,
     pub physical_dispatch_count: usize,
     pub queue_submission_count: usize,
     pub synchronization_wait_count: usize,
@@ -643,6 +644,7 @@ impl VulkanResidentTargetedOutputTransducerSession {
             throughput_windows: counters.windows,
             resident_parameter_bytes: self.resident_parameter_bytes,
             resident_transient_bytes: self.resident_transient_bytes(),
+            resource_loading: VulkanCompiledResourceLoadStatistics::default(),
             physical_dispatch_count: counters.physical_dispatch_count,
             queue_submission_count: counters.queue_submission_count,
             synchronization_wait_count: counters.queue_submission_count,
@@ -1068,6 +1070,7 @@ impl VulkanResidentTargetedComponentSession {
                 "targeted component quantum wait must be positive",
             );
         }
+        let resource_load_before = self.resource_load_statistics()?;
         self.reset_state_and_write_fixture(seed)?;
         let counters = match &self.execution {
                 VulkanTargetedComponentExecution::Decode(execution) => execution.execute(
@@ -1089,6 +1092,14 @@ impl VulkanResidentTargetedComponentSession {
             .then(|| self.captured_outputs())
             .transpose()?;
         let state_digest = self.state_digest()?;
+        let resource_loading = self
+            .resource_load_statistics()?
+            .checked_delta_since(resource_load_before)
+            .map_err(|error| {
+                targeted_component_error_value(format!(
+                    "failed to measure targeted resource loading: {error}",
+                ))
+            })?;
         Ok(VulkanTargetedComponentExecutionReport {
             component_id: self.component_id.clone(),
             node_id: self.node_id.clone(),
@@ -1108,12 +1119,29 @@ impl VulkanResidentTargetedComponentSession {
             throughput_windows: counters.windows,
             resident_parameter_bytes: self.resident_parameter_bytes,
             resident_transient_bytes: self.resident_transient_bytes(),
+            resource_loading,
             physical_dispatch_count: counters.physical_dispatch_count,
             queue_submission_count: counters.queue_submission_count,
             synchronization_wait_count: counters.queue_submission_count,
             synchronization_wait_ns: counters.synchronization_wait_ns,
             queue_wait_ns: counters.queue_wait_ns,
         })
+    }
+
+    fn resource_load_statistics(
+        &self,
+    ) -> Result<VulkanCompiledResourceLoadStatistics, VulkanResidentTokenModelPackageError> {
+        self.representation_context
+            .as_ref()
+            .map(|context| {
+                context.store.load_statistics().map_err(|error| {
+                    targeted_component_error_value(format!(
+                        "failed to snapshot targeted resource loading: {error}",
+                    ))
+                })
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     pub fn resident_parameter_bytes(&self) -> usize {
