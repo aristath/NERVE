@@ -27,8 +27,48 @@ struct VulkanResidentTargetedOutputTransducerPlan {
 }
 
 impl VulkanResidentModelPackageDeviceSlicePlan {
+    fn prepare_for_physical_planning(
+        manifest_dir: &Path,
+        runtime_model: &VulkanResidentRuntimeModel,
+        resource_contract: &CompiledResourceResidencyContract,
+        tensor_index: &TensorIndex,
+        device_id: &str,
+        capacity: usize,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        Self::prepare_internal(
+            None,
+            manifest_dir,
+            runtime_model,
+            resource_contract,
+            tensor_index,
+            device_id,
+            capacity,
+        )
+    }
+
     fn prepare(
         device: &VulkanComputeDevice,
+        manifest_dir: &Path,
+        runtime_model: &VulkanResidentRuntimeModel,
+        resource_contract: &CompiledResourceResidencyContract,
+        tensor_index: &TensorIndex,
+        device_id: &str,
+        capacity: usize,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        Self::prepare_internal(
+            Some(device),
+            manifest_dir,
+            runtime_model,
+            resource_contract,
+            tensor_index,
+            device_id,
+            capacity,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_internal(
+        device: Option<&VulkanComputeDevice>,
         manifest_dir: &Path,
         runtime_model: &VulkanResidentRuntimeModel,
         resource_contract: &CompiledResourceResidencyContract,
@@ -121,12 +161,17 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             &prepared_plan,
             &component_kernel_shaders,
         )?;
-        let batch_kernels = load_resident_component_batch_kernels(
-            device,
-            manifest_dir,
-            &runtime_model.component_executions,
-            &prepared_plan,
-        )?;
+        let batch_kernels = device
+            .map(|device| {
+                load_resident_component_batch_kernels(
+                    device,
+                    manifest_dir,
+                    &runtime_model.component_executions,
+                    &prepared_plan,
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
         let targeted_output = hosts_targeted_output
             .then(|| {
                 Ok(VulkanResidentTargetedOutputTransducerPlan {

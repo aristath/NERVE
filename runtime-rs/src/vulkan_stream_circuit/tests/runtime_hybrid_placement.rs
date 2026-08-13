@@ -1448,11 +1448,11 @@ fn runtime_hybrid_mounts_the_jointly_selected_representation_and_physical_plan_o
         },
         context_activations: crate::RuntimeInclusiveRange {
             minimum: 0,
-            maximum: 128,
+            maximum: 64,
         },
         state_activations: crate::RuntimeInclusiveRange {
             minimum: 0,
-            maximum: 128,
+            maximum: 64,
         },
         speculative_draft_tokens: 0,
         residency_policy: "eager".to_string(),
@@ -1521,9 +1521,18 @@ fn runtime_hybrid_mounts_the_jointly_selected_representation_and_physical_plan_o
         ))
         .unwrap();
     let capacity = VulkanPlacementCapacityEnvelope {
-        available_bytes_by_device: BTreeMap::from([(hybrid_test_device("gpu0"), 100)]),
-        host_available_bytes: 100,
+        available_bytes_by_device: BTreeMap::from([(
+            hybrid_test_device("gpu0"),
+            usize::MAX,
+        )]),
+        host_available_bytes: usize::MAX,
     };
+    let physical_mount_devices = [VulkanRuntimePhysicalPlanningDevice {
+        logical_device_id: "gpu0".to_string(),
+        identity: hybrid_test_device("gpu0"),
+        safe_capacity_bytes: usize::MAX,
+        storage_buffer_offset_alignment: 8,
+    }];
 
     let resolution = resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
         &package_root,
@@ -1533,8 +1542,14 @@ fn runtime_hybrid_mounts_the_jointly_selected_representation_and_physical_plan_o
         &implementation_catalog,
         &placement_catalog,
         &capacity,
-        128,
+        64,
         &BTreeMap::from([("gpu0".to_string(), "gpu0".to_string())]),
+        Some(VulkanRuntimeHybridMountPlanningContext {
+            devices: &physical_mount_devices,
+            speculative_draft_tokens: 0,
+            residency_policy: ResourceResidencyPolicy::Eager,
+            host_safe_capacity_bytes: usize::MAX,
+        }),
     )
     .unwrap()
     .expect("measured alternative has a complete route");
@@ -1572,6 +1587,10 @@ fn runtime_hybrid_mounts_the_jointly_selected_representation_and_physical_plan_o
         .physical_execution_plan
         .validate(&resolution.runtime_model)
         .unwrap();
+    assert!(
+        resolution.physical_mount_plan.is_some(),
+        "joint selection must pass exact full-context physical mount planning",
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

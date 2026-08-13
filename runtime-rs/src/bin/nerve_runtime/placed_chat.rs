@@ -43,6 +43,8 @@ fn resolve_runtime_hybrid_physical_execution(
     auto_placement: Option<&RuntimeAutoPlacementContext>,
     bound_devices: &RuntimeBoundVulkanDevices,
     context_capacity_activations: usize,
+    speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
 ) -> Result<
     (
         VulkanResidentRuntimeModel,
@@ -104,6 +106,23 @@ fn resolve_runtime_hybrid_physical_execution(
         )
         .into());
     }
+    let physical_mount_devices = bound_devices
+        .devices
+        .iter()
+        .map(|(logical_device_id, device)| VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: logical_device_id.clone(),
+            identity: VulkanPlacementDeviceExecutionIdentity {
+                physical_device_id: device.physical_device_id().to_string(),
+                api_version: device.api_version(),
+                driver_version: device.driver_version(),
+            },
+            safe_capacity_bytes: usize::try_from(
+                device.device_local_memory_budget().reservable_bytes,
+            )
+            .unwrap_or(usize::MAX),
+            storage_buffer_offset_alignment: device.min_storage_buffer_offset_alignment(),
+        })
+        .collect::<Vec<_>>();
     let Some(resolution) = resolve_vulkan_runtime_hybrid_physical_execution_with_representations(
         manifest_dir,
         &auto_placement.exact_runtime_model,
@@ -113,6 +132,10 @@ fn resolve_runtime_hybrid_physical_execution(
         &capacity,
         context_capacity_activations,
         &logical_device_id_by_physical_device,
+        &physical_mount_devices,
+        speculative_draft_tokens,
+        residency_policy,
+        capacity.host_available_bytes,
     )?
     else {
         eprintln!(
@@ -209,6 +232,8 @@ fn run_placed_chat(
         auto_placement.as_ref(),
         &bound_devices,
         capacity,
+        speculative_draft_tokens,
+        args.resource_residency_policy,
     )?;
     let implementation_selection = runtime_model
         .implementation_selection

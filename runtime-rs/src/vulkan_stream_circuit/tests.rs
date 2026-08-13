@@ -38,6 +38,7 @@ include!("tests/reusable_kernel_plan_tests.rs");
 include!("tests/prepared_dispatch_plan_tests.rs");
 include!("tests/runtime_residency_plan.rs");
 include!("tests/runtime_physical_execution_residency.rs");
+include!("tests/runtime_physical_mount_planning.rs");
 include!("tests/runtime_auto_placement.rs");
 include!("tests/runtime_hybrid_placement.rs");
 include!("tests/runtime_selected_resource_mount_planning.rs");
