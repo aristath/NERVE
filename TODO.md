@@ -395,7 +395,17 @@ For every numbered item below:
 - Treat every detected compatible target as eligible unless the caller
   explicitly excludes it. Current allocations are reservations: inspect each
   target immediately before planning and use only its measured safe remaining
-  capacity.
+  capacity. Driver-manifest discovery, package/live profile matching,
+  optimizer/validator device opening, and DRM queue-health leases are now
+  capability-driven and contain no PCI-vendor admission gate. The Linux DRM
+  sysfs probe accepts any Vulkan GPU that publishes exact total/used VRAM and
+  current activity counters, records existing resident clients, and excludes a
+  target with a typed reason when those counters are absent rather than
+  inventing headroom. Complete this boundary by sourcing equivalent exact
+  dynamic capacity/activity evidence from a driver-neutral runtime mechanism
+  (including `VK_EXT_memory_budget` where available), so compatible targets
+  such as the discrete Intel GPU are not excluded merely because their DRM
+  driver exposes different sysfs telemetry names.
 - Per-component physical compatibility is complete for the serialized
   backbone candidate graph. Runtime discovery now distinguishes source
   components from mounted instances, calibrates only exact execution

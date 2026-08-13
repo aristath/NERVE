@@ -26,7 +26,6 @@ use sha2::{Digest, Sha256};
 const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v8";
 const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v7";
 const PROGRESS_SCHEMA: &str = "nerve.optimizer.executor_progress.v1";
-const AMD_VENDOR_ID: u32 = 0x1002;
 const STREAM_ID: &str = "validation";
 const COMPONENT_ACTIVATIONS_STEP_UNIT: &str = "component_activations";
 
@@ -565,7 +564,7 @@ fn mount(
         &execution_mode,
         &conversation_set_policy,
     );
-    let (bound_devices, physical_to_logical) = bound_amd_devices(devices, &physical_device_ids)?;
+    let (bound_devices, physical_to_logical) = bind_devices(devices, &physical_device_ids)?;
     let default_logical_device = physical_to_logical
         .get(&physical_device_ids[0])
         .expect("declared physical device has logical binding");
@@ -1699,7 +1698,7 @@ fn required_graph_target(target_component_id: Option<&str>) -> Result<&str, io::
         .ok_or_else(|| invalid_input("graph operation requires graph_target_component_id"))
 }
 
-fn open_amd_devices(
+fn open_devices(
     physical_device_ids: &[String],
 ) -> Result<
     (
@@ -1722,13 +1721,6 @@ fn open_amd_devices(
                     "allowed physical device {physical_device_id:?} is unavailable"
                 ))
             })?;
-        if info.vendor_id != AMD_VENDOR_ID {
-            return Err(invalid_input(format!(
-                "validation execution requires AMD GPUs, but {:?} reports vendor 0x{:04x}",
-                info.device_name, info.vendor_id
-            ))
-            .into());
-        }
         let logical_device_id = format!("optimizer:device:{ordinal}");
         let device = Rc::new(catalog.open_physical_device_index(info.physical_device_index)?);
         physical_to_logical.insert(physical_device_id.clone(), logical_device_id.clone());
@@ -1737,7 +1729,7 @@ fn open_amd_devices(
     Ok((devices, physical_to_logical))
 }
 
-fn bound_amd_devices(
+fn bind_devices(
     pool: &mut Option<ValidationDevicePool>,
     physical_device_ids: &[String],
 ) -> Result<
@@ -1759,7 +1751,7 @@ fn bound_amd_devices(
             existing.physical_to_logical.clone(),
         ));
     }
-    let (devices, physical_to_logical) = open_amd_devices(physical_device_ids)?;
+    let (devices, physical_to_logical) = open_devices(physical_device_ids)?;
     let parameter_pool = VulkanResidentBufferPool::default();
     for (physical_device_id, logical_device_id) in &physical_to_logical {
         let device = devices.get(logical_device_id).ok_or_else(|| {

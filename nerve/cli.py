@@ -150,7 +150,7 @@ def main() -> None:
         default=[],
         type=Path,
         metavar="RADEON_ICD_JSON",
-        help=("explicit AMD Vulkan ICD manifest for optimization; may be repeated"),
+        help=("explicit Vulkan ICD manifest for optimization; may be repeated"),
     )
     parser.add_argument(
         "--device",

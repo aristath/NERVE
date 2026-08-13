@@ -740,37 +740,47 @@ impl VulkanComputeDeviceCatalog {
             let subgroup_size = subgroup_support.subgroup_size;
             let pci_address =
                 physical_device_pci_address(instance, physical_device);
-            let (mut activity_lease, device_health) =
-                if permitted_device.vendor_id == AMD_PCI_VENDOR_ID {
-                    let (render_major, render_minor) =
-                        match physical_device_drm_render_node(instance, physical_device) {
-                            Ok(render_node) => render_node,
-                            Err(error) => {
-                                device.destroy_device(None);
-                                return Err(error);
-                            }
-                        };
-                    let lease = match VulkanDeviceActivityLease::start_linux_drm(
-                        Arc::<str>::from(permitted_device.physical_device_id.clone()),
-                        render_major,
-                        render_minor,
-                    ) {
-                        Ok(lease) => lease,
+            let drm_activity_lease_supported = match physical_device_supports_extension(
+                instance,
+                physical_device,
+                ash::ext::physical_device_drm::NAME,
+            ) {
+                Ok(supported) => supported,
+                Err(error) => {
+                    device.destroy_device(None);
+                    return Err(error);
+                }
+            };
+            let (mut activity_lease, device_health) = if drm_activity_lease_supported {
+                let (render_major, render_minor) =
+                    match physical_device_drm_render_node(instance, physical_device) {
+                        Ok(render_node) => render_node,
                         Err(error) => {
                             device.destroy_device(None);
                             return Err(error);
                         }
                     };
-                    let health = lease.health();
-                    (Some(lease), health)
-                } else {
-                    (
-                        None,
-                        VulkanDeviceHealth::inactive(Arc::<str>::from(
-                            permitted_device.physical_device_id.clone(),
-                        )),
-                    )
+                let lease = match VulkanDeviceActivityLease::start_linux_drm(
+                    Arc::<str>::from(permitted_device.physical_device_id.clone()),
+                    render_major,
+                    render_minor,
+                ) {
+                    Ok(lease) => lease,
+                    Err(error) => {
+                        device.destroy_device(None);
+                        return Err(error);
+                    }
                 };
+                let health = lease.health();
+                (Some(lease), health)
+            } else {
+                (
+                    None,
+                    VulkanDeviceHealth::unleased(Arc::<str>::from(
+                        permitted_device.physical_device_id.clone(),
+                    )),
+                )
+            };
 
             let compute_queue_progress =
                 match create_vulkan_queue_progress_timeline(&device) {

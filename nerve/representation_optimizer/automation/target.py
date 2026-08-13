@@ -266,7 +266,7 @@ def _require_capacity_released(
             )
     if failures:
         raise ModelCompileError(
-            f"target {target_id!r} did not restore its pre-execution AMD "
+            f"target {target_id!r} did not restore its pre-execution "
             "device state: " + "; ".join(failures)
         )
 

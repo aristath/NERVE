@@ -9,7 +9,6 @@ from nerve.representation_optimizer.contracts import device_state_digest
 from nerve.representation_optimizer.automation.target import CapacityLeaseState
 
 
-AMD_PCI_VENDOR_ID = "0x1002"
 RUNTIME_DEVICE_LOCAL_MEMORY_POLICY_SCHEMA = (
     "nerve.runtime.device_local_memory_policy.v1"
 )
@@ -97,7 +96,7 @@ class DeviceCapacityPolicy:
 
     def reservable_vram_bytes(self, *, total: int, used: int) -> int:
         if total <= 0 or used < 0 or used > total:
-            raise ModelCompileError("AMD device returned invalid VRAM capacity counters")
+            raise ModelCompileError("device returned invalid VRAM capacity counters")
         return (
             (total - used)
             * self.reservable_free_vram_fraction_ppm
@@ -151,8 +150,14 @@ class DeviceCapacityObservation:
         }
 
 
-class LinuxAmdDeviceCapacityProbe:
-    """Measure shareable AMD VRAM without treating other workloads as exclusion."""
+class LinuxDrmSysfsDeviceCapacityProbe:
+    """Measure shareable VRAM through driver-published Linux DRM counters.
+
+    Selection is capability-driven rather than vendor-driven. A driver is
+    eligible when its DRM device publishes exact total/used VRAM and current
+    activity counters; drivers without that telemetry fail closed instead of
+    receiving an invented capacity.
+    """
 
     def __init__(
         self,
@@ -169,22 +174,19 @@ class LinuxAmdDeviceCapacityProbe:
         identity = profile.get("hardware_identity")
         if not isinstance(identity, dict):
             raise ModelCompileError("hardware profile has no identity")
+        provenance = profile.get("provenance")
         if (
             identity.get("device_kind") != "gpu"
-            or str(identity.get("vendor_id", "")).lower() != AMD_PCI_VENDOR_ID
+            or not isinstance(provenance, dict)
+            or provenance.get("api") != "vulkan"
         ):
             raise ModelCompileError(
-                "NERVE optimizer device probe accepts only AMD GPU profiles"
+                "NERVE optimizer device probe accepts only Vulkan GPU profiles"
             )
         device_id = _required_text(identity, "stable_device_id")
         pci_address = _profile_pci_address(profile)
         card = self._drm_card(pci_address)
         device_root = card / "device"
-        vendor = _read_text(device_root / "vendor").lower()
-        if vendor != AMD_PCI_VENDOR_ID:
-            raise ModelCompileError(
-                f"DRM device {card.name!r} is not an AMD GPU"
-            )
         total = _read_nonnegative_integer(
             device_root / "mem_info_vram_total",
             "total VRAM",
@@ -199,7 +201,7 @@ class LinuxAmdDeviceCapacityProbe:
         )
         if total <= 0 or used > total or busy > 100:
             raise ModelCompileError(
-                f"AMD device {device_id!r} returned invalid residency counters"
+                f"device {device_id!r} returned invalid residency counters"
             )
         processes = self._material_resident_processes(pci_address)
         return DeviceCapacityObservation(
@@ -237,7 +239,7 @@ class LinuxAmdDeviceCapacityProbe:
         observed_ids = {observation.device_id for observation in observations}
         if set(requirements) != observed_ids:
             raise ModelCompileError(
-                "capacity reservation does not match the probed AMD devices"
+                "capacity reservation does not match the probed devices"
             )
         failures = []
         for observation in observations:
@@ -257,7 +259,7 @@ class LinuxAmdDeviceCapacityProbe:
                 )
         if failures:
             raise ModelCompileError(
-                "AMD device has insufficient unreserved VRAM capacity: "
+                "device has insufficient unreserved VRAM capacity: "
                 + "; ".join(failures)
             )
         return tuple(item.to_json() for item in observations)
@@ -343,7 +345,7 @@ class LinuxAmdDeviceCapacityProbe:
         }
         if set(baseline_by_id) != set(current_by_id):
             raise ModelCompileError(
-                "capacity observations do not match the reserved AMD devices"
+                "capacity observations do not match the reserved devices"
             )
         missing = []
         for device_id, baseline in baseline_by_id.items():
@@ -372,7 +374,7 @@ class LinuxAmdDeviceCapacityProbe:
                     )
         if missing:
             raise ModelCompileError(
-                "pre-existing AMD resident allocations are no longer present: "
+                "pre-existing resident allocations are no longer present: "
                 + ", ".join(missing)
             )
 
@@ -383,17 +385,13 @@ class LinuxAmdDeviceCapacityProbe:
                 continue
             try:
                 resolved = (card / "device").resolve(strict=True)
-                vendor = _read_text(card / "device" / "vendor").lower()
-            except ModelCompileError:
+            except OSError:
                 continue
-            if (
-                normalize_pci_address(resolved.name) == pci_address
-                and vendor == AMD_PCI_VENDOR_ID
-            ):
+            if normalize_pci_address(resolved.name) == pci_address:
                 candidates.append(card)
         if len(candidates) != 1:
             raise ModelCompileError(
-                f"AMD PCI device {pci_address!r} does not map to one DRM card"
+                f"PCI device {pci_address!r} does not map to one DRM card"
             )
         return candidates[0]
 
@@ -541,7 +539,7 @@ def _profile_pci_address(profile: Json) -> str:
     if isinstance(binding, dict) and isinstance(binding.get("pci_address"), str):
         return normalize_pci_address(binding["pci_address"])
     raise ModelCompileError(
-        f"AMD device {identity.get('stable_device_id')!r} has no PCI identity"
+        f"device {identity.get('stable_device_id')!r} has no PCI identity"
     )
 
 
@@ -550,7 +548,7 @@ def _read_text(path: Path) -> str:
         return path.read_text().strip()
     except OSError as error:
         raise ModelCompileError(
-            f"required AMD device state file is unavailable: {path}"
+            f"required device state file is unavailable: {path}"
         ) from error
 
 
@@ -558,9 +556,9 @@ def _read_nonnegative_integer(path: Path, label: str) -> int:
     try:
         value = int(_read_text(path))
     except ValueError as error:
-        raise ModelCompileError(f"AMD {label} is not an integer") from error
+        raise ModelCompileError(f"{label} is not an integer") from error
     if value < 0:
-        raise ModelCompileError(f"AMD {label} must not be negative")
+        raise ModelCompileError(f"{label} must not be negative")
     return value
 
 

@@ -1,4 +1,3 @@
-const AMD_PCI_VENDOR_ID: u32 = 0x1002;
 const DRM_IOCTL_BASE: u32 = b'd' as u32;
 const DRM_IOCTL_GET_CAP_NUMBER: u32 = 0x0c;
 const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
@@ -63,7 +62,7 @@ struct VulkanDeviceActivityLease {
 }
 
 impl VulkanDeviceHealth {
-    fn inactive(device_id: impl Into<Arc<str>>) -> Self {
+    fn unleased(device_id: impl Into<Arc<str>>) -> Self {
         Self {
             device_id: device_id.into(),
             shared: Arc::new(VulkanDeviceHealthShared {
@@ -366,7 +365,7 @@ fn physical_device_drm_render_node(
         ash::ext::physical_device_drm::NAME,
     )? {
         return Err(VulkanError(
-            "AMD Vulkan device does not expose VK_EXT_physical_device_drm".to_string(),
+            "Vulkan device does not expose VK_EXT_physical_device_drm".to_string(),
         ));
     }
     let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
@@ -374,7 +373,7 @@ fn physical_device_drm_render_node(
     unsafe { instance.get_physical_device_properties2(physical_device, &mut properties) };
     if drm.has_render == 0 || drm.render_major < 0 || drm.render_minor < 0 {
         return Err(VulkanError(
-            "AMD Vulkan device does not expose a DRM render node".to_string(),
+            "Vulkan device does not expose a DRM render node".to_string(),
         ));
     }
     Ok((

@@ -78,7 +78,7 @@ class ResidentComponentExecutionAdapter:
         drivers = tuple(path.resolve() for path in vulkan_driver_files)
         if not drivers or any(not path.is_file() for path in drivers):
             raise ModelCompileError(
-                "resident execution requires explicit existing AMD Vulkan "
+                "resident execution requires explicit existing Vulkan "
                 "driver manifests"
             )
         if trace_root.is_symlink():

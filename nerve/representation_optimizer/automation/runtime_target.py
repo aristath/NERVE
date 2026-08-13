@@ -15,7 +15,7 @@ from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
 from nerve.representation_optimizer.automation.device_state import (
     DeviceCapacityPolicy,
-    LinuxAmdDeviceCapacityProbe,
+    LinuxDrmSysfsDeviceCapacityProbe,
     declared_capacity_reservation_digest,
     normalize_pci_address,
 )
@@ -113,7 +113,7 @@ def prepare_runtime_optimization_targets(
     vulkan_driver_files: Iterable[Path] = (),
     speculative_draft_tokens: int = 0,
     residency_policy: str = "demand_retained",
-    capacity_probe: LinuxAmdDeviceCapacityProbe | None = None,
+    capacity_probe: LinuxDrmSysfsDeviceCapacityProbe | None = None,
     live_target: CompilerTarget | None = None,
     policy: RuntimeOptimizationPolicy = RuntimeOptimizationPolicy(),
     lease_root: Path | None = None,
@@ -186,11 +186,11 @@ def prepare_runtime_optimization_targets(
     package_profiles = tuple(
         profile.to_json()
         for profile in package_target.hardware_profiles
-        if _is_amd_vulkan_gpu(profile.to_json())
+        if _is_vulkan_gpu(profile.to_json())
     )
     if not package_profiles:
         raise ModelCompileError(
-            "compiled package declares no AMD Vulkan optimization target"
+            "compiled package declares no Vulkan GPU optimization target"
         )
     requested = tuple(sorted(set(selected_device_ids)))
     if any(not value.startswith("vulkan-uuid:") for value in requested):
@@ -201,10 +201,10 @@ def prepare_runtime_optimization_targets(
         package_manifest.parent,
         manifest,
     )
-    drivers = discover_amd_vulkan_driver_files(vulkan_driver_files)
+    drivers = discover_vulkan_driver_files(vulkan_driver_files)
     check_compile_cancelled(cancel_requested)
     if live_target is None:
-        environment = amd_vulkan_environment(drivers)
+        environment = vulkan_environment(drivers)
         live_target = discover_compiler_target(
             runtime_bin=(
                 Path(runtime_command[0])
@@ -217,25 +217,25 @@ def prepare_runtime_optimization_targets(
             cancel_requested=cancel_requested,
         )
     check_compile_cancelled(cancel_requested)
-    all_live_amd_profiles = {
+    all_live_gpu_profiles = {
         str(profile.to_json()["hardware_identity"]["stable_device_id"]): (
             profile.to_json()
         )
         for profile in live_target.hardware_profiles
-        if _is_amd_vulkan_gpu(profile.to_json())
+        if _is_vulkan_gpu(profile.to_json())
     }
     package_capability_classes = {
         str(profile["capability_class"]) for profile in package_profiles
     }
     live_profiles = {
         device_id: profile
-        for device_id, profile in all_live_amd_profiles.items()
+        for device_id, profile in all_live_gpu_profiles.items()
         if profile["capability_class"] in package_capability_classes
     }
     missing = sorted(set(requested) - set(live_profiles))
     if missing:
         raise ModelCompileError(
-            "optimizer devices are not live AMD targets compatible with the "
+            "optimizer devices are not live Vulkan targets compatible with the "
             f"compiled execution capabilities: {missing}"
         )
     eligible = (
@@ -243,7 +243,7 @@ def prepare_runtime_optimization_targets(
         if requested
         else tuple(live_profiles.values())
     )
-    probe = capacity_probe or LinuxAmdDeviceCapacityProbe(
+    probe = capacity_probe or LinuxDrmSysfsDeviceCapacityProbe(
         policy=runtime_capacity_policy,
     )
     capacity_profiles: list[Json] = []
@@ -251,9 +251,9 @@ def prepare_runtime_optimization_targets(
     excluded_records: list[Json] = [
         {
             "device_id": device_id,
-            "reason": ("live AMD device does not match a compiled capability class"),
+            "reason": ("live Vulkan device does not match a compiled capability class"),
         }
-        for device_id in sorted(set(all_live_amd_profiles) - set(live_profiles))
+        for device_id in sorted(set(all_live_gpu_profiles) - set(live_profiles))
     ]
     for profile in eligible:
         check_compile_cancelled(cancel_requested)
@@ -274,7 +274,7 @@ def prepare_runtime_optimization_targets(
         selected_records.append(observation)
     if not capacity_profiles:
         raise ModelCompileError(
-            "no package-compatible AMD GPU has reservable VRAM capacity"
+            "no package-compatible Vulkan GPU has measurable reservable VRAM capacity"
         )
     live_eligible_profiles = tuple(sorted(capacity_profiles, key=_device_topology_key))
     available_capacity_by_device = {
@@ -364,12 +364,16 @@ def prepare_runtime_optimization_targets(
     )
 
 
-def discover_amd_vulkan_driver_files(
+def discover_vulkan_driver_files(
     configured: Iterable[Path] = (),
 ) -> tuple[Path, ...]:
     paths = tuple(Path(path).expanduser().resolve() for path in configured)
     if not paths:
-        raw = os.environ.get("NERVE_AMD_VULKAN_DRIVER_FILES")
+        raw = (
+            os.environ.get("NERVE_VULKAN_DRIVER_FILES")
+            or os.environ.get("VK_DRIVER_FILES")
+            or os.environ.get("VK_ICD_FILENAMES")
+        )
         if raw:
             paths = tuple(
                 Path(value).expanduser().resolve()
@@ -384,29 +388,37 @@ def discover_amd_vulkan_driver_files(
             "aarch64": "aarch64",
             "arm64": "aarch64",
         }.get(architecture, architecture)
-        preferred = Path(f"/usr/share/vulkan/icd.d/radeon_icd.{suffix}.json")
-        if preferred.is_file():
-            paths = (preferred.resolve(),)
+        manifest_root = Path("/usr/share/vulkan/icd.d")
+        paths = tuple(
+            path.resolve()
+            for path in sorted(manifest_root.glob(f"*.{suffix}.json"))
+            if path.is_file()
+        )
     if not paths:
         raise ModelCompileError(
-            "AMD Vulkan driver manifest is unavailable; set "
-            "NERVE_AMD_VULKAN_DRIVER_FILES"
+            "Vulkan driver manifests are unavailable; set "
+            "NERVE_VULKAN_DRIVER_FILES"
         )
     for path in paths:
+        if not path.is_file():
+            raise ModelCompileError(
+                f"Vulkan ICD manifest is unavailable: {path}"
+            )
         document = _read_json(path, "Vulkan ICD manifest")
-        library = document.get("ICD", {}).get("library_path")
+        icd = document.get("ICD")
+        library = icd.get("library_path") if isinstance(icd, dict) else None
         if (
-            not path.is_file()
+            not isinstance(document.get("file_format_version"), str)
             or not isinstance(library, str)
-            or "radeon" not in library.lower()
+            or not library
         ):
             raise ModelCompileError(
-                f"Vulkan ICD manifest is not an AMD Radeon driver: {path}"
+                f"Vulkan ICD manifest is malformed: {path}"
             )
     return tuple(sorted(set(paths)))
 
 
-def amd_vulkan_environment(driver_files: tuple[Path, ...]) -> dict[str, str]:
+def vulkan_environment(driver_files: tuple[Path, ...]) -> dict[str, str]:
     environment = dict(os.environ)
     environment["VK_DRIVER_FILES"] = os.pathsep.join(str(path) for path in driver_files)
     environment.pop("VK_ICD_FILENAMES", None)
@@ -761,7 +773,7 @@ def _build_target(
     residency_plan: Json,
     available_device_capacity_bytes: dict[str, int],
     reserved_device_capacity_bytes: dict[str, int],
-    capacity_probe: LinuxAmdDeviceCapacityProbe,
+    capacity_probe: LinuxDrmSysfsDeviceCapacityProbe,
     selected_observations: tuple[Json, ...],
     driver_files: tuple[Path, ...],
     component_command: tuple[str, ...],
@@ -1061,7 +1073,7 @@ def _select_capability_groups(
         groups.append(selected_group)
     if not groups:
         raise ModelCompileError(
-            "no AMD capability class can host the compiled package: "
+            "no Vulkan capability class can host the compiled package: "
             + "; ".join(failures)
         )
     return tuple(groups)
@@ -1192,12 +1204,11 @@ def _contiguous_capacity_packed_partition(
     return placement
 
 
-def _is_amd_vulkan_gpu(profile: Json) -> bool:
+def _is_vulkan_gpu(profile: Json) -> bool:
     identity = profile.get("hardware_identity", {})
     provenance = profile.get("provenance", {})
     return (
         identity.get("device_kind") == "gpu"
-        and str(identity.get("vendor_id", "")).lower() == "0x1002"
         and provenance.get("api") == "vulkan"
     )
 

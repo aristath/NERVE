@@ -18,7 +18,6 @@ use serde_json::{Value, json};
 
 const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v5";
 const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v5";
-const AMD_VENDOR_ID: u32 = 0x1002;
 const UNMOUNTED_LOGICAL_DEVICE_ID: &str = "optimizer:unmounted";
 
 #[derive(Debug, Deserialize)]
@@ -622,13 +621,6 @@ impl ExecutorHost {
                 .find(|device| device.physical_device_id == physical_device_id)
                 .cloned()
                 .ok_or_else(|| invalid_input("allowed physical device is unavailable"))?;
-            if device_info.vendor_id != AMD_VENDOR_ID {
-                return Err(invalid_input(format!(
-                    "optimizer execution requires an AMD GPU, but {:?} reports vendor 0x{:04x}",
-                    device_info.device_name, device_info.vendor_id
-                ))
-                .into());
-            }
             self.devices.insert(
                 physical_device_id.to_string(),
                 Rc::new(catalog.open_physical_device_index(device_info.physical_device_index)?),
@@ -929,7 +921,7 @@ mod tests {
             phase: phase.to_string(),
             execution_scope: "node".to_string(),
             activation_batch_width: width,
-            logical_device_id: "optimizer:amd0".to_string(),
+            logical_device_id: "optimizer:gpu0".to_string(),
             physical_device_id: format!("vulkan-uuid:{}", "0".repeat(32)),
             dynamic_state_capacity_activations: 64,
             maximum_quantum_wait_ns: 1_000_000_000,
@@ -1100,7 +1092,7 @@ mod tests {
         let exact = mounted_state_digest(
             "package",
             None,
-            "optimizer:amd0",
+            "optimizer:gpu0",
             "vulkan-uuid:0000",
             10,
             20,
@@ -1108,7 +1100,7 @@ mod tests {
         let repeated = mounted_state_digest(
             "package",
             None,
-            "optimizer:amd0",
+            "optimizer:gpu0",
             "vulkan-uuid:0000",
             10,
             20,
@@ -1116,7 +1108,7 @@ mod tests {
         let candidate = mounted_state_digest(
             "package",
             Some("candidate_123"),
-            "optimizer:amd0",
+            "optimizer:gpu0",
             "vulkan-uuid:0000",
             10,
             20,
@@ -1153,7 +1145,7 @@ mod tests {
         assert_eq!(host.prepared_runtime_models.len(), 1);
 
         let mut different_placement = mount;
-        different_placement.logical_device_id = "optimizer:amd1".to_string();
+        different_placement.logical_device_id = "optimizer:gpu1".to_string();
         let manifest = host.manifest(&package_manifest).unwrap();
         let (_, different_placement_hit) = host
             .prepared_runtime_model(
@@ -1179,7 +1171,7 @@ mod tests {
             None,
             None,
             "layer_00",
-            "optimizer:amd0",
+            "optimizer:gpu0",
         )
         .unwrap();
         let candidate_a = PreparedRuntimeModelKey::new(
@@ -1187,7 +1179,7 @@ mod tests {
             Some(candidate_root),
             Some("candidate_a"),
             "layer_00",
-            "optimizer:amd0",
+            "optimizer:gpu0",
         )
         .unwrap();
         let candidate_b = PreparedRuntimeModelKey::new(
@@ -1195,7 +1187,7 @@ mod tests {
             Some(candidate_root),
             Some("candidate_b"),
             "layer_00",
-            "optimizer:amd0",
+            "optimizer:gpu0",
         )
         .unwrap();
         assert_ne!(exact, candidate_a);
@@ -1206,7 +1198,7 @@ mod tests {
                 Some(candidate_root),
                 None,
                 "layer_00",
-                "optimizer:amd0",
+                "optimizer:gpu0",
             )
             .unwrap_err()
             .to_string()
@@ -1217,7 +1209,7 @@ mod tests {
     #[test]
     fn optimizer_executor_shutdown_proof_keeps_its_strict_protocol_shape() {
         let payload = executor_shutdown_payload(
-            vec!["vulkan-uuid:amd0".to_string()],
+            vec!["vulkan-uuid:gpu0".to_string()],
             1,
             vec![json!({"device": "proof"})],
             2,
