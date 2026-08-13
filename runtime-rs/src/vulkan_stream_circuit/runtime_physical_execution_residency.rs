@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v3";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v4";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
@@ -22,6 +22,7 @@ pub struct VulkanRuntimePhysicalExecutionDeviceResidencyPlan {
     pub mount_device_local_bytes: usize,
     pub stream_device_local_bytes: usize,
     pub stream_shared_host_bytes: usize,
+    pub resident_stream_device_allocations: Vec<VulkanRuntimeResidentStreamAllocation>,
     pub execution_transient_device_allocations:
         Vec<VulkanRuntimeDeviceLocalTransientAllocation>,
 }
@@ -74,6 +75,11 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                     VulkanRuntimePhysicalExecutionResidencyBreakdown::default(),
                 )
             })
+            .collect::<BTreeMap<_, _>>();
+        let mut resident_stream_device_allocations = logical_device_ids
+            .iter()
+            .cloned()
+            .map(|device_id| (device_id, Vec::new()))
             .collect::<BTreeMap<_, _>>();
 
         let mut base_devices = BTreeSet::new();
@@ -140,6 +146,82 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             breakdown.owner_stream_device_bytes = owner_stream_device_bytes;
             breakdown.owner_stream_control_device_bytes_per_stream =
                 device.breakdown.stream_control_bytes;
+            validate_resident_stream_allocation_ledger(device)?;
+            *resident_stream_device_allocations
+                .get_mut(&device.device_id)
+                .expect("base device was validated against the physical execution set") =
+                device.resident_stream_device_allocations.clone();
+        }
+
+        for allocation in &activations.allocations {
+            let replaces_resident = match &allocation.storage {
+                VulkanDistributedActivationStorage::ActivationSlot => true,
+                VulkanDistributedActivationStorage::BoundaryInput
+                | VulkanDistributedActivationStorage::BoundaryOutput => {
+                    if allocation.signal_ids.len() != 1 {
+                        return Err(VulkanRuntimeResidencyPlanError(format!(
+                            "distributed {:?} allocation {:?}.slot_{} requires exactly one signal identity",
+                            allocation.storage, allocation.component_id, allocation.slot,
+                        )));
+                    }
+                    true
+                }
+                VulkanDistributedActivationStorage::Edge { .. } => false,
+            };
+            let allocations = resident_stream_device_allocations
+                .get_mut(&allocation.owner_device_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "distributed activation replaces resident storage on absent logical device {:?}",
+                        allocation.owner_device_id,
+                    ))
+                })?;
+            let mut removed_bytes = 0usize;
+            let mut removed_count = 0usize;
+            let mut retained = Vec::with_capacity(allocations.len());
+            for resident in std::mem::take(allocations) {
+                if distributed_activation_replaces_resident_allocation(allocation, &resident)? {
+                    if allocation.byte_capacity != resident.byte_capacity {
+                        return Err(VulkanRuntimeResidencyPlanError(format!(
+                            "distributed activation {:?} replaces a {}-byte resident allocation with {} bytes",
+                            allocation.storage, resident.byte_capacity, allocation.byte_capacity,
+                        )));
+                    }
+                    removed_count = removed_count.checked_add(1).ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(
+                            "distributed activation replacement count overflowed".to_string(),
+                        )
+                    })?;
+                    removed_bytes = checked_residency_add(
+                        removed_bytes,
+                        resident.byte_capacity,
+                        "replaced resident stream allocation",
+                    )?;
+                } else {
+                    retained.push(resident);
+                }
+            }
+            *allocations = retained;
+            if replaces_resident && removed_count != 1 {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "distributed activation {:?} for {:?}.slot_{} replaces {removed_count} resident allocations, expected exactly one",
+                    allocation.storage, allocation.component_id, allocation.slot,
+                )));
+            }
+            if removed_bytes > 0 {
+                let breakdown = breakdowns
+                    .get_mut(&allocation.owner_device_id)
+                    .expect("distributed activation owner was validated above");
+                breakdown.owner_stream_device_bytes = breakdown
+                    .owner_stream_device_bytes
+                    .checked_sub(removed_bytes)
+                    .ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "distributed activation replacement exceeds owner stream residency on {:?}",
+                            allocation.owner_device_id,
+                        ))
+                    })?;
+            }
         }
 
         let mut exclusion_devices = BTreeSet::new();
@@ -295,12 +377,16 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 stream_shared_host_bytes,
                 "physical execution total shared-host residency",
             )?;
+            let resident_stream_device_allocations = resident_stream_device_allocations
+                .remove(&device_id)
+                .expect("physical execution device allocation ledger was initialized");
             device_plans.push(VulkanRuntimePhysicalExecutionDeviceResidencyPlan {
                 device_id,
                 breakdown,
                 mount_device_local_bytes,
                 stream_device_local_bytes,
                 stream_shared_host_bytes,
+                resident_stream_device_allocations,
                 execution_transient_device_allocations: Vec::new(),
             });
         }
@@ -555,6 +641,133 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
         *self = next;
         Ok(())
     }
+}
+
+fn validate_resident_stream_allocation_ledger(
+    device: &VulkanRuntimeDeviceResidencyPlan,
+) -> Result<(), VulkanRuntimeResidencyPlanError> {
+    let mut identities = BTreeSet::new();
+    let mut state_bytes = 0usize;
+    let mut state_transaction_bytes = 0usize;
+    let mut causal_verification_snapshot_bytes = 0usize;
+    let mut selection_telemetry_bytes = 0usize;
+    let mut activation_slot_bytes = 0usize;
+    let mut boundary_buffer_bytes = 0usize;
+    for allocation in &device.resident_stream_device_allocations {
+        if allocation.byte_capacity == 0 || !identities.insert(&allocation.kind) {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "base residency on {:?} has an empty or repeated resident stream allocation {:?}",
+                device.device_id, allocation.kind,
+            )));
+        }
+        let (bytes, label) = match &allocation.kind {
+            VulkanRuntimeResidentStreamAllocationKind::State { .. } => {
+                (&mut state_bytes, "resident stream state")
+            }
+            VulkanRuntimeResidentStreamAllocationKind::StateTransaction { .. } => {
+                (&mut state_transaction_bytes, "resident state transaction")
+            }
+            VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot { .. } => (
+                &mut causal_verification_snapshot_bytes,
+                "resident causal verification snapshot",
+            ),
+            VulkanRuntimeResidentStreamAllocationKind::SelectionTelemetry { .. } => {
+                (&mut selection_telemetry_bytes, "resident selection telemetry")
+            }
+            VulkanRuntimeResidentStreamAllocationKind::ActivationSlot { .. } => {
+                (&mut activation_slot_bytes, "resident activation slot")
+            }
+            VulkanRuntimeResidentStreamAllocationKind::BoundaryInput { .. }
+            | VulkanRuntimeResidentStreamAllocationKind::BoundaryOutput { .. } => {
+                (&mut boundary_buffer_bytes, "resident boundary buffer")
+            }
+        };
+        *bytes = checked_residency_add(*bytes, allocation.byte_capacity, label)?;
+    }
+    let declared = &device.breakdown;
+    let actual = [
+        ("stream state", state_bytes, declared.stream_state_bytes),
+        (
+            "state transaction",
+            state_transaction_bytes,
+            declared.state_transaction_bytes,
+        ),
+        (
+            "causal verification snapshot",
+            causal_verification_snapshot_bytes,
+            declared.causal_verification_snapshot_bytes,
+        ),
+        (
+            "selection telemetry",
+            selection_telemetry_bytes,
+            declared.selection_telemetry_bytes,
+        ),
+        (
+            "activation slot",
+            activation_slot_bytes,
+            declared.activation_slot_bytes,
+        ),
+        (
+            "boundary buffer",
+            boundary_buffer_bytes,
+            declared.boundary_buffer_bytes,
+        ),
+    ];
+    if let Some((label, allocation_bytes, breakdown_bytes)) = actual
+        .into_iter()
+        .find(|(_, allocation_bytes, breakdown_bytes)| allocation_bytes != breakdown_bytes)
+    {
+        return Err(VulkanRuntimeResidencyPlanError(format!(
+            "base residency on {:?} has {allocation_bytes} {label} allocation bytes but its breakdown declares {breakdown_bytes}",
+            device.device_id,
+        )));
+    }
+    Ok(())
+}
+
+fn distributed_activation_replaces_resident_allocation(
+    allocation: &VulkanDistributedActivationBufferAllocation,
+    resident: &VulkanRuntimeResidentStreamAllocation,
+) -> Result<bool, VulkanRuntimeResidencyPlanError> {
+    let replaced = match (&allocation.storage, &resident.kind) {
+        (
+            VulkanDistributedActivationStorage::ActivationSlot,
+            VulkanRuntimeResidentStreamAllocationKind::ActivationSlot { component_id, slot },
+        ) => allocation.component_id == *component_id && allocation.slot == *slot,
+        (
+            VulkanDistributedActivationStorage::BoundaryInput,
+            VulkanRuntimeResidentStreamAllocationKind::BoundaryInput {
+                component_id,
+                signal_id,
+            },
+        ) => {
+            let [distributed_signal_id] = allocation.signal_ids.as_slice() else {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "distributed boundary-input allocation {:?}.slot_{} requires exactly one signal identity",
+                    allocation.component_id, allocation.slot,
+                )));
+            };
+            allocation.component_id == *component_id && distributed_signal_id == signal_id
+        }
+        (
+            VulkanDistributedActivationStorage::BoundaryOutput,
+            VulkanRuntimeResidentStreamAllocationKind::BoundaryOutput {
+                component_id,
+                signal_id,
+            },
+        ) => {
+            let [distributed_signal_id] = allocation.signal_ids.as_slice() else {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "distributed boundary-output allocation {:?}.slot_{} requires exactly one signal identity",
+                    allocation.component_id, allocation.slot,
+                )));
+            };
+            allocation.component_id == *component_id && distributed_signal_id == signal_id
+        }
+        (VulkanDistributedActivationStorage::Edge { .. }, _) => false,
+        _ => false,
+    };
+    Ok(replaced)
 }
 
 fn validate_physical_execution_residency_inputs(

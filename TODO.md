@@ -491,10 +491,18 @@ For every numbered item below:
   causal snapshot, selected-resource gate, miss-queue, and predicate buffers
   survive into physical residency, and terminal admission queries each Vulkan
   requirement separately. The logical totals are derived and cross-checked
-  against those ledgers before reservation. The remaining resource work is to
-  extend equivalent allocation-level accounting across the residual resident
-  stream, sampler, feedback, speculative-decoder, and physical boundary
-  allocations that still enter terminal admission as class aggregates.
+  against those ledgers before reservation. Resident stream state, state
+  transactions, causal-verification snapshots, selection telemetry, activation
+  slots, and nonaliased model boundaries now retain exact allocation identities
+  too. Distributed activation and boundary storage replace their matching local
+  allocation exactly once, rather than leaving both charged, and terminal
+  admission queries every retained Vulkan allocation separately. Empty,
+  repeated, missing, capacity-mismatched, and identity-mismatched ledgers fail
+  closed. This also closes an omitted-residency defect for physically allocated
+  selection telemetry. The remaining resource work is to extend equivalent
+  allocation-level accounting across resident graph-edge storage, sampler,
+  feedback, and speculative-decoder allocations that still enter terminal
+  admission as class aggregates.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

@@ -30,6 +30,7 @@ fn empty_selected_resource_mount_residency_plan() -> VulkanRuntimeResidencyPlan 
             resource_store: VulkanCompiledResourceStoreResidencyBytes::default(),
             working_set: VulkanRuntimeWorkingSetBytes::default(),
             breakdown: VulkanRuntimeDeviceResidencyBreakdown::default(),
+            resident_stream_device_allocations: Vec::new(),
             initial_device_resident_bytes: 0,
         }],
         total_initial_device_resident_bytes: 0,

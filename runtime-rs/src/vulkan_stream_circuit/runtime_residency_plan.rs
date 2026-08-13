@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_residency_plan.v3";
+    "nerve.vulkan_runtime_residency_plan.v4";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeResidencyPlan {
@@ -19,6 +19,7 @@ pub struct VulkanRuntimeDeviceResidencyBreakdown {
     pub stream_state_bytes: usize,
     pub state_transaction_bytes: usize,
     pub activation_slot_bytes: usize,
+    pub selection_telemetry_bytes: usize,
     pub boundary_buffer_bytes: usize,
     pub edge_buffer_bytes: usize,
     pub stream_control_bytes: usize,
@@ -44,7 +45,48 @@ pub struct VulkanRuntimeDeviceResidencyPlan {
     pub resource_store: VulkanCompiledResourceStoreResidencyBytes,
     pub working_set: VulkanRuntimeWorkingSetBytes,
     pub breakdown: VulkanRuntimeDeviceResidencyBreakdown,
+    pub resident_stream_device_allocations: Vec<VulkanRuntimeResidentStreamAllocation>,
     pub initial_device_resident_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct VulkanRuntimeResidentStreamAllocation {
+    pub kind: VulkanRuntimeResidentStreamAllocationKind,
+    pub byte_capacity: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VulkanRuntimeResidentStreamAllocationKind {
+    State {
+        component_id: String,
+        state_id: String,
+    },
+    StateTransaction {
+        component_id: String,
+        state_id: String,
+    },
+    CausalVerificationSnapshot {
+        component_id: String,
+        state_id: String,
+    },
+    SelectionTelemetry {
+        component_id: String,
+        node_id: String,
+        domain_id: String,
+    },
+    ActivationSlot {
+        component_id: String,
+        slot: usize,
+    },
+    BoundaryInput {
+        component_id: String,
+        signal_id: String,
+    },
+    BoundaryOutput {
+        component_id: String,
+        signal_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,6 +206,7 @@ fn plan_vulkan_runtime_residency_with_contract(
     .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     let minimum_upload_alignment =
         compiled_resource_contract_minimum_upload_alignment(resource_contract)?;
+    let mut resident_stream_device_allocations_by_device = BTreeMap::new();
 
     for device_id in &device_ids {
         let (_resources, _placement, placed_plan) =
@@ -188,10 +231,13 @@ fn plan_vulkan_runtime_residency_with_contract(
         breakdown.stream_state_bytes = stream.state_bytes;
         breakdown.state_transaction_bytes = stream.transaction_bytes;
         breakdown.activation_slot_bytes = stream.activation_bytes;
+        breakdown.selection_telemetry_bytes = stream.selection_telemetry_bytes;
         breakdown.boundary_buffer_bytes = stream.boundary_bytes;
         breakdown.edge_buffer_bytes = stream.edge_bytes;
         breakdown.causal_verification_snapshot_bytes =
             stream.causal_verification_snapshot_bytes;
+        resident_stream_device_allocations_by_device
+            .insert(device_id.clone(), stream.allocations);
         // The placed runtime aliases a single stream-control allocation across
         // devices when possible. Charging every importing device is a safe
         // admission bound and remains negligible.
@@ -311,12 +357,21 @@ fn plan_vulkan_runtime_residency_with_contract(
             parameter_residency.maximum_addressable_bytes,
             "runtime maximum addressable parameter total",
         )?;
+        let resident_stream_device_allocations =
+            resident_stream_device_allocations_by_device
+                .remove(&device_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "runtime residency lost the resident allocation ledger for {device_id:?}",
+                    ))
+                })?;
         device_plans.push(VulkanRuntimeDeviceResidencyPlan {
             device_id,
             parameter_residency,
             resource_store,
             working_set,
             breakdown,
+            resident_stream_device_allocations,
             initial_device_resident_bytes,
         });
     }
@@ -338,14 +393,16 @@ fn plan_vulkan_runtime_residency_with_contract(
     })
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct StreamCircuitResidencyBytes {
     state_bytes: usize,
     transaction_bytes: usize,
     activation_bytes: usize,
+    selection_telemetry_bytes: usize,
     boundary_bytes: usize,
     edge_bytes: usize,
     causal_verification_snapshot_bytes: usize,
+    allocations: Vec<VulkanRuntimeResidentStreamAllocation>,
 }
 
 fn plan_stream_circuit_residency(
@@ -389,6 +446,7 @@ fn plan_stream_circuit_residency_for_component(
     let resident = &placed_plan.placed_resident_plan.resident_plan;
     let mut state_bytes = 0usize;
     let mut transaction_bytes = 0usize;
+    let mut allocations = Vec::new();
     let verification_lane_capacity = if speculative_draft_tokens == 0 {
         0
     } else {
@@ -414,60 +472,153 @@ fn plan_stream_circuit_residency_for_component(
         .map_err(residency_display_error)?;
         state_bytes =
             checked_residency_add(state_bytes, layout.byte_capacity, "stream state bytes")?;
+        allocations.push(VulkanRuntimeResidentStreamAllocation {
+            kind: VulkanRuntimeResidentStreamAllocationKind::State {
+                component_id: state.component_id.clone(),
+                state_id: state.state_id.clone(),
+            },
+            byte_capacity: layout.byte_capacity,
+        });
         if transactional && state.static_bytes.is_some() {
             // Speculative verification uses one transactional slot and one
             // baseline, exactly matching new_transactional(..., 1).
-            transaction_bytes = checked_residency_add(
-                transaction_bytes,
-                checked_residency_mul(
-                    layout.byte_capacity,
-                    2,
-                    "state transaction bytes",
-                )?,
+            let byte_capacity = checked_residency_mul(
+                layout.byte_capacity,
+                2,
                 "state transaction bytes",
             )?;
+            transaction_bytes = checked_residency_add(
+                transaction_bytes,
+                byte_capacity,
+                "state transaction bytes",
+            )?;
+            allocations.push(VulkanRuntimeResidentStreamAllocation {
+                kind: VulkanRuntimeResidentStreamAllocationKind::StateTransaction {
+                    component_id: state.component_id.clone(),
+                    state_id: state.state_id.clone(),
+                },
+                byte_capacity,
+            });
         }
-        if let Some(static_bytes) = state.static_bytes {
-            causal_verification_snapshot_bytes = checked_residency_add(
-                causal_verification_snapshot_bytes,
-                checked_residency_mul(
-                    static_bytes,
-                    verification_lane_capacity,
-                    "causal verification snapshots",
-                )?,
+        if let Some(static_bytes) = state.static_bytes
+            && verification_lane_capacity > 0
+        {
+            let byte_capacity = checked_residency_mul(
+                static_bytes,
+                verification_lane_capacity,
                 "causal verification snapshots",
             )?;
+            causal_verification_snapshot_bytes = checked_residency_add(
+                causal_verification_snapshot_bytes,
+                byte_capacity,
+                "causal verification snapshots",
+            )?;
+            allocations.push(VulkanRuntimeResidentStreamAllocation {
+                kind: VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot {
+                    component_id: state.component_id.clone(),
+                    state_id: state.state_id.clone(),
+                },
+                byte_capacity,
+            });
         }
     }
-    let activation_bytes = resident
+    let mut selection_telemetry_bytes = 0usize;
+    for telemetry in resident.selection_telemetry.iter().filter(|telemetry| {
+        component_id.is_none_or(|component| telemetry.component_id == component)
+    }) {
+        selection_telemetry_bytes = checked_residency_add(
+            selection_telemetry_bytes,
+            telemetry.byte_capacity,
+            "selection telemetry bytes",
+        )?;
+        allocations.push(VulkanRuntimeResidentStreamAllocation {
+            kind: VulkanRuntimeResidentStreamAllocationKind::SelectionTelemetry {
+                component_id: telemetry.component_id.clone(),
+                node_id: telemetry.node_id.clone(),
+                domain_id: telemetry.domain_id.clone(),
+            },
+            byte_capacity: telemetry.byte_capacity,
+        });
+    }
+    let mut activation_bytes = 0usize;
+    for bank in resident
         .activation_banks
         .iter()
         .filter(|bank| component_id.is_none_or(|component| bank.component_id == component))
-        .try_fold(
-        0usize,
-        |total, bank| {
-            bank.slots.iter().try_fold(total, |total, slot| {
-                let label = format!(
-                    "activation slot {}.slot_{} for signals {:?}",
-                    bank.component_id, slot.slot, slot.signal_ids
-                );
-                checked_residency_add(
-                    total,
-                    required_optional_bytes(slot.bytes, &label)?,
-                    "activation slot bytes",
-                )
-            })
-        },
-    )?;
+    {
+        for slot in &bank.slots {
+            let label = format!(
+                "activation slot {}.slot_{} for signals {:?}",
+                bank.component_id, slot.slot, slot.signal_ids
+            );
+            let byte_capacity = required_optional_bytes(slot.bytes, &label)?;
+            activation_bytes = checked_residency_add(
+                activation_bytes,
+                byte_capacity,
+                "activation slot bytes",
+            )?;
+            allocations.push(VulkanRuntimeResidentStreamAllocation {
+                kind: VulkanRuntimeResidentStreamAllocationKind::ActivationSlot {
+                    component_id: bank.component_id.clone(),
+                    slot: slot.slot,
+                },
+                byte_capacity,
+            });
+        }
+    }
     let boundary_plan = VulkanModelBoundaryBufferPlan::from_placed_plan(placed_plan)
         .map_err(residency_display_error)?;
-    let boundary_bytes = match component_id {
-        None => required_optional_bytes(
-            boundary_plan.total_byte_capacity,
+    let selected_inputs = boundary_plan
+        .inputs
+        .iter()
+        .filter(|input| component_id.is_none_or(|component| input.component_id == component))
+        .collect::<Vec<_>>();
+    let mut boundary_bytes = 0usize;
+    for input in &selected_inputs {
+        let byte_capacity =
+            required_optional_bytes(input.byte_capacity, "model input boundary buffer")?;
+        boundary_bytes = checked_residency_add(
+            boundary_bytes,
+            byte_capacity,
             "model boundary buffers",
-        )?,
-        Some(component_id) => component_boundary_buffer_bytes(&boundary_plan, component_id)?,
-    };
+        )?;
+        allocations.push(VulkanRuntimeResidentStreamAllocation {
+            kind: VulkanRuntimeResidentStreamAllocationKind::BoundaryInput {
+                component_id: input.component_id.clone(),
+                signal_id: input.signal_id.clone(),
+            },
+            byte_capacity,
+        });
+    }
+    for output in boundary_plan
+        .outputs
+        .iter()
+        .filter(|output| component_id.is_none_or(|component| output.component_id == component))
+    {
+        let aliases_input = output.source_signal_id.is_some()
+            && selected_inputs.iter().any(|input| {
+                input.component_id == output.component_id
+                    && input.signal_id == output.signal_id
+                    && input.shape == output.shape
+            });
+        if aliases_input {
+            continue;
+        }
+        let byte_capacity =
+            required_optional_bytes(output.byte_capacity, "model output boundary buffer")?;
+        boundary_bytes = checked_residency_add(
+            boundary_bytes,
+            byte_capacity,
+            "model boundary buffers",
+        )?;
+        allocations.push(VulkanRuntimeResidentStreamAllocation {
+            kind: VulkanRuntimeResidentStreamAllocationKind::BoundaryOutput {
+                component_id: output.component_id.clone(),
+                signal_id: output.signal_id.clone(),
+            },
+            byte_capacity,
+        });
+    }
     let edge_plan = VulkanPlacedEdgeIoPlan::from_placed_resident_plan(
         &placed_plan.placed_resident_plan,
     )
@@ -480,47 +631,12 @@ fn plan_stream_circuit_residency_for_component(
         state_bytes,
         transaction_bytes,
         activation_bytes,
+        selection_telemetry_bytes,
         boundary_bytes,
         edge_bytes,
         causal_verification_snapshot_bytes,
+        allocations,
     })
-}
-
-fn component_boundary_buffer_bytes(
-    plan: &VulkanModelBoundaryBufferPlan,
-    component_id: &str,
-) -> Result<usize, VulkanRuntimeResidencyPlanError> {
-    let inputs = plan
-        .inputs
-        .iter()
-        .filter(|input| input.component_id == component_id)
-        .collect::<Vec<_>>();
-    let mut total = 0usize;
-    for input in &inputs {
-        total = checked_residency_add(
-            total,
-            required_optional_bytes(input.byte_capacity, "model input boundary buffer")?,
-            "model boundary buffers",
-        )?;
-    }
-    for output in plan
-        .outputs
-        .iter()
-        .filter(|output| output.component_id == component_id)
-    {
-        let aliases_input = output.source_signal_id.is_some()
-            && inputs.iter().any(|input| {
-                input.signal_id == output.signal_id && input.shape == output.shape
-            });
-        if !aliases_input {
-            total = checked_residency_add(
-                total,
-                required_optional_bytes(output.byte_capacity, "model output boundary buffer")?,
-                "model boundary buffers",
-            )?;
-        }
-    }
-    Ok(total)
 }
 
 fn component_edge_buffer_bytes(
@@ -850,6 +966,7 @@ fn sum_activation_headroom_breakdown(
 ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
     [
         breakdown.activation_slot_bytes,
+        breakdown.selection_telemetry_bytes,
         breakdown.boundary_buffer_bytes,
         breakdown.edge_buffer_bytes,
         breakdown.output_transducer_workspace_bytes,

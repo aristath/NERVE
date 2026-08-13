@@ -65,6 +65,75 @@ fn runtime_residency_plan_uses_physical_transient_layout_without_opening_vulkan(
             + short_device.working_set.activation_headroom_bytes,
         short_device.initial_device_resident_bytes
     );
+    let ledger_bytes = short_device
+        .resident_stream_device_allocations
+        .iter()
+        .map(|allocation| allocation.byte_capacity)
+        .sum::<usize>();
+    let covered_breakdown_bytes = [
+        short_device.breakdown.stream_state_bytes,
+        short_device.breakdown.state_transaction_bytes,
+        short_device.breakdown.causal_verification_snapshot_bytes,
+        short_device.breakdown.selection_telemetry_bytes,
+        short_device.breakdown.activation_slot_bytes,
+        short_device.breakdown.boundary_buffer_bytes,
+    ]
+    .into_iter()
+    .sum::<usize>();
+    assert_eq!(ledger_bytes, covered_breakdown_bytes);
+}
+
+#[test]
+fn runtime_residency_accounts_selection_telemetry_as_a_physical_allocation() {
+    let runtime_model = fixture_model_runtime_model_with_remote_middle();
+    let graph = runtime_model
+        .circuit_graph
+        .to_signal_processor_graph(tiny_model_dir())
+        .unwrap();
+    let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
+    let execution_plan =
+        StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index).unwrap();
+    let mut resource_plan =
+        StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
+    resource_plan
+        .selection_domains
+        .push(crate::stream_plan::PlannedSelectionDomain {
+            component_id: "layer_00".to_string(),
+            circuit_id: "layer_00".to_string(),
+            node_id: "selector".to_string(),
+            domain_id: "experts".to_string(),
+            resource_count: 256,
+            selection_count_per_activation: 8,
+            predictable_dependency: None,
+        });
+    let placement_plan = graph.placement_plan(&runtime_model.placement).unwrap();
+    let resident = VulkanPlacedStreamCircuitResidentPlan::from_resource_plan_for_device(
+        &resource_plan,
+        &placement_plan,
+        "gpu0",
+        Some(&tensor_index),
+        Some(2),
+    )
+    .unwrap();
+    let placed =
+        VulkanPlacedStreamCircuitPlan::from_plans(&execution_plan, &resource_plan, resident)
+            .unwrap();
+
+    let residency = plan_stream_circuit_residency(&placed, 16, true, 0).unwrap();
+    let telemetry = residency
+        .allocations
+        .iter()
+        .filter(|allocation| {
+            matches!(
+                &allocation.kind,
+                VulkanRuntimeResidentStreamAllocationKind::SelectionTelemetry { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(telemetry.len(), 1);
+    assert_eq!(residency.selection_telemetry_bytes, telemetry[0].byte_capacity);
+    assert!(residency.selection_telemetry_bytes > 0);
 }
 
 #[test]
@@ -616,6 +685,7 @@ fn initial_runtime_residency_aggregates_logical_slices_on_one_physical_device() 
                 resource_store: VulkanCompiledResourceStoreResidencyBytes::default(),
                 working_set: VulkanRuntimeWorkingSetBytes::default(),
                 breakdown: VulkanRuntimeDeviceResidencyBreakdown::default(),
+                resident_stream_device_allocations: Vec::new(),
                 initial_device_resident_bytes: 600,
             },
             VulkanRuntimeDeviceResidencyPlan {
@@ -624,6 +694,7 @@ fn initial_runtime_residency_aggregates_logical_slices_on_one_physical_device() 
                 resource_store: VulkanCompiledResourceStoreResidencyBytes::default(),
                 working_set: VulkanRuntimeWorkingSetBytes::default(),
                 breakdown: VulkanRuntimeDeviceResidencyBreakdown::default(),
+                resident_stream_device_allocations: Vec::new(),
                 initial_device_resident_bytes: 401,
             },
         ],

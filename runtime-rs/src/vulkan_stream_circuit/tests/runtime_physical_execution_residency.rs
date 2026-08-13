@@ -64,10 +64,12 @@ fn physical_execution_residency_replaces_owner_tensors_without_double_counting()
     assert_eq!(owner.breakdown.excluded_owner_parameter_bytes, 600);
     assert_eq!(owner.mount_device_local_bytes, 500);
     assert_eq!(helper.mount_device_local_bytes, 300);
-    assert_eq!(owner.stream_device_local_bytes, 196);
+    assert_eq!(owner.stream_device_local_bytes, 132);
     assert_eq!(helper.stream_device_local_bytes, 32);
+    assert_eq!(owner.breakdown.owner_stream_device_bytes, 36);
+    assert!(owner.resident_stream_device_allocations.is_empty());
     assert_eq!(plan.total_mount_device_local_bytes, 800);
-    assert_eq!(plan.total_stream_device_local_bytes, 228);
+    assert_eq!(plan.total_stream_device_local_bytes, 164);
     assert_eq!(plan.total_stream_shared_host_bytes, 0);
 }
 
@@ -94,7 +96,7 @@ fn physical_execution_residency_charges_shared_host_once_without_device_local_al
     )
     .unwrap();
 
-    assert_eq!(plan.total_stream_device_local_bytes, 132);
+    assert_eq!(plan.total_stream_device_local_bytes, 68);
     assert_eq!(plan.total_stream_shared_host_bytes, 96);
     let error = admit_vulkan_runtime_physical_execution_stream(
         &plan,
@@ -329,7 +331,7 @@ fn physical_execution_residency_defers_eager_selected_payload_to_its_physical_st
         owner.breakdown.independently_admitted_resource_store_bytes,
         350
     );
-    assert_eq!(owner.stream_device_local_bytes, 100);
+    assert_eq!(owner.stream_device_local_bytes, 36);
 }
 
 #[test]
@@ -754,6 +756,162 @@ fn execution_transient_device_requirements_are_queried_and_aligned_per_allocatio
     assert!(overflow.to_string().contains("requirements overflowed"));
 }
 
+#[test]
+fn resident_stream_device_requirements_are_queried_and_aligned_per_allocation() {
+    let allocations = vec![
+        VulkanRuntimeResidentStreamAllocation {
+            kind: VulkanRuntimeResidentStreamAllocationKind::State {
+                component_id: "component".to_string(),
+                state_id: "state".to_string(),
+            },
+            byte_capacity: 17,
+        },
+        VulkanRuntimeResidentStreamAllocation {
+            kind: VulkanRuntimeResidentStreamAllocationKind::SelectionTelemetry {
+                component_id: "component".to_string(),
+                node_id: "node".to_string(),
+                domain_id: "domain".to_string(),
+            },
+            byte_capacity: 29,
+        },
+    ];
+    let mut queried = Vec::new();
+
+    let exact = resident_stream_device_requirement_bytes_with(&allocations, |allocation| {
+        queried.push(allocation.kind.clone());
+        Ok(allocation.byte_capacity.next_multiple_of(64))
+    })
+    .unwrap();
+
+    assert_eq!(queried.len(), 2);
+    assert_eq!(exact, 128);
+    assert_ne!(exact, (17usize + 29).next_multiple_of(64));
+
+    let overflow = resident_stream_device_requirement_bytes_with(&allocations, |allocation| {
+        Ok(if allocation.byte_capacity == 17 {
+            usize::MAX
+        } else {
+            1
+        })
+    })
+    .unwrap_err();
+    assert!(overflow.to_string().contains("requirements overflowed"));
+}
+
+#[test]
+fn physical_execution_residency_rejects_malformed_resident_ledgers_and_overrides() {
+    let parameters = empty_physical_execution_parameter_allocations();
+    let exclusions = empty_physical_execution_parameter_exclusions();
+    let activations =
+        physical_execution_activation_plan(VulkanSharedResidentBufferRoute::SharedHost);
+
+    let mut repeated = physical_execution_residency_base_plan(1_000, 100);
+    let repeated_allocation =
+        repeated.device_plans[0].resident_stream_device_allocations[0].clone();
+    repeated.device_plans[0]
+        .resident_stream_device_allocations
+        .push(repeated_allocation);
+    repeated.device_plans[0].breakdown.activation_slot_bytes = 128;
+    repeated.device_plans[0].working_set.activation_headroom_bytes = 128;
+    repeated.device_plans[0].initial_device_resident_bytes = 1_064;
+    repeated.total_initial_device_resident_bytes = 1_064;
+    let repeated_error = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &repeated,
+        &["owner".to_string(), "helper".to_string()],
+        &parameters,
+        &exclusions,
+        &activations,
+    )
+    .unwrap_err();
+    assert!(repeated_error.to_string().contains("repeated resident stream allocation"));
+
+    let mut mismatched = activations.clone();
+    mismatched.allocations[0].byte_capacity = 65;
+    mismatched.total_shared_byte_capacity = 97;
+    let mismatch_error = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &physical_execution_residency_base_plan(1_000, 100),
+        &["owner".to_string(), "helper".to_string()],
+        &parameters,
+        &exclusions,
+        &mismatched,
+    )
+    .unwrap_err();
+    assert!(mismatch_error.to_string().contains("replaces a 64-byte resident allocation with 65"));
+
+    let mut missing = physical_execution_residency_base_plan(1_000, 100);
+    missing.device_plans[0]
+        .resident_stream_device_allocations
+        .clear();
+    let missing_error = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &missing,
+        &["owner".to_string(), "helper".to_string()],
+        &parameters,
+        &exclusions,
+        &activations,
+    )
+    .unwrap_err();
+    assert!(missing_error.to_string().contains("activation slot allocation bytes"));
+}
+
+#[test]
+fn physical_execution_residency_replaces_boundary_storage_by_exact_identity() {
+    for (storage, kind) in [
+        (
+            VulkanDistributedActivationStorage::BoundaryInput,
+            VulkanRuntimeResidentStreamAllocationKind::BoundaryInput {
+                component_id: "component".to_string(),
+                signal_id: "signal".to_string(),
+            },
+        ),
+        (
+            VulkanDistributedActivationStorage::BoundaryOutput,
+            VulkanRuntimeResidentStreamAllocationKind::BoundaryOutput {
+                component_id: "component".to_string(),
+                signal_id: "signal".to_string(),
+            },
+        ),
+    ] {
+        let mut base = physical_execution_residency_base_plan(1_000, 100);
+        base.device_plans[0].breakdown.activation_slot_bytes = 0;
+        base.device_plans[0].breakdown.boundary_buffer_bytes = 64;
+        base.device_plans[0].resident_stream_device_allocations =
+            vec![VulkanRuntimeResidentStreamAllocation {
+                kind,
+                byte_capacity: 64,
+            }];
+        let mut activations =
+            physical_execution_activation_plan(VulkanSharedResidentBufferRoute::SharedHost);
+        activations.allocations[0].storage = storage;
+
+        let plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+            &base,
+            &["owner".to_string(), "helper".to_string()],
+            &empty_physical_execution_parameter_allocations(),
+            &empty_physical_execution_parameter_exclusions(),
+            &activations,
+        )
+        .unwrap();
+        let owner = plan
+            .device_plans
+            .iter()
+            .find(|device| device.device_id == "owner")
+            .unwrap();
+        assert_eq!(owner.breakdown.owner_stream_device_bytes, 36);
+        assert!(owner.resident_stream_device_allocations.is_empty());
+
+        activations.allocations[0].signal_ids = vec!["other".to_string()];
+        let identity_error = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+            &base,
+            &["owner".to_string(), "helper".to_string()],
+            &empty_physical_execution_parameter_allocations(),
+            &empty_physical_execution_parameter_exclusions(),
+            &activations,
+        )
+        .unwrap_err();
+        assert!(identity_error.to_string().contains("replaces 0 resident allocations"));
+    }
+}
+
 fn empty_physical_execution_parameter_allocations(
 ) -> VulkanDistributedParameterAllocationPlan {
     VulkanDistributedParameterAllocationPlan {
@@ -793,6 +951,7 @@ fn add_helper_stream_control_device(base: &mut VulkanRuntimeResidencyPlan) {
         stream_control_bytes: VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
         ..VulkanRuntimeDeviceResidencyBreakdown::default()
     };
+    helper.resident_stream_device_allocations.clear();
     helper.initial_device_resident_bytes = VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
     base.device_plans.push(helper);
     base.total_initial_device_resident_bytes += VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
@@ -822,10 +981,20 @@ fn physical_execution_residency_base_plan(
                 ..VulkanCompiledResourceStoreResidencyBytes::default()
             },
             working_set: VulkanRuntimeWorkingSetBytes {
-                transient_state_bytes: 40,
-                activation_headroom_bytes: 60,
+                transient_state_bytes: 36,
+                activation_headroom_bytes: 64,
             },
-            breakdown: VulkanRuntimeDeviceResidencyBreakdown::default(),
+            breakdown: VulkanRuntimeDeviceResidencyBreakdown {
+                activation_slot_bytes: 64,
+                ..VulkanRuntimeDeviceResidencyBreakdown::default()
+            },
+            resident_stream_device_allocations: vec![VulkanRuntimeResidentStreamAllocation {
+                kind: VulkanRuntimeResidentStreamAllocationKind::ActivationSlot {
+                    component_id: "component".to_string(),
+                    slot: 0,
+                },
+                byte_capacity: 64,
+            }],
             initial_device_resident_bytes,
         }],
         total_initial_device_resident_bytes: initial_device_resident_bytes,
