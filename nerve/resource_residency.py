@@ -52,9 +52,7 @@ _INTEGRITY_FIELDS = frozenset(("algorithm", "digest"))
 _COMPATIBILITY_FIELDS = frozenset(
     ("device_api", "storage_class", "read_only", "required_features")
 )
-_ATOMIC_GROUP_FIELDS = frozenset(
-    ("id", "lifetime", "resource_ids", "dependencies")
-)
+_ATOMIC_GROUP_FIELDS = frozenset(("id", "lifetime", "resource_ids", "dependencies"))
 _BINDING_FIELDS = frozenset(
     (
         "execution_scope",
@@ -64,9 +62,7 @@ _BINDING_FIELDS = frozenset(
         "mapping",
     )
 )
-_ATOMIC_GROUP_BINDING_FIELDS = frozenset(
-    ("kind", "atomic_group_id", "resource_id")
-)
+_ATOMIC_GROUP_BINDING_FIELDS = frozenset(("kind", "atomic_group_id", "resource_id"))
 _SELECTED_ATOMIC_GROUP_BINDING_FIELDS = frozenset(
     (
         "kind",
@@ -305,7 +301,9 @@ def derived_partition_identity(identity_seed: str, partition_index: int) -> str:
         or isinstance(partition_index, bool)
         or partition_index < 0
     ):
-        raise ModelCompileError("partition identity index must be a non-negative integer")
+        raise ModelCompileError(
+            "partition identity index must be a non-negative integer"
+        )
     return residency_content_id(
         "partition",
         {"identity_seed": identity_seed, "partition_index": partition_index},
@@ -319,24 +317,16 @@ def resolve_partition_atomic_group(
     partition_template_id: str,
     partition_index: int,
 ) -> Json:
-    template_id = _require_content_id(
-        partition_template_id, "partition template id"
-    )
+    template_id = _require_content_id(partition_template_id, "partition template id")
     templates = _require_object_list(
         contract.get("partition_templates"), "partition templates"
     )
     template = next(
-        (
-            candidate
-            for candidate in templates
-            if candidate.get("id") == template_id
-        ),
+        (candidate for candidate in templates if candidate.get("id") == template_id),
         None,
     )
     if template is None:
-        raise ModelCompileError(
-            f"unknown partition template {partition_template_id!r}"
-        )
+        raise ModelCompileError(f"unknown partition template {partition_template_id!r}")
     partition_count = _require_positive_int(
         template.get("partition_count"), "partition count"
     )
@@ -467,22 +457,17 @@ def read_verified_partition_atomic_group(
             "resolved partition atomic group resource ids are invalid"
         )
     actual_resource_ids = [
-        _require_content_id(
-            resource.get("id"), "resolved partition resource id"
-        )
+        _require_content_id(resource.get("id"), "resolved partition resource id")
         for resource in resources
     ]
-    if (
-        actual_resource_ids != declared_resource_ids
-        or len(actual_resource_ids) != len(set(actual_resource_ids))
+    if actual_resource_ids != declared_resource_ids or len(actual_resource_ids) != len(
+        set(actual_resource_ids)
     ):
         raise ModelCompileError(
             "resolved partition atomic group membership is inconsistent"
         )
     loaded: dict[str, list[bytes]] = {}
-    for resource, resource_id in zip(
-        resources, actual_resource_ids, strict=True
-    ):
+    for resource, resource_id in zip(resources, actual_resource_ids, strict=True):
         payloads = []
         for byte_range in _require_object_list(
             resource.get("ranges"), "resolved partition ranges"
@@ -567,6 +552,7 @@ def build_eager_resource_residency_contract(
     source_headers, artifact_byte_counts = compiled_resource_artifact_metadata(
         package_dir, tensor_index
     )
+    partition_digest_catalog: dict[str, tuple[bytes, str]] = {}
     resources_by_id: dict[str, Json] = {}
     resource_id_by_tensor: dict[str, str] = {}
     for tensor_name in sorted(tensor_bindings):
@@ -577,16 +563,17 @@ def build_eager_resource_residency_contract(
             lifetime="always_resident",
             source_headers=source_headers,
             artifact_byte_counts=artifact_byte_counts,
+            partition_digest_catalog=partition_digest_catalog,
         )
         resource_id = resource["id"]
         resource_id_by_tensor[tensor_name] = resource_id
         existing = resources_by_id.get(resource_id)
-        if existing is None or _range_location_key(resource) < _range_location_key(existing):
+        if existing is None or _range_location_key(resource) < _range_location_key(
+            existing
+        ):
             resources_by_id[resource_id] = resource
     if not resources_by_id:
-        raise ModelCompileError(
-            "compiled package has no immutable parameter resources"
-        )
+        raise ModelCompileError("compiled package has no immutable parameter resources")
     eager_spine_group = {
         "id": "",
         "lifetime": "always_resident",
@@ -615,7 +602,9 @@ def build_eager_resource_residency_contract(
         "identity_algorithm": RESOURCE_IDENTITY_ALGORITHM,
         "state_machine_schema": RESOURCE_STATE_MACHINE_SCHEMA,
         "supported_policies": list(SUPPORTED_RESIDENCY_POLICIES),
-        "resources": sorted(resources_by_id.values(), key=lambda resource: resource["id"]),
+        "resources": sorted(
+            resources_by_id.values(), key=lambda resource: resource["id"]
+        ),
         "atomic_groups": [eager_spine_group],
         "partition_templates": [],
         "bindings": bindings,
@@ -634,6 +623,7 @@ def compiled_immutable_resource(
     lifetime: str,
     source_headers: dict[str, int],
     artifact_byte_counts: dict[str, int],
+    partition_digest_catalog: dict[str, tuple[bytes, str]] | None = None,
 ) -> Json:
     tensors = tensor_index.get("tensors")
     metadata = tensors.get(tensor_name) if isinstance(tensors, dict) else None
@@ -689,6 +679,7 @@ def compiled_immutable_resource(
         source_file=source_file,
         absolute_offset=absolute_offset,
         byte_count=byte_count,
+        partition_digest_catalog=partition_digest_catalog,
     )
     resource = {
         "id": "",
@@ -714,6 +705,7 @@ def _compiled_tensor_source_ranges(
     source_file: str,
     absolute_offset: int,
     byte_count: int,
+    partition_digest_catalog: dict[str, tuple[bytes, str]] | None,
 ) -> list[Json]:
     integrity = metadata.get("partition_integrity")
     if integrity is None:
@@ -764,19 +756,33 @@ def _compiled_tensor_source_ranges(
         f"tensor {tensor_name!r} source partition digest stride",
     )
     table_sha256 = integrity.get("table_sha256")
-    try:
-        digest_table_payload = (package_dir / digest_table_path).read_bytes()
-    except OSError as error:
-        raise ModelCompileError(
-            f"compiled tensor {tensor_name!r} partition digest table cannot be read: {error}"
-        ) from error
+    cached_digest_table = (
+        None
+        if partition_digest_catalog is None
+        else partition_digest_catalog.get(digest_table_path)
+    )
+    if cached_digest_table is None:
+        try:
+            digest_table_payload = (package_dir / digest_table_path).read_bytes()
+        except OSError as error:
+            raise ModelCompileError(
+                f"compiled tensor {tensor_name!r} partition digest table cannot be read: {error}"
+            ) from error
+        actual_table_sha256 = sha256(digest_table_payload).hexdigest()
+        if partition_digest_catalog is not None:
+            partition_digest_catalog[digest_table_path] = (
+                digest_table_payload,
+                actual_table_sha256,
+            )
+    else:
+        digest_table_payload, actual_table_sha256 = cached_digest_table
     if (
         integrity.get("schema") != "nerve.tensor_partition_integrity.v1"
         or integrity.get("partition_axis") != 0
         or partition_count * partition_byte_count != byte_count
         or digest_stride_bytes != 32
         or not _is_lower_hex_sha256(table_sha256)
-        or sha256(digest_table_payload).hexdigest() != table_sha256
+        or actual_table_sha256 != table_sha256
         or digest_table_byte_offset + partition_count * digest_stride_bytes
         > len(digest_table_payload)
     ):
@@ -800,6 +806,7 @@ def _compiled_tensor_source_ranges(
             digest_table_byte_offset=digest_table_byte_offset,
             digest_stride_bytes=digest_stride_bytes,
             partition_index=partition_index,
+            digest_table_payload=digest_table_payload,
         )
         ranges.append(
             {
@@ -834,13 +841,14 @@ def compiled_resource_artifact_metadata(
     source_files = {
         metadata.get("source_file")
         for metadata in tensors.values()
-        if isinstance(metadata, dict)
-        and isinstance(metadata.get("source_file"), str)
+        if isinstance(metadata, dict) and isinstance(metadata.get("source_file"), str)
     }
     artifact_byte_counts: dict[str, int] = {}
     for source_file in source_files:
         try:
-            artifact_byte_counts[source_file] = (package_dir / source_file).stat().st_size
+            artifact_byte_counts[source_file] = (
+                (package_dir / source_file).stat().st_size
+            )
         except OSError as error:
             raise ModelCompileError(
                 f"compiled resource source {source_file!r} cannot be inspected: {error}"
@@ -854,13 +862,17 @@ def validate_resource_residency_contract(
     manifest: Json,
 ) -> None:
     contract = _require_object(contract, "compiled resource residency contract")
-    _require_exact_fields(contract, _CONTRACT_FIELDS, "compiled resource residency contract")
+    _require_exact_fields(
+        contract, _CONTRACT_FIELDS, "compiled resource residency contract"
+    )
     if contract["schema"] != RESOURCE_RESIDENCY_SCHEMA:
         raise ModelCompileError(
             f"unsupported compiled resource residency schema {contract['schema']!r}"
         )
     if contract["identity_algorithm"] != RESOURCE_IDENTITY_ALGORITHM:
-        raise ModelCompileError("compiled resource residency identity algorithm is invalid")
+        raise ModelCompileError(
+            "compiled resource residency identity algorithm is invalid"
+        )
     if contract["state_machine_schema"] != RESOURCE_STATE_MACHINE_SCHEMA:
         raise ModelCompileError("compiled resource residency state machine is invalid")
     if contract["supported_policies"] != list(SUPPORTED_RESIDENCY_POLICIES):
@@ -875,9 +887,7 @@ def validate_resource_residency_contract(
     )
     bindings = _require_object_list(contract["bindings"], "resource bindings")
     selectors = _require_object_list(contract["selectors"], "resource selectors")
-    checkpoints = _require_object_list(
-        contract["checkpoints"], "residency checkpoints"
-    )
+    checkpoints = _require_object_list(contract["checkpoints"], "residency checkpoints")
 
     resource_by_id = _validate_resources(package_dir, resources)
     group_by_id = _validate_atomic_groups(groups, resource_by_id)
@@ -1018,7 +1028,10 @@ def _validate_resources(package_dir: Path, resources: list[Json]) -> dict[str, J
                 f"resource {resource_id!r} depends on unknown resources {sorted(unknown)}"
             )
     _reject_dependency_cycles(
-        {resource_id: resource["dependencies"] for resource_id, resource in resource_by_id.items()},
+        {
+            resource_id: resource["dependencies"]
+            for resource_id, resource in resource_by_id.items()
+        },
         "resource",
     )
     for artifact_path, intervals in artifact_intervals.items():
@@ -1136,13 +1149,9 @@ def _validate_partition_templates(
             if not _PARTITION_MEMBER_FIELDS <= member_fields or (
                 member_fields - _PARTITION_MEMBER_FIELDS
             ) != (
-                {"resident_derivation"}
-                if "resident_derivation" in member
-                else set()
+                {"resident_derivation"} if "resident_derivation" in member else set()
             ):
-                raise ModelCompileError(
-                    "partition member template fields are invalid"
-                )
+                raise ModelCompileError("partition member template fields are invalid")
             seed = _require_content_id(
                 member["resource_identity_seed"], "partition resource identity seed"
             )
@@ -1218,9 +1227,7 @@ def _validate_range_template(
     base = _require_non_negative_int(
         byte_range["base_byte_offset"], "partition range base"
     )
-    stride = _require_positive_int(
-        byte_range["stride_bytes"], "partition range stride"
-    )
+    stride = _require_positive_int(byte_range["stride_bytes"], "partition range stride")
     byte_count = _require_positive_int(
         byte_range["byte_count"], "partition range byte count"
     )
@@ -1230,9 +1237,7 @@ def _validate_range_template(
     if base % alignment or stride % alignment:
         raise ModelCompileError("partition range base and stride violate alignment")
     if stride < byte_count:
-        raise ModelCompileError(
-            "partition range stride overlaps adjacent resources"
-        )
+        raise ModelCompileError("partition range stride overlaps adjacent resources")
     last_end = base + (partition_count - 1) * stride + byte_count
     try:
         artifact_bytes = (package_dir / artifact_path).stat().st_size
@@ -1244,9 +1249,7 @@ def _validate_range_template(
         raise ModelCompileError(
             f"partition range template exceeds artifact {artifact_path!r}"
         )
-    integrity = _require_object(
-        byte_range["integrity"], "partition range integrity"
-    )
+    integrity = _require_object(byte_range["integrity"], "partition range integrity")
     _require_exact_fields(
         integrity, _INTEGRITY_TEMPLATE_FIELDS, "partition range integrity"
     )
@@ -1300,13 +1303,11 @@ def _validate_bindings(
     component_nodes: dict[tuple[str, str], dict[str, Json]],
 ) -> None:
     resource_ids_by_group = {
-        group_id: set(group["resource_ids"])
-        for group_id, group in group_by_id.items()
+        group_id: set(group["resource_ids"]) for group_id, group in group_by_id.items()
     }
     member_seeds_by_template = {
         template_id: {
-            member["resource_identity_seed"]
-            for member in template["member_templates"]
+            member["resource_identity_seed"] for member in template["member_templates"]
         }
         for template_id, template in template_by_id.items()
     }
@@ -1314,14 +1315,10 @@ def _validate_bindings(
     bound_semantics = []
     bound_concrete_resources: set[str] = set()
     bound_partition_members: set[tuple[str, str]] = set()
-    selected_slots: dict[
-        tuple[str, str, str, str], list[tuple[str, int, int]]
-    ] = (
+    selected_slots: dict[tuple[str, str, str, str], list[tuple[str, int, int]]] = (
         defaultdict(list)
     )
-    partition_slots: dict[tuple[str, str, str, str, str], list[int]] = defaultdict(
-        list
-    )
+    partition_slots: dict[tuple[str, str, str, str, str], list[int]] = defaultdict(list)
     for binding in bindings:
         _require_exact_fields(binding, _BINDING_FIELDS, "resource binding")
         for field in ("execution_scope", "component_id", "node_id", "parameter_id"):
@@ -1416,7 +1413,10 @@ def _validate_bindings(
                 "resource binding partition parameter slot",
             )
             template = template_by_id.get(template_id)
-            if template is None or resource_seed not in member_seeds_by_template[template_id]:
+            if (
+                template is None
+                or resource_seed not in member_seeds_by_template[template_id]
+            ):
                 raise ModelCompileError(
                     "resource binding references an unknown partition template member"
                 )
@@ -1459,7 +1459,12 @@ def _validate_bindings(
         raise ModelCompileError(
             "resource bindings do not completely cover atomic resource membership"
         )
-    for (scope, component_id, node_id, selection_signal), slots in selected_slots.items():
+    for (
+        scope,
+        component_id,
+        node_id,
+        selection_signal,
+    ), slots in selected_slots.items():
         candidates = []
         for selector in selectors:
             mapping = selector.get("mapping")
@@ -1485,11 +1490,9 @@ def _validate_bindings(
                 "do not map exactly one group-table selector"
             )
         consumer = component_nodes.get((scope, component_id), {}).get(node_id)
-        if (
-            not isinstance(consumer, dict)
-            or candidates[0].get("execution_signal")
-            not in consumer.get("inputs", [])
-        ):
+        if not isinstance(consumer, dict) or candidates[0].get(
+            "execution_signal"
+        ) not in consumer.get("inputs", []):
             raise ModelCompileError(
                 f"selected resource bindings for {scope} {component_id}.{node_id} "
                 "do not consume the selector execution signal"
@@ -1542,11 +1545,9 @@ def _validate_bindings(
                 "do not map exactly one partition-template selector"
             )
         consumer = component_nodes.get((scope, component_id), {}).get(node_id)
-        if (
-            not isinstance(consumer, dict)
-            or matching_selectors[0].get("execution_signal")
-            not in consumer.get("inputs", [])
-        ):
+        if not isinstance(consumer, dict) or matching_selectors[0].get(
+            "execution_signal"
+        ) not in consumer.get("inputs", []):
             raise ModelCompileError(
                 f"partition resource bindings for {scope} {component_id}.{node_id} "
                 "do not consume the selector execution signal"
@@ -1556,6 +1557,8 @@ def _validate_bindings(
                 f"partition resource bindings for {scope} {component_id}.{node_id} "
                 "do not define one contiguous parameter-slot layout"
             )
+
+
 def _validate_selectors(
     selectors: list[Json],
     group_by_id: dict[str, Json],
@@ -1593,8 +1596,7 @@ def _validate_selectors(
             != {"id", "resource_count", "selection_signal", "encoding"}
             or selection_domain.get("id") != selector["domain_id"]
             or selection_domain.get("resource_count") != selector["resource_count"]
-            or selection_domain.get("selection_signal")
-            != selector["selection_signal"]
+            or selection_domain.get("selection_signal") != selector["selection_signal"]
             or selection_domain.get("encoding") != selector["encoding"]
         ):
             raise ModelCompileError(
@@ -1607,9 +1609,7 @@ def _validate_selectors(
         resource_count = _require_positive_int(
             selector["resource_count"], "selector resource count"
         )
-        encoding = _require_object(
-            selector["encoding"], "selector selection encoding"
-        )
+        encoding = _require_object(selector["encoding"], "selector selection encoding")
         _require_exact_fields(
             encoding,
             _SELECTION_ENCODING_FIELDS,
@@ -1672,7 +1672,9 @@ def _validate_selectors(
                 raise ModelCompileError(
                     f"selector {selector_id!r} maps unknown atomic groups"
                 )
-            if any(group_by_id[group_id]["lifetime"] != "dynamic" for group_id in group_ids):
+            if any(
+                group_by_id[group_id]["lifetime"] != "dynamic" for group_id in group_ids
+            ):
                 raise ModelCompileError(
                     f"selector {selector_id!r} maps an always-resident group"
                 )
@@ -1731,9 +1733,7 @@ def _validate_checkpoints(
     selector_owners = Counter()
     for checkpoint in checkpoints:
         _require_exact_fields(checkpoint, _CHECKPOINT_FIELDS, "residency checkpoint")
-        checkpoint_id = _require_content_id(
-            checkpoint["id"], "residency checkpoint id"
-        )
+        checkpoint_id = _require_content_id(checkpoint["id"], "residency checkpoint id")
         for field in (
             "execution_scope",
             "component_id",
@@ -1870,9 +1870,9 @@ def _compiled_semantics(
             )
             circuit = _require_object(component.get("circuit"), "component circuit")
             refs = _require_object(
-                _require_object(
-                    component.get("params"), "component parameters"
-                ).get("refs"),
+                _require_object(component.get("params"), "component parameters").get(
+                    "refs"
+                ),
                 "component parameter references",
             )
             nodes = _require_object_list(circuit.get("nodes"), "component nodes")

@@ -15,6 +15,7 @@ from nerve.resource_residency import (
     atomic_group_identity,
     build_eager_resource_residency_contract,
     checkpoint_identity,
+    compiled_immutable_resource,
     derived_partition_identity,
     partition_group_identity_seed,
     partition_template_identity,
@@ -26,6 +27,77 @@ from nerve.resource_residency import (
     selector_identity,
     validate_resource_residency_contract,
 )
+
+
+def test_compiler_reuses_one_verified_partition_digest_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_path = "weights/bank.safetensors"
+    artifact = tmp_path / artifact_path
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"H" * 16 + bytes(range(32)))
+    table_path = "integrity/resource_partitions.sha256"
+    table = tmp_path / table_path
+    table.parent.mkdir(parents=True)
+    table_payload = b"".join(sha256(bytes([index])).digest() for index in range(4))
+    table.write_bytes(table_payload)
+    table_digest = sha256(table_payload).hexdigest()
+    tensors = {
+        f"tensor.{index}": {
+            "source_file": artifact_path,
+            "data_offsets": [index * 16, (index + 1) * 16],
+            "safetensors_header_bytes": 8,
+            "byte_count": 16,
+            "data_sha256": sha256(
+                bytes(range(index * 16, (index + 1) * 16))
+            ).hexdigest(),
+            "partition_integrity": {
+                "schema": "nerve.tensor_partition_integrity.v1",
+                "partition_axis": 0,
+                "partition_count": 2,
+                "partition_byte_count": 8,
+                "digest_table_path": table_path,
+                "digest_table_byte_offset": index * 64,
+                "digest_stride_bytes": 32,
+                "table_sha256": table_digest,
+            },
+        }
+        for index in range(2)
+    }
+    open_count = 0
+    original_open = Path.open
+
+    def count_table_opens(path: Path, *args, **kwargs):
+        nonlocal open_count
+        if path == table:
+            open_count += 1
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", count_table_opens)
+    digest_catalog: dict[str, tuple[bytes, str]] = {}
+
+    resources = [
+        compiled_immutable_resource(
+            package_dir=tmp_path,
+            tensor_index={"tensors": tensors},
+            tensor_name=tensor_name,
+            lifetime="dynamic",
+            source_headers={artifact_path: 8},
+            artifact_byte_counts={artifact_path: artifact.stat().st_size},
+            partition_digest_catalog=digest_catalog,
+        )
+        for tensor_name in tensors
+    ]
+
+    assert open_count == 1
+    assert set(digest_catalog) == {table_path}
+    assert [
+        byte_range["integrity"]["digest"] for byte_range in resources[0]["ranges"]
+    ] == [
+        table_payload[:32].hex(),
+        table_payload[32:64].hex(),
+    ]
 
 
 def _fixture(
@@ -60,7 +132,7 @@ def _fixture(
                             "element_type": "u32",
                             "selection_count_per_activation": 1,
                             "index_shift": 0,
-                            "index_mask": 0xffff,
+                            "index_mask": 0xFFFF,
                             "calibration_word_base": 0,
                         },
                     }
@@ -109,17 +181,13 @@ def _fixture(
                 {
                     "component_id": "component",
                     "circuit": {"nodes": nodes},
-                    "params": {
-                        "refs": parameter_refs
-                    },
+                    "params": {"refs": parameter_refs},
                 }
             ]
         },
         "speculative_decoders": [],
     }
-    tensor_index = {
-        "tensors": tensors
-    }
+    tensor_index = {"tensors": tensors}
     return manifest, tensor_index
 
 
@@ -185,10 +253,7 @@ def _dynamic_template(root: Path) -> dict[str, object]:
     }
     template["group_identity_seed"] = partition_group_identity_seed(
         template["partition_count"],
-        [
-            member["resource_identity_seed"]
-            for member in template["member_templates"]
-        ],
+        [member["resource_identity_seed"] for member in template["member_templates"]],
     )
     template["id"] = partition_template_identity(template)
     return template
@@ -224,9 +289,7 @@ def _add_dynamic_selector_contract(
         "node_id": "selector",
         "domain_id": "addressable_resources",
         "resource_count": (
-            template["partition_count"]
-            if resource_count is None
-            else resource_count
+            template["partition_count"] if resource_count is None else resource_count
         ),
         "selection_signal": "selection",
         "execution_signal": "selection",
@@ -235,7 +298,7 @@ def _add_dynamic_selector_contract(
             "element_type": "u32",
             "selection_count_per_activation": 1,
             "index_shift": 0,
-            "index_mask": 0xffff,
+            "index_mask": 0xFFFF,
             "calibration_word_base": 0,
         },
         "mapping": {
@@ -301,11 +364,8 @@ def test_eager_spine_is_one_semantic_group_not_one_group_per_tensor(
         resource["id"] for resource in contract["resources"]
     )
     assert {
-        binding["mapping"]["atomic_group_id"]
-        for binding in contract["bindings"]
-    } == {
-        contract["atomic_groups"][0]["id"]
-    }
+        binding["mapping"]["atomic_group_id"] for binding in contract["bindings"]
+    } == {contract["atomic_groups"][0]["id"]}
 
 
 def test_content_identity_survives_package_relocation_and_artifact_renaming(
@@ -313,12 +373,8 @@ def test_content_identity_survives_package_relocation_and_artifact_renaming(
 ) -> None:
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
-    first, _ = _contract(
-        first_root, artifact_path="weights/original.safetensors"
-    )
-    second, _ = _contract(
-        second_root, artifact_path="relocated/renamed.safetensors"
-    )
+    first, _ = _contract(first_root, artifact_path="weights/original.safetensors")
+    second, _ = _contract(second_root, artifact_path="relocated/renamed.safetensors")
 
     assert [item["id"] for item in first["resources"]] == [
         item["id"] for item in second["resources"]
@@ -370,9 +426,7 @@ def test_failed_and_resident_states_require_explicit_lifecycle_clear() -> None:
             "fields are invalid",
         ),
         (
-            lambda contract: contract["bindings"][0].update(
-                {"node_id": "invented"}
-            ),
+            lambda contract: contract["bindings"][0].update({"node_id": "invented"}),
             "exactly cover",
         ),
     ),
@@ -455,9 +509,7 @@ def test_resolves_and_independently_verifies_one_partition(
     )
 
     assert resolved["partition_index"] == 1
-    assert resolved["atomic_group"]["resource_ids"] == [
-        resolved["resources"][0]["id"]
-    ]
+    assert resolved["atomic_group"]["resource_ids"] == [resolved["resources"][0]["id"]]
     assert resolved["resources"][0]["ranges"] == [
         {
             "artifact_path": "weights/parameter.safetensors",
@@ -470,9 +522,9 @@ def test_resolves_and_independently_verifies_one_partition(
             },
         }
     ]
-    assert list(
-        read_verified_partition_atomic_group(tmp_path, resolved).values()
-    ) == [[b"4567"]]
+    assert list(read_verified_partition_atomic_group(tmp_path, resolved).values()) == [
+        [b"4567"]
+    ]
 
     artifact = tmp_path / "weights" / "parameter.safetensors"
     payload = bytearray(artifact.read_bytes())
@@ -481,9 +533,9 @@ def test_resolves_and_independently_verifies_one_partition(
 
     # Corruption in partition zero does not force a read or hash of it when
     # partition one is requested.
-    assert list(
-        read_verified_partition_atomic_group(tmp_path, resolved).values()
-    ) == [[b"4567"]]
+    assert list(read_verified_partition_atomic_group(tmp_path, resolved).values()) == [
+        [b"4567"]
+    ]
     corrupt = resolve_partition_atomic_group(
         tmp_path,
         contract,
@@ -509,9 +561,7 @@ def test_resolved_partition_group_rejects_duplicate_or_mismatched_membership(
 
     duplicate = deepcopy(resolved)
     duplicate["resources"].append(deepcopy(duplicate["resources"][0]))
-    duplicate["atomic_group"]["resource_ids"].append(
-        duplicate["resources"][0]["id"]
-    )
+    duplicate["atomic_group"]["resource_ids"].append(duplicate["resources"][0]["id"])
     with pytest.raises(ModelCompileError, match="resource ids are invalid"):
         read_verified_partition_atomic_group(tmp_path, duplicate)
 
@@ -601,9 +651,9 @@ def test_rejects_digest_table_corruption_and_uncovered_suffix(
             message = "does not match its SHA-256"
         else:
             payload.extend(b"x" * 32)
-            template["member_templates"][0]["range_templates"][0][
-                "integrity"
-            ]["table_sha256"] = sha256(payload).hexdigest()
+            template["member_templates"][0]["range_templates"][0]["integrity"][
+                "table_sha256"
+            ] = sha256(payload).hexdigest()
             template["id"] = partition_template_identity(template)
             message = "covers 64 of 96"
         table.write_bytes(payload)
@@ -616,12 +666,8 @@ def test_rejects_digest_table_corruption_and_uncovered_suffix(
 def test_rejects_overlapping_partition_ranges(tmp_path: Path) -> None:
     contract, manifest = _contract(tmp_path, selector=True)
     template = _dynamic_template(tmp_path)
-    template["member_templates"][0]["range_templates"][0][
-        "stride_bytes"
-    ] = 2
-    template["member_templates"][0]["range_templates"][0][
-        "alignment_bytes"
-    ] = 2
+    template["member_templates"][0]["range_templates"][0]["stride_bytes"] = 2
+    template["member_templates"][0]["range_templates"][0]["alignment_bytes"] = 2
     template["id"] = partition_template_identity(template)
     _replace_eager_resource_with_dynamic_template(contract, template)
 
@@ -678,9 +724,9 @@ def test_rejects_unbound_atomic_partition_member(tmp_path: Path) -> None:
     table_payload += sha256(b"abcd").digest() + sha256(b"efgh").digest()
     table.write_bytes(table_payload)
     for member in template["member_templates"]:
-        member["range_templates"][0]["integrity"][
-            "table_sha256"
-        ] = sha256(table_payload).hexdigest()
+        member["range_templates"][0]["integrity"]["table_sha256"] = sha256(
+            table_payload
+        ).hexdigest()
     second_member = deepcopy(template["member_templates"][0])
     second_member["resource_identity_seed"] = residency_content_id(
         "partition_resource_seed", {"member": 1}
@@ -688,22 +734,15 @@ def test_rejects_unbound_atomic_partition_member(tmp_path: Path) -> None:
     second_range = second_member["range_templates"][0]
     second_range["artifact_path"] = "weights/second.bin"
     second_range["base_byte_offset"] = 0
-    second_range["integrity"]["digest_table_byte_offset"] = (
-        second_digest_offset
-    )
-    second_range["integrity"]["table_sha256"] = sha256(
-        table_payload
-    ).hexdigest()
+    second_range["integrity"]["digest_table_byte_offset"] = second_digest_offset
+    second_range["integrity"]["table_sha256"] = sha256(table_payload).hexdigest()
     template["member_templates"].append(second_member)
     template["member_templates"].sort(
         key=lambda member: member["resource_identity_seed"]
     )
     template["group_identity_seed"] = partition_group_identity_seed(
         template["partition_count"],
-        [
-            member["resource_identity_seed"]
-            for member in template["member_templates"]
-        ],
+        [member["resource_identity_seed"] for member in template["member_templates"]],
     )
     template["id"] = partition_template_identity(template)
     _replace_eager_resource_with_dynamic_template(contract, template)
@@ -743,7 +782,7 @@ def test_validates_concrete_dynamic_group_selector_and_checkpoint(
             "element_type": "u32",
             "selection_count_per_activation": 1,
             "index_shift": 0,
-            "index_mask": 0xffff,
+            "index_mask": 0xFFFF,
             "calibration_word_base": 0,
         },
         "mapping": {
@@ -812,7 +851,7 @@ def test_rejects_selector_count_and_checkpoint_boundary_drift(
             "element_type": "u32",
             "selection_count_per_activation": 1,
             "index_shift": 0,
-            "index_mask": 0xffff,
+            "index_mask": 0xFFFF,
             "calibration_word_base": 0,
         },
         "mapping": {

@@ -57,9 +57,7 @@ def validate_partition_range_storage(
     unreferenced table suffix fails closed.
     """
 
-    artifact_intervals: dict[
-        str, list[tuple[int, int, tuple[object, ...]]]
-    ] = {}
+    artifact_intervals: dict[str, list[tuple[int, int, tuple[object, ...]]]] = {}
     for interval in concrete_intervals:
         artifact_intervals.setdefault(interval.artifact_path, []).append(
             (
@@ -70,9 +68,7 @@ def validate_partition_range_storage(
         )
 
     table_contracts: dict[str, str] = {}
-    digest_intervals: dict[
-        str, list[tuple[int, int, tuple[object, ...]]]
-    ] = {}
+    digest_intervals: dict[str, list[tuple[int, int, tuple[object, ...]]]] = {}
     for series in partition_series:
         if series.stride_bytes < series.byte_count:
             raise ModelCompileError(
@@ -88,8 +84,7 @@ def validate_partition_range_storage(
             )
         for partition_index in range(series.partition_count):
             byte_offset = (
-                series.base_byte_offset
-                + partition_index * series.stride_bytes
+                series.base_byte_offset + partition_index * series.stride_bytes
             )
             digest_offset = (
                 series.digest_table_byte_offset
@@ -107,9 +102,7 @@ def validate_partition_range_storage(
             artifact_intervals.setdefault(series.artifact_path, []).append(
                 (byte_offset, byte_offset + series.byte_count, identity)
             )
-            digest_intervals.setdefault(
-                series.digest_table_path, []
-            ).append(
+            digest_intervals.setdefault(series.digest_table_path, []).append(
                 (digest_offset, digest_offset + _SHA256_BYTES, identity)
             )
 
@@ -160,6 +153,7 @@ def resolve_partition_range(
     digest_table_byte_offset: int,
     digest_stride_bytes: int,
     partition_index: int,
+    digest_table_payload: bytes | None = None,
 ) -> ResolvedResourceRange:
     _validate_relative_path(artifact_path, "partition artifact")
     _validate_relative_path(digest_table_path, "partition digest table")
@@ -193,21 +187,22 @@ def resolve_partition_range(
         raise ModelCompileError("partition range resolution input is invalid")
     byte_offset = base_byte_offset + partition_index * stride_bytes
     if byte_offset % alignment_bytes:
-        raise ModelCompileError(
-            "resolved partition byte offset violates alignment"
-        )
-    digest_offset = (
-        digest_table_byte_offset + partition_index * digest_stride_bytes
-    )
-    digest_path = package_dir / digest_table_path
-    try:
-        with digest_path.open("rb") as digest_file:
-            digest_file.seek(digest_offset)
-            digest = digest_file.read(_SHA256_BYTES)
-    except OSError as error:
-        raise ModelCompileError(
-            f"cannot resolve partition digest from {digest_table_path!r}: {error}"
-        ) from error
+        raise ModelCompileError("resolved partition byte offset violates alignment")
+    digest_offset = digest_table_byte_offset + partition_index * digest_stride_bytes
+    if digest_table_payload is None:
+        digest_path = package_dir / digest_table_path
+        try:
+            with digest_path.open("rb") as digest_file:
+                digest_file.seek(digest_offset)
+                digest = digest_file.read(_SHA256_BYTES)
+        except OSError as error:
+            raise ModelCompileError(
+                f"cannot resolve partition digest from {digest_table_path!r}: {error}"
+            ) from error
+    else:
+        if not isinstance(digest_table_payload, bytes):
+            raise ModelCompileError("partition digest catalog payload is invalid")
+        digest = digest_table_payload[digest_offset : digest_offset + _SHA256_BYTES]
     if len(digest) != _SHA256_BYTES:
         raise ModelCompileError(
             f"partition digest at {digest_table_path}:{digest_offset} is truncated"
@@ -224,9 +219,7 @@ def resolve_partition_range(
 def read_verified_resource_range(
     package_dir: Path, byte_range: ResolvedResourceRange
 ) -> bytes:
-    _validate_relative_path(
-        byte_range.artifact_path, "resolved resource artifact"
-    )
+    _validate_relative_path(byte_range.artifact_path, "resolved resource artifact")
     integer_fields = (
         byte_range.byte_offset,
         byte_range.byte_count,
@@ -240,14 +233,10 @@ def read_verified_resource_range(
         or byte_range.byte_offset < 0
         or byte_range.byte_count <= 0
         or byte_range.alignment_bytes <= 0
-        or byte_range.alignment_bytes
-        & (byte_range.alignment_bytes - 1)
+        or byte_range.alignment_bytes & (byte_range.alignment_bytes - 1)
         or byte_range.byte_offset % byte_range.alignment_bytes
         or len(byte_range.sha256) != _SHA256_BYTES * 2
-        or any(
-            character not in "0123456789abcdef"
-            for character in byte_range.sha256
-        )
+        or any(character not in "0123456789abcdef" for character in byte_range.sha256)
     ):
         raise ModelCompileError("resolved resource range is invalid")
     path = package_dir / byte_range.artifact_path
@@ -282,9 +271,7 @@ def _file_sha256_and_size(path: Path, label: str) -> tuple[str, int]:
             _hash_chunks(source, digest)
             size = source.tell()
     except OSError as error:
-        raise ModelCompileError(
-            f"{label} {path!s} cannot be read: {error}"
-        ) from error
+        raise ModelCompileError(f"{label} {path!s} cannot be read: {error}") from error
     return digest.hexdigest(), size
 
 
