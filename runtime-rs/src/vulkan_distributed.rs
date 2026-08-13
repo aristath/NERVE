@@ -14,3 +14,5 @@ include!("vulkan_distributed/exact_case_replay.rs");
 include!("vulkan_distributed/contract_planning.rs");
 include!("vulkan_distributed/planning.rs");
 include!("vulkan_distributed/tests.rs");
+#[cfg(test)]
+include!("vulkan_distributed/activation_buffer_tests.rs");

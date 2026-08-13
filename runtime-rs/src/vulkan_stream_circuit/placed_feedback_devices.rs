@@ -1486,7 +1486,7 @@ where
                         )),
                     ));
                 }
-                participant_device_ids.extend(allocation.device_buffers.keys().cloned());
+                participant_device_ids.extend(allocation.planned.device_ids.iter().cloned());
             }
         }
 
@@ -1667,16 +1667,25 @@ where
                 VulkanDistributedActivationStorage::Edge { edge_index, .. }
                     if produced_edge_indices.contains(&edge_index)
             ) {
-                for (device_id, buffer) in &mut allocation.device_buffers {
-                    *buffer = group_buffers.get(device_id).cloned().ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                            format!(
-                                "produced port {}.{} has no shared allocation on {device_id:?}",
-                                group.source_component_id, group.source_port_id,
-                            ),
-                        ))
-                    })?;
-                }
+                allocation.device_buffers = allocation
+                    .planned
+                    .device_ids
+                    .iter()
+                    .map(|device_id| {
+                        group_buffers
+                            .get(device_id)
+                            .cloned()
+                            .map(|buffer| (device_id.clone(), buffer))
+                            .ok_or_else(|| {
+                                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                    VulkanError(format!(
+                                        "produced port {}.{} has no shared allocation on {device_id:?}",
+                                        group.source_component_id, group.source_port_id,
+                                    )),
+                                )
+                            })
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
                 if let Some(route) = shared_route {
                     allocation.route = route;
                     allocation.external_device_local_error = None;
@@ -1853,6 +1862,13 @@ where
             )),
         ));
     }
+    distributed_activation_buffers
+        .finalize_deferred_graph_edges()
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "failed to finalize distributed graph-edge allocations: {error}",
+            )))
+        })?;
     let mut unique_devices = Vec::<(&VulkanComputeDevice, Vec<String>)>::new();
     for slice in device_slices {
         let device = device_for(&slice.device_id)?;

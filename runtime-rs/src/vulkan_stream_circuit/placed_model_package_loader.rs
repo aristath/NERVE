@@ -1418,10 +1418,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &stream_distributed_execution_plans.decode,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let mut distributed_activation_buffers = VulkanDistributedActivationBuffers::allocate(
-            &self.distributed_activation_plan,
-            |device_id| device_for(device_id),
-        )
+        let mut distributed_activation_buffers =
+            VulkanDistributedActivationBuffers::allocate_deferring_graph_edges(
+                &self.distributed_activation_plan,
+                |device_id| device_for(device_id),
+            )
         .map_err(|error| {
             VulkanResidentInProcessPlacedRuntimeError::Package(
                 VulkanResidentTokenModelPackageError::new(format!(

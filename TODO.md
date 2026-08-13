@@ -484,8 +484,11 @@ For every numbered item below:
   for each concrete allocation before acquiring the transaction; include
   per-allocation shared-host alignment for prefill/verification transients;
   move the one multi-device stream-control allocation from per-device working
-  sets to shared-host residency; and remove the provisional distributed edge
-  buffers that are allocated only to be replaced during boundary mounting.
+  sets to shared-host residency. Provisional distributed graph-edge buffers no
+  longer contribute a hidden mount peak: their generic route is left
+  unmaterialized, boundary mounting installs the selected final physical route
+  once, and finalization rejects missing, extra, or substituted participant
+  buffers before dispatch construction.
   Prove that the admitted device/host totals are consumed exactly—neither
   exhausted early nor left as unexplained credit—on local, staged, direct
   device-local, speculative, and TP stream shapes. Exact

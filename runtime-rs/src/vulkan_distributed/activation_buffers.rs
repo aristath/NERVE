@@ -753,9 +753,42 @@ impl VulkanDistributedActivationBuffers {
         Self::allocate_for_lanes(plan, 1, device_for)
     }
 
+    /// Allocates every distributed activation except graph edges whose final
+    /// transport is selected by the mounted boundary plan. Those edges are
+    /// installed once by `create_placed_device_links`; allocating the generic
+    /// route first would retain two physical copies at the mount peak.
+    pub(crate) fn allocate_deferring_graph_edges<'a, F, E>(
+        plan: &VulkanDistributedActivationBufferPlan,
+        device_for: F,
+    ) -> Result<Self, VulkanDistributedActivationBufferError>
+    where
+        F: FnMut(&str) -> Result<&'a VulkanComputeDevice, E>,
+        E: Display,
+    {
+        Self::allocate_for_lanes_with_deferred_graph_edges(plan, 1, true, device_for)
+    }
+
     pub fn allocate_for_lanes<'a, F, E>(
         plan: &VulkanDistributedActivationBufferPlan,
         lane_capacity: usize,
+        device_for: F,
+    ) -> Result<Self, VulkanDistributedActivationBufferError>
+    where
+        F: FnMut(&str) -> Result<&'a VulkanComputeDevice, E>,
+        E: Display,
+    {
+        Self::allocate_for_lanes_with_deferred_graph_edges(
+            plan,
+            lane_capacity,
+            false,
+            device_for,
+        )
+    }
+
+    fn allocate_for_lanes_with_deferred_graph_edges<'a, F, E>(
+        plan: &VulkanDistributedActivationBufferPlan,
+        lane_capacity: usize,
+        defer_graph_edges: bool,
         mut device_for: F,
     ) -> Result<Self, VulkanDistributedActivationBufferError>
     where
@@ -780,14 +813,24 @@ impl VulkanDistributedActivationBuffers {
                         planned.component_id, planned.slot
                     ))
                 })?;
-            let shared = allocate_distributed_shared_buffer(
-                &planned.owner_device_id,
-                &planned.device_ids,
-                byte_capacity,
-                plan.route,
-                &format!("activation {}.slot_{}", planned.component_id, planned.slot),
-                &mut device_for,
-            )?;
+            let shared = if defer_graph_edges
+                && matches!(planned.storage, VulkanDistributedActivationStorage::Edge { .. })
+            {
+                VulkanDistributedSharedBufferAllocation {
+                    route: plan.route,
+                    external_device_local_error: None,
+                    device_buffers: BTreeMap::new(),
+                }
+            } else {
+                allocate_distributed_shared_buffer(
+                    &planned.owner_device_id,
+                    &planned.device_ids,
+                    byte_capacity,
+                    plan.route,
+                    &format!("activation {}.slot_{}", planned.component_id, planned.slot),
+                    &mut device_for,
+                )?
+            };
             import_count = import_count
                 .checked_add(shared.device_buffers.len())
                 .ok_or_else(|| {
@@ -927,6 +970,33 @@ impl VulkanDistributedActivationBuffers {
         })
     }
 
+    pub(crate) fn finalize_deferred_graph_edges(
+        &mut self,
+    ) -> Result<(), VulkanDistributedActivationBufferError> {
+        for allocation in &self.allocations {
+            validate_final_distributed_activation_devices(
+                &allocation.planned,
+                allocation.device_buffers.keys().map(String::as_str),
+            )?;
+        }
+        self.import_count = self
+            .allocations
+            .iter()
+            .map(|allocation| allocation.device_buffers.len())
+            .chain(
+                self.reduction_allocations
+                    .iter()
+                    .map(|allocation| allocation.device_buffers.len()),
+            )
+            .try_fold(0usize, |total, count| total.checked_add(count))
+            .ok_or_else(|| {
+                VulkanDistributedActivationBufferError(
+                    "final distributed activation import count overflowed".to_string(),
+                )
+            })?;
+        Ok(())
+    }
+
     pub fn activation_buffer(
         &self,
         dispatch_owner_device_id: &str,
@@ -1053,6 +1123,28 @@ impl VulkanDistributedActivationBuffers {
             )
         })
     }
+}
+
+fn validate_final_distributed_activation_devices<'a>(
+    planned: &VulkanDistributedActivationBufferAllocation,
+    actual_device_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<(), VulkanDistributedActivationBufferError> {
+    let actual = actual_device_ids.into_iter().collect::<BTreeSet<_>>();
+    let expected = planned
+        .device_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if actual != expected || expected.len() != planned.device_ids.len() {
+        return Err(VulkanDistributedActivationBufferError(format!(
+            "distributed activation {}.slot_{} finalized {} buffers for {} declared devices",
+            planned.component_id,
+            planned.slot,
+            actual.len(),
+            planned.device_ids.len(),
+        )));
+    }
+    Ok(())
 }
 
 pub struct VulkanDistributedActivationBuffer {
