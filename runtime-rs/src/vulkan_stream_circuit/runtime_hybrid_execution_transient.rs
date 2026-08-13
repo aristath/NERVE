@@ -1,7 +1,15 @@
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VulkanRuntimeHybridExecutionTransientPlan {
     device_bytes_by_logical_device: BTreeMap<String, usize>,
+    device_allocations: Vec<VulkanRuntimeDeviceLocalTransientAllocation>,
     shared_host_allocations: Vec<VulkanRuntimeSharedHostTransientAllocation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VulkanRuntimeDeviceLocalTransientAllocation {
+    pub logical_device_id: String,
+    pub byte_capacity: usize,
+    pub concern: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -25,15 +33,16 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         &mut self,
         other: Self,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
-        for (logical_device_id, byte_count) in other.device_bytes_by_logical_device {
-            self.add_device_bytes(
-                &logical_device_id,
-                byte_count,
-                "combined component-batch runners",
+        let mut next = self.clone();
+        for allocation in other.device_allocations {
+            next.add_device_allocation(
+                &allocation.logical_device_id,
+                allocation.byte_capacity,
+                &allocation.concern,
             )?;
         }
         for allocation in other.shared_host_allocations {
-            self.add_shared_host_allocation(
+            next.add_shared_host_allocation(
                 allocation.mode,
                 &allocation.owner_device_id,
                 allocation.participant_device_ids,
@@ -41,15 +50,22 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
                 &allocation.concern,
             )?;
         }
+        *self = next;
         Ok(())
     }
 
-    fn add_device_bytes(
+    fn add_device_allocation(
         &mut self,
         logical_device_id: &str,
         byte_count: usize,
         concern: &str,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        if logical_device_id.trim().is_empty() || byte_count == 0 || concern.trim().is_empty() {
+            return Err(VulkanRuntimeHybridPlacementError(
+                "exact hybrid device transient allocation requires a device, positive capacity, and concern"
+                    .to_string(),
+            ));
+        }
         let total = self
             .device_bytes_by_logical_device
             .entry(logical_device_id.to_string())
@@ -59,6 +75,12 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
                 "exact hybrid {concern} transient bytes overflowed on {logical_device_id:?}",
             ))
         })?;
+        self.device_allocations
+            .push(VulkanRuntimeDeviceLocalTransientAllocation {
+                logical_device_id: logical_device_id.to_string(),
+                byte_capacity: byte_count,
+                concern: concern.to_string(),
+            });
         Ok(())
     }
 
@@ -383,26 +405,21 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                     "shared component-batch signal",
                 )?;
             } else {
-                plan.add_device_bytes(
+                plan.add_device_allocation(
                     &slice.device_id,
                     byte_count,
                     "component-batch signal",
                 )?;
             }
         }
-        plan.add_device_bytes(
-            &slice.device_id,
-            VULKAN_STREAM_CONTROL_BYTE_CAPACITY
-                .checked_mul(activation_batch_width)
-                .ok_or_else(|| {
-                    VulkanRuntimeHybridPlacementError(
-                        "exact hybrid component-batch stream-control capacity overflowed"
-                            .to_string(),
-                    )
-                })?,
-            "component-batch stream-control",
-        )?;
-        plan.add_device_bytes(
+        for _ in 0..activation_batch_width {
+            plan.add_device_allocation(
+                &slice.device_id,
+                VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                "component-batch lane stream-control",
+            )?;
+        }
+        plan.add_device_allocation(
             &slice.device_id,
             size_of::<u32>()
                 .checked_mul(activation_batch_width)
@@ -413,30 +430,35 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                 })?,
             "component-batch token IDs",
         )?;
-        plan.add_device_bytes(
-            &slice.device_id,
-            exact_vulkan_component_batch_fixed_control_bytes()?,
-            "component-batch control",
-        )?;
-        plan.add_device_bytes(
-            &slice.device_id,
-            if causal_snapshot_storage_preclaimed {
-                size_of::<u32>()
-            } else {
-                exact_vulkan_component_batch_snapshot_bytes(
-                    runtime_model,
-                    &selected_dispatches,
-                    &distributed_dispatch_indices,
-                    activation_batch_width,
-                )?
-            },
-            "component-batch causal snapshots",
-        )?;
+        for payload in exact_vulkan_component_batch_fixed_control_payloads() {
+            plan.add_device_allocation(
+                &slice.device_id,
+                payload.byte_count() as usize,
+                "component-batch control",
+            )?;
+        }
+        let snapshot_allocations = if causal_snapshot_storage_preclaimed {
+            vec![size_of::<u32>()]
+        } else {
+            exact_vulkan_component_batch_snapshot_allocation_bytes(
+                runtime_model,
+                &selected_dispatches,
+                &distributed_dispatch_indices,
+                activation_batch_width,
+            )?
+        };
+        for byte_capacity in snapshot_allocations {
+            plan.add_device_allocation(
+                &slice.device_id,
+                byte_capacity,
+                "component-batch causal snapshot",
+            )?;
+        }
     }
 
     for spec in private_activations.values() {
         for (logical_device_id, frame_byte_capacity) in &spec.frame_byte_capacities {
-            plan.add_device_bytes(
+            plan.add_device_allocation(
                 logical_device_id,
                 frame_byte_capacity
                     .checked_mul(activation_batch_width)
@@ -462,7 +484,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                 )
             })?;
         match execution_plan.shared_activation_route {
-            VulkanSharedResidentBufferRoute::ExternalDeviceLocal => plan.add_device_bytes(
+            VulkanSharedResidentBufferRoute::ExternalDeviceLocal => plan.add_device_allocation(
                 &reduction.owner_device_id,
                 byte_count,
                 "batch reduction",
@@ -508,28 +530,21 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                 dispatch.component_id, dispatch.node_id,
             ))
         })?;
-        let control_bytes = implementation
+        let control_payloads = implementation
             .stages
             .iter()
             .map(|stage| stage.control.storage_buffer().2)
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .try_fold(0usize, |total, payload| {
-                total
-                    .checked_add(payload.byte_count() as usize)
-                    .ok_or_else(|| {
-                        VulkanRuntimeHybridPlacementError(
-                            "exact hybrid distributed batch control capacity overflowed"
-                                .to_string(),
-                        )
-                    })
-            })?;
+            .collect::<Vec<_>>();
         for shard in &dispatch.shards {
-            plan.add_device_bytes(
-                &shard.device_id,
-                control_bytes,
-                "distributed batch control",
-            )?;
+            for payload in &control_payloads {
+                plan.add_device_allocation(
+                    &shard.device_id,
+                    payload.byte_count() as usize,
+                    "distributed batch control",
+                )?;
+            }
         }
     }
     let component_owner_logical_device_ids = slice_plans
@@ -579,7 +594,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
             )?;
         }
     }
-    let gates = exact_vulkan_runtime_hybrid_gate_device_bytes(
+    let gates = exact_vulkan_runtime_hybrid_gate_device_plan(
         component_ids,
         &component_owner_logical_device_ids,
         execution_plan,
@@ -588,13 +603,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         resource_layout,
         residency_policy,
     )?;
-    for (logical_device_id, byte_count) in gates {
-        plan.add_device_bytes(
-            &logical_device_id,
-            byte_count,
-            "prefill residency gate",
-        )?;
-    }
+    plan.extend(gates)?;
     Ok(plan)
 }
 
@@ -607,11 +616,32 @@ fn exact_vulkan_runtime_hybrid_gate_device_bytes(
     resource_layout: &VulkanCompiledResourceAddressLayout,
     residency_policy: ResourceResidencyPolicy,
 ) -> Result<BTreeMap<String, usize>, VulkanRuntimeHybridPlacementError> {
+    exact_vulkan_runtime_hybrid_gate_device_plan(
+        component_ids,
+        component_owner_logical_device_ids,
+        execution_plan,
+        lane_count,
+        resource_contract,
+        resource_layout,
+        residency_policy,
+    )
+    .map(|plan| plan.device_bytes_by_logical_device)
+}
+
+fn exact_vulkan_runtime_hybrid_gate_device_plan(
+    component_ids: &BTreeSet<String>,
+    component_owner_logical_device_ids: &BTreeMap<String, String>,
+    execution_plan: &VulkanDistributedExecutionPlan,
+    lane_count: usize,
+    resource_contract: &CompiledResourceResidencyContract,
+    resource_layout: &VulkanCompiledResourceAddressLayout,
+    residency_policy: ResourceResidencyPolicy,
+) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanRuntimeHybridPlacementError> {
     if lane_count == 0 {
         return runtime_hybrid_error("exact hybrid residency gate lane count is zero");
     }
     if !residency_policy.is_demand_loaded() {
-        return Ok(BTreeMap::new());
+        return Ok(VulkanRuntimeHybridExecutionTransientPlan::default());
     }
     let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
     let distributed_components = execution_plan
@@ -666,23 +696,26 @@ fn exact_vulkan_runtime_hybrid_gate_device_bytes(
                 )?,
                 owned_resource_indices: None,
             };
-            plan.add_device_bytes(
-                owner,
-                config
-                    .private_device_bytes()
-                    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
-                    .total_bytes,
-                "scalar residency gate",
-            )?;
+            let private = config
+                .private_device_bytes()
+                .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+            for byte_capacity in [
+                private.configuration_bytes,
+                private.resource_group_record_bytes,
+                private.resource_address_slot_bytes,
+                private.resolved_address_bytes,
+            ] {
+                plan.add_device_allocation(owner, byte_capacity, "scalar residency gate")?;
+            }
         }
-        plan.add_device_bytes(
+        plan.add_device_allocation(
             owner,
             VulkanGpuResidencyMissQueue::device_bytes_for_capacity(missing_capacity)
                 .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
                 .byte_count,
             "scalar residency miss queue",
         )?;
-        plan.add_device_bytes(
+        plan.add_device_allocation(
             owner,
             size_of::<u32>(),
             "scalar residency predicate",
@@ -750,27 +783,30 @@ fn exact_vulkan_runtime_hybrid_gate_device_bytes(
                 };
                 let private = config
                     .private_device_bytes()
-                    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
-                    .total_bytes;
+                    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
                 let queue = VulkanGpuResidencyMissQueue::device_bytes_for_capacity(selection_count)
                     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
                     .byte_count;
-                plan.add_device_bytes(
-                    &shard.device_id,
-                    private.checked_add(queue).ok_or_else(|| {
-                        VulkanRuntimeHybridPlacementError(
-                            "exact hybrid distributed gate bytes overflowed".to_string(),
-                        )
-                    })?,
-                    "distributed residency gate",
-                )?;
+                for byte_capacity in [
+                    private.configuration_bytes,
+                    private.resource_group_record_bytes,
+                    private.resource_address_slot_bytes,
+                    private.resolved_address_bytes,
+                    queue,
+                ] {
+                    plan.add_device_allocation(
+                        &shard.device_id,
+                        byte_capacity,
+                        "distributed residency gate",
+                    )?;
+                }
                 gate_count += 1;
             }
             if gate_count > 0 {
                 // The runtime creates one predicate on each shard and shares
                 // that predicate across every selected-resource partition on
                 // the shard.
-                plan.add_device_bytes(
+                plan.add_device_allocation(
                     &shard.device_id,
                     size_of::<u32>(),
                     "distributed shard residency predicate",
@@ -778,7 +814,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_bytes(
             }
         }
     }
-    Ok(plan.device_bytes_by_logical_device)
+    Ok(plan)
 }
 
 fn exact_vulkan_runtime_hybrid_selector<'a>(
@@ -831,8 +867,8 @@ fn exact_vulkan_runtime_hybrid_gate_address_mapping(
     })
 }
 
-fn exact_vulkan_component_batch_fixed_control_bytes(
-) -> Result<usize, VulkanRuntimeHybridPlacementError> {
+fn exact_vulkan_component_batch_fixed_control_payloads(
+) -> [VulkanResidentComponentBatchControlPayload; 6] {
     [
         VulkanResidentComponentBatchControlPayload::Width,
         VulkanResidentComponentBatchControlPayload::WidthStateSnapshots,
@@ -841,16 +877,22 @@ fn exact_vulkan_component_batch_fixed_control_bytes(
         VulkanResidentComponentBatchControlPayload::Temporal,
         VulkanResidentComponentBatchControlPayload::TemporalStateSnapshots,
     ]
-    .into_iter()
-    .try_fold(0usize, |total, payload| {
-        total
-            .checked_add(payload.byte_count() as usize)
-            .ok_or_else(|| {
-                VulkanRuntimeHybridPlacementError(
-                    "exact hybrid component-batch control capacity overflowed".to_string(),
-                )
-            })
-    })
+}
+
+#[cfg(test)]
+fn exact_vulkan_component_batch_fixed_control_bytes(
+) -> Result<usize, VulkanRuntimeHybridPlacementError> {
+    exact_vulkan_component_batch_fixed_control_payloads()
+        .into_iter()
+        .try_fold(0usize, |total, payload| {
+            total
+                .checked_add(payload.byte_count() as usize)
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(
+                        "exact hybrid component-batch control capacity overflowed".to_string(),
+                    )
+                })
+        })
 }
 
 fn exact_vulkan_runtime_component_kernel<'a>(
@@ -870,12 +912,12 @@ fn exact_vulkan_runtime_component_kernel<'a>(
         })
 }
 
-fn exact_vulkan_component_batch_snapshot_bytes(
+fn exact_vulkan_component_batch_snapshot_allocation_bytes(
     runtime_model: &VulkanResidentRuntimeModel,
     dispatches: &[&VulkanPreparedDispatch],
     distributed_dispatch_indices: &BTreeSet<usize>,
     activation_batch_width: usize,
-) -> Result<usize, VulkanRuntimeHybridPlacementError> {
+) -> Result<Vec<usize>, VulkanRuntimeHybridPlacementError> {
     let mut snapshot_reader_exists = false;
     let mut requested_states = BTreeMap::<(String, String), usize>::new();
     for dispatch in dispatches {
@@ -958,32 +1000,21 @@ fn exact_vulkan_component_batch_snapshot_bytes(
             }
         }
     }
-    let state_bytes = if snapshot_reader_exists {
-        requested_states.values().try_fold(0usize, |total, bytes| {
-            total.checked_add(*bytes).ok_or_else(|| {
-                VulkanRuntimeHybridPlacementError(
-                    "exact hybrid snapshot state capacity overflowed".to_string(),
-                )
-            })
-        })?
-    } else {
-        0
-    };
-    size_of::<u32>()
-        .checked_add(
-            state_bytes
+    let mut allocations = vec![size_of::<u32>()];
+    if snapshot_reader_exists {
+        for static_bytes in requested_states.values() {
+            allocations.push(
+                static_bytes
                 .checked_mul(activation_batch_width)
                 .ok_or_else(|| {
                     VulkanRuntimeHybridPlacementError(
                         "exact hybrid snapshot lane capacity overflowed".to_string(),
                     )
                 })?,
-        )
-        .ok_or_else(|| {
-            VulkanRuntimeHybridPlacementError(
-                "exact hybrid snapshot bank capacity overflowed".to_string(),
-            )
-        })
+            );
+        }
+    }
+    Ok(allocations)
 }
 
 fn exact_vulkan_component_batch_insert_snapshot_state(

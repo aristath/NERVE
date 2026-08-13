@@ -100,6 +100,29 @@ fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
     let four_bytes = four.device_bytes_by_logical_device[&logical_device_id];
     assert!(one_bytes > fixed, "the fixture must require lane storage");
     assert_eq!(four_bytes, fixed + 4 * (one_bytes - fixed));
+    assert_eq!(
+        one.device_allocations
+            .iter()
+            .map(|allocation| allocation.byte_capacity)
+            .sum::<usize>(),
+        one_bytes
+    );
+    assert_eq!(
+        four
+            .device_allocations
+            .iter()
+            .map(|allocation| allocation.byte_capacity)
+            .sum::<usize>(),
+        four_bytes
+    );
+    assert_eq!(
+        four
+            .device_allocations
+            .iter()
+            .filter(|allocation| allocation.concern == "component-batch lane stream-control")
+            .count(),
+        4
+    );
     assert_eq!(one.device_bytes_by_logical_device.len(), 1);
     assert_eq!(four.device_bytes_by_logical_device.len(), 1);
 }

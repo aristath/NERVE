@@ -485,10 +485,16 @@ For every numbered item below:
   logical owner, complete participant set, capacity, and concern; malformed or
   out-of-plan participants fail atomically. Terminal admission queries each
   concrete Vulkan allocation separately, so memory-type alignment is no longer
-  lost by summing logical capacities first. The remaining resource work is the
-  equivalent allocation-level device-local ledger: replace every residual
-  logical-capacity aggregate with the exact Vulkan requirement for each
-  concrete allocation before acquiring the transaction.
+  lost by summing logical capacities first. Device-local prompt and
+  verification transients now use the same contract: individual signal,
+  private activation, reduction, per-lane stream control, token/control,
+  causal snapshot, selected-resource gate, miss-queue, and predicate buffers
+  survive into physical residency, and terminal admission queries each Vulkan
+  requirement separately. The logical totals are derived and cross-checked
+  against those ledgers before reservation. The remaining resource work is to
+  extend equivalent allocation-level accounting across the residual resident
+  stream, sampler, feedback, speculative-decoder, and physical boundary
+  allocations that still enter terminal admission as class aggregates.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

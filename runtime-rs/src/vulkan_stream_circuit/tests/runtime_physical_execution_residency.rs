@@ -142,9 +142,21 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
         byte_capacity: 19,
         concern: "test allocation".to_string(),
     };
+    let device_transients = vec![
+        VulkanRuntimeDeviceLocalTransientAllocation {
+            logical_device_id: "owner".to_string(),
+            byte_capacity: 33,
+            concern: "owner test allocation".to_string(),
+        },
+        VulkanRuntimeDeviceLocalTransientAllocation {
+            logical_device_id: "helper".to_string(),
+            byte_capacity: 17,
+            concern: "helper test allocation".to_string(),
+        },
+    ];
 
     plan.add_execution_transient_reservation(
-        &BTreeMap::from([("owner".to_string(), 33), ("helper".to_string(), 17)]),
+        &device_transients,
         std::slice::from_ref(&shared_transient),
     )
     .unwrap();
@@ -161,6 +173,8 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
         .unwrap();
     assert_eq!(owner.breakdown.execution_transient_device_bytes_per_stream, 33);
     assert_eq!(helper.breakdown.execution_transient_device_bytes_per_stream, 17);
+    assert_eq!(owner.execution_transient_device_allocations.len(), 1);
+    assert_eq!(helper.execution_transient_device_allocations.len(), 1);
     assert_eq!(
         plan.total_stream_device_local_bytes,
         baseline.total_stream_device_local_bytes + 50
@@ -194,7 +208,7 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
 
     let accepted = plan.clone();
     let repeated = plan
-        .add_execution_transient_reservation(&BTreeMap::new(), &[])
+        .add_execution_transient_reservation(&[], &[])
         .unwrap_err();
     assert!(repeated.to_string().contains("already attached"));
     assert_eq!(plan, accepted);
@@ -203,7 +217,18 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
     let invalid_original = invalid_plan.clone();
     let error = invalid_plan
         .add_execution_transient_reservation(
-            &BTreeMap::from([("owner".to_string(), 1), ("absent".to_string(), 1)]),
+            &[
+                VulkanRuntimeDeviceLocalTransientAllocation {
+                    logical_device_id: "owner".to_string(),
+                    byte_capacity: 1,
+                    concern: "valid prefix".to_string(),
+                },
+                VulkanRuntimeDeviceLocalTransientAllocation {
+                    logical_device_id: "absent".to_string(),
+                    byte_capacity: 1,
+                    concern: "invalid suffix".to_string(),
+                },
+            ],
             &[],
         )
         .unwrap_err();
@@ -563,7 +588,7 @@ fn stream_control_binding_rejects_incomplete_repeated_or_extra_maps_atomically()
 }
 
 #[test]
-fn execution_transient_shared_host_ledger_rejects_malformed_allocations_atomically() {
+fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
     let base = physical_execution_residency_base_plan(1_000, 100);
     let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
         &base,
@@ -574,6 +599,30 @@ fn execution_transient_shared_host_ledger_rejects_malformed_allocations_atomical
     )
     .unwrap();
     let original = plan.clone();
+
+    for malformed in [
+        VulkanRuntimeDeviceLocalTransientAllocation {
+            logical_device_id: "".to_string(),
+            byte_capacity: 19,
+            concern: "missing device".to_string(),
+        },
+        VulkanRuntimeDeviceLocalTransientAllocation {
+            logical_device_id: "owner".to_string(),
+            byte_capacity: 0,
+            concern: "zero capacity".to_string(),
+        },
+        VulkanRuntimeDeviceLocalTransientAllocation {
+            logical_device_id: "owner".to_string(),
+            byte_capacity: 19,
+            concern: "".to_string(),
+        },
+    ] {
+        let error = plan
+            .add_execution_transient_reservation(&[malformed], &[])
+            .unwrap_err();
+        assert!(error.to_string().contains("is malformed"));
+        assert_eq!(plan, original);
+    }
 
     for malformed in [
         VulkanRuntimeSharedHostTransientAllocation {
@@ -613,7 +662,7 @@ fn execution_transient_shared_host_ledger_rejects_malformed_allocations_atomical
         },
     ] {
         let error = plan
-            .add_execution_transient_reservation(&BTreeMap::new(), &[malformed])
+            .add_execution_transient_reservation(&[], &[malformed])
             .unwrap_err();
         assert!(error.to_string().contains("is malformed"));
         assert_eq!(plan, original);
@@ -664,6 +713,44 @@ fn execution_transient_host_requirements_are_queried_and_aligned_per_allocation(
         },
     )
     .unwrap_err();
+    assert!(overflow.to_string().contains("requirements overflowed"));
+}
+
+#[test]
+fn execution_transient_device_requirements_are_queried_and_aligned_per_allocation() {
+    let allocations = vec![
+        VulkanRuntimeDeviceLocalTransientAllocation {
+            logical_device_id: "owner".to_string(),
+            byte_capacity: 17,
+            concern: "signal".to_string(),
+        },
+        VulkanRuntimeDeviceLocalTransientAllocation {
+            logical_device_id: "owner".to_string(),
+            byte_capacity: 29,
+            concern: "control".to_string(),
+        },
+    ];
+    let mut queried = Vec::new();
+
+    let exact = execution_transient_device_requirement_bytes_with(&allocations, |allocation| {
+        queried.push(allocation.concern.clone());
+        Ok(allocation.byte_capacity.next_multiple_of(64))
+    })
+    .unwrap();
+
+    assert_eq!(queried, vec!["signal", "control"]);
+    assert_eq!(exact, 128);
+    assert_ne!(exact, (17usize + 29).next_multiple_of(64));
+
+    let overflow =
+        execution_transient_device_requirement_bytes_with(&allocations, |allocation| {
+            Ok(if allocation.concern == "signal" {
+                usize::MAX
+            } else {
+                1
+            })
+        })
+        .unwrap_err();
     assert!(overflow.to_string().contains("requirements overflowed"));
 }
 

@@ -174,7 +174,7 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
             .plans
             .physical_execution_residency_plan
             .add_execution_transient_reservation(
-                &execution_transient.device_bytes_by_logical_device,
+                &execution_transient.device_allocations,
                 &execution_transient.shared_host_allocations,
             )
             .map_err(|error| {

@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v2";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v3";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
@@ -22,6 +22,8 @@ pub struct VulkanRuntimePhysicalExecutionDeviceResidencyPlan {
     pub mount_device_local_bytes: usize,
     pub stream_device_local_bytes: usize,
     pub stream_shared_host_bytes: usize,
+    pub execution_transient_device_allocations:
+        Vec<VulkanRuntimeDeviceLocalTransientAllocation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -299,6 +301,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 mount_device_local_bytes,
                 stream_device_local_bytes,
                 stream_shared_host_bytes,
+                execution_transient_device_allocations: Vec::new(),
             });
         }
         Ok(Self {
@@ -430,7 +433,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
 
     fn add_execution_transient_reservation(
         &mut self,
-        device_bytes_by_logical_device: &BTreeMap<String, usize>,
+        device_allocations: &[VulkanRuntimeDeviceLocalTransientAllocation],
         shared_host_allocations: &[VulkanRuntimeSharedHostTransientAllocation],
     ) -> Result<(), VulkanRuntimeResidencyPlanError> {
         // Construct the augmented plan off to the side. A stale logical
@@ -446,20 +449,31 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                     .breakdown
                     .execution_transient_device_bytes_per_stream
                     != 0
+                    || !device.execution_transient_device_allocations.is_empty()
             })
         {
             return Err(VulkanRuntimeResidencyPlanError(
                 "execution transient reservation was already attached".to_string(),
             ));
         }
-        for (logical_device_id, byte_count) in device_bytes_by_logical_device {
+        for allocation in device_allocations {
+            if allocation.logical_device_id.trim().is_empty()
+                || allocation.concern.trim().is_empty()
+                || allocation.byte_capacity == 0
+            {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "execution transient device allocation {:?} is malformed",
+                    allocation.concern,
+                )));
+            }
             let device = next
                 .device_plans
                 .iter_mut()
-                .find(|device| device.device_id == *logical_device_id)
+                .find(|device| device.device_id == allocation.logical_device_id)
                 .ok_or_else(|| {
                     VulkanRuntimeResidencyPlanError(format!(
-                        "execution transient reservation references absent logical device {logical_device_id:?}",
+                        "execution transient reservation references absent logical device {:?}",
+                        allocation.logical_device_id,
                     ))
                 })?;
             device.breakdown.execution_transient_device_bytes_per_stream =
@@ -467,19 +481,22 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                     device
                         .breakdown
                         .execution_transient_device_bytes_per_stream,
-                    *byte_count,
+                    allocation.byte_capacity,
                     "execution transient device residency",
                 )?;
             device.stream_device_local_bytes = checked_residency_add(
                 device.stream_device_local_bytes,
-                *byte_count,
+                allocation.byte_capacity,
                 "execution transient stream residency",
             )?;
             next.total_stream_device_local_bytes = checked_residency_add(
                 next.total_stream_device_local_bytes,
-                *byte_count,
+                allocation.byte_capacity,
                 "execution transient total stream residency",
             )?;
+            device
+                .execution_transient_device_allocations
+                .push(allocation.clone());
         }
         let admitted_logical_devices = next
             .device_plans

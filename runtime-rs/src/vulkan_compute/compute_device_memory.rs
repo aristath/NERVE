@@ -1158,26 +1158,54 @@ impl VulkanComputeDevice {
                 self.device_name
             )));
         }
+        self.resident_buffer_memory_requirement_bytes_for_usage(
+            byte_capacity,
+            resident_buffer_usage() | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            "addressable resident",
+        )
+    }
+
+    pub(crate) fn resident_buffer_memory_requirement_bytes(
+        &self,
+        byte_capacity: usize,
+    ) -> Result<usize, VulkanError> {
+        self.resident_buffer_memory_requirement_bytes_for_usage(
+            byte_capacity,
+            resident_buffer_usage(),
+            "resident",
+        )
+    }
+
+    fn resident_buffer_memory_requirement_bytes_for_usage(
+        &self,
+        byte_capacity: usize,
+        usage: vk::BufferUsageFlags,
+        concern: &str,
+    ) -> Result<usize, VulkanError> {
+        if byte_capacity == 0 {
+            return Err(VulkanError(format!(
+                "{concern} buffer requirement capacity must not be zero",
+            )));
+        }
         unsafe {
             let buffer_info = vk::BufferCreateInfo::default()
                 .size(byte_capacity as vk::DeviceSize)
-                .usage(resident_buffer_usage() | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+                .usage(usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE);
             let buffer = self
                 .device
                 .create_buffer(&buffer_info, None)
                 .map_err(|error| {
                     VulkanError(format!(
-                        "failed to query addressable resident buffer requirements: {error:?}"
+                        "failed to query {concern} buffer requirements: {error:?}"
                     ))
                 })?;
             let requirements = self.device.get_buffer_memory_requirements(buffer);
             self.device.destroy_buffer(buffer, None);
             usize::try_from(requirements.size).map_err(|_| {
-                VulkanError(
-                    "addressable resident buffer memory requirement exceeds usize"
-                        .to_string(),
-                )
+                VulkanError(format!(
+                    "{concern} buffer memory requirement exceeds usize",
+                ))
             })
         }
     }
