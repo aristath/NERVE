@@ -104,10 +104,16 @@ the local placement calibration, and the mounted graph.
   reconstructs the selected component transaction from the concretely loaded
   SPIR-V, graph topology, operation and reduction geometry, equivalence,
   activation shape, devices and drivers, endpoints, owner, shards, selected
-  resources, and transport routes. Normal chat reports the mounted
-  physical-execution summary, and the conversation gate can require a nonzero
-  TP-island proof. This path is covered hardware-neutrally; its first real-model
-  proof remains blocked by the live inference quarantine above.
+  resources, and transport routes. Normal chat reports both the mounted
+  physical-execution summary and transaction-local distributed submissions by
+  phase and physical strategy. When TP proof is requested, the conversation
+  gate now requires every completed warmup and measured turn to submit at
+  least one actual TP, intra-expert TP, or hybrid island in both decode and
+  package-supported prefill. Mounted-but-unused islands, whole-expert-only
+  execution, missing counters, inconsistent island classification, and
+  impossible shard counts fail closed. This path is covered hardware-neutrally;
+  its first real-model proof remains blocked by the live inference quarantine
+  above.
 - Representation and physical-island selection now terminate in the same
   production mount transaction. Auto-placement preserves the untouched exact
   model at its converged logical placement, the hybrid solver compares exact
@@ -205,8 +211,10 @@ For every numbered item below:
   prefill; FP8 scale partitions preserve their logical row alignment; F32
   partial collection is accounted at its true byte width; fully distributed
   physical resources exclude redundant canonical owner tensors while a mixed
-  canonical use prevents exclusion; and a natively supported format without a
-  distributed implementation remains local. The remaining acceptance below is
+  canonical use prevents exclusion; a natively supported format without a
+  distributed implementation remains local; and successful immediate and
+  causal-batch submissions feed the normal per-turn decode/prefill strategy
+  counters used by the conversation gate. The remaining acceptance below is
   the explicitly authorized mounted real-model proof.
 - On an explicitly selected real transformer component, compare immediate
   decode and package-supported prefill output plus persistent state against the

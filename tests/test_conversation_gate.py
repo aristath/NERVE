@@ -36,6 +36,52 @@ def _turn(prompt: str, answer: str, decode: float = 25.0) -> ConversationTurn:
     )
 
 
+def _tp_execution_counters(
+    *,
+    decode_tp: int = 1,
+    prefill_tp: int = 1,
+    decode_whole_expert: int = 0,
+    prefill_whole_expert: int = 0,
+) -> dict[str, int]:
+    decode_islands = decode_tp + decode_whole_expert
+    prefill_islands = prefill_tp + prefill_whole_expert
+    return {
+        "distributed_decode_island_submissions": decode_islands,
+        "distributed_decode_shard_submissions": decode_islands * 2,
+        "distributed_decode_tensor_parallel_island_submissions": decode_tp,
+        "distributed_decode_whole_expert_parallel_island_submissions": (
+            decode_whole_expert
+        ),
+        "distributed_decode_intra_expert_tensor_parallel_island_submissions": 0,
+        "distributed_decode_hybrid_island_submissions": 0,
+        "distributed_prefill_island_submissions": prefill_islands,
+        "distributed_prefill_shard_submissions": prefill_islands * 2,
+        "distributed_prefill_tensor_parallel_island_submissions": prefill_tp,
+        "distributed_prefill_whole_expert_parallel_island_submissions": (
+            prefill_whole_expert
+        ),
+        "distributed_prefill_intra_expert_tensor_parallel_island_submissions": 0,
+        "distributed_prefill_hybrid_island_submissions": 0,
+    }
+
+
+def _turn_with_execution(
+    prompt: str,
+    answer: str,
+    execution_counters: dict[str, int],
+    decode: float = 25.0,
+) -> ConversationTurn:
+    return ConversationTurn(
+        prompt=prompt,
+        response=_response(answer),
+        stats={
+            "decode_tokens_per_second": decode,
+            "prefill_tokens_per_second": 100.0,
+        },
+        execution_counters=execution_counters,
+    )
+
+
 def _valid_turns() -> list[ConversationTurn]:
     return [
         _turn(MEASURED_PROMPTS[0], "I am a language model."),
@@ -138,6 +184,124 @@ def test_transcript_parser_requires_all_completed_resident_turns() -> None:
 
     assert [turn.prompt for turn in turns] == [WARMUP_PROMPT, *MEASURED_PROMPTS]
     assert turns[-1].stats["decode_tokens_per_second"] == 25.0
+    assert turns[-1].execution_counters == {
+        "resident_sequence_queue_submits": 1,
+    }
+
+
+def test_tensor_parallel_validation_requires_decode_and_prefill_on_every_turn() -> None:
+    answers = (
+        "I am a language model.",
+        "The capital is Athens.",
+        "Corinth refers to cities in Greece and elsewhere.",
+        "My knowledge cutoff is not available.",
+        "You asked about Greece.",
+    )
+    turns = [
+        _turn_with_execution(prompt, answer, _tp_execution_counters())
+        for prompt, answer in zip(MEASURED_PROMPTS, answers, strict=True)
+    ]
+
+    validate_conversation_turns(
+        turns,
+        require_thinking=True,
+        minimum_decode_tokens_per_second=20.0,
+        require_tensor_parallel_execution=True,
+    )
+
+    turns[-1] = _turn_with_execution(
+        MEASURED_PROMPTS[-1],
+        answers[-1],
+        _tp_execution_counters(prefill_tp=0),
+    )
+    with pytest.raises(
+        ConversationGateError,
+        match="did not submit a tensor-parallel prefill island",
+    ):
+        validate_conversation_turns(
+            turns,
+            require_thinking=True,
+            minimum_decode_tokens_per_second=20.0,
+            require_tensor_parallel_execution=True,
+        )
+
+
+def test_tensor_parallel_validation_does_not_count_whole_expert_parallelism() -> None:
+    turns = _valid_turns()
+    turns[0] = _turn_with_execution(
+        MEASURED_PROMPTS[0],
+        "I am a language model.",
+        _tp_execution_counters(
+            decode_tp=0,
+            prefill_tp=0,
+            decode_whole_expert=2,
+            prefill_whole_expert=2,
+        ),
+    )
+
+    with pytest.raises(
+        ConversationGateError,
+        match="did not submit a tensor-parallel decode island",
+    ):
+        validate_conversation_turns(
+            turns,
+            require_thinking=True,
+            minimum_decode_tokens_per_second=20.0,
+            require_tensor_parallel_execution=True,
+        )
+
+
+def test_gate_rejects_mounted_but_unused_tensor_parallelism(
+    monkeypatch, tmp_path
+) -> None:
+    package = tmp_path / "package.json"
+    package.write_text("{}")
+    sections = [
+        "nerve chat ready: physical_execution=VulkanMountedPhysicalExecutionSummary { "
+        "tensor_parallel_island_count: 1, whole_expert_parallel_island_count: 0, "
+        "intra_expert_tensor_parallel_island_count: 0, hybrid_island_count: 0, "
+        "selected_resource_placement_count: 0 }, setup_ms=12.000\n"
+    ]
+    for answer in (
+        "Hello.",
+        "I am a language model.",
+        "The capital of Greece is Athens.",
+        "There are several cities named Corinth.",
+        "My knowledge cutoff is unavailable.",
+        "The country was Greece.",
+    ):
+        sections.append(
+            "you> llm> "
+            f"{_response(answer)}\n"
+            "stats:\n"
+            "  prefill_tokens_per_second=100.000\n"
+            "  decode_tokens_per_second=25.000\n"
+            "execution:\n"
+            "  resident_sequence_queue_submits=1\n"
+        )
+    sections.append("you> ")
+    transcript = "".join(sections)
+    monkeypatch.setattr(
+        "nerve.conversation_gate.run_resident_conversation",
+        lambda command, warmup_conversation_sets=0: (transcript, 0),
+    )
+
+    with pytest.raises(
+        ConversationGateError,
+        match="did not report execution counter 'distributed_decode_island_submissions'",
+    ):
+        run_conversation_gate(
+            [
+                sys.executable,
+                "--package",
+                str(package),
+                "--chat",
+            ],
+            seeds=(0,),
+            minimum_decode_tokens_per_second=20.0,
+            minimum_tensor_parallel_islands=1,
+            require_thinking=True,
+        )
 
 
 def test_transcript_parser_requires_every_discarded_and_measured_set() -> None:
@@ -213,6 +377,7 @@ def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
         "memory_tiers.device_capacity": 80,
         "memory_tiers.host_visible_capacity": 20,
     }
+    assert turns[-1].execution_counters == {}
 
 
 def test_transcript_parser_does_not_treat_quoted_user_prompt_as_a_turn() -> None:
@@ -640,6 +805,18 @@ while True:
     print("  prefill_tokens_per_second=100.000")
     print(f"  decode_tokens_per_second={decode:.3f}")
     print("execution:")
+    print("  distributed_decode_island_submissions=3")
+    print("  distributed_decode_shard_submissions=6")
+    print("  distributed_decode_tensor_parallel_island_submissions=1")
+    print("  distributed_decode_whole_expert_parallel_island_submissions=1")
+    print("  distributed_decode_intra_expert_tensor_parallel_island_submissions=1")
+    print("  distributed_decode_hybrid_island_submissions=0")
+    print("  distributed_prefill_island_submissions=3")
+    print("  distributed_prefill_shard_submissions=6")
+    print("  distributed_prefill_tensor_parallel_island_submissions=1")
+    print("  distributed_prefill_whole_expert_parallel_island_submissions=1")
+    print("  distributed_prefill_intra_expert_tensor_parallel_island_submissions=1")
+    print("  distributed_prefill_hybrid_island_submissions=0")
     print("resource_residency:")
     print("  policy=demand-paged physical_stores=3")
     print(f"  gpu_accesses(selections/resident_hits/misses)={completed}/{completed - misses}/{misses}")

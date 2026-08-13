@@ -96,6 +96,9 @@ one concrete end-to-end contract:
 
 - an explicitly selected real transformer component runs on two or more GPUs;
 - decode and package-supported prefill both use the distributed path;
+- every completed normal chat turn reports successful phase- and
+  strategy-specific TP island submissions, rather than treating a mounted plan
+  as execution evidence;
 - immediate component outputs and state are canonical-equivalent to the
   single-device execution;
 - each GPU stores only the permanent tensor ranges assigned to it;

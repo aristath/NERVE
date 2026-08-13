@@ -33,6 +33,7 @@ _TURN_ERROR_MARKER = b"\nturn_error: "
 _NEW_CONVERSATION_COMMAND = "/new"
 _SESSION_RESET_MARKER = b"session_reset: "
 _STATS_MARKER = "\nstats:\n"
+_EXECUTION_MARKER = "\nexecution:\n"
 _STAT_LINE = re.compile(r"^  ([a-z][a-z0-9_]*)=(.+)$")
 _RESIDENCY_POLICY = re.compile(r"^  policy=([^ ]+)", re.MULTILINE)
 _RESIDENCY_COUNTER_LINE = re.compile(r"^  ([a-z_]+)\(([^)]+)\)=([^\n]+)$", re.MULTILINE)
@@ -94,6 +95,7 @@ class ConversationTurn:
     residency_policy: str | None = None
     residency_counters: dict[str, int | float] | None = None
     residency_gauges: dict[str, int | float] | None = None
+    execution_counters: dict[str, int | float | str] | None = None
 
     @property
     def decode_tokens_per_second(self) -> float:
@@ -203,6 +205,23 @@ def _residency_metrics(
     )
 
 
+def _execution_metrics(report: str) -> dict[str, int | float | str] | None:
+    if _EXECUTION_MARKER not in report:
+        return None
+    block = report.split(_EXECUTION_MARKER, 1)[1]
+    counters: dict[str, int | float | str] = {}
+    for line in block.splitlines():
+        if line and not line.startswith("  "):
+            break
+        match = _STAT_LINE.match(line)
+        if match is None:
+            if counters:
+                break
+            continue
+        counters[match.group(1)] = _parse_scalar(match.group(2))
+    return counters
+
+
 def parse_physical_execution_summary(
     transcript: str,
     *,
@@ -288,7 +307,10 @@ def parse_conversation_transcript(
                 continue
             stats[match.group(1)] = _parse_scalar(match.group(2))
         policy, counters, gauges = _residency_metrics(report)
-        completed_sections.append((response.rstrip(), stats, policy, counters, gauges))
+        execution_counters = _execution_metrics(report)
+        completed_sections.append(
+            (response.rstrip(), stats, policy, counters, gauges, execution_counters)
+        )
 
     expected_prompts = CANONICAL_CONVERSATION_PROMPTS * (warmup_conversation_sets + 1)
     if len(completed_sections) != len(expected_prompts):
@@ -304,11 +326,64 @@ def parse_conversation_transcript(
             residency_policy=policy,
             residency_counters=counters,
             residency_gauges=gauges,
+            execution_counters=execution_counters,
         )
-        for prompt, (response, stats, policy, counters, gauges) in zip(
+        for prompt, (response, stats, policy, counters, gauges, execution_counters) in zip(
             expected_prompts, completed_sections, strict=True
         )
     ]
+
+
+def _required_execution_counter(turn: ConversationTurn, key: str) -> int:
+    counters = turn.execution_counters
+    if counters is None or key not in counters:
+        raise ConversationGateError(
+            f"turn {turn.prompt!r} did not report execution counter {key!r}"
+        )
+    value = counters[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConversationGateError(
+            f"turn {turn.prompt!r} reported invalid execution counter {key!r}: {value!r}"
+        )
+    return value
+
+
+def _validate_tensor_parallel_turn_execution(turn: ConversationTurn) -> None:
+    for phase in ("decode", "prefill"):
+        prefix = f"distributed_{phase}_"
+        island_submissions = _required_execution_counter(
+            turn, f"{prefix}island_submissions"
+        )
+        shard_submissions = _required_execution_counter(
+            turn, f"{prefix}shard_submissions"
+        )
+        tensor_parallel = _required_execution_counter(
+            turn, f"{prefix}tensor_parallel_island_submissions"
+        )
+        whole_expert = _required_execution_counter(
+            turn, f"{prefix}whole_expert_parallel_island_submissions"
+        )
+        intra_expert = _required_execution_counter(
+            turn, f"{prefix}intra_expert_tensor_parallel_island_submissions"
+        )
+        hybrid = _required_execution_counter(
+            turn, f"{prefix}hybrid_island_submissions"
+        )
+        classified_islands = tensor_parallel + whole_expert + intra_expert + hybrid
+        if island_submissions != classified_islands:
+            raise ConversationGateError(
+                f"turn {turn.prompt!r} reported {island_submissions} distributed {phase} "
+                f"island submission(s), but classified {classified_islands}"
+            )
+        if shard_submissions < island_submissions * 2:
+            raise ConversationGateError(
+                f"turn {turn.prompt!r} reported {shard_submissions} distributed {phase} "
+                f"shard submission(s) for {island_submissions} island(s)"
+            )
+        if tensor_parallel + intra_expert + hybrid == 0:
+            raise ConversationGateError(
+                f"turn {turn.prompt!r} did not submit a tensor-parallel {phase} island"
+            )
 
 
 def _final_answer(response: str, require_thinking: bool) -> str:
@@ -352,6 +427,7 @@ def validate_conversation_turns(
     *,
     require_thinking: bool,
     minimum_decode_tokens_per_second: float,
+    require_tensor_parallel_execution: bool = False,
 ) -> tuple[float, float]:
     if len(turns) != len(MEASURED_PROMPTS):
         raise ConversationGateError(
@@ -370,6 +446,8 @@ def validate_conversation_turns(
             raise ConversationGateError(
                 f"turn {turn.prompt!r} ends in a repeated segment: {repeated!r}"
             )
+        if require_tensor_parallel_execution:
+            _validate_tensor_parallel_turn_execution(turn)
         answers.append(answer)
 
     if "athens" not in answers[1].casefold():
@@ -692,6 +770,8 @@ def run_conversation_gate(
                     f"seed {seed} conversation set {set_index + 1} "
                     "warmup ended in repetition"
                 )
+            if minimum_tensor_parallel_islands > 0:
+                _validate_tensor_parallel_turn_execution(warmup)
             set_minimum = (
                 minimum_decode_tokens_per_second
                 if set_index == warmup_conversation_sets
@@ -701,6 +781,7 @@ def run_conversation_gate(
                 turns,
                 require_thinking=require_thinking,
                 minimum_decode_tokens_per_second=set_minimum,
+                require_tensor_parallel_execution=minimum_tensor_parallel_islands > 0,
             )
             residency_end = conversation_set[-1].residency_counters
             residency_gauges_end = conversation_set[-1].residency_gauges
