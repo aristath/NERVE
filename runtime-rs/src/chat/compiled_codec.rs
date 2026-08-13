@@ -100,6 +100,121 @@ pub enum RuntimeAssistantStreamProtocolAction {
     TerminateAndTrim { token_count: usize },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeCanonicalShadowProtocol {
+    reasoning_end_token_ids: Vec<u32>,
+    tool_open_token_ids: Vec<u32>,
+    assistant_stop_token_ids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeCanonicalShadowTransducer {
+    protocol: RuntimeCanonicalShadowProtocol,
+    reasoning_recent_token_ids: Vec<u32>,
+    reasoning_complete: bool,
+    content_and_suffix_token_ids: Vec<u32>,
+    stable_content_token_count: usize,
+    structural_suffix_started: bool,
+    assistant_stopped: bool,
+}
+
+impl RuntimeCanonicalShadowProtocol {
+    pub fn start(&self) -> RuntimeCanonicalShadowTransducer {
+        RuntimeCanonicalShadowTransducer {
+            protocol: self.clone(),
+            reasoning_recent_token_ids: Vec::with_capacity(self.reasoning_end_token_ids.len()),
+            reasoning_complete: false,
+            content_and_suffix_token_ids: Vec::new(),
+            stable_content_token_count: 0,
+            structural_suffix_started: false,
+            assistant_stopped: false,
+        }
+    }
+}
+
+impl RuntimeCanonicalShadowTransducer {
+    pub fn observe(&mut self, token_id: u32) {
+        if !self.reasoning_complete {
+            self.reasoning_recent_token_ids.push(token_id);
+            trim_recent_token_ids(
+                &mut self.reasoning_recent_token_ids,
+                self.protocol.reasoning_end_token_ids.len(),
+            );
+            if self
+                .reasoning_recent_token_ids
+                .ends_with(&self.protocol.reasoning_end_token_ids)
+            {
+                self.reasoning_complete = true;
+                self.reasoning_recent_token_ids.clear();
+            }
+            return;
+        }
+
+        self.content_and_suffix_token_ids.push(token_id);
+        if self.structural_suffix_started || self.assistant_stopped {
+            return;
+        }
+        if self
+            .content_and_suffix_token_ids
+            .ends_with(&self.protocol.tool_open_token_ids)
+        {
+            self.stable_content_token_count = self
+                .content_and_suffix_token_ids
+                .len()
+                .saturating_sub(self.protocol.tool_open_token_ids.len());
+            self.structural_suffix_started = true;
+            return;
+        }
+        if self
+            .content_and_suffix_token_ids
+            .ends_with(&self.protocol.assistant_stop_token_ids)
+        {
+            self.stable_content_token_count = self
+                .content_and_suffix_token_ids
+                .len()
+                .saturating_sub(self.protocol.assistant_stop_token_ids.len());
+            self.assistant_stopped = true;
+            return;
+        }
+        let delimiter_lookbehind = self
+            .protocol
+            .tool_open_token_ids
+            .len()
+            .max(self.protocol.assistant_stop_token_ids.len())
+            .saturating_sub(1);
+        self.stable_content_token_count = self
+            .content_and_suffix_token_ids
+            .len()
+            .saturating_sub(delimiter_lookbehind);
+    }
+
+    pub fn reasoning_complete(&self) -> bool {
+        self.reasoning_complete
+    }
+
+    pub fn stable_content_token_ids(&self) -> &[u32] {
+        &self.content_and_suffix_token_ids[..self.stable_content_token_count]
+    }
+
+    pub fn stable_content_token_count(&self) -> usize {
+        self.stable_content_token_count
+    }
+
+    pub fn structural_suffix_started(&self) -> bool {
+        self.structural_suffix_started
+    }
+
+    pub fn assistant_stopped(&self) -> bool {
+        self.assistant_stopped
+    }
+}
+
+fn trim_recent_token_ids(token_ids: &mut Vec<u32>, maximum_len: usize) {
+    if token_ids.len() > maximum_len {
+        token_ids.drain(..token_ids.len() - maximum_len);
+    }
+}
+
 impl RuntimeAssistantStreamProtocolValidator {
     pub fn observe(&mut self, token_id: u32) -> io::Result<RuntimeAssistantStreamProtocolAction> {
         self.observed_token_count = self.observed_token_count.saturating_add(1);
@@ -300,6 +415,46 @@ impl CompiledChatCodec {
         }))
     }
 
+    pub fn canonical_shadow_protocol<C>(
+        &self,
+        codec: &C,
+        variables: &Map<String, Value>,
+        messages: &[Value],
+    ) -> io::Result<Option<RuntimeCanonicalShadowProtocol>>
+    where
+        C: VulkanResidentTokenTextCodec,
+    {
+        let thinking = variables
+            .get("enable_thinking")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if !thinking || !self.drop_previous_reasoning(variables, messages) {
+            return Ok(None);
+        }
+        let encode = |name: &str, text: &str| -> io::Result<Vec<u32>> {
+            let token_ids = codec.encode_text(text).map_err(|error| {
+                invalid_data(format!(
+                    "could not encode compiled canonical-shadow {name} token {text:?}: {error}",
+                ))
+            })?;
+            if token_ids.is_empty() {
+                return Err(invalid_data(format!(
+                    "compiled canonical-shadow {name} token {text:?} encoded to no tokens",
+                )));
+            }
+            Ok(token_ids)
+        };
+        let tool_open = format!(
+            "\n\n<{}{}>\n",
+            self.tokens.tool_markup, self.tools.calls_block_name,
+        );
+        Ok(Some(RuntimeCanonicalShadowProtocol {
+            reasoning_end_token_ids: encode("reasoning-end", &self.tokens.thinking_end)?,
+            tool_open_token_ids: encode("tool-open", &tool_open)?,
+            assistant_stop_token_ids: encode("assistant-stop", &self.tokens.assistant_stop)?,
+        }))
+    }
+
     pub fn format_messages(
         &self,
         messages: &[Value],
@@ -315,19 +470,9 @@ impl CompiledChatCodec {
             .get("reasoning_effort")
             .and_then(Value::as_str)
             .unwrap_or(&self.reasoning.default_effort);
-        let mut drop_thinking = variables
-            .get("drop_thinking")
-            .and_then(Value::as_bool)
-            .unwrap_or(self.reasoning.drop_previous_by_default);
         let mut messages = merge_tool_messages(messages)?;
         sort_tool_results(&mut messages);
-        if self.reasoning.preserve_when_tools_are_present
-            && messages
-                .iter()
-                .any(|message| message.get("tools").is_some())
-        {
-            drop_thinking = false;
-        }
+        let drop_thinking = self.drop_previous_reasoning(variables, &messages);
         if thinking && drop_thinking {
             messages = drop_previous_reasoning(messages);
         }
@@ -343,6 +488,18 @@ impl CompiledChatCodec {
             )?);
         }
         Ok(prompt)
+    }
+
+    fn drop_previous_reasoning(&self, variables: &Map<String, Value>, messages: &[Value]) -> bool {
+        let requested = variables
+            .get("drop_thinking")
+            .and_then(Value::as_bool)
+            .unwrap_or(self.reasoning.drop_previous_by_default);
+        requested
+            && !(self.reasoning.preserve_when_tools_are_present
+                && messages
+                    .iter()
+                    .any(|message| message.get("tools").is_some()))
     }
 
     fn render_message(
@@ -987,7 +1144,7 @@ mod tests {
         CompiledResponseParser, RuntimeAssistantStreamProtocolAction, STRUCTURED_CODEC_KIND,
     };
     use crate::{
-        RuntimeChatFormatter, RuntimeChatMessage, VulkanResidentTokenTextCodec,
+        RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession, VulkanResidentTokenTextCodec,
         VulkanResidentTokenTextCodecError,
     };
 
@@ -1078,6 +1235,178 @@ mod tests {
             }
         }
         Ok(action)
+    }
+
+    fn observe_shadow_text(transducer: &mut super::RuntimeCanonicalShadowTransducer, text: &str) {
+        for token_id in ByteCodec.encode_text(text).unwrap() {
+            transducer.observe(token_id);
+        }
+    }
+
+    #[test]
+    fn canonical_shadow_transducer_withholds_reasoning_and_delimiter_lookbehind() {
+        let protocol = fixture_codec()
+            .canonical_shadow_protocol(
+                &ByteCodec,
+                &Map::from_iter([("enable_thinking".to_string(), Value::Bool(true))]),
+                &[json!({"role": "user", "content": "question"})],
+            )
+            .unwrap()
+            .unwrap();
+        let mut transducer = protocol.start();
+
+        observe_shadow_text(&mut transducer, "private reasoning</T>");
+        assert!(transducer.reasoning_complete());
+        assert!(transducer.stable_content_token_ids().is_empty());
+
+        let answer = "abcdefghijklmnopqrstuvwxyz";
+        observe_shadow_text(&mut transducer, answer);
+        assert_eq!(
+            ByteCodec
+                .decode_tokens(transducer.stable_content_token_ids())
+                .unwrap(),
+            "abcdefghijklmnop",
+        );
+        assert!(!transducer.structural_suffix_started());
+        assert!(!transducer.assistant_stopped());
+
+        observe_shadow_text(&mut transducer, "<E>");
+        assert_eq!(
+            ByteCodec
+                .decode_tokens(transducer.stable_content_token_ids())
+                .unwrap(),
+            answer,
+        );
+        assert!(transducer.assistant_stopped());
+    }
+
+    #[test]
+    fn canonical_shadow_transducer_freezes_before_structured_tool_markup() {
+        let protocol = fixture_codec()
+            .canonical_shadow_protocol(&ByteCodec, &Map::new(), &[])
+            .unwrap()
+            .unwrap();
+        let mut transducer = protocol.start();
+
+        observe_shadow_text(
+            &mut transducer,
+            "reasoning</T>plain answer\n\n<Xcalls>\n<Xinvoke name=\"lookup\">",
+        );
+
+        assert!(transducer.reasoning_complete());
+        assert!(transducer.structural_suffix_started());
+        assert_eq!(
+            ByteCodec
+                .decode_tokens(transducer.stable_content_token_ids())
+                .unwrap(),
+            "plain answer",
+        );
+        observe_shadow_text(&mut transducer, "more structure<E>");
+        assert_eq!(
+            ByteCodec
+                .decode_tokens(transducer.stable_content_token_ids())
+                .unwrap(),
+            "plain answer",
+        );
+    }
+
+    #[test]
+    fn canonical_shadow_protocol_respects_compiled_reasoning_retention_policy() {
+        let codec = fixture_codec();
+        assert!(
+            codec
+                .canonical_shadow_protocol(
+                    &ByteCodec,
+                    &Map::from_iter([("drop_thinking".to_string(), Value::Bool(false))]),
+                    &[],
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            codec
+                .canonical_shadow_protocol(
+                    &ByteCodec,
+                    &Map::new(),
+                    &[json!({"role": "system", "content": "use tools", "tools": []})],
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            codec
+                .canonical_shadow_protocol(
+                    &ByteCodec,
+                    &Map::from_iter([("enable_thinking".to_string(), Value::Bool(false))]),
+                    &[],
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn canonical_shadow_publishes_only_a_prefix_of_the_exact_future_turn() {
+        let mut session = RuntimeChatSession {
+            formatter: RuntimeChatFormatter {
+                template_source: String::new(),
+                template_variables: Map::new(),
+                render_time: chrono::Local::now().fixed_offset(),
+                compiled_codec: Some(fixture_codec()),
+            },
+            messages: Vec::new(),
+            committed_token_ids: Vec::new(),
+        };
+        let user_content = "question";
+        let prepared = session.prepare_user_turn(user_content, &ByteCodec).unwrap();
+        let mut shadow = session
+            .prepare_canonical_assistant_shadow(user_content, &ByteCodec)
+            .unwrap()
+            .unwrap();
+
+        for token_id in ByteCodec
+            .encode_text("private reasoning</T>abcdefghijklmnopqrstuvwxyz")
+            .unwrap()
+        {
+            shadow.observe_generated_token(token_id);
+        }
+        let published = shadow
+            .next_stable_canonical_token_delta(&session, &prepared, user_content, &ByteCodec)
+            .unwrap();
+        let published_text = ByteCodec.decode_tokens(&published).unwrap();
+        assert!(!published.is_empty());
+        assert!(!published_text.contains("private reasoning"));
+        assert!(published_text.contains("abcdefghijklmnop"));
+        assert!(
+            shadow
+                .next_stable_canonical_token_delta(&session, &prepared, user_content, &ByteCodec,)
+                .unwrap()
+                .is_empty()
+        );
+
+        for token_id in ByteCodec.encode_text("<E>").unwrap() {
+            shadow.observe_generated_token(token_id);
+        }
+        let tail = shadow
+            .next_stable_canonical_token_delta(&session, &prepared, user_content, &ByteCodec)
+            .unwrap();
+        assert!(!tail.is_empty());
+
+        let assistant_message = session
+            .formatter
+            .parse_assistant_completion("private reasoning</T>abcdefghijklmnopqrstuvwxyz", true)
+            .unwrap();
+        let (canonical_delta, canonical) = session
+            .render_assistant_commit_token_delta(
+                &prepared,
+                user_content,
+                &assistant_message,
+                &ByteCodec,
+            )
+            .unwrap();
+        assert!(canonical_delta.starts_with(shadow.published_canonical_token_ids()));
+        assert!(canonical_delta.len() > shadow.published_canonical_token_ids().len());
+        session.commit_assistant_turn(user_content, &assistant_message, canonical);
     }
 
     #[test]

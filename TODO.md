@@ -848,12 +848,23 @@ For every numbered item below:
   when the engine has committed that exact historical prefix with no pending
   feedback; only the remaining canonical suffix is executed. Normal chat and
   validation report whether state was adopted or replayed; protocol trimming,
-  private reasoning, tool rerendering, malformed output, and every other mismatch fail
-  closed to rollback plus full canonical replay. This removes avoidable replay
-  for already-canonical templates without claiming the reasoning-model shadow
-  below or changing the fallback's exact state semantics. For reasoning models,
-  the canonical branch may consume
-  the known assistant/non-reasoning prefix immediately, discard private
+  private reasoning, tool rerendering, malformed output, and every other
+  mismatch fail closed to rollback plus full canonical replay. This removes
+  avoidable replay for already-canonical templates without claiming the
+  reasoning-model shadow below or changing the fallback's exact state
+  semantics. The compiler-owned structured chat codec now also emits the
+  runtime shadow contract directly from its reasoning-retention policy and
+  encoded reasoning-end, tool-open, and
+  assistant-stop delimiters. Its incremental transducer withholds private
+  reasoning, retains enough lookbehind to prevent partial tool/stop markup from
+  leaking into answer content, freezes structurally uncertain tool suffixes,
+  and publishes only token prefixes that remain stable under two distinct
+  continuation probes. Hardware-neutral tests prove that every published
+  prefix is a prefix of the exact future-turn rendering and that disabled
+  reasoning retention or tool-preservation policy disables the shadow rather
+  than guessing. Runtime fork/scheduling/commit wiring and complete-product
+  measurement remain below. For reasoning models, the canonical branch may
+  consume the known assistant/non-reasoning prefix immediately, discard private
   reasoning, and consume answer content after the reasoning boundary. Buffer
   tool markup or any other structurally uncertain suffix until complete parse
   and exact re-render. At success, atomically retain the canonical branch and

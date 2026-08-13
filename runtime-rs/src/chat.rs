@@ -43,6 +43,67 @@ pub struct RuntimePreparedChatTurn {
     pub generation_prompt_token_delta: Vec<u32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeCanonicalAssistantShadow {
+    transducer: RuntimeCanonicalShadowTransducer,
+    rendered_stable_content_token_count: Option<usize>,
+    published_canonical_token_ids: Vec<u32>,
+}
+
+impl RuntimeCanonicalAssistantShadow {
+    pub fn observe_generated_token(&mut self, token_id: u32) {
+        self.transducer.observe(token_id);
+    }
+
+    pub fn reasoning_complete(&self) -> bool {
+        self.transducer.reasoning_complete()
+    }
+
+    pub fn structural_suffix_started(&self) -> bool {
+        self.transducer.structural_suffix_started()
+    }
+
+    pub fn next_stable_canonical_token_delta<C>(
+        &mut self,
+        chat_session: &RuntimeChatSession,
+        prepared: &RuntimePreparedChatTurn,
+        user_content: &str,
+        codec: &C,
+    ) -> Result<Vec<u32>, Box<dyn Error>>
+    where
+        C: VulkanResidentTokenTextCodec,
+    {
+        if !self.transducer.reasoning_complete() {
+            return Ok(Vec::new());
+        }
+        let stable_content_token_count = self.transducer.stable_content_token_count();
+        if self.rendered_stable_content_token_count == Some(stable_content_token_count) {
+            return Ok(Vec::new());
+        }
+        let content = codec.decode_tokens(self.transducer.stable_content_token_ids())?;
+        let stable = chat_session.render_assistant_content_stable_prefix_token_delta(
+            prepared,
+            user_content,
+            &content,
+            codec,
+        )?;
+        if !stable.starts_with(&self.published_canonical_token_ids) {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical assistant shadow rewrote an already published token prefix",
+            )));
+        }
+        let delta = stable[self.published_canonical_token_ids.len()..].to_vec();
+        self.rendered_stable_content_token_count = Some(stable_content_token_count);
+        self.published_canonical_token_ids = stable;
+        Ok(delta)
+    }
+
+    pub fn published_canonical_token_ids(&self) -> &[u32] {
+        &self.published_canonical_token_ids
+    }
+}
+
 pub struct VulkanResidentChatTransactionRun {
     pub generated_token_ids: Vec<u32>,
     pub assistant_content: String,
@@ -578,6 +639,71 @@ impl RuntimeChatSession {
         })
     }
 
+    pub fn prepare_canonical_assistant_shadow<C>(
+        &self,
+        user_content: &str,
+        codec: &C,
+    ) -> Result<Option<RuntimeCanonicalAssistantShadow>, Box<dyn Error>>
+    where
+        C: VulkanResidentTokenTextCodec,
+    {
+        let Some(compiled_codec) = &self.formatter.compiled_codec else {
+            return Ok(None);
+        };
+        let mut messages = self.messages.clone();
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": user_content,
+        }));
+        Ok(compiled_codec
+            .canonical_shadow_protocol(codec, &self.formatter.template_variables, &messages)?
+            .map(|protocol| RuntimeCanonicalAssistantShadow {
+                transducer: protocol.start(),
+                rendered_stable_content_token_count: None,
+                published_canonical_token_ids: Vec::new(),
+            }))
+    }
+
+    pub fn render_assistant_content_stable_prefix_token_delta<C>(
+        &self,
+        prepared: &RuntimePreparedChatTurn,
+        user_content: &str,
+        stable_content: &str,
+        codec: &C,
+    ) -> Result<Vec<u32>, Box<dyn Error>>
+    where
+        C: VulkanResidentTokenTextCodec,
+    {
+        let render = |content_probe: &str| -> Result<Vec<u32>, Box<dyn Error>> {
+            self.render_assistant_with_next_user_probe(
+                user_content,
+                &serde_json::json!({
+                    "role": "assistant",
+                    "content": format!("{stable_content}{content_probe}"),
+                    "reasoning_content": "",
+                    "tool_calls": [],
+                }),
+                "NERVE_CANONICAL_SHADOW_NEXT_USER_PROBE_7831A9C4",
+                codec,
+            )
+        };
+        let left = render("NERVE_CANONICAL_SHADOW_LEFT_CONTINUATION_45CE127A")?;
+        let right = render("ZERVE_CANONICAL_SHADOW_RIGHT_CONTINUATION_B9A37210")?;
+        let stable_prefix_len = left
+            .iter()
+            .zip(&right)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let stable = left[..stable_prefix_len].to_vec();
+        if !stable.starts_with(&prepared.canonical_user_token_ids) {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical assistant shadow rewrote the canonical user-turn prefix",
+            )));
+        }
+        Ok(stable[prepared.canonical_user_token_ids.len()..].to_vec())
+    }
+
     pub fn render_assistant_commit_token_delta<C>(
         &self,
         prepared: &RuntimePreparedChatTurn,
@@ -598,22 +724,13 @@ impl RuntimeChatSession {
                 "parsed assistant message must have role assistant",
             )));
         }
-        let mut messages = self.messages.clone();
-        messages.push(serde_json::json!({
-            "role": "user",
-            "content": user_content,
-        }));
-        messages.push(assistant_message.clone());
         let render_with_next_user_probe = |probe: &str| -> Result<Vec<u32>, Box<dyn Error>> {
-            let mut probed_messages = messages.clone();
-            probed_messages.push(serde_json::json!({
-                "role": "user",
-                "content": probe,
-            }));
-            let rendered = self
-                .formatter
-                .format_structured_messages(&probed_messages, false)?;
-            Ok(codec.encode_text(&rendered)?)
+            self.render_assistant_with_next_user_probe(
+                user_content,
+                assistant_message,
+                probe,
+                codec,
+            )
         };
         let left_probe = render_with_next_user_probe("NERVE_NEXT_USER_LEFT_PROBE_3EAF96A1")?;
         let right_probe = render_with_next_user_probe("ZERVE_NEXT_USER_RIGHT_PROBE_8D4C217B")?;
@@ -638,6 +755,32 @@ impl RuntimeChatSession {
             )));
         }
         Ok((assistant_token_delta, canonical_turn_token_ids))
+    }
+
+    fn render_assistant_with_next_user_probe<C>(
+        &self,
+        user_content: &str,
+        assistant_message: &serde_json::Value,
+        next_user_probe: &str,
+        codec: &C,
+    ) -> Result<Vec<u32>, Box<dyn Error>>
+    where
+        C: VulkanResidentTokenTextCodec,
+    {
+        let mut messages = self.messages.clone();
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": user_content,
+        }));
+        messages.push(assistant_message.clone());
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": next_user_probe,
+        }));
+        let rendered = self
+            .formatter
+            .format_structured_messages(&messages, false)?;
+        Ok(codec.encode_text(&rendered)?)
     }
 
     pub fn commit_assistant_turn(
