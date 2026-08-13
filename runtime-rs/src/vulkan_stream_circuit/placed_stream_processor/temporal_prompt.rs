@@ -414,7 +414,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         // stream transaction that was acquired before the base stream was
         // constructed; otherwise lazy mounting could race another stream for
         // capacity that the physical plan already promised to this one.
-        let _stream_memory_scope = self.stream_memory_admission.enter();
+        let _stream_memory_scope = self.stream_memory_admission.enter_reusable();
         // Normal prompt ingestion has no causal rollback snapshots, so one
         // full-width runner avoids retaining a new activation bank for every
         // prompt remainder. Verification is different: its snapshot storage

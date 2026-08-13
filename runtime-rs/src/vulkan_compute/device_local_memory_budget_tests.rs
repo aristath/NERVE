@@ -722,13 +722,15 @@ fn eager_stream_memory_admission_accepts_exactly_consumed_credit() {
     admission
         .ensure_fully_consumed("eager fixture")
         .expect("every admitted byte was consumed");
-    drop(admission);
-    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 0);
-    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
     drop(device_allocation);
     drop(host_allocation);
+    assert_eq!(admission.remaining_device_bytes(device_key), 0);
+    assert_eq!(admission.remaining_host_bytes(), 0);
+    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 0);
     assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
     assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+    drop(admission);
 }
 
 #[test]
@@ -782,6 +784,125 @@ fn eager_stream_memory_admission_rejects_unexplained_device_and_host_credit() {
     assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
     assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
     assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
+fn reusable_stream_memory_admission_recycles_released_device_and_host_capacity() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let device = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let device_key = Arc::as_ptr(&device) as usize;
+    let host_key = Arc::as_ptr(&host) as usize;
+    let admission = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            device_key,
+            VulkanDeviceLocalMemoryPermit::acquire(&device, 1_000_000, 100_000).unwrap(),
+        )],
+        Some((
+            host_key,
+            VulkanHostMemoryPermit::acquire(&host, 1_000_000, 50_000).unwrap(),
+        )),
+    );
+
+    let first_device_allocation;
+    let first_host_allocation;
+    {
+        let _scope = admission.enter_reusable();
+        first_device_allocation = take_scoped_device_local_memory_capacity(&device, 100_000)
+            .expect("device is in the reusable admission")
+            .unwrap()
+            .commit(100_000)
+            .unwrap();
+        first_host_allocation = take_scoped_host_memory_capacity(&host, 50_000)
+            .expect("host is in the reusable admission")
+            .unwrap()
+            .commit(50_000)
+            .unwrap();
+    }
+    admission.ensure_fully_consumed("first mount").unwrap();
+    drop(first_device_allocation);
+    drop(first_host_allocation);
+
+    assert_eq!(admission.remaining_device_bytes(device_key), 100_000);
+    assert_eq!(admission.remaining_host_bytes(), 50_000);
+    assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 100_000);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 50_000);
+
+    let second_device_allocation;
+    let second_host_allocation;
+    {
+        let _scope = admission.enter_reusable();
+        second_device_allocation = take_scoped_device_local_memory_capacity(&device, 100_000)
+            .expect("recycled device capacity is reusable")
+            .unwrap()
+            .commit(100_000)
+            .unwrap();
+        second_host_allocation = take_scoped_host_memory_capacity(&host, 50_000)
+            .expect("recycled host capacity is reusable")
+            .unwrap()
+            .commit(50_000)
+            .unwrap();
+    }
+    admission.ensure_fully_consumed("second mount").unwrap();
+
+    drop(admission);
+    drop(second_device_allocation);
+    drop(second_host_allocation);
+    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
+fn reusable_stream_memory_admission_rejects_partial_commit_without_losing_credit() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let device = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let device_key = Arc::as_ptr(&device) as usize;
+    let host_key = Arc::as_ptr(&host) as usize;
+    let admission = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            device_key,
+            VulkanDeviceLocalMemoryPermit::acquire(&device, 1_000_000, 100_000).unwrap(),
+        )],
+        Some((
+            host_key,
+            VulkanHostMemoryPermit::acquire(&host, 1_000_000, 50_000).unwrap(),
+        )),
+    );
+
+    {
+        let _scope = admission.enter_reusable();
+        let device_error = take_scoped_device_local_memory_capacity(&device, 100_000)
+            .unwrap()
+            .unwrap()
+            .commit(99_999)
+            .unwrap_err();
+        let host_error = take_scoped_host_memory_capacity(&host, 50_000)
+            .unwrap()
+            .unwrap()
+            .commit(49_999)
+            .unwrap_err();
+        assert!(device_error.to_string().contains("require exact physical consumption"));
+        assert!(host_error.to_string().contains("require exact physical consumption"));
+    }
+
+    assert_eq!(admission.remaining_device_bytes(device_key), 100_000);
+    assert_eq!(admission.remaining_host_bytes(), 50_000);
+    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 100_000);
+    assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 50_000);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+    drop(admission);
+    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
 }
 
 #[test]

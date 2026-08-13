@@ -568,6 +568,13 @@ For every numbered item below:
   proof for the main stream's intentionally deferred allocations across the
   complete local, staged, speculative, and TP shapes plus the explicitly
   authorized live gate.
+  Deferred prompt, causal-verification, verification-state, and serial catch-up
+  allocations now use reusable admission leases: releasing or replacing a
+  cached runner atomically converts its tracked device/host bytes back into the
+  owning stream's pending credit. Permanent mount allocations remain one-shot.
+  A failed or non-exact reusable commit returns its complete child credit, and
+  session reset or placement-driven runner invalidation can remount without
+  silently escaping the stream transaction or spending the reservation twice.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

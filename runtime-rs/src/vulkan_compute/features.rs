@@ -9,7 +9,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};

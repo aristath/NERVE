@@ -124,12 +124,14 @@ pub struct VulkanDeviceLocalMemoryReclaimerRegistration {
 struct VulkanDeviceLocalMemoryReservation {
     tracker: Arc<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>,
     byte_count: u64,
+    recycle_pool: Option<Weak<Mutex<VulkanDeviceLocalMemoryPermitPool>>>,
 }
 
 #[derive(Debug)]
 pub struct VulkanDeviceLocalMemoryPermit {
     tracker: Arc<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>,
     byte_count: u64,
+    recycle_pool: Option<Weak<Mutex<VulkanDeviceLocalMemoryPermitPool>>>,
 }
 
 impl VulkanDeviceLocalMemoryBudgetTracker {
@@ -545,6 +547,7 @@ impl VulkanDeviceLocalMemoryReservation {
         Ok(Arc::new(Self {
             tracker: Arc::clone(tracker),
             byte_count,
+            recycle_pool: None,
         }))
     }
 }
@@ -596,6 +599,7 @@ impl VulkanDeviceLocalMemoryPermit {
         Ok(Self {
             tracker: Arc::clone(tracker),
             byte_count,
+            recycle_pool: None,
         })
     }
 
@@ -606,6 +610,12 @@ impl VulkanDeviceLocalMemoryPermit {
         if allocation_byte_count == 0 || allocation_byte_count > self.byte_count {
             return Err(VulkanError(format!(
                 "device-local allocation needs {allocation_byte_count} bytes but its capacity permit holds {} bytes",
+                self.byte_count,
+            )));
+        }
+        if self.recycle_pool.is_some() && allocation_byte_count != self.byte_count {
+            return Err(VulkanError(format!(
+                "reusable device-local capacity permit holds {} bytes but the allocation committed {allocation_byte_count}; reusable admissions require exact physical consumption",
                 self.byte_count,
             )));
         }
@@ -640,11 +650,13 @@ impl VulkanDeviceLocalMemoryPermit {
         // execution boundary to observe its physical heap cost instead of
         // reusing an observation captured while the allocation was pending.
         state.invalidate_execution_memory_observation();
+        let recycle_pool = self.recycle_pool.take();
         self.byte_count = 0;
         drop(state);
         Ok(Arc::new(VulkanDeviceLocalMemoryReservation {
             tracker: Arc::clone(&self.tracker),
             byte_count: allocation_byte_count,
+            recycle_pool,
         }))
     }
 
@@ -666,7 +678,16 @@ impl VulkanDeviceLocalMemoryPermit {
         Ok(Self {
             tracker: Arc::clone(&self.tracker),
             byte_count,
+            recycle_pool: None,
         })
+    }
+
+    fn recycle_into(
+        mut self,
+        pool: Weak<Mutex<VulkanDeviceLocalMemoryPermitPool>>,
+    ) -> Self {
+        self.recycle_pool = Some(pool);
+        self
     }
 
     fn remaining_byte_count(&self) -> u64 {
@@ -679,6 +700,14 @@ impl Drop for VulkanDeviceLocalMemoryPermit {
         if self.byte_count == 0 {
             return;
         }
+        if let Some(pool) = self.recycle_pool.as_ref().and_then(Weak::upgrade)
+            && pool.lock().is_ok_and(|mut pool| {
+                pool.recycle_pending_permit(&self.tracker, self.byte_count)
+            })
+        {
+            self.byte_count = 0;
+            return;
+        }
         if let Ok(mut state) = self.tracker.lock() {
             state.pending_reservation_bytes = state
                 .pending_reservation_bytes
@@ -689,6 +718,14 @@ impl Drop for VulkanDeviceLocalMemoryPermit {
 
 impl Drop for VulkanDeviceLocalMemoryReservation {
     fn drop(&mut self) {
+        if let Some(pool) = self.recycle_pool.as_ref().and_then(Weak::upgrade)
+            && pool.lock().is_ok_and(|mut pool| {
+                pool.recycle_committed_allocation(&self.tracker, self.byte_count)
+            })
+        {
+            self.byte_count = 0;
+            return;
+        }
         if let Ok(mut state) = self.tracker.lock() {
             state.tracked_allocation_bytes = state
                 .tracked_allocation_bytes

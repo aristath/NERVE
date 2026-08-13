@@ -125,7 +125,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         normalized_target_frames: &VulkanResidentBuffer,
         frame_byte_capacity: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let _stream_memory_scope = self.stream_memory_admission.enter();
+        let _stream_memory_scope = self.stream_memory_admission.enter_reusable();
         for decoder in self
             .speculative_decoders
             .iter()
@@ -172,6 +172,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         if transactions_are_sufficient && causal_window_is_sufficient {
             return Ok(());
         }
+        let _stream_memory_scope = self.stream_memory_admission.enter_reusable();
         if !transactions_are_sufficient {
             let transactions = create_placed_state_transactions(
                 &self.device_slices,
@@ -376,7 +377,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .projection
             .norm
             .normalized_frames_buffer;
-        let _stream_memory_scope = self.stream_memory_admission.enter();
+        let _stream_memory_scope = self.stream_memory_admission.enter_reusable();
         decoder.run_catch_up_window(
             draft_device,
             input_token_ids,

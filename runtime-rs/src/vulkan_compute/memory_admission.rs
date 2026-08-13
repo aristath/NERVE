@@ -18,12 +18,14 @@ fn vulkan_host_memory_budget_tracker() -> Arc<Mutex<VulkanHostMemoryBudgetTracke
 struct VulkanHostMemoryPermit {
     tracker: Arc<Mutex<VulkanHostMemoryBudgetTracker>>,
     byte_count: usize,
+    recycle_pool: Option<Weak<Mutex<VulkanHostMemoryPermitPool>>>,
 }
 
 #[derive(Debug)]
 struct VulkanHostMemoryReservation {
     tracker: Arc<Mutex<VulkanHostMemoryBudgetTracker>>,
     byte_count: usize,
+    recycle_pool: Option<Weak<Mutex<VulkanHostMemoryPermitPool>>>,
 }
 
 impl VulkanHostMemoryPermit {
@@ -65,6 +67,7 @@ impl VulkanHostMemoryPermit {
         Ok(Self {
             tracker: Arc::clone(tracker),
             byte_count,
+            recycle_pool: None,
         })
     }
 
@@ -79,7 +82,13 @@ impl VulkanHostMemoryPermit {
         Ok(Self {
             tracker: Arc::clone(&self.tracker),
             byte_count,
+            recycle_pool: None,
         })
+    }
+
+    fn recycle_into(mut self, pool: Weak<Mutex<VulkanHostMemoryPermitPool>>) -> Self {
+        self.recycle_pool = Some(pool);
+        self
     }
 
     fn commit(
@@ -89,6 +98,12 @@ impl VulkanHostMemoryPermit {
         if allocation_byte_count == 0 || allocation_byte_count > self.byte_count {
             return Err(VulkanError(format!(
                 "host allocation needs {allocation_byte_count} bytes but its capacity permit holds {} bytes",
+                self.byte_count,
+            )));
+        }
+        if self.recycle_pool.is_some() && allocation_byte_count != self.byte_count {
+            return Err(VulkanError(format!(
+                "reusable host capacity permit holds {} bytes but the allocation committed {allocation_byte_count}; reusable admissions require exact physical consumption",
                 self.byte_count,
             )));
         }
@@ -104,11 +119,13 @@ impl VulkanHostMemoryPermit {
             .tracked_allocation_bytes
             .checked_add(allocation_byte_count)
             .ok_or_else(|| VulkanError("host tracked allocation bytes overflowed".to_string()))?;
+        let recycle_pool = self.recycle_pool.take();
         self.byte_count = 0;
         drop(state);
         Ok(Arc::new(VulkanHostMemoryReservation {
             tracker: Arc::clone(&self.tracker),
             byte_count: allocation_byte_count,
+            recycle_pool,
         }))
     }
 
@@ -122,6 +139,14 @@ impl Drop for VulkanHostMemoryPermit {
         if self.byte_count == 0 {
             return;
         }
+        if let Some(pool) = self.recycle_pool.as_ref().and_then(Weak::upgrade)
+            && pool.lock().is_ok_and(|mut pool| {
+                pool.recycle_pending_permit(&self.tracker, self.byte_count)
+            })
+        {
+            self.byte_count = 0;
+            return;
+        }
         if let Ok(mut state) = self.tracker.lock() {
             state.pending_reservation_bytes = state
                 .pending_reservation_bytes
@@ -132,6 +157,14 @@ impl Drop for VulkanHostMemoryPermit {
 
 impl Drop for VulkanHostMemoryReservation {
     fn drop(&mut self) {
+        if let Some(pool) = self.recycle_pool.as_ref().and_then(Weak::upgrade)
+            && pool.lock().is_ok_and(|mut pool| {
+                pool.recycle_committed_allocation(&self.tracker, self.byte_count)
+            })
+        {
+            self.byte_count = 0;
+            return;
+        }
         if let Ok(mut state) = self.tracker.lock() {
             state.tracked_allocation_bytes = state
                 .tracked_allocation_bytes
@@ -155,6 +188,48 @@ impl VulkanDeviceLocalMemoryPermitPool {
     fn remaining_byte_count(&self) -> usize {
         usize::try_from(self.permit.remaining_byte_count()).unwrap_or(usize::MAX)
     }
+
+    fn recycle_pending_permit(
+        &mut self,
+        tracker: &Arc<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>,
+        byte_count: u64,
+    ) -> bool {
+        if !Arc::ptr_eq(&self.permit.tracker, tracker) {
+            return false;
+        }
+        let Some(next) = self.permit.byte_count.checked_add(byte_count) else {
+            return false;
+        };
+        self.permit.byte_count = next;
+        true
+    }
+
+    fn recycle_committed_allocation(
+        &mut self,
+        tracker: &Arc<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>,
+        byte_count: u64,
+    ) -> bool {
+        if !Arc::ptr_eq(&self.permit.tracker, tracker) {
+            return false;
+        }
+        let Some(next_pool_bytes) = self.permit.byte_count.checked_add(byte_count) else {
+            return false;
+        };
+        let Ok(mut state) = tracker.lock() else {
+            return false;
+        };
+        let Some(next_tracked_bytes) = state.tracked_allocation_bytes.checked_sub(byte_count) else {
+            return false;
+        };
+        let Some(next_pending_bytes) = state.pending_reservation_bytes.checked_add(byte_count) else {
+            return false;
+        };
+        self.permit.byte_count = next_pool_bytes;
+        state.tracked_allocation_bytes = next_tracked_bytes;
+        state.pending_reservation_bytes = next_pending_bytes;
+        state.invalidate_execution_memory_observation();
+        true
+    }
 }
 
 #[derive(Debug)]
@@ -170,6 +245,47 @@ impl VulkanHostMemoryPermitPool {
     fn remaining_byte_count(&self) -> usize {
         self.permit.remaining_byte_count()
     }
+
+    fn recycle_pending_permit(
+        &mut self,
+        tracker: &Arc<Mutex<VulkanHostMemoryBudgetTracker>>,
+        byte_count: usize,
+    ) -> bool {
+        if !Arc::ptr_eq(&self.permit.tracker, tracker) {
+            return false;
+        }
+        let Some(next) = self.permit.byte_count.checked_add(byte_count) else {
+            return false;
+        };
+        self.permit.byte_count = next;
+        true
+    }
+
+    fn recycle_committed_allocation(
+        &mut self,
+        tracker: &Arc<Mutex<VulkanHostMemoryBudgetTracker>>,
+        byte_count: usize,
+    ) -> bool {
+        if !Arc::ptr_eq(&self.permit.tracker, tracker) {
+            return false;
+        }
+        let Some(next_pool_bytes) = self.permit.byte_count.checked_add(byte_count) else {
+            return false;
+        };
+        let Ok(mut state) = tracker.lock() else {
+            return false;
+        };
+        let Some(next_tracked_bytes) = state.tracked_allocation_bytes.checked_sub(byte_count) else {
+            return false;
+        };
+        let Some(next_pending_bytes) = state.pending_reservation_bytes.checked_add(byte_count) else {
+            return false;
+        };
+        self.permit.byte_count = next_pool_bytes;
+        state.tracked_allocation_bytes = next_tracked_bytes;
+        state.pending_reservation_bytes = next_pending_bytes;
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -177,6 +293,7 @@ struct VulkanMemoryAdmissionScopeEntry {
     id: u64,
     device_pools: BTreeMap<usize, Arc<Mutex<VulkanDeviceLocalMemoryPermitPool>>>,
     host_pool: Option<(usize, Arc<Mutex<VulkanHostMemoryPermitPool>>)>,
+    recycle_released_capacity: bool,
 }
 
 thread_local! {
@@ -189,9 +306,10 @@ static NEXT_VULKAN_MEMORY_ADMISSION_ID: AtomicU64 = AtomicU64::new(1);
 /// An all-participant capacity transaction for one runtime stream.
 ///
 /// The transaction is acquired before any stream buffer is created. A scoped
-/// construction call consumes exact child permits from it; committed children
-/// live with their buffers while unused credit remains available for the
-/// stream's lazily mounted prompt and verification runners.
+/// construction call consumes exact child permits from it. Permanent children
+/// consume their credit once; reusable lazy-runner children return committed
+/// capacity to the same transaction when their buffers are released. Unused
+/// credit remains reserved for the stream's prompt and verification runners.
 #[derive(Debug)]
 pub(crate) struct VulkanMemoryAdmission {
     id: u64,
@@ -279,11 +397,28 @@ impl VulkanMemoryAdmission {
     }
 
     pub(crate) fn enter(&self) -> VulkanMemoryAdmissionScope {
+        self.enter_with_recycling(false)
+    }
+
+    /// Enters a lazy allocation scope whose committed capacity is returned to
+    /// this admission when the corresponding buffers are released. This is
+    /// used for cached runners that can be replaced or remounted while the
+    /// owning stream remains alive. Permanent mount allocations use `enter`
+    /// and consume their credit once.
+    pub(crate) fn enter_reusable(&self) -> VulkanMemoryAdmissionScope {
+        self.enter_with_recycling(true)
+    }
+
+    fn enter_with_recycling(
+        &self,
+        recycle_released_capacity: bool,
+    ) -> VulkanMemoryAdmissionScope {
         VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
             scopes.borrow_mut().push(VulkanMemoryAdmissionScopeEntry {
                 id: self.id,
                 device_pools: self.device_pools.clone(),
                 host_pool: self.host_pool.clone(),
+                recycle_released_capacity,
             });
         });
         VulkanMemoryAdmissionScope {
@@ -396,25 +531,36 @@ fn take_scoped_device_local_memory_capacity(
     byte_count: usize,
 ) -> Option<Result<VulkanDeviceLocalMemoryPermit, VulkanError>> {
     let tracker_key = Arc::as_ptr(tracker) as usize;
-    let pool = match VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
+    let (pool, recycle_released_capacity) = match VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
         scopes
             .borrow()
             .last()
-            .map(|scope| scope.device_pools.get(&tracker_key).cloned())
+            .map(|scope| {
+                (
+                    scope.device_pools.get(&tracker_key).cloned(),
+                    scope.recycle_released_capacity,
+                )
+            })
     })? {
-        Some(pool) => pool,
-        None => {
+        (Some(pool), recycle_released_capacity) => (pool, recycle_released_capacity),
+        (None, _) => {
             return Some(Err(VulkanError(
                 "active stream admission has no capacity permit for this physical device"
                     .to_string(),
             )));
         }
     };
-    Some(
-        pool.lock()
+    let child = pool
+        .lock()
             .map_err(|_| VulkanError("stream device-local permit pool was poisoned".to_string()))
-            .and_then(|mut pool| pool.take(byte_count)),
-    )
+        .and_then(|mut pool| pool.take(byte_count));
+    Some(child.map(|permit| {
+        if recycle_released_capacity {
+            permit.recycle_into(Arc::downgrade(&pool))
+        } else {
+            permit
+        }
+    }))
 }
 
 fn take_scoped_host_memory_capacity(
@@ -422,25 +568,34 @@ fn take_scoped_host_memory_capacity(
     byte_count: usize,
 ) -> Option<Result<VulkanHostMemoryPermit, VulkanError>> {
     let tracker_key = Arc::as_ptr(tracker) as usize;
-    let pool = match VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
+    let (pool, recycle_released_capacity) = match VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
         scopes.borrow().last().map(|scope| {
-            scope
-                .host_pool
-                .as_ref()
-                .filter(|(key, _)| *key == tracker_key)
-                .map(|(_, pool)| Arc::clone(pool))
+            (
+                scope
+                    .host_pool
+                    .as_ref()
+                    .filter(|(key, _)| *key == tracker_key)
+                    .map(|(_, pool)| Arc::clone(pool)),
+                scope.recycle_released_capacity,
+            )
         })
     })? {
-        Some(pool) => pool,
-        None => {
+        (Some(pool), recycle_released_capacity) => (pool, recycle_released_capacity),
+        (None, _) => {
             return Some(Err(VulkanError(
                 "active stream admission has no shared-host capacity permit".to_string(),
             )));
         }
     };
-    Some(
-        pool.lock()
+    let child = pool
+        .lock()
             .map_err(|_| VulkanError("stream host permit pool was poisoned".to_string()))
-            .and_then(|mut pool| pool.take(byte_count)),
-    )
+        .and_then(|mut pool| pool.take(byte_count));
+    Some(child.map(|permit| {
+        if recycle_released_capacity {
+            permit.recycle_into(Arc::downgrade(&pool))
+        } else {
+            permit
+        }
+    }))
 }
