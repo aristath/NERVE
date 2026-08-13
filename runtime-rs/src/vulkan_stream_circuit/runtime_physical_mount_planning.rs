@@ -31,6 +31,8 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
     residency_plan: &VulkanRuntimeResidencyPlan,
     logical_device_ids: &[String],
     slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
+    speculative_decoder_slice_plans:
+        &BTreeMap<String, VulkanResidentModelPackageDeviceSlicePlan>,
     tensor_index: &TensorIndex,
     devices: &[VulkanRuntimeSelectedResourceMountDevice],
     input_device_id: &str,
@@ -51,6 +53,14 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
         .iter()
         .map(|slice| (slice.device_id.as_str(), &slice.prepared_plan))
         .collect::<Vec<_>>();
+    let speculative_catch_up_transient =
+        exact_vulkan_runtime_speculative_catch_up_transient_plan(
+            runtime_model,
+            speculative_decoder_slice_plans,
+            normal_prefill_lane_capacity,
+            speculative_draft_tokens,
+            residency_policy,
+        )?;
     let mut execution_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
         runtime_model,
         slice_plans,
@@ -60,6 +70,13 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
         residency_policy,
         speculative_draft_tokens,
     )?;
+    execution_transient
+        .extend(speculative_catch_up_transient.clone())
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to attach speculative catch-up transients: {error}",
+            ))
+        })?;
     let mut seen_transients = Vec::new();
     for _ in 0..VULKAN_SELECTED_RESOURCE_MOUNT_PLACEMENT_MAXIMUM_ITERATIONS {
         if seen_transients.contains(&execution_transient) {
@@ -86,7 +103,7 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             telemetry,
             &execution_transient.device_bytes_by_logical_device,
         )?;
-        let resolved_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
+        let mut resolved_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
             runtime_model,
             slice_plans,
             &resolution.plans.execution_plans.prefill,
@@ -95,6 +112,13 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             residency_policy,
             speculative_draft_tokens,
         )?;
+        resolved_transient
+            .extend(speculative_catch_up_transient.clone())
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to attach resolved speculative catch-up transients: {error}",
+                ))
+            })?;
         if resolved_transient == execution_transient {
             return Ok((resolution, resolved_transient));
         }
@@ -114,6 +138,8 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
     residency_plan: &VulkanRuntimeResidencyPlan,
     logical_device_ids: &[String],
     slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
+    speculative_decoder_slice_plans:
+        &BTreeMap<String, VulkanResidentModelPackageDeviceSlicePlan>,
     edge_plans: &[VulkanPlacedEdgeIoPlan],
     selected_boundary_routes: &BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
     tensor_index: &TensorIndex,
@@ -162,6 +188,7 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
                 residency_plan,
                 logical_device_ids,
                 slice_plans,
+                speculative_decoder_slice_plans,
                 tensor_index,
                 devices,
                 input_device_id,
@@ -319,6 +346,28 @@ fn plan_vulkan_runtime_physical_mount(
             )?,
         );
     }
+    let mut speculative_decoder_slice_plans = BTreeMap::new();
+    if speculative_draft_tokens > 0 {
+        for decoder in &runtime_model.package.speculative_decoders {
+            let plan = VulkanResidentSpeculativeDecoderModelPackage::prepare_device_slice_for_physical_planning(
+                manifest_dir,
+                runtime_model,
+                &tensor_index,
+                decoder,
+                &output_device_id,
+                context_capacity_activations,
+            )?;
+            if speculative_decoder_slice_plans
+                .insert(decoder.id.clone(), plan)
+                .is_some()
+            {
+                return Err(VulkanResidentTokenModelPackageError::new(format!(
+                    "physical mount repeats speculative decoder {:?}",
+                    decoder.id,
+                )));
+            }
+        }
+    }
     let prepared_plans = slice_plans
         .iter()
         .map(|slice| (slice.device_id.as_str(), &slice.prepared_plan))
@@ -414,6 +463,7 @@ fn plan_vulkan_runtime_physical_mount(
         &residency_plan,
         &physical_execution_plan.device_ids(runtime_model),
         &slice_plans,
+        &speculative_decoder_slice_plans,
         &edge_plans,
         &mounted_boundary_routes,
         &tensor_index,

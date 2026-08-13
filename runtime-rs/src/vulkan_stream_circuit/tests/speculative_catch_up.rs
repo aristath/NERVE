@@ -34,6 +34,24 @@ fn speculative_catch_up_uses_one_canonical_target_window_capacity() {
 }
 
 #[test]
+fn speculative_catch_up_capacity_covers_prompt_and_verification_windows() {
+    assert_eq!(
+        speculative_catch_up_execution_lane_capacity(3, 7).unwrap(),
+        8
+    );
+    assert_eq!(
+        speculative_catch_up_execution_lane_capacity(33, 7).unwrap(),
+        64
+    );
+    assert_eq!(
+        speculative_catch_up_execution_lane_capacity(4, 31).unwrap(),
+        32
+    );
+    assert!(speculative_catch_up_execution_lane_capacity(0, 7).is_err());
+    assert!(speculative_catch_up_execution_lane_capacity(65, 7).is_err());
+}
+
+#[test]
 fn speculative_catch_up_source_identity_covers_device_buffer_and_frame_geometry() {
     let baseline = VulkanResidentSpeculativeCatchUpSourceIdentity {
         device_handle: 11,

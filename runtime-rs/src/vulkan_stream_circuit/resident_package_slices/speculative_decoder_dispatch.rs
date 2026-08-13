@@ -21,6 +21,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     VulkanResidentAutoregressiveSpeculativeDecoderProcessor::from_model(
                         device,
                         model,
+                        target_model.normal_prefill_lane_capacity,
                         target_model.speculative_draft_tokens,
                         target_hidden,
                         target_output_parameters,

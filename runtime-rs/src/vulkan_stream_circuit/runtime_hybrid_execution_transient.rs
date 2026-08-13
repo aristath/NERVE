@@ -137,18 +137,21 @@ fn exact_vulkan_runtime_hybrid_prefill_runners_transient_plan(
     component_ids: &BTreeSet<String>,
     slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
     execution_plan: &VulkanDistributedExecutionPlan,
-    normal_lane_capacity: usize,
+    normal_active_width: usize,
     resource_contract: &CompiledResourceResidencyContract,
     resource_layout: &VulkanCompiledResourceAddressLayout,
     residency_policy: ResourceResidencyPolicy,
     speculative_draft_tokens: usize,
 ) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanRuntimeHybridPlacementError> {
     let retain_speculative_source_taps = speculative_draft_tokens > 0;
+    let normal_lane_capacity = causal_component_block_lane_capacity(normal_active_width)
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     let mut transient = exact_vulkan_runtime_hybrid_prefill_transient_plan(
         runtime_model,
         component_ids,
         slice_plans,
         execution_plan,
+        normal_active_width,
         normal_lane_capacity,
         resource_contract,
         resource_layout,
@@ -170,6 +173,7 @@ fn exact_vulkan_runtime_hybrid_prefill_runners_transient_plan(
             component_ids,
             slice_plans,
             execution_plan,
+            verification_width,
             verification_width,
             resource_contract,
             resource_layout,
@@ -219,6 +223,107 @@ fn exact_vulkan_runtime_mounted_prefill_transient_plan(
             "failed to plan mounted prefill execution transients: {error}",
         ))
     })
+}
+
+fn exact_vulkan_runtime_speculative_catch_up_transient_plan(
+    runtime_model: &VulkanResidentRuntimeModel,
+    decoder_slice_plans: &BTreeMap<String, VulkanResidentModelPackageDeviceSlicePlan>,
+    normal_prefill_lane_capacity: usize,
+    speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
+) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanResidentTokenModelPackageError> {
+    let mut transient = VulkanRuntimeHybridExecutionTransientPlan::default();
+    if speculative_draft_tokens == 0 || residency_policy.is_demand_loaded() {
+        return Ok(transient);
+    }
+    let lane_capacity = speculative_catch_up_execution_lane_capacity(
+        normal_prefill_lane_capacity,
+        speculative_draft_tokens,
+    )
+    .map_err(|error| {
+        VulkanResidentTokenModelPackageError::new(format!(
+            "failed to plan speculative catch-up width: {error}",
+        ))
+    })?;
+    let (batch_control_binding, batch_control_byte_count, batch_control_payload) = runtime_model
+        .package
+        .input_transducer
+        .batch_control
+        .storage_buffer();
+    if batch_control_payload != VulkanResidentComponentBatchControlPayload::Width
+        || batch_control_byte_count != VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "speculative catch-up input batch control binding {batch_control_binding} carries {batch_control_payload:?} in {batch_control_byte_count} bytes",
+        )));
+    }
+    for decoder in runtime_model.package.speculative_decoders.iter().filter(|decoder| {
+        decoder
+            .execution_contract
+            .uses_dedicated_autoregressive_io()
+    }) {
+        let slice = decoder_slice_plans.get(&decoder.id).ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} has no prepared catch-up slice",
+                decoder.id,
+            ))
+        })?;
+        let allocation_plan = VulkanComponentBatchResidentAllocationPlan::for_single_device(
+            &slice.placed_plan,
+            &slice.prepared_plan,
+            &slice.batch_kernels,
+            lane_capacity,
+            VulkanComponentBatchExecutionMode::CausalSequence,
+            &VulkanComponentBatchExecutionScope::all(),
+            &BTreeSet::new(),
+            false,
+            false,
+        )
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to plan speculative decoder {:?} catch-up runner: {error}",
+                decoder.id,
+            ))
+        })?;
+        for allocation in allocation_plan.allocations {
+            transient
+                .add_device_allocation(
+                    &slice.device_id,
+                    allocation.byte_capacity,
+                    &format!(
+                        "speculative catch-up {} component batch {:?}",
+                        decoder.id, allocation.kind,
+                    ),
+                )
+                .map_err(|error| {
+                    VulkanResidentTokenModelPackageError::new(error.to_string())
+                })?;
+        }
+        for (byte_capacity, concern) in [
+            (
+                lane_capacity
+                    .checked_mul(size_of::<u32>())
+                    .ok_or_else(|| {
+                        VulkanResidentTokenModelPackageError::new(
+                            "speculative catch-up embedding token capacity overflowed",
+                        )
+                    })?,
+                "embedding token IDs",
+            ),
+            (batch_control_byte_count as usize, "embedding batch control"),
+        ] {
+            transient
+                .add_device_allocation(
+                    &slice.device_id,
+                    byte_capacity,
+                    &format!("speculative catch-up {} {concern}", decoder.id),
+                )
+                .map_err(|error| {
+                    VulkanResidentTokenModelPackageError::new(error.to_string())
+                })?;
+        }
+    }
+    Ok(transient)
 }
 
 fn vulkan_runtime_normal_prefill_lane_capacity_candidates(
@@ -296,15 +401,20 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
     slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
     execution_plan: &VulkanDistributedExecutionPlan,
     activation_batch_width: usize,
+    allocation_lane_capacity: usize,
     resource_contract: &CompiledResourceResidencyContract,
     resource_layout: &VulkanCompiledResourceAddressLayout,
     residency_policy: ResourceResidencyPolicy,
     retain_speculative_source_taps: bool,
     causal_snapshot_storage_preclaimed: bool,
 ) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanRuntimeHybridPlacementError> {
-    if activation_batch_width == 0 || component_ids.is_empty() || slice_plans.is_empty() {
+    if activation_batch_width == 0
+        || allocation_lane_capacity < activation_batch_width
+        || component_ids.is_empty()
+        || slice_plans.is_empty()
+    {
         return runtime_hybrid_error(
-            "exact hybrid prefill transient planning requires components, slices, and width",
+            "exact hybrid prefill transient planning requires components, slices, and an allocation capacity covering the active width",
         );
     }
     let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
@@ -387,7 +497,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         for (buffer_index, buffer) in signal_buffers.into_iter().enumerate() {
             let byte_count = buffer
                 .frame_byte_capacity
-                .checked_mul(activation_batch_width)
+                .checked_mul(allocation_lane_capacity)
                 .ok_or_else(|| {
                     VulkanRuntimeHybridPlacementError(
                         "exact hybrid component-batch signal capacity overflowed".to_string(),
@@ -412,7 +522,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                 )?;
             }
         }
-        for _ in 0..activation_batch_width {
+        for _ in 0..allocation_lane_capacity {
             plan.add_device_allocation(
                 &slice.device_id,
                 VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
@@ -422,7 +532,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         plan.add_device_allocation(
             &slice.device_id,
             size_of::<u32>()
-                .checked_mul(activation_batch_width)
+                .checked_mul(allocation_lane_capacity)
                 .ok_or_else(|| {
                     VulkanRuntimeHybridPlacementError(
                         "exact hybrid component-batch token-id capacity overflowed".to_string(),
@@ -445,6 +555,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                 &selected_dispatches,
                 &distributed_dispatch_indices,
                 activation_batch_width,
+                allocation_lane_capacity,
             )?
         };
         for byte_capacity in snapshot_allocations {
@@ -461,7 +572,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
             plan.add_device_allocation(
                 logical_device_id,
                 frame_byte_capacity
-                    .checked_mul(activation_batch_width)
+                    .checked_mul(allocation_lane_capacity)
                     .ok_or_else(|| {
                         VulkanRuntimeHybridPlacementError(
                             "exact hybrid private batch activation capacity overflowed"
@@ -477,7 +588,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
     for reduction in &activations.reduction_allocations {
         let byte_count = reduction
             .byte_capacity
-            .checked_mul(activation_batch_width)
+            .checked_mul(allocation_lane_capacity)
             .ok_or_else(|| {
                 VulkanRuntimeHybridPlacementError(
                     "exact hybrid batch reduction capacity overflowed".to_string(),
@@ -584,7 +695,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                     &endpoint.connection,
                     endpoint.byte_capacity,
                 )?
-                .checked_mul(activation_batch_width)
+                .checked_mul(allocation_lane_capacity)
                 .ok_or_else(|| {
                     VulkanRuntimeHybridPlacementError(
                         "exact hybrid batch edge staging capacity overflowed".to_string(),
@@ -598,7 +709,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         component_ids,
         &component_owner_logical_device_ids,
         execution_plan,
-        activation_batch_width,
+        allocation_lane_capacity,
         resource_contract,
         resource_layout,
         residency_policy,
@@ -917,6 +1028,7 @@ fn exact_vulkan_component_batch_snapshot_allocation_bytes(
     dispatches: &[&VulkanPreparedDispatch],
     distributed_dispatch_indices: &BTreeSet<usize>,
     activation_batch_width: usize,
+    allocation_lane_capacity: usize,
 ) -> Result<Vec<usize>, VulkanRuntimeHybridPlacementError> {
     let mut snapshot_reader_exists = false;
     let mut requested_states = BTreeMap::<(String, String), usize>::new();
@@ -1005,7 +1117,7 @@ fn exact_vulkan_component_batch_snapshot_allocation_bytes(
         for static_bytes in requested_states.values() {
             allocations.push(
                 static_bytes
-                .checked_mul(activation_batch_width)
+                .checked_mul(allocation_lane_capacity)
                 .ok_or_else(|| {
                     VulkanRuntimeHybridPlacementError(
                         "exact hybrid snapshot lane capacity overflowed".to_string(),

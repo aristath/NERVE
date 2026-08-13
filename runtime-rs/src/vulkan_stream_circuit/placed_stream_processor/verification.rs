@@ -125,6 +125,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         normalized_target_frames: &VulkanResidentBuffer,
         frame_byte_capacity: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        let _stream_memory_scope = self.stream_memory_admission.enter();
         for decoder in self
             .speculative_decoders
             .iter()
@@ -375,6 +376,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .projection
             .norm
             .normalized_frames_buffer;
+        let _stream_memory_scope = self.stream_memory_admission.enter();
         decoder.run_catch_up_window(
             draft_device,
             input_token_ids,

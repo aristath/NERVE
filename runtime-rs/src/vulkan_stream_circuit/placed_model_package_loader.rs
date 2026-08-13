@@ -242,6 +242,34 @@ impl VulkanResidentInProcessPlacedModelPackage {
             )
         })?;
 
+        let mut speculative_decoder_slice_plans = BTreeMap::new();
+        if mount_speculative_decoders {
+            let decoder_device = device_for(&output_device_id)?;
+            for decoder in &runtime_model.package.speculative_decoders {
+                let plan = VulkanResidentSpeculativeDecoderModelPackage::prepare_device_slice(
+                    decoder_device,
+                    manifest_dir,
+                    &runtime_model,
+                    &tensor_index,
+                    decoder,
+                    &output_device_id,
+                    capacity,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+                if speculative_decoder_slice_plans
+                    .insert(decoder.id.clone(), plan)
+                    .is_some()
+                {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "resident package repeats speculative decoder {:?}",
+                            decoder.id,
+                        )),
+                    ));
+                }
+            }
+        }
+
         let prepared_plans = device_slice_plans
             .iter()
             .map(|slice| (slice.device_id.as_str(), &slice.prepared_plan))
@@ -386,6 +414,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &residency_plan,
             &device_ids,
             &device_slice_plans,
+            &speculative_decoder_slice_plans,
             &edge_plans,
             &mounted_boundary_routes,
             &tensor_index,
@@ -1180,14 +1209,33 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .iter()
             .take(speculative_decoder_count)
         {
+            let device_slice_plan = speculative_decoder_slice_plans
+                .remove(&decoder.id)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "speculative decoder {:?} has no prepared device slice",
+                            decoder.id,
+                        )),
+                    )
+                })?;
             speculative_decoders.push(
                 VulkanResidentSpeculativeDecoderModelPackage::from_runtime_model(
                     output_device,
                     decoder,
                     &output_device_id,
+                    device_slice_plan,
                     &speculative_decoder_context,
                 )?,
             );
+        }
+        if !speculative_decoder_slice_plans.is_empty() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "prepared speculative decoder slices were not consumed: {:?}",
+                    speculative_decoder_slice_plans.keys().collect::<Vec<_>>(),
+                )),
+            ));
         }
 
         let runtime_instance_by_id = runtime_model

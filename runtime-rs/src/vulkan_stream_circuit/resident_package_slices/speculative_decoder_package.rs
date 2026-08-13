@@ -65,22 +65,85 @@ fn speculative_decoder_output_parameter_tensors(
 }
 
 impl VulkanResidentSpeculativeDecoderModelPackage {
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_device_slice_for_physical_planning(
+        manifest_dir: &Path,
+        target_runtime_model: &VulkanResidentRuntimeModel,
+        tensor_index: &TensorIndex,
+        decoder: &VulkanResidentSpeculativeDecoderPackageSpec,
+        device_id: &str,
+        capacity: usize,
+    ) -> Result<VulkanResidentModelPackageDeviceSlicePlan, VulkanResidentTokenModelPackageError>
+    {
+        let draft_runtime_model =
+            speculative_decoder_runtime_model(target_runtime_model, decoder, device_id);
+        let resource_contract = instantiate_runtime_resource_contract(&draft_runtime_model)
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to instantiate speculative decoder {:?} resource contract: {error}",
+                    decoder.id,
+                ))
+            })?;
+        VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning(
+            manifest_dir,
+            &draft_runtime_model,
+            &resource_contract,
+            tensor_index,
+            device_id,
+            capacity,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_device_slice(
+        device: &VulkanComputeDevice,
+        manifest_dir: &Path,
+        target_runtime_model: &VulkanResidentRuntimeModel,
+        tensor_index: &TensorIndex,
+        decoder: &VulkanResidentSpeculativeDecoderPackageSpec,
+        device_id: &str,
+        capacity: usize,
+    ) -> Result<VulkanResidentModelPackageDeviceSlicePlan, VulkanResidentTokenModelPackageError>
+    {
+        let draft_runtime_model =
+            speculative_decoder_runtime_model(target_runtime_model, decoder, device_id);
+        let resource_contract = instantiate_runtime_resource_contract(&draft_runtime_model)
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to instantiate speculative decoder {:?} resource contract: {error}",
+                    decoder.id,
+                ))
+            })?;
+        VulkanResidentModelPackageDeviceSlicePlan::prepare(
+            device,
+            manifest_dir,
+            &draft_runtime_model,
+            &resource_contract,
+            tensor_index,
+            device_id,
+            capacity,
+        )
+    }
+
     fn from_runtime_model(
         device: &VulkanComputeDevice,
         decoder: &VulkanResidentSpeculativeDecoderPackageSpec,
         device_id: &str,
+        device_slice_plan: VulkanResidentModelPackageDeviceSlicePlan,
         context: &VulkanResidentSpeculativeDecoderLoadContext<'_>,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
-        let draft_runtime_model =
-            speculative_decoder_runtime_model(context.runtime_model, decoder, device_id);
-        let mut device_slice =
-            VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
-                device,
-                context.manifest_dir,
-                draft_runtime_model,
-                device_id,
-                Some(context.capacity),
-            )
+        if device_slice_plan.device_id != device_id
+            || device_slice_plan.dynamic_state_capacity_activations != context.capacity
+        {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "speculative decoder {:?} prepared slice does not match device {device_id:?} and capacity {}",
+                    decoder.id, context.capacity,
+                )),
+            ));
+        }
+        let mut device_slice = device_slice_plan
+            .materialize(device, context.tensor_index, &BTreeSet::new(), None)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
         let selected_tensors = device_slice
             .placed_plan

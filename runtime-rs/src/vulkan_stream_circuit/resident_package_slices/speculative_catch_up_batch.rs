@@ -42,6 +42,14 @@ fn speculative_catch_up_lane_capacity(speculative_draft_tokens: usize) -> Result
     causal_component_block_lane_capacity(target_tick_count)
 }
 
+fn speculative_catch_up_execution_lane_capacity(
+    normal_prefill_lane_capacity: usize,
+    speculative_draft_tokens: usize,
+) -> Result<usize, VulkanError> {
+    Ok(causal_component_block_lane_capacity(normal_prefill_lane_capacity)?
+        .max(speculative_catch_up_lane_capacity(speculative_draft_tokens)?))
+}
+
 fn speculative_catch_up_preceding_target_bytes(
     batch_width: usize,
     frame_byte_capacity: usize,

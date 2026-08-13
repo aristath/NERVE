@@ -42,6 +42,130 @@ fn runtime_hybrid_shared_host_ledger_extends_without_collapsing_allocations() {
 }
 
 #[test]
+fn speculative_catch_up_transient_matches_one_canonical_component_batch_and_embedding() {
+    let package_root = tiny_model_dir();
+    let mut model = fixture_model_runtime_model();
+    let logical_device_id = model.placement.default_device_id.clone();
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let contract = instantiate_runtime_resource_contract(&model).unwrap();
+    let slice = VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning(
+        &package_root,
+        &model,
+        &contract,
+        &tensor_index,
+        &logical_device_id,
+        64,
+    )
+    .unwrap();
+    let lane_capacity = speculative_catch_up_lane_capacity(7).unwrap();
+    let component_plan = VulkanComponentBatchResidentAllocationPlan::for_single_device(
+        &slice.placed_plan,
+        &slice.prepared_plan,
+        &slice.batch_kernels,
+        lane_capacity,
+        VulkanComponentBatchExecutionMode::CausalSequence,
+        &VulkanComponentBatchExecutionScope::all(),
+        &BTreeSet::new(),
+        false,
+        false,
+    )
+    .unwrap();
+    let mut decoder = parallel_speculative_decoder_with_default("draft", 7);
+    decoder.execution_contract =
+        VulkanResidentSpeculativeExecutionContract::AutoregressiveFeedback {
+            processor_schedule: "one_token_per_tick".to_string(),
+            output_schedule: "dedicated_token_transducer".to_string(),
+        };
+    model.package.speculative_decoders.push(decoder);
+    let slice_plans = BTreeMap::from([("draft".to_string(), slice)]);
+
+    let planned = exact_vulkan_runtime_speculative_catch_up_transient_plan(
+        &model,
+        &slice_plans,
+        4,
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    let embedding_bytes = lane_capacity * size_of::<u32>()
+        + VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize;
+    assert_eq!(
+        planned.device_bytes_by_logical_device[&logical_device_id],
+        component_plan.total_byte_capacity + embedding_bytes,
+    );
+    assert_eq!(
+        planned.device_allocations.len(),
+        component_plan.allocations.len() + 2,
+    );
+    assert!(planned.shared_host_allocations.is_empty());
+
+    let prompt_lane_capacity = speculative_catch_up_execution_lane_capacity(17, 7).unwrap();
+    let prompt_component_plan = VulkanComponentBatchResidentAllocationPlan::for_single_device(
+        &slice_plans["draft"].placed_plan,
+        &slice_plans["draft"].prepared_plan,
+        &slice_plans["draft"].batch_kernels,
+        prompt_lane_capacity,
+        VulkanComponentBatchExecutionMode::CausalSequence,
+        &VulkanComponentBatchExecutionScope::all(),
+        &BTreeSet::new(),
+        false,
+        false,
+    )
+    .unwrap();
+    let prompt_planned = exact_vulkan_runtime_speculative_catch_up_transient_plan(
+        &model,
+        &slice_plans,
+        17,
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    assert_eq!(prompt_lane_capacity, 32);
+    assert_eq!(
+        prompt_planned.device_bytes_by_logical_device[&logical_device_id],
+        prompt_component_plan.total_byte_capacity
+            + prompt_lane_capacity * size_of::<u32>()
+            + VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize,
+    );
+    assert!(
+        prompt_planned.device_bytes_by_logical_device[&logical_device_id]
+            > planned.device_bytes_by_logical_device[&logical_device_id],
+    );
+}
+
+#[test]
+fn speculative_catch_up_transient_is_absent_for_demand_residency_and_fails_closed() {
+    let mut model = fixture_model_runtime_model();
+    let mut decoder = parallel_speculative_decoder_with_default("draft", 7);
+    decoder.execution_contract =
+        VulkanResidentSpeculativeExecutionContract::AutoregressiveFeedback {
+            processor_schedule: "one_token_per_tick".to_string(),
+            output_schedule: "dedicated_token_transducer".to_string(),
+        };
+    model.package.speculative_decoders.push(decoder);
+
+    let demand = exact_vulkan_runtime_speculative_catch_up_transient_plan(
+        &model,
+        &BTreeMap::new(),
+        4,
+        7,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+    assert_eq!(demand, VulkanRuntimeHybridExecutionTransientPlan::default());
+
+    let error = exact_vulkan_runtime_speculative_catch_up_transient_plan(
+        &model,
+        &BTreeMap::new(),
+        4,
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("no prepared catch-up slice"));
+}
+
+#[test]
 fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
     let package_root = tiny_model_dir();
     let model = fixture_model_runtime_model();
@@ -74,6 +198,7 @@ fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
         std::slice::from_ref(&slice),
         &execution_plan,
         1,
+        1,
         &contract,
         &VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap(),
         ResourceResidencyPolicy::Eager,
@@ -86,6 +211,21 @@ fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
         &components,
         std::slice::from_ref(&slice),
         &execution_plan,
+        4,
+        4,
+        &contract,
+        &VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap(),
+        ResourceResidencyPolicy::Eager,
+        false,
+        false,
+    )
+    .unwrap();
+    let three_in_four = exact_vulkan_runtime_hybrid_prefill_transient_plan(
+        &model,
+        &components,
+        std::slice::from_ref(&slice),
+        &execution_plan,
+        3,
         4,
         &contract,
         &VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap(),
@@ -100,6 +240,11 @@ fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
     let four_bytes = four.device_bytes_by_logical_device[&logical_device_id];
     assert!(one_bytes > fixed, "the fixture must require lane storage");
     assert_eq!(four_bytes, fixed + 4 * (one_bytes - fixed));
+    assert_eq!(
+        three_in_four.device_bytes_by_logical_device[&logical_device_id],
+        four_bytes,
+        "the allocation ledger must reserve the rounded runner capacity, not only the active width",
+    );
     assert_eq!(
         one.device_allocations
             .iter()
@@ -125,6 +270,22 @@ fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
     );
     assert_eq!(one.device_bytes_by_logical_device.len(), 1);
     assert_eq!(four.device_bytes_by_logical_device.len(), 1);
+
+    let undersized = exact_vulkan_runtime_hybrid_prefill_transient_plan(
+        &model,
+        &components,
+        std::slice::from_ref(&slice),
+        &execution_plan,
+        4,
+        3,
+        &contract,
+        &VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap(),
+        ResourceResidencyPolicy::Eager,
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert!(undersized.to_string().contains("covering the active width"));
 }
 
 #[test]
@@ -161,6 +322,7 @@ fn runtime_hybrid_exact_speculative_prefill_accounts_both_cached_runners() {
         std::slice::from_ref(&slice),
         &execution_plan,
         4,
+        4,
         &contract,
         &layout,
         ResourceResidencyPolicy::Eager,
@@ -173,6 +335,7 @@ fn runtime_hybrid_exact_speculative_prefill_accounts_both_cached_runners() {
         &components,
         std::slice::from_ref(&slice),
         &execution_plan,
+        8,
         8,
         &contract,
         &layout,
@@ -519,6 +682,7 @@ fn runtime_hybrid_exact_prefill_accounts_cross_device_batch_staging_once() {
         &slice_plans,
         &execution_plan,
         1,
+        1,
         &contract,
         &layout,
         ResourceResidencyPolicy::Eager,
@@ -531,6 +695,7 @@ fn runtime_hybrid_exact_prefill_accounts_cross_device_batch_staging_once() {
         &components,
         &slice_plans,
         &execution_plan,
+        4,
         4,
         &contract,
         &layout,

@@ -537,12 +537,18 @@ For every numbered item below:
   per observed width and source. Its copy-command binding uses the stable Vulkan
   device/buffer identity, is rebuilt when the source or frame geometry changes,
   is explicitly invalidated before a temporal source runner is replaced, and is
-  dropped before the stream's source buffers during teardown. The lazily mounted
-  autoregressive catch-up batch runner and the permanently mounted
+  dropped before the stream's source buffers during teardown. Its device-filtered
+  component-batch allocation plan plus the batched embedding token/control
+  buffers are now attached to the terminal physical mount before admission, and
+  lazy construction enters that pre-reserved stream transaction. Demand-resident
+  autoregressive catch-up stays on the serial path and therefore reserves no
+  unused batch bank. Exact hybrid prefill planning also separates the active
+  calibrated width from the power-of-two runner allocation capacity, so an
+  odd-width selection cannot under-reserve its buffers. The permanently mounted
   parallel-block proposal, committed-context, state-ingestion, history, and
-  readback buffers do not yet
-  have workload-free allocation plans; terminal admission must cover those
-  actual allocations before speculative TP can enter the live gate.
+  readback buffers do not yet have workload-free allocation plans; terminal
+  admission must cover those actual allocations before speculative TP can enter
+  the live gate.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

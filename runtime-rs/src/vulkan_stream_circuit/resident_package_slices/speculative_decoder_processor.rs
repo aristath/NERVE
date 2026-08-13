@@ -122,6 +122,7 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
     fn from_model(
         device: &VulkanComputeDevice,
         model: &VulkanResidentSpeculativeDecoderModelPackage,
+        normal_prefill_lane_capacity: usize,
         speculative_draft_tokens: usize,
         target_hidden: &VulkanResidentBuffer,
         target_output_parameters: &VulkanPermanentParameterBuffers,
@@ -336,8 +337,11 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
                 VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let catch_up_lane_capacity = speculative_catch_up_lane_capacity(speculative_draft_tokens)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let catch_up_lane_capacity = speculative_catch_up_execution_lane_capacity(
+            normal_prefill_lane_capacity,
+            speculative_draft_tokens,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
 
         Ok(Self {
             id: model.id.clone(),
