@@ -401,13 +401,32 @@ For every numbered item below:
   phase, and compiled resource identities. Compiler-generated physical layouts
   retain their own immutable storage-range identity, so they cannot be
   incorrectly deduplicated against their canonical source tensor. Exact
-  sequential tests cover insufficient parameter capacity, unchanged
+  mutable-state claims now precede route search as well. They are derived from
+  component-scoped physical stream-state layouts at the requested context and
+  speculation width, including transactional and causal-verification storage,
+  activation slots, true model boundaries, same- and cross-device graph-edge
+  allocations, shared stream control, output/sampler/feedback workspaces, and
+  speculative-decoder state. Replayed distributed candidates add their exact
+  shared activation, reduction, and participant-private intermediate backing;
+  shared-host routes charge host capacity while device-local routes charge the
+  concrete owner. Stable allocation identities deduplicate only the same edge,
+  boundary alias, stream-control allocation, or distributed buffer. A
+  candidate cannot inherit unrelated components' state merely because the
+  workload-free planning copy co-locates the rest of the graph on its owner.
+  Permanent and mutable-state capacity are now authoritative during partial
+  route search, while sampled calibration transients remain advisory.
+  Exact sequential tests compare a complete local route with the ordinary
+  workload-free residency plan, prove component scoping and same-device edge
+  deduplication, exercise device-local/shared-host distributed backing, and
+  reject a candidate one byte below its exact permanent-plus-state need.
+  The remaining resource work includes cache quota, atomic load-wave, and
+  execution-transient claims per
+  candidate before search; these must replace their calibration aggregates
+  without making sampled evidence authoritative. Exact sequential tests also
+  cover insufficient parameter capacity, unchanged
   non-parameter classes, malformed bindings, ineligible historical candidates,
   representation/decode and prefill discovery, joint mount, local full-route
-  totals, and four-participant TP fragment totals. The remaining resource work
-  is to derive mutable state, cache quota, atomic load-wave, and
-  execution-transient claims per candidate before search and replace their
-  calibration aggregates without making sampled evidence authoritative.
+  totals, and four-participant TP fragment totals.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
   durations. Model compute and transfer queues, dependency edges, collectives,
   independent expert branches, resource contention, and legal overlap.

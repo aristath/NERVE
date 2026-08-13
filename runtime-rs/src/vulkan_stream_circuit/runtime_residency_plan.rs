@@ -354,6 +354,38 @@ fn plan_stream_circuit_residency(
     transactional: bool,
     speculative_draft_tokens: usize,
 ) -> Result<StreamCircuitResidencyBytes, VulkanRuntimeResidencyPlanError> {
+    plan_stream_circuit_residency_for_component(
+        placed_plan,
+        None,
+        context_capacity_activations,
+        transactional,
+        speculative_draft_tokens,
+    )
+}
+
+fn plan_component_stream_circuit_residency(
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
+    component_id: &str,
+    context_capacity_activations: usize,
+    transactional: bool,
+    speculative_draft_tokens: usize,
+) -> Result<StreamCircuitResidencyBytes, VulkanRuntimeResidencyPlanError> {
+    plan_stream_circuit_residency_for_component(
+        placed_plan,
+        Some(component_id),
+        context_capacity_activations,
+        transactional,
+        speculative_draft_tokens,
+    )
+}
+
+fn plan_stream_circuit_residency_for_component(
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
+    component_id: Option<&str>,
+    context_capacity_activations: usize,
+    transactional: bool,
+    speculative_draft_tokens: usize,
+) -> Result<StreamCircuitResidencyBytes, VulkanRuntimeResidencyPlanError> {
     let resident = &placed_plan.placed_resident_plan.resident_plan;
     let mut state_bytes = 0usize;
     let mut transaction_bytes = 0usize;
@@ -370,7 +402,11 @@ fn plan_stream_circuit_residency(
         .map_err(residency_display_error)?
     };
     let mut causal_verification_snapshot_bytes = 0usize;
-    for state in &resident.stream_state_buffers {
+    for state in resident
+        .stream_state_buffers
+        .iter()
+        .filter(|state| component_id.is_none_or(|component| state.component_id == component))
+    {
         let layout = VulkanTransientStateBufferLayout::for_state(
             state,
             context_capacity_activations,
@@ -403,7 +439,11 @@ fn plan_stream_circuit_residency(
             )?;
         }
     }
-    let activation_bytes = resident.activation_banks.iter().try_fold(
+    let activation_bytes = resident
+        .activation_banks
+        .iter()
+        .filter(|bank| component_id.is_none_or(|component| bank.component_id == component))
+        .try_fold(
         0usize,
         |total, bank| {
             bank.slots.iter().try_fold(total, |total, slot| {
@@ -419,20 +459,23 @@ fn plan_stream_circuit_residency(
             })
         },
     )?;
-    let boundary_bytes = required_optional_bytes(
-        VulkanModelBoundaryBufferPlan::from_placed_plan(placed_plan)
-            .map_err(residency_display_error)?
-            .total_byte_capacity,
-        "model boundary buffers",
-    )?;
-    let edge_bytes = required_optional_bytes(
-        VulkanPlacedEdgeIoPlan::from_placed_resident_plan(
-            &placed_plan.placed_resident_plan,
-        )
-        .map_err(residency_display_error)?
-        .total_byte_capacity,
-        "placed edge buffers",
-    )?;
+    let boundary_plan = VulkanModelBoundaryBufferPlan::from_placed_plan(placed_plan)
+        .map_err(residency_display_error)?;
+    let boundary_bytes = match component_id {
+        None => required_optional_bytes(
+            boundary_plan.total_byte_capacity,
+            "model boundary buffers",
+        )?,
+        Some(component_id) => component_boundary_buffer_bytes(&boundary_plan, component_id)?,
+    };
+    let edge_plan = VulkanPlacedEdgeIoPlan::from_placed_resident_plan(
+        &placed_plan.placed_resident_plan,
+    )
+    .map_err(residency_display_error)?;
+    let edge_bytes = match component_id {
+        None => required_optional_bytes(edge_plan.total_byte_capacity, "placed edge buffers")?,
+        Some(component_id) => component_edge_buffer_bytes(&edge_plan, component_id)?,
+    };
     Ok(StreamCircuitResidencyBytes {
         state_bytes,
         transaction_bytes,
@@ -441,6 +484,69 @@ fn plan_stream_circuit_residency(
         edge_bytes,
         causal_verification_snapshot_bytes,
     })
+}
+
+fn component_boundary_buffer_bytes(
+    plan: &VulkanModelBoundaryBufferPlan,
+    component_id: &str,
+) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    let inputs = plan
+        .inputs
+        .iter()
+        .filter(|input| input.component_id == component_id)
+        .collect::<Vec<_>>();
+    let mut total = 0usize;
+    for input in &inputs {
+        total = checked_residency_add(
+            total,
+            required_optional_bytes(input.byte_capacity, "model input boundary buffer")?,
+            "model boundary buffers",
+        )?;
+    }
+    for output in plan
+        .outputs
+        .iter()
+        .filter(|output| output.component_id == component_id)
+    {
+        let aliases_input = output.source_signal_id.is_some()
+            && inputs.iter().any(|input| {
+                input.signal_id == output.signal_id && input.shape == output.shape
+            });
+        if !aliases_input {
+            total = checked_residency_add(
+                total,
+                required_optional_bytes(output.byte_capacity, "model output boundary buffer")?,
+                "model boundary buffers",
+            )?;
+        }
+    }
+    Ok(total)
+}
+
+fn component_edge_buffer_bytes(
+    plan: &VulkanPlacedEdgeIoPlan,
+    component_id: &str,
+) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    plan.local_edges
+        .iter()
+        .filter(|edge| {
+            edge.source_component_id == component_id
+                || edge.destination_component_id == component_id
+        })
+        .map(|edge| edge.byte_capacity)
+        .chain(
+            plan.endpoints
+                .iter()
+                .filter(|endpoint| endpoint.local_component_id == component_id)
+                .map(|endpoint| endpoint.byte_capacity),
+        )
+        .try_fold(0usize, |total, bytes| {
+            checked_residency_add(
+                total,
+                required_optional_bytes(bytes, "placed component edge buffer")?,
+                "placed component edge buffers",
+            )
+        })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1362,7 +1362,7 @@ fn runtime_hybrid_physical_resolution_carries_measured_tp_into_normal_execution(
 }
 
 #[test]
-fn runtime_hybrid_exact_candidate_parameters_prune_before_terminal_mount() {
+fn runtime_hybrid_exact_candidate_resources_prune_before_terminal_mount() {
     let model = fixture_model_runtime_model();
     let catalog = hybrid_test_catalog(&model);
     let package_root = tiny_model_dir();
@@ -1389,6 +1389,7 @@ fn runtime_hybrid_exact_candidate_parameters_prune_before_terminal_mount() {
         logical_device_id_by_physical_device: &bindings,
         planning_devices: &planning_devices,
         context_capacity_activations: 64,
+        speculative_draft_tokens: 0,
     };
     let candidates = runtime_hybrid_candidate_graph(
         &model,
@@ -1401,7 +1402,10 @@ fn runtime_hybrid_exact_candidate_parameters_prune_before_terminal_mount() {
     .unwrap();
     assert_eq!(
         candidates.authoritative_resource_classes,
-        BTreeSet::from([VulkanHybridResourceClass::Permanent])
+        BTreeSet::from([
+            VulkanHybridResourceClass::Permanent,
+            VulkanHybridResourceClass::MutableState,
+        ])
     );
 
     let select_first = |capacity: &VulkanPlacementCapacityEnvelope| {
@@ -1428,12 +1432,47 @@ fn runtime_hybrid_exact_candidate_parameters_prune_before_terminal_mount() {
     let exact_parameter_bytes = accepted.authoritative_resource_reservations.device_bytes
         [&hybrid_test_device("gpu0")]
         .permanent_bytes;
+    let exact_required_bytes = accepted.authoritative_resource_reservations.device_bytes
+        [&hybrid_test_device("gpu0")]
+        .required_capacity_bytes()
+        .unwrap();
     assert!(exact_parameter_bytes > 100);
+    assert!(
+        accepted.authoritative_resource_reservations.device_bytes
+            [&hybrid_test_device("gpu0")]
+            .mutable_state_bytes
+            > 0
+    );
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let full_residency = plan_vulkan_runtime_residency(
+        &package_root,
+        &model,
+        &tensor_index,
+        64,
+        0,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    let [full_device] = full_residency.device_plans.as_slice() else {
+        panic!("the one-device fixture must have one residency plan");
+    };
+    let expected_candidate_state = full_device
+        .working_set
+        .transient_state_bytes
+        .checked_add(full_device.working_set.activation_headroom_bytes)
+        .unwrap();
+    assert_eq!(
+        accepted.authoritative_resource_reservations.device_bytes
+            [&hybrid_test_device("gpu0")]
+            .mutable_state_bytes,
+        expected_candidate_state,
+        "candidate state must match the full workload-free residency plan",
+    );
     assert!(
         select_first(&VulkanPlacementCapacityEnvelope {
             available_bytes_by_device: BTreeMap::from([(
                 hybrid_test_device("gpu0"),
-                exact_parameter_bytes - 1,
+                exact_required_bytes - 1,
             )]),
             host_available_bytes: usize::MAX,
         })
@@ -1444,7 +1483,7 @@ fn runtime_hybrid_exact_candidate_parameters_prune_before_terminal_mount() {
         select_first(&VulkanPlacementCapacityEnvelope {
             available_bytes_by_device: BTreeMap::from([(
                 hybrid_test_device("gpu0"),
-                exact_parameter_bytes,
+                exact_required_bytes,
             )]),
             host_available_bytes: usize::MAX,
         })
@@ -1478,6 +1517,7 @@ fn runtime_hybrid_exact_candidate_parameters_require_complete_physical_bindings(
         logical_device_id_by_physical_device: &bindings,
         planning_devices: &planning_devices,
         context_capacity_activations: 64,
+        speculative_draft_tokens: 0,
     };
 
     let error = match runtime_hybrid_candidate_graph(
@@ -1496,6 +1536,268 @@ fn runtime_hybrid_exact_candidate_parameters_require_complete_physical_bindings(
         error
             .0
             .contains("planning device \"gpu1\" is not bound to logical device \"gpu1\"")
+    );
+}
+
+#[test]
+fn runtime_hybrid_exact_state_deduplicates_same_device_component_edges() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let catalog = hybrid_test_catalog(&model);
+    let package_root = tiny_model_dir();
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "gpu0".to_string()),
+        ("gpu1".to_string(), "gpu1".to_string()),
+    ]);
+    let planning_devices = [
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu0".to_string(),
+            identity: hybrid_test_device("gpu0"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu1".to_string(),
+            identity: hybrid_test_device("gpu1"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+    ];
+    let planner = VulkanRuntimeHybridExactCandidateResourcePlanner {
+        package_root: &package_root,
+        logical_device_id_by_physical_device: &bindings,
+        planning_devices: &planning_devices,
+        context_capacity_activations: 64,
+        speculative_draft_tokens: 0,
+    };
+    let candidates = runtime_hybrid_candidate_graph(
+        &model,
+        &catalog,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        None,
+        VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+        Some(&planner),
+    )
+    .unwrap();
+    let route = visit_vulkan_hybrid_ordered_graph_routes_by_duration(
+        &catalog,
+        candidates.component_ids.len(),
+        &candidates.region_candidates,
+        &candidates.boundary_candidates,
+        &candidates.resource_catalog,
+        &candidates.authoritative_resource_classes,
+        &VulkanPlacementCapacityEnvelope {
+            available_bytes_by_device: BTreeMap::from([(
+                hybrid_test_device("gpu0"),
+                usize::MAX,
+            )]),
+            host_available_bytes: usize::MAX,
+        },
+        |route| Ok(Some(route.clone())),
+    )
+    .unwrap()
+    .expect("the all-gpu0 exact route must be available");
+
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let full_residency = plan_vulkan_runtime_residency(
+        &package_root,
+        &model,
+        &tensor_index,
+        64,
+        0,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    let [full_device] = full_residency.device_plans.as_slice() else {
+        panic!("the all-gpu0 fixture must have one residency plan");
+    };
+    assert_eq!(
+        route.authoritative_resource_reservations.device_bytes
+            [&hybrid_test_device("gpu0")]
+            .mutable_state_bytes,
+        full_device
+            .working_set
+            .transient_state_bytes
+            .checked_add(full_device.working_set.activation_headroom_bytes)
+            .unwrap(),
+        "component-local edge views must canonicalize to the full graph allocation",
+    );
+}
+
+#[test]
+fn runtime_hybrid_exact_state_is_scoped_to_the_candidate_component() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let package_root = tiny_model_dir();
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let placed_model = vulkan_runtime_model_with_component_placement(
+        &model,
+        "gpu0",
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let graph = placed_model.executable_circuit_graph().unwrap();
+    let (_, _, placed_plan) = plan_resident_package_placed_stream_circuit_with_tensor_index(
+        "gpu0",
+        &placed_model.placement,
+        &graph,
+        &package_root,
+        &tensor_index,
+        placed_model.package.activation_element_bytes,
+    )
+    .unwrap();
+    let component_id = "layer_00";
+    let full = plan_stream_circuit_residency(&placed_plan, 64, false, 0).unwrap();
+    let component =
+        plan_component_stream_circuit_residency(&placed_plan, component_id, 64, false, 0)
+            .unwrap();
+    assert!(component.state_bytes < full.state_bytes);
+    assert!(component.activation_bytes < full.activation_bytes);
+    assert!(component.edge_bytes < full.edge_bytes);
+    assert!(component.boundary_bytes < full.boundary_bytes);
+
+    let execution_case = hybrid_test_observation(
+        hybrid_test_behavior("component-scoped-state"),
+        "gpu0",
+        1,
+    )
+    .execution_case;
+    let requirements = exact_vulkan_runtime_hybrid_component_state_requirements(
+        &package_root,
+        &model,
+        &placed_model,
+        component_id,
+        &execution_case,
+        "gpu0",
+        &placed_plan,
+        64,
+        0,
+        &tensor_index,
+    )
+    .unwrap();
+    let expected = [
+        component.state_bytes,
+        component.transaction_bytes,
+        component.activation_bytes,
+        component.boundary_bytes,
+        component.edge_bytes,
+        component.causal_verification_snapshot_bytes,
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+    ]
+    .into_iter()
+    .sum::<usize>();
+    assert_eq!(
+        requirements
+            .iter()
+            .map(|requirement| requirement.byte_count)
+            .sum::<usize>(),
+        expected,
+    );
+    assert!(requirements.iter().all(|requirement| {
+        !requirement.resource_identity.contains("layer_00_tail")
+            && !requirement.resource_identity.contains("layer_00_remote")
+    }));
+}
+
+#[test]
+fn runtime_hybrid_exact_state_accounts_distributed_shared_and_private_activations() {
+    let model = fixture_model_runtime_model();
+    let identities = BTreeMap::from([
+        ("gpu0".to_string(), hybrid_test_device("gpu0")),
+        ("gpu1".to_string(), hybrid_test_device("gpu1")),
+    ]);
+    let activation_plan = |route| VulkanDistributedActivationBufferPlan {
+        allocations: vec![VulkanDistributedActivationBufferAllocation {
+            storage: VulkanDistributedActivationStorage::ActivationSlot,
+            owner_device_id: "gpu0".to_string(),
+            component_id: "component".to_string(),
+            slot: 0,
+            byte_capacity: 64,
+            signal_ids: vec!["input".to_string()],
+            device_ids: vec!["gpu0".to_string(), "gpu1".to_string()],
+            input_use_count: 1,
+            output_use_count: 0,
+        }],
+        reduction_allocations: vec![VulkanDistributedReductionBufferAllocation {
+            owner_device_id: "gpu0".to_string(),
+            dispatch_index: 1,
+            component_id: "component".to_string(),
+            node_id: "down".to_string(),
+            plane_byte_capacity: 48,
+            byte_capacity: 96,
+            device_ids: vec!["gpu0".to_string(), "gpu1".to_string()],
+        }],
+        private_intermediate_allocations: vec![
+            VulkanDistributedPrivateIntermediateBufferAllocation {
+                producer_dispatch_index: 0,
+                consumer_dispatch_index: 1,
+                component_id: "component".to_string(),
+                signal_id: "activated".to_string(),
+                devices: vec![
+                    VulkanDistributedPrivateIntermediateDeviceAllocation {
+                        device_id: "gpu0".to_string(),
+                        byte_capacity: 16,
+                    },
+                    VulkanDistributedPrivateIntermediateDeviceAllocation {
+                        device_id: "gpu1".to_string(),
+                        byte_capacity: 24,
+                    },
+                ],
+            },
+        ],
+        allocation_count: 4,
+        import_count: 6,
+        reference_count: 6,
+        total_shared_byte_capacity: 160,
+        total_private_byte_capacity: 40,
+        route,
+    };
+    let reservations = |route| {
+        let requirements =
+            exact_vulkan_runtime_hybrid_distributed_activation_requirements_from_plan(
+                &model,
+                &activation_plan(route),
+                &identities,
+            )
+            .unwrap();
+        let resources = canonical_vulkan_hybrid_shared_range_resources(&BTreeMap::from([(
+            "candidate".to_string(),
+            requirements,
+        )]))
+        .unwrap();
+        VulkanHybridResourceReservations::default()
+            .reserve(
+                &resources["candidate"],
+                &VulkanPlacementCapacityEnvelope {
+                    available_bytes_by_device: BTreeMap::from([
+                        (hybrid_test_device("gpu0"), usize::MAX),
+                        (hybrid_test_device("gpu1"), usize::MAX),
+                    ]),
+                    host_available_bytes: usize::MAX,
+                },
+            )
+            .unwrap()
+            .unwrap()
+    };
+
+    let shared_host = reservations(VulkanSharedResidentBufferRoute::SharedHost);
+    assert_eq!(shared_host.host_bytes.mutable_state_bytes, 160);
+    assert_eq!(
+        shared_host.device_bytes[&hybrid_test_device("gpu0")].mutable_state_bytes,
+        16
+    );
+    assert_eq!(
+        shared_host.device_bytes[&hybrid_test_device("gpu1")].mutable_state_bytes,
+        24
+    );
+
+    let device_local = reservations(VulkanSharedResidentBufferRoute::ExternalDeviceLocal);
+    assert_eq!(device_local.host_bytes.mutable_state_bytes, 0);
+    assert_eq!(
+        device_local.device_bytes[&hybrid_test_device("gpu0")].mutable_state_bytes,
+        176
+    );
+    assert_eq!(
+        device_local.device_bytes[&hybrid_test_device("gpu1")].mutable_state_bytes,
+        24
     );
 }
 

@@ -56,7 +56,7 @@ struct VulkanRuntimeHybridCandidateGraph {
         BTreeMap<VulkanPlacementExecutionCaseIdentity, VulkanPlacementRegionExecutionCalibration>,
     representation_selections_by_candidate_id:
         BTreeMap<String, Vec<crate::RuntimeSelectedImplementation>>,
-    exact_parameter_requirements_by_candidate_id:
+    exact_shared_requirements_by_candidate_id:
         BTreeMap<String, Vec<VulkanHybridSharedRangeRequirement>>,
     authoritative_resource_classes: BTreeSet<VulkanHybridResourceClass>,
 }
@@ -578,6 +578,7 @@ fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
             logical_device_id_by_physical_device,
             planning_devices: planning.devices,
             context_capacity_activations,
+            speculative_draft_tokens: planning.speculative_draft_tokens,
         }
     });
     visit_runtime_hybrid_representation_placements_by_duration(
@@ -1138,7 +1139,7 @@ fn runtime_hybrid_candidate_graph(
         &boundary_candidates,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    let mut exact_parameter_requirements_by_candidate_id = BTreeMap::new();
+    let mut exact_shared_requirements_by_candidate_id = BTreeMap::new();
     if let Some(planner) = exact_parameter_planner {
         let tensor_index = runtime_model
             .load_runtime_tensor_index(planner.package_root)
@@ -1154,7 +1155,7 @@ fn runtime_hybrid_candidate_graph(
                             .to_string(),
                     )
                 })?;
-            let requirements = planner.parameter_requirements(
+            let requirements = planner.shared_resource_requirements(
                 runtime_model,
                 phase,
                 components,
@@ -1163,21 +1164,31 @@ fn runtime_hybrid_candidate_graph(
                 &tensor_index,
                 &resource_contract,
             )?;
-            exact_parameter_requirements_by_candidate_id
+            exact_shared_requirements_by_candidate_id
                 .insert(candidate.candidate_id.clone(), requirements);
         }
         let exact_resources = canonical_vulkan_hybrid_shared_range_resources(
-            &exact_parameter_requirements_by_candidate_id,
+            &exact_shared_requirements_by_candidate_id,
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         for (candidate_id, resources) in exact_resources {
-            resource_catalog
-                .replace_region_resource_class_claims(
-                    &candidate_id,
-                    VulkanHybridResourceClass::Permanent,
-                    resources.claims,
-                )
-                .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+            for class in [
+                VulkanHybridResourceClass::Permanent,
+                VulkanHybridResourceClass::MutableState,
+            ] {
+                resource_catalog
+                    .replace_region_resource_class_claims(
+                        &candidate_id,
+                        class,
+                        resources
+                            .claims
+                            .iter()
+                            .filter(|claim| claim.class == class)
+                            .cloned()
+                            .collect(),
+                    )
+                    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+            }
         }
     }
     Ok(VulkanRuntimeHybridCandidateGraph {
@@ -1189,10 +1200,15 @@ fn runtime_hybrid_candidate_graph(
         resource_catalog,
         region_executions_by_case,
         representation_selections_by_candidate_id: BTreeMap::new(),
-        exact_parameter_requirements_by_candidate_id,
+        exact_shared_requirements_by_candidate_id,
         authoritative_resource_classes: exact_parameter_planner
             .is_some()
-            .then(|| BTreeSet::from([VulkanHybridResourceClass::Permanent]))
+            .then(|| {
+                BTreeSet::from([
+                    VulkanHybridResourceClass::Permanent,
+                    VulkanHybridResourceClass::MutableState,
+                ])
+            })
             .unwrap_or_default(),
     })
 }
@@ -1311,8 +1327,8 @@ fn runtime_hybrid_representation_candidate_graph(
             })
         {
             let alternative_candidate_id = candidate.candidate_id.clone();
-            let exact_parameter_requirements = alternative
-                .exact_parameter_requirements_by_candidate_id
+            let exact_shared_requirements = alternative
+                .exact_shared_requirements_by_candidate_id
                 .get(&alternative_candidate_id)
                 .cloned();
             candidate.candidate_id = format!(
@@ -1340,9 +1356,9 @@ fn runtime_hybrid_representation_candidate_graph(
                     _ => {}
                 }
             }
-            if let Some(requirements) = exact_parameter_requirements {
+            if let Some(requirements) = exact_shared_requirements {
                 combined
-                    .exact_parameter_requirements_by_candidate_id
+                    .exact_shared_requirements_by_candidate_id
                     .insert(candidate.candidate_id.clone(), requirements);
             }
             combined.region_candidates.push(candidate);
@@ -1386,21 +1402,31 @@ fn runtime_hybrid_representation_candidate_graph(
         .map(|candidate| candidate.candidate_id.as_str())
         .collect::<BTreeSet<_>>();
     combined
-        .exact_parameter_requirements_by_candidate_id
+        .exact_shared_requirements_by_candidate_id
         .retain(|candidate_id, _| retained_candidate_ids.contains(candidate_id.as_str()));
     let exact_resources = canonical_vulkan_hybrid_shared_range_resources(
-        &combined.exact_parameter_requirements_by_candidate_id,
+        &combined.exact_shared_requirements_by_candidate_id,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     for (candidate_id, resources) in exact_resources {
-        combined
-            .resource_catalog
-            .replace_region_resource_class_claims(
-                &candidate_id,
-                VulkanHybridResourceClass::Permanent,
-                resources.claims,
-            )
-            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        for class in [
+            VulkanHybridResourceClass::Permanent,
+            VulkanHybridResourceClass::MutableState,
+        ] {
+            combined
+                .resource_catalog
+                .replace_region_resource_class_claims(
+                    &candidate_id,
+                    class,
+                    resources
+                        .claims
+                        .iter()
+                        .filter(|claim| claim.class == class)
+                        .cloned()
+                        .collect(),
+                )
+                .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        }
     }
     Ok(combined)
 }
