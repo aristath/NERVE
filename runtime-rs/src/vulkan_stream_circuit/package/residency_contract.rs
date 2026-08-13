@@ -887,6 +887,8 @@ pub(super) fn compiled_selector_identity(
             "domain_id": selector.domain_id,
             "resource_count": selector.resource_count,
             "selection_signal": selector.selection_signal,
+            "execution_signal": selector.execution_signal,
+            "execution_calibration_word_base": selector.execution_calibration_word_base,
             "encoding": selector.encoding,
             "mapping": selector.mapping,
         }),
@@ -2053,6 +2055,38 @@ fn invalid_residency_error(message: impl Into<String>) -> io::Error {
 mod shared_template_tests {
     use super::*;
     use crate::test_support::tiny_model_package_manifest_path;
+
+    #[test]
+    fn selector_identity_matches_the_compiler_execution_record() {
+        let selector = CompiledResourceSelector {
+            id: String::new(),
+            execution_scope: "target".to_string(),
+            component_id: "layer_00".to_string(),
+            node_id: "select".to_string(),
+            domain_id: "experts".to_string(),
+            resource_count: 2,
+            selection_signal: "selected".to_string(),
+            execution_signal: "weighted".to_string(),
+            execution_calibration_word_base: 1.0_f32.to_bits(),
+            encoding: CompiledResourceSelectionEncoding {
+                element_type: CompiledResourceSelectionElementType::U32,
+                selection_count_per_activation: 1,
+                index_shift: 0,
+                index_mask: 0xffff,
+                calibration_word_base: 0,
+            },
+            mapping: CompiledResourceSelectorMapping::PartitionTemplate {
+                partition_template_id:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+            },
+        };
+
+        assert_eq!(
+            compiled_selector_identity(&selector).unwrap(),
+            "sha256:9a02eec5614224066ecf0f52c2d4074c98a3ba5770848ca571356cc6cf6d1219"
+        );
+    }
 
     #[test]
     fn compatible_partition_template_is_shareable_across_selectors() {

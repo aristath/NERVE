@@ -29,6 +29,37 @@ from nerve.resource_residency import (
 )
 
 
+def test_selector_identity_matches_the_runtime_execution_record() -> None:
+    selector = {
+        "id": "",
+        "execution_scope": "target",
+        "component_id": "layer_00",
+        "node_id": "select",
+        "domain_id": "experts",
+        "resource_count": 2,
+        "selection_signal": "selected",
+        "execution_signal": "weighted",
+        "execution_calibration_word_base": 0x3F800000,
+        "encoding": {
+            "element_type": "u32",
+            "selection_count_per_activation": 1,
+            "index_shift": 0,
+            "index_mask": 0xFFFF,
+            "calibration_word_base": 0,
+        },
+        "mapping": {
+            "kind": "partition_template",
+            "partition_template_id": (
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+        },
+    }
+
+    assert selector_identity(selector) == (
+        "sha256:9a02eec5614224066ecf0f52c2d4074c98a3ba5770848ca571356cc6cf6d1219"
+    )
+
+
 def test_compiler_reuses_one_verified_partition_digest_catalog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
