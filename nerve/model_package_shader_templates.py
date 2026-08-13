@@ -909,8 +909,9 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         return rendered
 
     indexed_sparse_attention_main = re.fullmatch(
-        r"indexed_sparse_attention_main(_score_pipeline|_tile_overlap)?"
-        r"(_temporal(?:_parallel)?)?_bf16_"
+        r"indexed_sparse_attention_main"
+        r"(_score_pipeline|_tile_overlap|_head_grouped_tile_overlap)?"
+        r"(?:_hg(\d+))?(_temporal(?:_parallel)?)?_bf16_"
         r"q(\d+)_kv(\d+)_d(\d+)_w(\d+)_"
         r"r(\d+)_k(\d+)_scale([0-9eE+.-]+)\.comp",
         shader_file,
@@ -918,6 +919,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
     if indexed_sparse_attention_main is not None:
         (
             schedule,
+            head_group,
             temporal,
             query_heads,
             kv_heads,
@@ -927,6 +929,7 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             max_compressed_indices,
             scale,
         ) = indexed_sparse_attention_main.groups()
+        head_group = int(head_group) if head_group is not None else 1
         (
             query_heads,
             kv_heads,
@@ -957,14 +960,27 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             or window <= 0
             or (compression_ratio == 0) != (max_compressed_indices == 0)
             or (
-                schedule is not None
+                schedule in {"_score_pipeline", "_tile_overlap"}
                 and (kv_heads != 1 or head_width != 512 or not has_compressed)
             )
+            or (
+                schedule == "_head_grouped_tile_overlap"
+                and (
+                    kv_heads != 1
+                    or head_width != 512
+                    or head_group not in {2, 4, 8}
+                    or query_heads % head_group
+                )
+            )
+            or (schedule != "_head_grouped_tile_overlap" and head_group != 1)
         ):
             raise ModelCompileError(
                 f"invalid main indexed sparse-attention shader shape {shader_file!r}"
             )
-        if schedule == "_tile_overlap" and temporal not in {
+        if schedule in {
+            "_tile_overlap",
+            "_head_grouped_tile_overlap",
+        } and temporal not in {
             None,
             "_temporal_parallel",
         }:
@@ -974,7 +990,12 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
         rendered = render_shader_template(
             source_dir,
             (
-                "indexed_sparse_attention_main_tile_overlap_temporal_parallel_bf16.comp.template"
+                "indexed_sparse_attention_main_head_grouped_tile_overlap_temporal_parallel_bf16.comp.template"
+                if schedule == "_head_grouped_tile_overlap"
+                and temporal == "_temporal_parallel"
+                else "indexed_sparse_attention_main_head_grouped_tile_overlap_bf16.comp.template"
+                if schedule == "_head_grouped_tile_overlap"
+                else "indexed_sparse_attention_main_tile_overlap_temporal_parallel_bf16.comp.template"
                 if schedule == "_tile_overlap" and temporal == "_temporal_parallel"
                 else "indexed_sparse_attention_main_tile_overlap_bf16.comp.template"
                 if schedule == "_tile_overlap"
@@ -989,12 +1010,16 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
             {
                 "LOCAL_SIZE": str(
                     head_width * 2
-                    if schedule == "_tile_overlap"
+                    if schedule in {
+                        "_tile_overlap",
+                        "_head_grouped_tile_overlap",
+                    }
                     else head_width + 64
                     if schedule == "_score_pipeline"
                     else head_width
                 ),
                 "QUERY_HEADS": str(query_heads),
+                "HEAD_GROUP": str(head_group),
                 "KV_HEADS": str(kv_heads),
                 "HEAD_WIDTH": str(head_width),
                 "LOCAL_WINDOW": str(window),
@@ -1007,7 +1032,10 @@ def render_shader_source(source_dir: Path, shader_file: str) -> str:
                 "CONTROL_BINDING": "8" if has_compressed else "5",
             },
         )
-        if temporal == "_temporal_parallel" and schedule != "_tile_overlap":
+        if temporal == "_temporal_parallel" and schedule not in {
+            "_tile_overlap",
+            "_head_grouped_tile_overlap",
+        }:
             return parallelize_temporal_batch_lanes(shader_file, rendered)
         return rendered
 

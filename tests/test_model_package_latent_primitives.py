@@ -20,6 +20,7 @@ from nerve.model_package_batching import (
     causal_scan_batch_shader_file,
     causal_scan_workgroup_count_x,
 )
+from nerve.model_package_shader_templates import render_shader_source
 
 
 def _fixture() -> tuple[dict[str, object], dict[str, object]]:
@@ -1219,3 +1220,40 @@ def test_selects_fastest_exact_attention_schedule_for_discovered_capabilities(
         dimensions,
         compiler_target=target,
     )
+
+
+def test_renders_grouped_head_attention_candidates_for_local_and_compressed_state(
+    tmp_path: Path,
+) -> None:
+    shader_source_dir = Path(__file__).parents[1] / "runtime-rs" / "shaders"
+    shader_files = {
+        (
+            "indexed_sparse_attention_main_head_grouped_tile_overlap_"
+            f"hg{head_group}{temporal}_bf16_q64_kv1_d512_w128_{history}_"
+            f"scale0.0441941738__{'pbc' if temporal else 'sc'}8.comp"
+        )
+        for head_group in (2, 4, 8)
+        for temporal in ("", "_temporal_parallel")
+        for history in ("r0_k0", "r4_k512")
+    }
+
+    copy_shader_templates(shader_source_dir, tmp_path, shader_files)
+    for shader_file in shader_files:
+        source = (tmp_path / shader_file).read_text()
+        expected_group = shader_file.split("_hg", 1)[1].split("_", 1)[0]
+        assert f"const uint HEAD_GROUP = {expected_group}u;" in source
+        assert "query_head_base = gl_WorkGroupID.x * HEAD_GROUP" in source
+        assert "query_values[head] * key_value" in source
+        assert "previous_tile_accumulators[head] +=" in source
+    compile_shader_artifacts(tmp_path)
+
+    for invalid in (
+        "indexed_sparse_attention_main_head_grouped_tile_overlap_hg1_"
+        "bf16_q64_kv1_d512_w128_r0_k0_scale0.0441941738__sc8.comp",
+        "indexed_sparse_attention_main_head_grouped_tile_overlap_hg3_"
+        "bf16_q64_kv1_d512_w128_r0_k0_scale0.0441941738__sc8.comp",
+        "indexed_sparse_attention_main_head_grouped_tile_overlap_hg8_"
+        "bf16_q60_kv1_d512_w128_r0_k0_scale0.0441941738__sc8.comp",
+    ):
+        with pytest.raises(ModelCompileError, match="invalid main indexed"):
+            render_shader_source(shader_source_dir, invalid)
