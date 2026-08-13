@@ -14,10 +14,16 @@ pub struct VulkanRuntimePhysicalMountPlan {
     pub selected_resource_cache_quota_bytes_by_logical_device: BTreeMap<String, usize>,
     pub maximum_load_wave_bytes_by_logical_device: BTreeMap<String, usize>,
     pub shared_host_cache_quota_bytes: usize,
+    pub normal_prefill_lane_capacity: usize,
+}
+
+struct VulkanRuntimeSelectedResourceTransientResolution {
+    resolution: VulkanRuntimeSelectedResourceMountResolution,
+    normal_prefill_lane_capacity: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
+fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
     runtime_model: &VulkanResidentRuntimeModel,
     resource_contract: &CompiledResourceResidencyContract,
     loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
@@ -29,7 +35,7 @@ fn resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
     devices: &[VulkanRuntimeSelectedResourceMountDevice],
     input_device_id: &str,
     output_device_id: &str,
-    prefill_activation_batch_width: Option<usize>,
+    normal_prefill_lane_capacity: usize,
     speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
     catalog: Option<&VulkanPlacementCalibrationCatalog>,
@@ -49,7 +55,7 @@ fn resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
         runtime_model,
         slice_plans,
         &baseline_execution_plans.prefill,
-        prefill_activation_batch_width,
+        normal_prefill_lane_capacity,
         resource_contract,
         residency_policy,
         speculative_draft_tokens,
@@ -84,7 +90,7 @@ fn resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
             runtime_model,
             slice_plans,
             &resolution.plans.execution_plans.prefill,
-            prefill_activation_batch_width,
+            normal_prefill_lane_capacity,
             resource_contract,
             residency_policy,
             speculative_draft_tokens,
@@ -97,6 +103,96 @@ fn resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
     Err(VulkanResidentTokenModelPackageError::new(
         "selected-resource placement and execution-transient planning did not converge",
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
+    runtime_model: &VulkanResidentRuntimeModel,
+    resource_contract: &CompiledResourceResidencyContract,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
+    baseline_execution_plans: &VulkanDistributedExecutionPlanSet,
+    residency_plan: &VulkanRuntimeResidencyPlan,
+    logical_device_ids: &[String],
+    slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
+    tensor_index: &TensorIndex,
+    devices: &[VulkanRuntimeSelectedResourceMountDevice],
+    input_device_id: &str,
+    output_device_id: &str,
+    exact_prefill_lane_capacity: Option<usize>,
+    speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
+    catalog: Option<&VulkanPlacementCalibrationCatalog>,
+    telemetry: Option<&VulkanSelectionTelemetrySnapshot>,
+    host_safe_capacity_bytes: usize,
+) -> Result<Option<VulkanRuntimeSelectedResourceTransientResolution>, VulkanResidentTokenModelPackageError>
+{
+    let physical_device_by_logical_device = devices
+        .iter()
+        .map(|device| {
+            (
+                device.logical_device_id.clone(),
+                device.physical_device_id.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let safe_capacity_by_physical_device = devices.iter().fold(
+        BTreeMap::<String, usize>::new(),
+        |mut capacities, device| {
+            capacities
+                .entry(device.physical_device_id.clone())
+                .and_modify(|capacity| {
+                    *capacity = (*capacity).min(device.live_safe_capacity_bytes)
+                })
+                .or_insert(device.live_safe_capacity_bytes);
+            capacities
+        },
+    );
+    for normal_prefill_lane_capacity in vulkan_runtime_normal_prefill_lane_capacity_candidates(
+        slice_plans,
+        exact_prefill_lane_capacity,
+    )? {
+        let (mut resolution, execution_transient) =
+            resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
+                runtime_model,
+                resource_contract,
+                loaded_manifest,
+                baseline_execution_plans,
+                residency_plan,
+                logical_device_ids,
+                slice_plans,
+                tensor_index,
+                devices,
+                input_device_id,
+                output_device_id,
+                normal_prefill_lane_capacity,
+                speculative_draft_tokens,
+                residency_policy,
+                catalog,
+                telemetry,
+            )?;
+        resolution
+            .plans
+            .physical_execution_residency_plan
+            .add_execution_transient_reservation(
+                &execution_transient.device_bytes_by_logical_device,
+                execution_transient.host_bytes,
+            )
+            .map_err(|error| {
+                physical_mount_planning_error("execution transient residency", error)
+            })?;
+        if runtime_physical_mount_fits(
+            &resolution.plans.physical_execution_residency_plan,
+            &physical_device_by_logical_device,
+            &safe_capacity_by_physical_device,
+            host_safe_capacity_bytes,
+        )? {
+            return Ok(Some(VulkanRuntimeSelectedResourceTransientResolution {
+                resolution,
+                normal_prefill_lane_capacity,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,8 +345,8 @@ fn plan_vulkan_runtime_physical_mount(
                 .max(std::mem::align_of::<u64>()),
         })
         .collect::<Vec<_>>();
-    let (mut resolution, execution_transient) =
-        resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
+    let Some(transient_resolution) =
+        try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
         runtime_model,
         &resource_contract,
         &loaded_manifest,
@@ -267,41 +363,12 @@ fn plan_vulkan_runtime_physical_mount(
         resource_residency_policy,
         placement_calibration_catalog,
         None,
-    )?;
-    resolution
-        .plans
-        .physical_execution_residency_plan
-        .add_execution_transient_reservation(
-            &execution_transient.device_bytes_by_logical_device,
-            execution_transient.host_bytes,
-        )
-        .map_err(|error| physical_mount_planning_error("execution transient residency", error))?;
-    let physical_device_by_logical_device = devices
-        .iter()
-        .map(|device| {
-            (
-                device.logical_device_id.clone(),
-                device.identity.physical_device_id.clone(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let safe_capacity_by_physical_device = devices
-        .iter()
-        .map(|device| {
-            (
-                device.identity.physical_device_id.clone(),
-                device.safe_capacity_bytes,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    if !runtime_physical_mount_fits(
-        &resolution.plans.physical_execution_residency_plan,
-        &physical_device_by_logical_device,
-        &safe_capacity_by_physical_device,
         host_safe_capacity_bytes,
-    )? {
+    )?
+    else {
         return Ok(None);
-    }
+    };
+    let resolution = transient_resolution.resolution;
     let final_capacities = selected_resource_mount_capacities(
         runtime_model,
         &resource_contract,
@@ -355,6 +422,7 @@ fn plan_vulkan_runtime_physical_mount(
         maximum_load_wave_bytes_by_logical_device: selected_resource_summary
             .maximum_load_wave_bytes_by_logical_device,
         shared_host_cache_quota_bytes,
+        normal_prefill_lane_capacity: transient_resolution.normal_prefill_lane_capacity,
     }))
 }
 

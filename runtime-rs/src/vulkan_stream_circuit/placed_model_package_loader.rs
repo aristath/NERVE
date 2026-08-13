@@ -360,8 +360,10 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 upload_alignment,
             });
         }
-        let (selected_resource_resolution, execution_transient) =
-            resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
+        let host_safe_capacity_bytes = vulkan_safe_host_available_bytes()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+        let Some(transient_resolution) =
+            try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
             &runtime_model,
             &compiled_resource_contract,
             &distributed_loaded_manifest,
@@ -378,8 +380,18 @@ impl VulkanResidentInProcessPlacedModelPackage {
             resource_residency_policy,
             placement_calibration_catalog,
             None,
+            host_safe_capacity_bytes,
         )
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?
+        else {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(
+                    "no compiled normal-prompt lane capacity fits the live physical mount",
+                ),
+            ));
+        };
+        let normal_prefill_lane_capacity = transient_resolution.normal_prefill_lane_capacity;
+        let selected_resource_resolution = transient_resolution.resolution;
         let selected_resource_placements = selected_resource_resolution.placements;
         let runtime_execution_identity = canonical_mounted_runtime_execution_identity(
             &base_runtime_execution_identity,
@@ -393,20 +405,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
             selected_resource_execution_ownership_plan:
                 distributed_selected_resource_execution_ownership_plan,
             selected_resource_store_plan: distributed_selected_resource_store_plan,
-            mut physical_execution_residency_plan,
+            physical_execution_residency_plan,
         } = selected_resource_resolution.plans;
-        physical_execution_residency_plan
-            .add_execution_transient_reservation(
-                &execution_transient.device_bytes_by_logical_device,
-                execution_transient.host_bytes,
-            )
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to admit mounted prefill execution transients: {error}",
-                    )),
-                )
-            })?;
         admit_vulkan_runtime_physical_execution_mount(
             &physical_execution_residency_plan,
             &physical_device_by_logical_device,
@@ -1207,8 +1207,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             input_device_id,
             output_device_id,
             dynamic_state_capacity_activations: capacity,
-            normal_prefill_lane_capacity: physical_execution_plan
-                .prefill_activation_batch_width,
+            normal_prefill_lane_capacity,
             device_count: device_ids.len(),
             device_ids,
             hosted_component_count,

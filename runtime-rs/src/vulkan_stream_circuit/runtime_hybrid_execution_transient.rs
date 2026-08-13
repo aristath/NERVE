@@ -105,14 +105,11 @@ fn exact_vulkan_runtime_mounted_prefill_transient_plan(
     runtime_model: &VulkanResidentRuntimeModel,
     slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
     execution_plan: &VulkanDistributedExecutionPlan,
-    normal_lane_capacity: Option<usize>,
+    normal_lane_capacity: usize,
     resource_contract: &CompiledResourceResidencyContract,
     residency_policy: ResourceResidencyPolicy,
     speculative_draft_tokens: usize,
 ) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanResidentTokenModelPackageError> {
-    let Some(normal_lane_capacity) = normal_lane_capacity else {
-        return Ok(VulkanRuntimeHybridExecutionTransientPlan::default());
-    };
     let component_ids = runtime_model
         .circuit_graph
         .components
@@ -142,6 +139,75 @@ fn exact_vulkan_runtime_mounted_prefill_transient_plan(
             "failed to plan mounted prefill execution transients: {error}",
         ))
     })
+}
+
+fn vulkan_runtime_normal_prefill_lane_capacity_candidates(
+    slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
+    exact_lane_capacity: Option<usize>,
+) -> Result<Vec<usize>, VulkanResidentTokenModelPackageError> {
+    if slice_plans.is_empty() {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "normal prefill lane planning requires at least one owner slice",
+        ));
+    }
+    if let Some(exact_lane_capacity) = exact_lane_capacity {
+        if exact_lane_capacity == 0 || exact_lane_capacity > VULKAN_BACKEND_LOOP_MAX_WINDOW {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "exact normal prefill lane capacity {exact_lane_capacity} exceeds resident window {VULKAN_BACKEND_LOOP_MAX_WINDOW}",
+            )));
+        }
+        return Ok(vec![exact_lane_capacity]);
+    }
+
+    let mut maximum = VULKAN_BACKEND_LOOP_MAX_WINDOW;
+    for slice in slice_plans {
+        for artifact in slice.batch_kernels.iter().filter(|artifact| {
+            artifact.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan
+        }) {
+            maximum = maximum.min(artifact.lane_tile_width);
+        }
+        let mut scalar_dispatches_per_lane_by_component = BTreeMap::<&str, usize>::new();
+        for dispatch in &slice.prepared_plan.dispatches {
+            if !slice.batch_kernels.iter().any(|artifact| {
+                artifact.component_id == dispatch.component_id
+                    && artifact.node_id == dispatch.node_id
+            }) {
+                *scalar_dispatches_per_lane_by_component
+                    .entry(&dispatch.component_id)
+                    .or_default() += 1;
+            }
+        }
+        let scalar_dispatches_per_lane = scalar_dispatches_per_lane_by_component
+            .values()
+            .copied()
+            .max()
+            .unwrap_or_default();
+        if scalar_dispatches_per_lane > 0 {
+            const RECORDED_DISPATCH_BUDGET_PER_SUBMISSION: usize = 65_536;
+            maximum = maximum.min(
+                RECORDED_DISPATCH_BUDGET_PER_SUBMISSION
+                    .checked_div(scalar_dispatches_per_lane)
+                    .unwrap_or(1)
+                    .max(1),
+            );
+        }
+    }
+    let mut lane_capacity = maximum.max(1).min(VULKAN_BACKEND_LOOP_MAX_WINDOW);
+    if !lane_capacity.is_power_of_two() {
+        lane_capacity = lane_capacity
+            .checked_next_power_of_two()
+            .and_then(|next| next.checked_div(2))
+            .unwrap_or(1);
+    }
+    let mut candidates = Vec::new();
+    loop {
+        candidates.push(lane_capacity);
+        if lane_capacity == 1 {
+            break;
+        }
+        lane_capacity /= 2;
+    }
+    Ok(candidates)
 }
 
 fn exact_vulkan_runtime_hybrid_prefill_transient_plan(

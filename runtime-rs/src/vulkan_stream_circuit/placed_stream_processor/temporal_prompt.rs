@@ -289,10 +289,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         const MINIMUM_DEVICE_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
         const RECORDED_DISPATCH_BUDGET_PER_SUBMISSION: usize = 65_536;
 
-        let mut width = self
-            .model
-            .normal_prefill_lane_capacity
-            .unwrap_or(VULKAN_BACKEND_LOOP_MAX_WINDOW);
+        let mut width = self.model.normal_prefill_lane_capacity;
         for slice in &self.device_slices {
             let device = devices.get(&slice.device_id).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {

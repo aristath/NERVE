@@ -45,6 +45,17 @@ fn physical_mount_plan_uses_requested_context_without_opening_vulkan() {
     .unwrap();
     let long = long.unwrap();
 
+    assert!(short.normal_prefill_lane_capacity.is_power_of_two());
+    assert_eq!(
+        short.normal_prefill_lane_capacity,
+        long.normal_prefill_lane_capacity
+    );
+    assert!(
+        short.physical_execution_residency_plan.device_plans[0]
+            .breakdown
+            .execution_transient_device_bytes_per_stream
+            > 0
+    );
     assert!(
         long.physical_execution_residency_plan
             .total_stream_device_local_bytes
@@ -203,9 +214,17 @@ fn physical_mount_plan_reports_full_context_capacity_infeasibility_without_alloc
     )
     .unwrap()
     .unwrap();
-    let required = exact.physical_execution_residency_plan.device_plans[0].mount_device_local_bytes
-        + exact.physical_execution_residency_plan.device_plans[0].stream_device_local_bytes;
-    device.safe_capacity_bytes = required - 1;
+    let plan = &exact.physical_execution_residency_plan.device_plans[0];
+    let required_without_prompt_runner = plan
+        .mount_device_local_bytes
+        .checked_add(plan.stream_device_local_bytes)
+        .unwrap()
+        .checked_sub(
+            plan.breakdown
+                .execution_transient_device_bytes_per_stream,
+        )
+        .unwrap();
+    device.safe_capacity_bytes = required_without_prompt_runner;
 
     assert!(
         plan_vulkan_runtime_physical_mount(
@@ -221,6 +240,58 @@ fn physical_mount_plan_reports_full_context_capacity_infeasibility_without_alloc
         )
         .unwrap()
         .is_none()
+    );
+}
+
+#[test]
+fn physical_mount_plan_downshifts_unmeasured_prefill_width_before_rejecting() {
+    let model = fixture_model_runtime_model();
+    let physical = VulkanRuntimePhysicalExecutionPlan::uniform(&model);
+    let [logical_device_id] = physical.device_ids(&model).try_into().unwrap();
+    let mut device = physical_mount_test_device(&logical_device_id);
+    let widest = plan_vulkan_runtime_physical_mount(
+        tiny_model_dir(),
+        &model,
+        &physical,
+        None,
+        64,
+        0,
+        ResourceResidencyPolicy::Eager,
+        std::slice::from_ref(&device),
+        usize::MAX,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(widest.normal_prefill_lane_capacity > 1);
+    let widest_device = &widest.physical_execution_residency_plan.device_plans[0];
+    device.safe_capacity_bytes = widest_device.mount_device_local_bytes
+        + widest_device.stream_device_local_bytes
+        - 1;
+
+    let downshifted = plan_vulkan_runtime_physical_mount(
+        tiny_model_dir(),
+        &model,
+        &physical,
+        None,
+        64,
+        0,
+        ResourceResidencyPolicy::Eager,
+        &[device],
+        usize::MAX,
+    )
+    .unwrap()
+    .expect("a narrower compiled prompt runner must fit before rejection");
+    assert!(
+        downshifted.normal_prefill_lane_capacity < widest.normal_prefill_lane_capacity,
+        "capacity pressure must select a smaller explicit contract",
+    );
+    assert!(
+        downshifted.physical_execution_residency_plan.device_plans[0]
+            .breakdown
+            .execution_transient_device_bytes_per_stream
+            < widest_device
+                .breakdown
+                .execution_transient_device_bytes_per_stream,
     );
 }
 
@@ -287,6 +358,7 @@ fn physical_mount_plan_admits_the_exact_selected_prefill_runner_geometry() {
     )
     .unwrap()
     .unwrap();
+    assert_eq!(exact.normal_prefill_lane_capacity, 4);
     assert!(
         exact
             .physical_execution_residency_plan

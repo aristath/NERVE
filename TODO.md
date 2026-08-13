@@ -460,9 +460,14 @@ For every numbered item below:
   nonzero residency and that one byte below the complete mount plus stream
   requirement is rejected.
 
-  The remaining resource work is to replace the local/unmeasured fallback's
-  adaptive prompt-runner width with an exact capacity-selected contract, and
-  to make multi-stream admission one atomic device/host reservation transaction
+  Local and otherwise unmeasured fallback no longer escapes this contract. The
+  mount derives legal power-of-two widths from the compiled causal-batch
+  artifacts and recorded-command budget, tries them widest-first against the
+  same selected-resource/transient fixed point, and records the winning width
+  in both the workload-free mount and real package. A one-byte-short widest
+  plan downshifts instead of failing or mounting an unaccounted runner; capacity
+  below the scalar contract fails closed. The remaining resource work is to
+  make multi-stream admission one atomic device/host reservation transaction
   whose permits are consumed by the subsequent buffer allocations. Exact
   sequential tests also cover source
   projections, uneven selector waves, paged versus retained/eager quotas,
