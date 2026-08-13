@@ -366,8 +366,13 @@ For every numbered item below:
   transient pressure was previously invisible. Replace calibration-session
   aggregates with exact permanent, KV/state, cache-quota, and atomic load-wave
   claims derived for the requested context, speculation, residency policy, and
-  lowered physical plan; shared claims must be deduplicated by identity rather
-  than summed once per component.
+  lowered physical plan. The solver contract and production candidate graph
+  now carry those typed dimensions and immutable claim identities; shared
+  claims deduplicate only when their definitions match, cache waves must fit
+  the admitted quota, and different claim sets remain distinct on the Pareto
+  frontier. Runtime candidates still seed the contract from bounded
+  calibration-session aggregates, so authoritative full-context claim
+  derivation remains before this item is complete.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
   durations. Model compute and transfer queues, dependency edges, collectives,
   independent expert branches, resource contention, and legal overlap.

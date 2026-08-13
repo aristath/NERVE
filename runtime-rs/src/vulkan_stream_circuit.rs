@@ -222,6 +222,7 @@ include!("vulkan_stream_circuit/placement_calibration_catalog.rs");
 include!("vulkan_stream_circuit/region_placement_calibration_catalog.rs");
 include!("vulkan_stream_circuit/selected_resource_calibration_catalog.rs");
 include!("vulkan_stream_circuit/package_placement_catalog.rs");
+include!("vulkan_stream_circuit/hybrid_placement_resources.rs");
 include!("vulkan_stream_circuit/hybrid_placement_optimizer.rs");
 include!("vulkan_stream_circuit/runtime_hybrid_placement.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_planning.rs");

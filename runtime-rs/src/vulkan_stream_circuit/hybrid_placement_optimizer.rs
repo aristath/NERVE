@@ -17,6 +17,139 @@ pub struct VulkanHybridBoundaryCandidate {
     pub execution_case: VulkanPlacementExecutionCaseIdentity,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VulkanHybridCandidateResourceCatalog {
+    region_resources_by_candidate_id: BTreeMap<String, VulkanHybridCandidateResources>,
+    boundary_resources_by_case:
+        BTreeMap<(usize, VulkanPlacementExecutionCaseIdentity), VulkanHybridCandidateResources>,
+}
+
+impl VulkanHybridCandidateResourceCatalog {
+    pub fn from_calibration(
+        catalog: &VulkanPlacementCalibrationCatalog,
+        region_candidates: &[VulkanHybridRegionCandidate],
+        boundary_candidates: &[VulkanHybridBoundaryCandidate],
+    ) -> Result<Self, VulkanHybridPlacementError> {
+        let mut resources = Self::default();
+        for candidate in region_candidates {
+            let Some(observation) = catalog.exact_observation(&candidate.execution_case) else {
+                continue;
+            };
+            resources.region_resources_by_candidate_id.insert(
+                candidate.candidate_id.clone(),
+                hybrid_calibration_candidate_resources(
+                    &format!("region:{}", candidate.candidate_id),
+                    observation,
+                )?,
+            );
+        }
+        for candidate in boundary_candidates {
+            let Some(observation) = catalog.exact_observation(&candidate.execution_case) else {
+                continue;
+            };
+            let key = (candidate.boundary_index, candidate.execution_case.clone());
+            if resources
+                .boundary_resources_by_case
+                .insert(
+                    key,
+                    hybrid_calibration_candidate_resources(
+                        &format!(
+                            "boundary:{}:{}",
+                            candidate.boundary_index,
+                            candidate.execution_case.execution_graph_digest,
+                        ),
+                        observation,
+                    )?,
+                )
+                .is_some()
+            {
+                return Err(VulkanHybridPlacementError(
+                    "hybrid resource catalog repeats an exact boundary candidate".to_string(),
+                ));
+            }
+        }
+        Ok(resources)
+    }
+
+    pub fn replace_region_claims(
+        &mut self,
+        candidate_id: &str,
+        claims: Vec<VulkanHybridResourceClaim>,
+    ) -> Result<(), VulkanHybridPlacementError> {
+        let resources = self
+            .region_resources_by_candidate_id
+            .get_mut(candidate_id)
+            .ok_or_else(|| {
+                VulkanHybridPlacementError(format!(
+                    "hybrid resource catalog has no measured region candidate {candidate_id:?}",
+                ))
+            })?;
+        *resources = VulkanHybridCandidateResources::new(claims);
+        Ok(())
+    }
+}
+
+fn hybrid_calibration_candidate_resources(
+    namespace: &str,
+    observation: &VulkanPlacementCalibrationObservation,
+) -> Result<VulkanHybridCandidateResources, VulkanHybridPlacementError> {
+    let mut claims = Vec::new();
+    for device in &observation.execution_case.devices {
+        let physical_device_id = &device.physical_device_id;
+        let resident = observation
+            .resident_bytes_by_physical_device
+            .get(physical_device_id)
+            .copied()
+            .ok_or_else(|| {
+                VulkanHybridPlacementError(
+                    "validated placement observation lost device resident-byte evidence"
+                        .to_string(),
+                )
+            })?;
+        if resident > 0 {
+            claims.push(VulkanHybridResourceClaim::device(
+                format!("{namespace}:device:{physical_device_id}:resident"),
+                device.clone(),
+                VulkanHybridResourceClass::Permanent,
+                resident,
+            ));
+        }
+        let transient = observation
+            .transient_peak_bytes_by_physical_device
+            .get(physical_device_id)
+            .copied()
+            .ok_or_else(|| {
+                VulkanHybridPlacementError(
+                    "validated placement observation lost device transient-byte evidence"
+                        .to_string(),
+                )
+            })?;
+        if transient > 0 {
+            claims.push(VulkanHybridResourceClaim::device(
+                format!("{namespace}:device:{physical_device_id}:transient"),
+                device.clone(),
+                VulkanHybridResourceClass::ExecutionTransient,
+                transient,
+            ));
+        }
+    }
+    if observation.host_resident_bytes > 0 {
+        claims.push(VulkanHybridResourceClaim::host(
+            format!("{namespace}:host:resident"),
+            VulkanHybridResourceClass::Permanent,
+            observation.host_resident_bytes,
+        ));
+    }
+    if observation.host_transient_peak_bytes > 0 {
+        claims.push(VulkanHybridResourceClaim::host(
+            format!("{namespace}:host:transient"),
+            VulkanHybridResourceClass::ExecutionTransient,
+            observation.host_transient_peak_bytes,
+        ));
+    }
+    Ok(VulkanHybridCandidateResources::new(claims))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VulkanHybridScheduledStep {
     Boundary {
@@ -35,11 +168,7 @@ pub enum VulkanHybridScheduledStep {
 pub struct VulkanHybridPlacementPlan {
     pub steps: Vec<VulkanHybridScheduledStep>,
     pub predicted_duration_ns_per_activation: u128,
-    pub resident_bytes_by_device: BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
-    pub transient_peak_bytes_by_device:
-        BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
-    pub host_resident_bytes: usize,
-    pub host_transient_peak_bytes: usize,
+    pub resource_reservations: VulkanHybridResourceReservations,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,12 +186,14 @@ impl Error for VulkanHybridPlacementError {}
 struct VulkanHybridResolvedRegionCandidate<'a> {
     request: &'a VulkanHybridRegionCandidate,
     observation: &'a VulkanPlacementCalibrationObservation,
+    resources: &'a VulkanHybridCandidateResources,
 }
 
 #[derive(Clone)]
 struct VulkanHybridResolvedBoundaryCandidate<'a> {
     request: &'a VulkanHybridBoundaryCandidate,
     observation: &'a VulkanPlacementCalibrationObservation,
+    resources: &'a VulkanHybridCandidateResources,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,11 +202,7 @@ struct VulkanHybridPlacementState {
     output_physical_device_id: Option<String>,
     steps: Vec<VulkanHybridScheduledStep>,
     predicted_duration_ns_per_activation: u128,
-    resident_bytes_by_device: BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
-    transient_peak_bytes_by_device:
-        BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
-    host_resident_bytes: usize,
-    host_transient_peak_bytes: usize,
+    resource_reservations: VulkanHybridResourceReservations,
 }
 
 /// Selects exact measured physical islands for a canonical ordered graph.
@@ -108,6 +235,30 @@ pub fn plan_vulkan_hybrid_ordered_graph(
     })
 }
 
+pub fn plan_vulkan_hybrid_ordered_graph_with_resources(
+    catalog: &VulkanPlacementCalibrationCatalog,
+    component_count: usize,
+    region_candidates: &[VulkanHybridRegionCandidate],
+    boundary_candidates: &[VulkanHybridBoundaryCandidate],
+    resources: &VulkanHybridCandidateResourceCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+) -> Result<VulkanHybridPlacementPlan, VulkanHybridPlacementError> {
+    try_plan_vulkan_hybrid_ordered_graph_with_resources(
+        catalog,
+        component_count,
+        region_candidates,
+        boundary_candidates,
+        resources,
+        capacity,
+    )?
+    .ok_or_else(|| {
+        VulkanHybridPlacementError(
+            "no exact measured hybrid placement covers the graph within current capacity"
+                .to_string(),
+        )
+    })
+}
+
 /// Returns `None` when all structurally valid, exactly measured candidates are
 /// unavailable for the current device identities, boundaries, or capacity.
 /// Invalid evidence remains an error. This distinction lets a product runtime
@@ -118,6 +269,29 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
     component_count: usize,
     region_candidates: &[VulkanHybridRegionCandidate],
     boundary_candidates: &[VulkanHybridBoundaryCandidate],
+    capacity: &VulkanPlacementCapacityEnvelope,
+) -> Result<Option<VulkanHybridPlacementPlan>, VulkanHybridPlacementError> {
+    let resources = VulkanHybridCandidateResourceCatalog::from_calibration(
+        catalog,
+        region_candidates,
+        boundary_candidates,
+    )?;
+    try_plan_vulkan_hybrid_ordered_graph_with_resources(
+        catalog,
+        component_count,
+        region_candidates,
+        boundary_candidates,
+        &resources,
+        capacity,
+    )
+}
+
+pub fn try_plan_vulkan_hybrid_ordered_graph_with_resources(
+    catalog: &VulkanPlacementCalibrationCatalog,
+    component_count: usize,
+    region_candidates: &[VulkanHybridRegionCandidate],
+    boundary_candidates: &[VulkanHybridBoundaryCandidate],
+    resources: &VulkanHybridCandidateResourceCatalog,
     capacity: &VulkanPlacementCapacityEnvelope,
 ) -> Result<Option<VulkanHybridPlacementPlan>, VulkanHybridPlacementError> {
     if component_count == 0 {
@@ -192,12 +366,22 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
             &mut expected_phase,
             observation.execution_case.behavior.phase,
         )?;
+        let candidate_resources = resources
+            .region_resources_by_candidate_id
+            .get(&candidate.candidate_id)
+            .ok_or_else(|| {
+                VulkanHybridPlacementError(format!(
+                    "hybrid resource catalog omitted measured region candidate {:?}",
+                    candidate.candidate_id,
+                ))
+            })?;
         regions_by_start
             .entry(candidate.component_start)
             .or_default()
             .push(VulkanHybridResolvedRegionCandidate {
                 request: candidate,
                 observation,
+                resources: candidate_resources,
             });
     }
     for candidates in regions_by_start.values_mut() {
@@ -231,12 +415,22 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
             &mut expected_phase,
             observation.execution_case.behavior.phase,
         )?;
+        let candidate_resources = resources
+            .boundary_resources_by_case
+            .get(&(candidate.boundary_index, candidate.execution_case.clone()))
+            .ok_or_else(|| {
+                VulkanHybridPlacementError(format!(
+                    "hybrid resource catalog omitted measured boundary candidate {}",
+                    candidate.boundary_index,
+                ))
+            })?;
         boundaries_by_index
             .entry(candidate.boundary_index)
             .or_default()
             .push(VulkanHybridResolvedBoundaryCandidate {
                 request: candidate,
                 observation,
+                resources: candidate_resources,
             });
     }
 
@@ -246,10 +440,7 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
         output_physical_device_id: None,
         steps: Vec::new(),
         predicted_duration_ns_per_activation: 0,
-        resident_bytes_by_device: BTreeMap::new(),
-        transient_peak_bytes_by_device: BTreeMap::new(),
-        host_resident_bytes: 0,
-        host_transient_peak_bytes: 0,
+        resource_reservations: VulkanHybridResourceReservations::default(),
     });
 
     for cursor in 0..component_count {
@@ -269,17 +460,10 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
                     let Some(mut next) = apply_hybrid_boundary(&state, boundary, capacity)? else {
                         continue;
                     };
-                    let Some((
-                        resident_bytes_by_device,
-                        transient_peak_bytes_by_device,
-                        host_resident_bytes,
-                        host_transient_peak_bytes,
-                    )) =
-                        reserve_hybrid_observation_resources(
-                            &next,
-                            candidate.observation,
-                            capacity,
-                        )?
+                    let Some(resource_reservations) = next
+                        .resource_reservations
+                        .reserve(candidate.resources, capacity)
+                        .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
                     else {
                         continue;
                     };
@@ -291,10 +475,7 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
                                 "hybrid placement predicted duration overflowed".to_string(),
                             )
                         })?;
-                    next.resident_bytes_by_device = resident_bytes_by_device;
-                    next.transient_peak_bytes_by_device = transient_peak_bytes_by_device;
-                    next.host_resident_bytes = host_resident_bytes;
-                    next.host_transient_peak_bytes = host_transient_peak_bytes;
+                    next.resource_reservations = resource_reservations;
                     next.cursor = candidate.request.component_end;
                     next.output_physical_device_id = Some(
                         candidate
@@ -331,10 +512,7 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
     Ok(Some(VulkanHybridPlacementPlan {
         steps: best.steps,
         predicted_duration_ns_per_activation: best.predicted_duration_ns_per_activation,
-        resident_bytes_by_device: best.resident_bytes_by_device,
-        transient_peak_bytes_by_device: best.transient_peak_bytes_by_device,
-        host_resident_bytes: best.host_resident_bytes,
-        host_transient_peak_bytes: best.host_transient_peak_bytes,
+        resource_reservations: best.resource_reservations,
     }))
 }
 
@@ -421,13 +599,10 @@ fn apply_hybrid_boundary(
     let Some(boundary) = boundary else {
         return Ok(Some(state.clone()));
     };
-    let Some((
-        resident_bytes_by_device,
-        transient_peak_bytes_by_device,
-        host_resident_bytes,
-        host_transient_peak_bytes,
-    )) =
-        reserve_hybrid_observation_resources(state, boundary.observation, capacity)?
+    let Some(resource_reservations) = state
+        .resource_reservations
+        .reserve(boundary.resources, capacity)
+        .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
     else {
         return Ok(None);
     };
@@ -438,110 +613,12 @@ fn apply_hybrid_boundary(
         .ok_or_else(|| {
             VulkanHybridPlacementError("hybrid boundary predicted duration overflowed".to_string())
         })?;
-    next.resident_bytes_by_device = resident_bytes_by_device;
-    next.transient_peak_bytes_by_device = transient_peak_bytes_by_device;
-    next.host_resident_bytes = host_resident_bytes;
-    next.host_transient_peak_bytes = host_transient_peak_bytes;
+    next.resource_reservations = resource_reservations;
     next.steps.push(VulkanHybridScheduledStep::Boundary {
         boundary_index: boundary.request.boundary_index,
         execution_case: boundary.observation.execution_case.clone(),
     });
     Ok(Some(next))
-}
-
-fn reserve_hybrid_observation_resources(
-    state: &VulkanHybridPlacementState,
-    observation: &VulkanPlacementCalibrationObservation,
-    capacity: &VulkanPlacementCapacityEnvelope,
-) -> Result<
-    Option<(
-        BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
-        BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
-        usize,
-        usize,
-    )>,
-    VulkanHybridPlacementError,
-> {
-    let mut resident_bytes_by_device = state.resident_bytes_by_device.clone();
-    let mut transient_peak_bytes_by_device = state.transient_peak_bytes_by_device.clone();
-    for device in &observation.execution_case.devices {
-        if !capacity.available_bytes_by_device.contains_key(device) {
-            return Ok(None);
-        }
-        let resident = observation
-            .resident_bytes_by_physical_device
-            .get(&device.physical_device_id)
-            .copied()
-            .ok_or_else(|| {
-                VulkanHybridPlacementError(
-                    "validated placement observation lost device resident-byte evidence"
-                        .to_string(),
-                )
-            })?;
-        let transient = observation
-            .transient_peak_bytes_by_physical_device
-            .get(&device.physical_device_id)
-            .copied()
-            .ok_or_else(|| {
-                VulkanHybridPlacementError(
-                    "validated placement observation lost device transient-byte evidence"
-                        .to_string(),
-                )
-            })?;
-        let retained = resident_bytes_by_device
-            .get(device)
-            .copied()
-            .unwrap_or(0)
-            .checked_add(resident)
-            .ok_or_else(|| {
-                VulkanHybridPlacementError(
-                    "hybrid device resident-byte accounting overflowed".to_string(),
-                )
-            })?;
-        resident_bytes_by_device.insert(device.clone(), retained);
-        transient_peak_bytes_by_device
-            .entry(device.clone())
-            .and_modify(|peak| *peak = (*peak).max(transient))
-            .or_insert(transient);
-    }
-    for (device, retained) in &resident_bytes_by_device {
-        let Some(available) = capacity.available_bytes_by_device.get(device).copied() else {
-            return Ok(None);
-        };
-        let transient = transient_peak_bytes_by_device
-            .get(device)
-            .copied()
-            .unwrap_or(0);
-        if retained
-            .checked_add(transient)
-            .is_none_or(|required| required > available)
-        {
-            return Ok(None);
-        }
-    }
-    let host_resident_bytes = state
-        .host_resident_bytes
-        .checked_add(observation.host_resident_bytes)
-        .ok_or_else(|| {
-            VulkanHybridPlacementError(
-                "hybrid host resident-byte accounting overflowed".to_string(),
-            )
-        })?;
-    let host_transient_peak_bytes = state
-        .host_transient_peak_bytes
-        .max(observation.host_transient_peak_bytes);
-    if host_resident_bytes
-        .checked_add(host_transient_peak_bytes)
-        .is_none_or(|required| required > capacity.host_available_bytes)
-    {
-        return Ok(None);
-    }
-    Ok(Some((
-        resident_bytes_by_device,
-        transient_peak_bytes_by_device,
-        host_resident_bytes,
-        host_transient_peak_bytes,
-    )))
 }
 
 fn normalized_hybrid_duration_ns(
@@ -581,47 +658,18 @@ fn hybrid_state_dominates(
     if left.cursor != right.cursor
         || left.output_physical_device_id != right.output_physical_device_id
         || left.predicted_duration_ns_per_activation > right.predicted_duration_ns_per_activation
-        || left.host_resident_bytes > right.host_resident_bytes
-        || left.host_transient_peak_bytes > right.host_transient_peak_bytes
     {
         return false;
     }
-    let device_ids = left
-        .resident_bytes_by_device
-        .keys()
-        .chain(right.resident_bytes_by_device.keys())
-        .collect::<BTreeSet<_>>();
-    device_ids.into_iter().all(|device| {
-        left.resident_bytes_by_device
-            .get(device)
-            .copied()
-            .unwrap_or(0)
-            <= right
-                .resident_bytes_by_device
-                .get(device)
-                .copied()
-                .unwrap_or(0)
-            && left
-                .transient_peak_bytes_by_device
-                .get(device)
-                .copied()
-                .unwrap_or(0)
-                <= right
-                    .transient_peak_bytes_by_device
-                    .get(device)
-                    .copied()
-                    .unwrap_or(0)
-    })
+    left.resource_reservations
+        .claims_are_subset_of(&right.resource_reservations)
 }
 
 fn hybrid_state_ordering_key(
     state: &VulkanHybridPlacementState,
 ) -> (u128, usize, usize, usize, usize, Vec<String>) {
-    let resident_bytes = state
-        .resident_bytes_by_device
-        .values()
-        .copied()
-        .fold(0usize, usize::saturating_add);
+    let (resident_bytes, transient_peak_bytes, host_resident_bytes, host_transient_peak_bytes) =
+        state.resource_reservations.ordering_totals();
     let step_ids = state
         .steps
         .iter()
@@ -632,17 +680,12 @@ fn hybrid_state_ordering_key(
             VulkanHybridScheduledStep::Region { candidate_id, .. } => candidate_id.clone(),
         })
         .collect();
-    let transient_peak_bytes = state
-        .transient_peak_bytes_by_device
-        .values()
-        .copied()
-        .fold(0usize, usize::saturating_add);
     (
         state.predicted_duration_ns_per_activation,
         resident_bytes,
         transient_peak_bytes,
-        state.host_resident_bytes,
-        state.host_transient_peak_bytes,
+        host_resident_bytes,
+        host_transient_peak_bytes,
         step_ids,
     )
 }
@@ -1461,10 +1504,164 @@ mod hybrid_placement_optimizer_tests {
             ["slow-low-transient", "second"]
         );
         assert_eq!(plan.predicted_duration_ns_per_activation, 13);
-        assert_eq!(plan.resident_bytes_by_device[&device("gpu0", 2)], 90);
         assert_eq!(
-            plan.transient_peak_bytes_by_device[&device("gpu0", 2)],
+            plan.resource_reservations.device_bytes[&device("gpu0", 2)].permanent_bytes,
+            90
+        );
+        assert_eq!(
+            plan.resource_reservations.device_bytes[&device("gpu0", 2)]
+                .execution_transient_peak_bytes,
             0
+        );
+    }
+
+    #[test]
+    fn exact_resource_claims_deduplicate_shared_cache_and_reject_an_oversized_load_wave() {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let first = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("first"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 0)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                5,
+                1,
+            ),
+        );
+        let second = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("second"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 0)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                5,
+                1,
+            ),
+        );
+        let candidates = [
+            VulkanHybridRegionCandidate {
+                candidate_id: "first".to_string(),
+                component_start: 0,
+                component_end: 1,
+                semantic_contract_id: "first".to_string(),
+                execution_case: first,
+            },
+            VulkanHybridRegionCandidate {
+                candidate_id: "second".to_string(),
+                component_start: 1,
+                component_end: 2,
+                semantic_contract_id: "second".to_string(),
+                execution_case: second,
+            },
+        ];
+        let gpu0 = device("gpu0", 2);
+        let shared_cache = VulkanHybridResourceClaim::device(
+            "store:gpu0:cache",
+            gpu0.clone(),
+            VulkanHybridResourceClass::CacheQuota,
+            60,
+        );
+        let shared_wave = VulkanHybridResourceClaim::device(
+            "store:gpu0:wave",
+            gpu0.clone(),
+            VulkanHybridResourceClass::AtomicLoadWave,
+            60,
+        );
+        let mut resources = VulkanHybridCandidateResourceCatalog::from_calibration(
+            &catalog,
+            &candidates,
+            &[],
+        )
+        .unwrap();
+        resources
+            .replace_region_claims(
+                "first",
+                vec![
+                    VulkanHybridResourceClaim::device(
+                        "state:first",
+                        gpu0.clone(),
+                        VulkanHybridResourceClass::MutableState,
+                        10,
+                    ),
+                    shared_cache.clone(),
+                    shared_wave.clone(),
+                ],
+            )
+            .unwrap();
+        resources
+            .replace_region_claims(
+                "second",
+                vec![
+                    VulkanHybridResourceClaim::device(
+                        "state:second",
+                        gpu0.clone(),
+                        VulkanHybridResourceClass::MutableState,
+                        10,
+                    ),
+                    shared_cache,
+                    shared_wave,
+                ],
+            )
+            .unwrap();
+
+        let plan = plan_vulkan_hybrid_ordered_graph_with_resources(
+            &catalog,
+            2,
+            &candidates,
+            &[],
+            &resources,
+            &capacity(2, 80, 100),
+        )
+        .unwrap();
+        let reservation = &plan.resource_reservations.device_bytes[&gpu0];
+        assert_eq!(reservation.mutable_state_bytes, 20);
+        assert_eq!(reservation.cache_quota_bytes, 60);
+        assert_eq!(reservation.atomic_load_wave_bytes, 60);
+        assert_eq!(reservation.required_capacity_bytes().unwrap(), 80);
+
+        resources
+            .replace_region_claims(
+                "second",
+                vec![
+                    VulkanHybridResourceClaim::device(
+                        "state:second",
+                        gpu0.clone(),
+                        VulkanHybridResourceClass::MutableState,
+                        10,
+                    ),
+                    VulkanHybridResourceClaim::device(
+                        "store:gpu0:cache",
+                        gpu0.clone(),
+                        VulkanHybridResourceClass::CacheQuota,
+                        60,
+                    ),
+                    VulkanHybridResourceClaim::device(
+                        "store:gpu0:wave:oversized",
+                        gpu0,
+                        VulkanHybridResourceClass::AtomicLoadWave,
+                        61,
+                    ),
+                ],
+            )
+            .unwrap();
+        assert!(
+            try_plan_vulkan_hybrid_ordered_graph_with_resources(
+                &catalog,
+                2,
+                &candidates,
+                &[],
+                &resources,
+                &capacity(2, 80, 100),
+            )
+            .unwrap()
+            .is_none(),
+            "an atomic load wave must fit within the admitted cache quota"
         );
     }
 }

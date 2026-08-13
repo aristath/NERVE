@@ -50,6 +50,7 @@ struct VulkanRuntimeHybridCandidateGraph {
     activation_batch_width: usize,
     region_candidates: Vec<VulkanHybridRegionCandidate>,
     boundary_candidates: Vec<VulkanHybridBoundaryCandidate>,
+    resource_catalog: VulkanHybridCandidateResourceCatalog,
     region_executions_by_case:
         BTreeMap<VulkanPlacementExecutionCaseIdentity, VulkanPlacementRegionExecutionCalibration>,
     representation_selections_by_candidate_id:
@@ -130,11 +131,12 @@ pub fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_representations(
         phase,
         None,
     )?;
-    let plan = try_plan_vulkan_hybrid_ordered_graph(
+    let plan = try_plan_vulkan_hybrid_ordered_graph_with_resources(
         catalog,
         candidates.component_ids.len(),
         &candidates.region_candidates,
         &candidates.boundary_candidates,
+        &candidates.resource_catalog,
         capacity,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
@@ -599,11 +601,12 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners_and_filter(
         required_owner_by_component,
         component_strategy_filter,
     )?;
-    let plan = try_plan_vulkan_hybrid_ordered_graph(
+    let plan = try_plan_vulkan_hybrid_ordered_graph_with_resources(
         catalog,
         candidates.component_ids.len(),
         &candidates.region_candidates,
         &candidates.boundary_candidates,
+        &candidates.resource_catalog,
         capacity,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
@@ -870,12 +873,19 @@ fn runtime_hybrid_candidate_graph(
         }
     }
 
+    let resource_catalog = VulkanHybridCandidateResourceCatalog::from_calibration(
+        catalog,
+        &region_candidates,
+        &boundary_candidates,
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     Ok(VulkanRuntimeHybridCandidateGraph {
         component_ids,
         execution_phase,
         activation_batch_width,
         region_candidates,
         boundary_candidates,
+        resource_catalog,
         region_executions_by_case,
         representation_selections_by_candidate_id: BTreeMap::new(),
     })
@@ -1045,6 +1055,12 @@ fn runtime_hybrid_representation_candidate_graph(
                 right.candidate_id.as_str(),
             ))
     });
+    combined.resource_catalog = VulkanHybridCandidateResourceCatalog::from_calibration(
+        catalog,
+        &combined.region_candidates,
+        &combined.boundary_candidates,
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     Ok(combined)
 }
 
