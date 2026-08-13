@@ -153,7 +153,13 @@ the local placement calibration, and the mounted graph.
   or expert-fragment layout still fail closed. Production hybrid selection
   expands one observation per physical target to every matching component
   instance before exact replay. The placement-catalog schema is v13 so older
-  evidence cannot cross this identity boundary.
+  evidence cannot cross this identity boundary. The bounded
+  `calibrate-package` path now includes every exact selected-resource execution
+  class and its paired singleton load evidence on every requested participant;
+  it publishes nothing when a component candidate is unavailable or any
+  selected-resource class is missing. A first real-model TP proof therefore no
+  longer requires the broad suite merely to construct a production-consumable
+  sparse-component catalog.
 - The refreshed workload-free DeepSeek preflight at 128K context,
   package-default seven-token speculation, and demand-paged residency preserves
   all 720 component occurrences across the eight currently detected targets,

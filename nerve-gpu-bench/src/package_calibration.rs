@@ -22,6 +22,7 @@ use crate::calibration_device_state::{
 use crate::calibration_package::{CalibrationPackage, CalibrationRuntimeConfig};
 use crate::cli::PackageCalibrationPhase;
 use crate::output::write_atomic;
+use crate::selected_resource_calibration::measure_selected_resource_classes_for_runtime_model;
 
 pub fn run_package_calibration(
     package: &Path,
@@ -35,17 +36,22 @@ pub fn run_package_calibration(
     package.reject_output_collision(output)?;
     let measurement =
         measure_package_candidates(&package, component, phase, ordered_target_ids, runtime)?;
-    if measurement.catalog.observation_count() == 0 {
+    if !requested_component_candidate_available(
+        measurement.catalog.observation_count(),
+        measurement.reports.len(),
+        ordered_target_ids.len(),
+    ) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "the requested package placement candidate is unavailable",
         )
         .into());
     }
+    validate_complete_selected_resource_evidence(&measurement)?;
     let payload = measurement.catalog.to_json_bytes()?;
     write_atomic(output, &payload)?;
     println!(
-        "calibrated package={} signature={} representative={} requested_component={} phase={} batch_width={} targets={:?} observations={} contract_candidates={} sampled={} best_measured_ns={} output={}",
+        "calibrated package={} signature={} representative={} requested_component={} phase={} batch_width={} targets={:?} observations={} contract_candidates={} selected_resource_cases={} measured_selected_resource_cases={} unavailable_selected_resource_cases={} selected_resource_classes={} sampled={} best_measured_ns={} output={}",
         package.source_path().display(),
         measurement
             .targets
@@ -68,6 +74,12 @@ pub fn run_package_calibration(
         ordered_target_ids,
         measurement.catalog.observation_count(),
         measurement.reports.len(),
+        measurement.planned_selected_resource_case_count,
+        measurement.measured_selected_resource_case_count,
+        measurement.unavailable_selected_resource_case_count,
+        measurement
+            .catalog
+            .selected_resource_execution_class_count(),
         measurement
             .reports
             .iter()
@@ -87,6 +99,29 @@ pub struct PackageCalibrationMeasurement {
     pub targets: Vec<VulkanRuntimePlacementCalibrationTarget>,
     pub catalog: VulkanPlacementCalibrationCatalog,
     pub reports: Vec<VulkanRuntimeDistributedPlacementCalibrationReport>,
+    pub planned_selected_resource_case_count: usize,
+    pub measured_selected_resource_case_count: usize,
+    pub unavailable_selected_resource_case_count: usize,
+}
+
+fn validate_complete_selected_resource_evidence(
+    measurement: &PackageCalibrationMeasurement,
+) -> Result<(), io::Error> {
+    if measurement.planned_selected_resource_case_count
+        != measurement.measured_selected_resource_case_count
+        || measurement.unavailable_selected_resource_case_count != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "requested component has incomplete selected-resource evidence: planned={}, measured={}, unavailable={}",
+                measurement.planned_selected_resource_case_count,
+                measurement.measured_selected_resource_case_count,
+                measurement.unavailable_selected_resource_case_count,
+            ),
+        ));
+    }
+    Ok(())
 }
 
 pub fn measure_package_candidates(
@@ -122,6 +157,9 @@ pub fn measure_package_candidates(
     let mut targets = Vec::new();
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     let mut reports = Vec::new();
+    let mut planned_selected_resource_case_count = 0usize;
+    let mut measured_selected_resource_case_count = 0usize;
+    let mut unavailable_selected_resource_case_count = 0usize;
     for runtime_model in &runtime_models {
         let target = vulkan_runtime_placement_calibration_target_for_component(
             runtime_model,
@@ -138,15 +176,84 @@ pub fn measure_package_candidates(
             phase,
             ordered_target_ids,
         )?;
+        let component_candidate_available = requested_component_candidate_available(
+            measurement.catalog.observation_count(),
+            measurement.reports.len(),
+            ordered_target_ids.len(),
+        );
+        let selected_resource_participants = selected_resource_calibration_participants(
+            component_candidate_available,
+            ordered_target_ids,
+        );
         targets.extend(measurement.targets);
         catalog.merge(&measurement.catalog)?;
         reports.extend(measurement.reports);
+        for target_id in selected_resource_participants {
+            let selected_resources = measure_selected_resource_classes_for_runtime_model(
+                package,
+                runtime_model,
+                &target,
+                phase,
+                target_id,
+            )?;
+            planned_selected_resource_case_count = planned_selected_resource_case_count
+                .checked_add(selected_resources.planned_case_count)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "selected-resource planned-case count overflowed",
+                    )
+                })?;
+            measured_selected_resource_case_count = measured_selected_resource_case_count
+                .checked_add(selected_resources.measured_case_count)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "selected-resource measured-case count overflowed",
+                    )
+                })?;
+            unavailable_selected_resource_case_count = unavailable_selected_resource_case_count
+                .checked_add(selected_resources.unavailable_case_count)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "selected-resource unavailable-case count overflowed",
+                    )
+                })?;
+            catalog.merge(&selected_resources.catalog)?;
+        }
     }
     Ok(PackageCalibrationMeasurement {
         targets,
         catalog,
         reports,
+        planned_selected_resource_case_count,
+        measured_selected_resource_case_count,
+        unavailable_selected_resource_case_count,
     })
+}
+
+fn selected_resource_calibration_participants<'a>(
+    component_candidate_available: bool,
+    ordered_target_ids: &'a [String],
+) -> &'a [String] {
+    if component_candidate_available {
+        ordered_target_ids
+    } else {
+        &[]
+    }
+}
+
+fn requested_component_candidate_available(
+    observation_count: usize,
+    distributed_report_count: usize,
+    requested_target_count: usize,
+) -> bool {
+    match requested_target_count {
+        0 => false,
+        1 => observation_count > 0,
+        _ => distributed_report_count > 0,
+    }
 }
 
 pub fn measure_package_candidates_for_runtime_model(
@@ -268,5 +375,88 @@ pub fn measure_package_candidates_for_runtime_model(
         targets: vec![target.clone()],
         catalog,
         reports,
+        planned_selected_resource_case_count: 0,
+        measured_selected_resource_case_count: 0,
+        unavailable_selected_resource_case_count: 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn measurement_with_selected_resource_counts(
+        planned: usize,
+        measured: usize,
+        unavailable: usize,
+    ) -> PackageCalibrationMeasurement {
+        PackageCalibrationMeasurement {
+            targets: Vec::new(),
+            catalog: VulkanPlacementCalibrationCatalog::default(),
+            reports: Vec::new(),
+            planned_selected_resource_case_count: planned,
+            measured_selected_resource_case_count: measured,
+            unavailable_selected_resource_case_count: unavailable,
+        }
+    }
+
+    #[test]
+    fn unavailable_component_skips_all_selected_resource_workloads() {
+        let targets = ["owner".to_string(), "helper".to_string()];
+
+        assert!(selected_resource_calibration_participants(false, &targets).is_empty());
+    }
+
+    #[test]
+    fn available_component_calibrates_selected_resources_on_every_participant() {
+        let targets = [
+            "owner".to_string(),
+            "helper-a".to_string(),
+            "helper-b".to_string(),
+        ];
+
+        assert_eq!(
+            selected_resource_calibration_participants(true, &targets),
+            targets,
+        );
+    }
+
+    #[test]
+    fn local_reference_cannot_masquerade_as_a_distributed_candidate() {
+        assert!(requested_component_candidate_available(1, 0, 1));
+        assert!(!requested_component_candidate_available(1, 0, 2));
+        assert!(requested_component_candidate_available(2, 1, 2));
+        assert!(!requested_component_candidate_available(1, 1, 0));
+    }
+
+    #[test]
+    fn component_catalog_rejects_partial_selected_resource_evidence() {
+        validate_complete_selected_resource_evidence(&measurement_with_selected_resource_counts(
+            2, 2, 0,
+        ))
+        .unwrap();
+        validate_complete_selected_resource_evidence(&measurement_with_selected_resource_counts(
+            0, 0, 0,
+        ))
+        .unwrap();
+
+        let missing = validate_complete_selected_resource_evidence(
+            &measurement_with_selected_resource_counts(2, 1, 1),
+        )
+        .unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            missing
+                .to_string()
+                .contains("planned=2, measured=1, unavailable=1")
+        );
+
+        assert!(
+            validate_complete_selected_resource_evidence(
+                &measurement_with_selected_resource_counts(1, 2, 0),
+            )
+            .is_err(),
+            "over-recorded evidence is also inconsistent and must not publish",
+        );
+    }
 }

@@ -288,17 +288,23 @@ observation. Resident/transient device bytes and host read/staging bytes are
 recorded as resource vectors. Teardown and catalog publication use the same
 strict transactional proof as the other package calibrators.
 
-The component-calibration path executes the compiler-emitted component artifacts and physical
-execution contracts used by inference. It measures every singleton reference
-and then each prefix of the requested owner/worker order, with one warmup and
-one measured call under a one-minute transaction bound. All stages use the
-same safe parameter budget derived from the least-free selected target, so a
-smaller sample cannot make a larger placement appear to perform different
-work. The command inspects VRAM accounting, usable capacity, pressure, and
-available activity counters immediately before and after the workload. It
-publishes the catalog atomically only when outputs are canonical and NERVE's
-allocations and reservations have returned to the pre-run state. A missing,
-stale, unavailable, invalid, or unrestored candidate produces no catalog.
+The component-calibration path executes the compiler-emitted component
+artifacts and physical execution contracts used by inference. It measures
+every singleton reference and then each prefix of the requested owner/worker
+order, with one warmup and one measured call under a one-minute transaction
+bound. For a component with demand-selected resources, it also measures every
+exact compiler-declared execution class on every requested participant and
+pairs each class with its matching singleton load transaction. Consequently a
+bounded `calibrate-package` run can publish complete sparse-component evidence;
+it does not require the broad suite merely to make that requested component
+eligible for normal placement. All stages use the same safe parameter budget
+derived from current target reservations, so a smaller sample cannot make a
+larger placement appear to perform different work. The command inspects VRAM
+accounting, usable capacity, pressure, and available activity counters
+immediately before and after each workload. It publishes the catalog atomically
+only when outputs are canonical and NERVE's allocations and reservations have
+returned to their exact pre-run state. A missing, stale, unavailable, invalid,
+or unrestored candidate produces no catalog.
 
 Combine independently measured candidates without discarding alternative
 owners, exits, transports, or resource tradeoffs:
