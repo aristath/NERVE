@@ -117,6 +117,18 @@ class ResidentComponentValidationBackend:
             raise ModelCompileError(
                 "component validation check must declare one execution phase"
             )
+        physical_execution_scope = check["controls"].get(
+            "physical_execution_scope",
+            "node",
+        )
+        if (
+            not isinstance(physical_execution_scope, str)
+            or physical_execution_scope
+            not in {"node", "component", "decode_component_prefix"}
+        ):
+            raise ModelCompileError(
+                "component validation check has an invalid physical execution scope"
+            )
         physical_device_id = _component_device(
             request.matched_conditions,
             component_id,
@@ -148,6 +160,7 @@ class ResidentComponentValidationBackend:
             ),
             maximum_quantum_wait_ns=maximum_wait_ns,
             request_identity=request.to_json(),
+            execution_scope=physical_execution_scope,
             capture_output_values=_optional_boolean(
                 check["controls"],
                 "capture_output_values",

@@ -1,4 +1,8 @@
 from model_package_layout_common import *
+from nerve.model_package_spirv_requirements import (
+    spirv_capabilities_from_payload,
+    spirv_vulkan_requirements_from_payloads,
+)
 
 def test_compiler_derives_vulkan_features_from_compiled_spirv(tmp_path: Path) -> None:
     shader = tmp_path / "cooperative.spv"
@@ -57,6 +61,33 @@ def test_compiler_derives_vulkan_features_from_compiled_spirv(tmp_path: Path) ->
         "arithmetic",
         "basic",
     ]
+
+
+def test_optimizer_derives_vulkan_requirements_from_in_memory_spirv(
+    tmp_path: Path,
+) -> None:
+    shader = tmp_path / "candidate.spv"
+    write_spirv_module(shader, [1, 61, 63, 5116])
+    payload = shader.read_bytes()
+
+    assert spirv_capabilities_from_payload(
+        payload,
+        label="kernels/candidate.spv",
+    ) == {1, 61, 63, 5116}
+    assert spirv_vulkan_requirements_from_payloads(
+        {"kernels/candidate.spv": payload}
+    ) == (
+        ["shader_bfloat16_type"],
+        ["arithmetic", "basic"],
+    )
+
+
+def test_optimizer_rejects_non_binary_in_memory_spirv() -> None:
+    with pytest.raises(ModelCompileError, match="payload must be bytes"):
+        spirv_capabilities_from_payload(  # type: ignore[arg-type]
+            "not bytes",
+            label="kernels/candidate.spv",
+        )
 
 
 def test_compiler_derives_vendor_device_extension_from_spirv_intrinsic(

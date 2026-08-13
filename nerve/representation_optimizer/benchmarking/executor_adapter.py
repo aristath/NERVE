@@ -258,6 +258,19 @@ class ResidentComponentExecutionSession:
         component_id = required_text(controls, "component_id")
         physical_node_id = required_text(controls, "physical_node_id")
         phase = required_text(controls, "phase")
+        physical_execution_scope = controls.get(
+            "physical_execution_scope",
+            "node",
+        )
+        if (
+            not isinstance(physical_execution_scope, str)
+            or physical_execution_scope
+            not in {"node", "component", "decode_component_prefix"}
+        ):
+            raise ModelCompileError(
+                "resident component benchmark has an invalid physical "
+                "execution scope"
+            )
         if controls.get("execution") != "ordinary":
             raise ModelCompileError(
                 "resident component benchmark requires ordinary execution"
@@ -315,6 +328,7 @@ class ResidentComponentExecutionSession:
                 ),
                 maximum_quantum_wait_ns=maximum_wait_ns,
                 request_identity=request.to_json(),
+                execution_scope=physical_execution_scope,
                 cancel_requested=request.cancel_requested,
             )
         )

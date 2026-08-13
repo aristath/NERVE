@@ -330,6 +330,50 @@ def test_resident_component_adapter_uses_candidate_bound_ordinary_execution(
     assert executor.aborted is False
 
 
+def test_resident_component_adapter_mounts_an_explicit_component_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, executor, _, _ = _adapter_fixture(tmp_path, monkeypatch)
+    mount_request, _, candidate_id = _requests(
+        tmp_path,
+        physical_execution_scope="component",
+    )
+    candidate_root = tmp_path / "candidate"
+    (candidate_root / "fixtures").mkdir(parents=True)
+    (candidate_root / "fixtures" / "input.bin").write_bytes(
+        b"candidate-specific input"
+    )
+
+    session = adapter.open_session(mount_request)
+    session.close()
+
+    assert executor.commands[0]["candidate_id"] == candidate_id
+    assert executor.commands[0]["execution_scope"] == "component"
+    assert executor.closed is True
+
+
+def test_resident_component_adapter_rejects_an_unknown_execution_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, executor, _, _ = _adapter_fixture(tmp_path, monkeypatch)
+    mount_request, _, _ = _requests(
+        tmp_path,
+        physical_execution_scope="whole_model",
+    )
+    candidate_root = tmp_path / "candidate"
+    (candidate_root / "fixtures").mkdir(parents=True)
+    (candidate_root / "fixtures" / "input.bin").write_bytes(
+        b"candidate-specific input"
+    )
+
+    with pytest.raises(ModelCompileError, match="invalid physical execution scope"):
+        adapter.open_session(mount_request)
+
+    assert executor.commands == []
+
+
 def test_resident_component_adapter_reuses_executor_and_candidate_seal_per_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -654,6 +698,7 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
             "phase": "decode",
             "component_id": "block_13",
             "physical_node_id": "head_norm",
+            "physical_execution_scope": "component",
         },
         seeds=(17, 19),
         step_unit="component_activations",
@@ -738,6 +783,14 @@ def test_component_validation_backend_reuses_resident_executor_per_role(
         assert executor.closed is False
         assert executor.factory_calls == 1
     assert executor.closed is True
+    mount_commands = [
+        command for command in executor.commands if command["command"] == "mount"
+    ]
+    assert mount_commands
+    assert all(
+        command["execution_scope"] == "component"
+        for command in mount_commands
+    )
     comparison = backend.compare_results(
         ValidationComparisonRequest(
             plan_id=plan_id,
@@ -896,6 +949,8 @@ def _adapter_fixture(
 
 def _requests(
     tmp_path: Path,
+    *,
+    physical_execution_scope: str | None = None,
 ) -> tuple[BenchmarkMountRequest, BenchmarkExecutionRequest, str]:
     candidate_id = "candidate_" + "a" * 32
     input_digest = _artifact_digest(b"candidate-specific input")
@@ -918,6 +973,11 @@ def _requests(
             "phase": "decode",
             "component_id": "block_13",
             "physical_node_id": "head_norm",
+            **(
+                {"physical_execution_scope": physical_execution_scope}
+                if physical_execution_scope is not None
+                else {}
+            ),
         },
         randomness_algorithm="deterministic_fixture_counter",
         seeds=(17,),

@@ -310,6 +310,24 @@ def _fuse_hyper_connection_rms_norm_regions(
     return fused_nodes
 
 
+def fuse_hyper_connection_rms_norm_regions(
+    nodes: list[Json],
+    can_fuse: Callable[[Json, Json], bool],
+    boundary_outputs: set[str],
+) -> list[Json]:
+    """Apply the exact hyper/RMS transaction rewrite to selected regions.
+
+    The model-package compiler and post-compiler use the same transformation;
+    only their capability admission and artifact ownership differ.
+    """
+
+    return _fuse_hyper_connection_rms_norm_regions(
+        nodes,
+        can_fuse,
+        boundary_outputs,
+    )
+
+
 def _fuse_hyper_connection_pre_regions(nodes: list[Json]) -> list[Json]:
     fused_nodes: list[Json] = []
     index = 0

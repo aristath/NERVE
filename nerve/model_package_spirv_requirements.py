@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from nerve.model_package_common import *
 from nerve.model_package_shader_selection import *
 
@@ -103,14 +105,24 @@ def required_vulkan_subgroup_operations(
 
 def spirv_capabilities(shader_path: Path) -> set[int]:
     payload = shader_path.read_bytes()
+    return spirv_capabilities_from_payload(payload, label=str(shader_path))
+
+
+def spirv_capabilities_from_payload(
+    payload: bytes,
+    *,
+    label: str,
+) -> set[int]:
+    if not isinstance(payload, bytes):
+        raise ModelCompileError(f"compiled shader payload must be bytes: {label}")
     if len(payload) < 20 or len(payload) % 4 != 0:
         raise ModelCompileError(
-            f"compiled shader is not a complete SPIR-V module: {shader_path}"
+            f"compiled shader is not a complete SPIR-V module: {label}"
         )
     words = struct.unpack(f"<{len(payload) // 4}I", payload)
     if words[0] != SPIRV_MAGIC:
         raise ModelCompileError(
-            f"compiled shader has an invalid SPIR-V magic word: {shader_path}"
+            f"compiled shader has an invalid SPIR-V magic word: {label}"
         )
     capabilities = set()
     cursor = 5
@@ -120,12 +132,12 @@ def spirv_capabilities(shader_path: Path) -> set[int]:
         opcode = instruction & 0xFFFF
         if word_count == 0 or cursor + word_count > len(words):
             raise ModelCompileError(
-                f"compiled shader has a malformed SPIR-V instruction at word {cursor}: {shader_path}"
+                f"compiled shader has a malformed SPIR-V instruction at word {cursor}: {label}"
             )
         if opcode == SPIRV_OP_CAPABILITY:
             if word_count != 2:
                 raise ModelCompileError(
-                    f"compiled shader has a malformed OpCapability at word {cursor}: {shader_path}"
+                    f"compiled shader has a malformed OpCapability at word {cursor}: {label}"
                 )
             capabilities.add(words[cursor + 1])
         cursor += word_count
@@ -133,9 +145,39 @@ def spirv_capabilities(shader_path: Path) -> set[int]:
     if unsupported:
         raise ModelCompileError(
             "compiled shader declares SPIR-V capabilities without a runtime device "
-            f"contract {sorted(unsupported)}: {shader_path}"
+            f"contract {sorted(unsupported)}: {label}"
         )
     return capabilities
+
+
+def spirv_vulkan_requirements_from_payloads(
+    artifact_payloads: Mapping[str, bytes],
+) -> tuple[list[str], list[str]]:
+    capabilities = set()
+    for artifact_path, payload in artifact_payloads.items():
+        if not isinstance(artifact_path, str) or not artifact_path:
+            raise ModelCompileError(
+                "compiled shader payload has an invalid artifact path"
+            )
+        capabilities.update(
+            spirv_capabilities_from_payload(payload, label=artifact_path)
+        )
+    features = sorted(
+        {
+            SPIRV_CAPABILITY_VULKAN_FEATURE_REQUIREMENTS[capability]
+            for capability in capabilities
+            if capability in SPIRV_CAPABILITY_VULKAN_FEATURE_REQUIREMENTS
+        }
+    )
+    subgroup_operations = sorted(
+        {
+            SPIRV_CAPABILITY_VULKAN_SUBGROUP_OPERATION_REQUIREMENTS[capability]
+            for capability in capabilities
+            if capability
+            in SPIRV_CAPABILITY_VULKAN_SUBGROUP_OPERATION_REQUIREMENTS
+        }
+    )
+    return features, subgroup_operations
 
 
 def spirv_vulkan_requirements(
@@ -163,4 +205,3 @@ def spirv_vulkan_requirements(
         }
     )
     return features, subgroup_operations
-

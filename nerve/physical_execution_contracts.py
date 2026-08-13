@@ -4,7 +4,7 @@ from copy import deepcopy
 from hashlib import sha256
 import json
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, Mapping, TypedDict
 
 from nerve.model_package_physical_kernels import (
     local_shard_intermediates_for_node,
@@ -308,6 +308,7 @@ def build_kernel_physical_execution_contracts(
     tensor_index: Json,
     kernel: Json,
     package_dir: Path,
+    artifact_payloads: Mapping[str, bytes] | None = None,
 ) -> list[PhysicalExecutionContract]:
     """Describe compiled implementations without assigning physical devices."""
     node = deepcopy(node)
@@ -323,7 +324,13 @@ def build_kernel_physical_execution_contracts(
             ]
         )
     )
-    scalar_artifacts = [_artifact_identity(package_dir, kernel["shader_path"])]
+    scalar_artifacts = [
+        _artifact_identity(
+            package_dir,
+            kernel["shader_path"],
+            artifact_payloads=artifact_payloads,
+        )
+    ]
     scalar_geometry = _kernel_geometry(
         node,
         circuit,
@@ -393,6 +400,7 @@ def build_kernel_physical_execution_contracts(
                 package_dir,
                 stage["shader_path"],
                 role="primary" if index == len(stages) - 1 else "preparation",
+                artifact_payloads=artifact_payloads,
             )
             for index, stage in enumerate(stages)
         ]
@@ -958,13 +966,18 @@ def _artifact_identity(
     relative_path: object,
     *,
     role: ArtifactRole = "primary",
+    artifact_payloads: Mapping[str, bytes] | None = None,
 ) -> ArtifactIdentity:
     path = _non_empty_string(relative_path, "artifact path")
-    artifact_path = package_dir / path
-    try:
-        payload = artifact_path.read_bytes()
-    except OSError as error:
-        _invalid(f"could not read compiled artifact {path!r}: {error}")
+    payload = artifact_payloads.get(path) if artifact_payloads is not None else None
+    if payload is None:
+        artifact_path = package_dir / path
+        try:
+            payload = artifact_path.read_bytes()
+        except OSError as error:
+            _invalid(f"could not read compiled artifact {path!r}: {error}")
+    elif not isinstance(payload, bytes):
+        _invalid(f"compiled artifact payload {path!r} must be bytes")
     return {
         "path": path,
         "sha256": artifact_sha256(payload),

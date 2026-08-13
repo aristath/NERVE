@@ -213,9 +213,13 @@ def _validate_mount_spec(spec: ResidentExecutorMountSpec) -> None:
         raise ModelCompileError(
             "resident executor phase must be decode or prefill"
         )
-    if spec.execution_scope not in {"node", "decode_component_prefix"}:
+    if spec.execution_scope not in {
+        "node",
+        "component",
+        "decode_component_prefix",
+    }:
         raise ModelCompileError(
-            "resident executor execution scope must be node or "
+            "resident executor execution scope must be node, component, or "
             "decode_component_prefix"
         )
     if (

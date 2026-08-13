@@ -528,6 +528,34 @@ def test_compiler_emits_local_batch_and_legal_distributed_contracts(tmp_path: Pa
     assert all("model_name" not in contract for contract in contracts)
 
 
+def test_compiler_can_seal_candidate_artifacts_from_in_memory_payloads(
+    tmp_path: Path,
+) -> None:
+    node, circuit, tensor_index, kernel = projection_compiler_fixture(tmp_path)
+    payloads = {
+        "shaders/parallel_projection_bf16.spv": b"candidate scalar spirv",
+        "shaders/parallel_projection_batch_bf16.spv": b"candidate batch spirv",
+    }
+    for path in payloads:
+        (tmp_path / path).unlink()
+
+    contracts = build_kernel_physical_execution_contracts(
+        node=node,
+        circuit=circuit,
+        tensor_index=tensor_index,
+        kernel=kernel,
+        package_dir=tmp_path,
+        artifact_payloads=payloads,
+    )
+
+    assert contracts[0]["artifacts"][0]["sha256"] == artifact_sha256(
+        payloads["shaders/parallel_projection_bf16.spv"]
+    )
+    assert contracts[2]["artifacts"][0]["sha256"] == artifact_sha256(
+        payloads["shaders/parallel_projection_batch_bf16.spv"]
+    )
+
+
 def test_compiler_keeps_a_dense_format_without_a_partition_contract_local(
     tmp_path: Path,
 ) -> None:
