@@ -497,6 +497,8 @@ pub(crate) fn try_plan_vulkan_runtime_warm_selected_resource_reconfigurations(
     catalog: &VulkanPlacementCalibrationCatalog,
     capacities: &[VulkanPlacementSelectedResourceDeviceCapacity],
     telemetry: &VulkanSelectionTelemetrySnapshot,
+    current_stream_id: &str,
+    peers: &VulkanSelectedResourceConcurrentPeerSnapshot,
     residency_policy: ResourceResidencyPolicy,
     phase: nerve_execution_contracts::ExecutionPhase,
 ) -> Result<Vec<VulkanSelectedResourceReconfigurationPlan>, VulkanResidentTokenModelPackageError>
@@ -570,11 +572,34 @@ pub(crate) fn try_plan_vulkan_runtime_warm_selected_resource_reconfigurations(
                 dispatch.shards.iter().map(|shard| shard.device_id.as_str())
             })
             .collect::<BTreeSet<_>>();
+        let selector_capacities = peers
+            .selector_capacity_bytes_by_logical_device
+            .get(selector_id)
+            .ok_or_else(|| {
+                distributed_calibration_error_value(format!(
+                    "warm selected-resource selector {selector_id:?} has no live cache quota",
+                ))
+            })?;
         let candidate_capacities = capacities
             .iter()
             .filter(|capacity| participant_ids.contains(capacity.device_id.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
+            .map(|capacity| {
+                let resident_payload_capacity_bytes = selector_capacities
+                    .get(&capacity.device_id)
+                    .copied()
+                    .ok_or_else(|| {
+                        distributed_calibration_error_value(format!(
+                            "warm selected-resource selector {selector_id:?} has no cache quota on {:?}",
+                            capacity.device_id,
+                        ))
+                    })?;
+                Ok(VulkanPlacementSelectedResourceDeviceCapacity {
+                    device_id: capacity.device_id.clone(),
+                    identity: capacity.identity.clone(),
+                    resident_payload_capacity_bytes,
+                })
+            })
+            .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
         if participant_ids.len() < 2
             || candidate_capacities.len() != participant_ids.len()
         {
@@ -607,7 +632,7 @@ pub(crate) fn try_plan_vulkan_runtime_warm_selected_resource_reconfigurations(
                 matching.len(),
             ));
         };
-        let Some(reconfiguration) =
+        let reconfiguration = if peers.streams.is_empty() {
             try_plan_warm_selected_resource_reconfiguration(
                 &first_dispatch.component_id,
                 partition,
@@ -619,7 +644,48 @@ pub(crate) fn try_plan_vulkan_runtime_warm_selected_resource_reconfigurations(
                 current,
             )
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?
-        else {
+        } else {
+            let mut streams = vec![VulkanSelectedResourceConcurrentStreamDemand {
+                stream_id: current_stream_id.to_string(),
+                activation_rate_weight: 1,
+                telemetry: (*domain).clone(),
+            }];
+            let mut fixed_peer_assignments = Vec::new();
+            for peer in &peers.streams {
+                let state = peer.selectors.get(selector_id).ok_or_else(|| {
+                    distributed_calibration_error_value(format!(
+                        "concurrent selected-resource peer {:?} omits mounted selector {selector_id:?}",
+                        peer.stream_id,
+                    ))
+                })?;
+                streams.push(VulkanSelectedResourceConcurrentStreamDemand {
+                    stream_id: peer.stream_id.clone(),
+                    activation_rate_weight: 1,
+                    telemetry: state.telemetry.clone(),
+                });
+                fixed_peer_assignments.extend(state.assignments.iter().map(|assignment| {
+                    VulkanSelectedResourceConcurrentAssignment {
+                        stream_id: peer.stream_id.clone(),
+                        resource_index: assignment.resource_index,
+                        device_id: assignment.device_id.clone(),
+                    }
+                }));
+            }
+            try_plan_concurrent_selected_resource_reconfiguration(
+                &first_dispatch.component_id,
+                partition,
+                &execution_classes,
+                current_stream_id,
+                &streams,
+                &fixed_peer_assignments,
+                &devices,
+                residency_policy,
+                phase,
+                current,
+            )
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?
+        };
+        let Some(reconfiguration) = reconfiguration else {
             continue;
         };
         let current_participants = current

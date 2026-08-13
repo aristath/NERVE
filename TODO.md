@@ -325,9 +325,6 @@ For every numbered item below:
 - Prove and separately measure the compiler-declared intra-expert TP candidate,
   including its dynamic output-row gate/up to local input-column down-projection
   batch path. Do not shard every expert merely because the mechanism exists.
-- Use marginal expert frequency and joint co-selection telemetry to place and
-  replicate hot experts. Optimize concurrent per-device expert makespan, not
-  the sum of six independent expected costs.
 - Feed warm session selection and co-selection telemetry back into expert
   ownership, replication, and cache-quota planning. The initial production
   mount now consumes exact calibration but uses a uniform prior; warm
@@ -356,8 +353,25 @@ For every numbered item below:
   selector shares remain fixed, and complete per-store eviction policies swap
   transactionally. A failed quota publication restores both the previous
   shared policy and any ownership change from the same prompt boundary. The
-  remaining work is measured replication and the explicitly authorized mounted
-  proof.
+  concurrent-stream extension is now complete hardware-neutrally as well. It
+  jointly scores every live stream from exact selection and co-selection
+  windows, keeps every peer's arithmetic ownership fixed while one quiescent
+  stream replans, permits a hot immutable resource to have one physical copy
+  on each selected execution target, and still assigns that resource exactly
+  once per stream. Shared copies count once against each physical selector
+  quota; retained and eager policies admit the complete addressable union,
+  while demand-paged admission uses a conservative concurrent load wave. The
+  primary objective is the measured maximum per-device execution moment, not
+  the sum of independent expert scores. A package-level generation-guarded
+  prompt-boundary transaction snapshots live peer ownership and cache quotas,
+  preloads every destination copy, changes stream-local arithmetic ownership,
+  and transactionally publishes the resulting aggregate cache policy. A lone
+  stream never creates a ceremonial replica, peer ownership cannot move, and
+  an accepted change must repay exact measured destination load cost within
+  the observed window. This makes measured hot-resource replication a real
+  runtime candidate without inventing duplicate arithmetic or a model-specific
+  execution strategy. It does not claim a single-stream speedup, and its live
+  Vulkan behavior remains part of the explicitly authorized mounted proof.
 - Allow a compiler-declared predictable router dependency to trigger safe
   prefetch or preselection without a DeepSeek-specific runtime branch.
 
@@ -392,9 +406,12 @@ For every numbered item below:
   share one semantic candidate graph and one canonical mount transaction. The
   production optimizer accepts the two expert-parallel families directly;
   exact replay separately proves whole-expert ordinal ownership and fragmented
-  intra-expert geometry. Replicated-resource and general DAG candidate families
-  remain to be incorporated into that same solve without reintroducing
-  whole-model device assumptions.
+  intra-expert geometry. Measured selected-resource replication is now solved
+  at the package's concurrent-stream prompt boundary because it is a
+  multi-stream residency and ownership decision, not a component execution
+  strategy. General DAG candidate families remain to be incorporated into the
+  whole mounted-graph solve without reintroducing whole-model device
+  assumptions.
 - The ordered-graph solver now retains mounted bytes and the maximum execution
   transient as separate per-device and host dimensions. Capacity is checked
   against the final union of mounted regions plus every earlier transient, and

@@ -1534,7 +1534,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 })?;
         }
         self.processor
-            .adapt_selected_resource_ownership_at_prompt_boundary(&telemetry)?;
+            .adapt_selected_resource_ownership_at_prompt_boundary(&telemetry, &self.devices)?;
         Ok(())
     }
 }

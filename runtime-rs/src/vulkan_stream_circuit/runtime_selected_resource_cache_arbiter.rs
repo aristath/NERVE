@@ -8,6 +8,28 @@ struct VulkanSelectedResourceCacheDemand {
 struct VulkanSelectedResourceStreamCacheDemand {
     by_store_selector:
         BTreeMap<String, BTreeMap<String, VulkanSelectedResourceCacheDemand>>,
+    concurrent_selectors:
+        BTreeMap<String, VulkanSelectedResourceConcurrentSelectorState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanSelectedResourceConcurrentSelectorState {
+    telemetry: VulkanSelectionTelemetryDomainSnapshot,
+    assignments: Vec<VulkanSelectedResourceAssignment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanSelectedResourceConcurrentPeerStream {
+    stream_id: String,
+    selectors: BTreeMap<String, VulkanSelectedResourceConcurrentSelectorState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VulkanSelectedResourceConcurrentPeerSnapshot {
+    generation: u64,
+    streams: Vec<VulkanSelectedResourceConcurrentPeerStream>,
+    selector_capacity_bytes_by_logical_device:
+        BTreeMap<String, BTreeMap<String, usize>>,
 }
 
 struct VulkanSelectedResourceCacheStore {
@@ -21,12 +43,14 @@ struct VulkanSelectedResourceCacheStore {
 
 #[derive(Default)]
 struct VulkanSelectedResourceCacheArbiterState {
+    generation: u64,
     stream_demands: BTreeMap<u64, VulkanSelectedResourceStreamCacheDemand>,
 }
 
 struct VulkanSelectedResourceCacheArbiter {
     next_stream_id: std::sync::atomic::AtomicU64,
     stores: BTreeMap<String, VulkanSelectedResourceCacheStore>,
+    adaptation_transaction: std::sync::Mutex<()>,
     state: std::sync::Mutex<VulkanSelectedResourceCacheArbiterState>,
 }
 
@@ -119,6 +143,7 @@ impl VulkanSelectedResourceCacheArbiter {
         Ok(Arc::new(Self {
             next_stream_id: std::sync::atomic::AtomicU64::new(1),
             stores,
+            adaptation_transaction: std::sync::Mutex::new(()),
             state: std::sync::Mutex::new(VulkanSelectedResourceCacheArbiterState::default()),
         }))
     }
@@ -126,6 +151,11 @@ impl VulkanSelectedResourceCacheArbiter {
     fn register(
         self: &Arc<Self>,
     ) -> Result<VulkanSelectedResourceCacheRegistration, VulkanResidentTokenModelPackageError> {
+        let _transaction = self.adaptation_transaction.lock().map_err(|_| {
+            selected_resource_cache_error(
+                "selected-resource adaptation transaction was poisoned",
+            )
+        })?;
         let stream_id = self
             .next_stream_id
             .fetch_update(
@@ -137,6 +167,9 @@ impl VulkanSelectedResourceCacheArbiter {
         let mut state = self.state.lock().map_err(|_| {
             selected_resource_cache_error("selected-resource cache arbiter was poisoned")
         })?;
+        let next_generation = state.generation.checked_add(1).ok_or_else(|| {
+            selected_resource_cache_error("selected-resource cache generation overflowed")
+        })?;
         if state
             .stream_demands
             .insert(stream_id, VulkanSelectedResourceStreamCacheDemand::default())
@@ -146,6 +179,7 @@ impl VulkanSelectedResourceCacheArbiter {
                 "selected-resource cache arbiter repeated a stream ID",
             ));
         }
+        state.generation = next_generation;
         Ok(VulkanSelectedResourceCacheRegistration {
             stream_id,
             arbiter: Arc::clone(self),
@@ -203,6 +237,22 @@ impl VulkanSelectedResourceCacheArbiter {
                     placement.selector_id,
                 )));
             }
+            if demand
+                .concurrent_selectors
+                .insert(
+                    placement.selector_id.clone(),
+                    VulkanSelectedResourceConcurrentSelectorState {
+                        telemetry: (*domain).clone(),
+                        assignments: placement.assignments.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(selected_resource_cache_error(format!(
+                    "selected-resource cache repeats concurrent selector {:?}",
+                    placement.selector_id,
+                )));
+            }
             for assignment in &placement.assignments {
                 let matching_stores = self
                     .stores
@@ -257,9 +307,73 @@ impl VulkanSelectedResourceCacheArbiter {
         Ok(demand)
     }
 
-    fn replace_stream_demand(
+    fn peer_snapshot(
         &self,
         stream_id: u64,
+    ) -> Result<VulkanSelectedResourceConcurrentPeerSnapshot, VulkanResidentTokenModelPackageError>
+    {
+        let state = self.state.lock().map_err(|_| {
+            selected_resource_cache_error("selected-resource cache arbiter was poisoned")
+        })?;
+        if !state.stream_demands.contains_key(&stream_id) {
+            return Err(selected_resource_cache_error(format!(
+                "selected-resource cache arbiter has no stream {stream_id}",
+            )));
+        }
+        let mut selector_capacity_bytes_by_logical_device = BTreeMap::<
+            String,
+            BTreeMap<String, usize>,
+        >::new();
+        for (store_id, store) in &self.stores {
+            let mounted = store.store.upgrade().ok_or_else(|| {
+                selected_resource_cache_error(format!(
+                    "selected-resource cache store {store_id:?} was unloaded",
+                ))
+            })?;
+            let budgets = mounted
+                .selector_payload_budget_snapshot()
+                .map_err(|error| selected_resource_cache_error(error.to_string()))?;
+            for selector_id in store.adaptive_baseline_budgets.keys() {
+                let budget = budgets.get(selector_id).copied().ok_or_else(|| {
+                    selected_resource_cache_error(format!(
+                        "selected-resource cache store {store_id:?} lost selector {selector_id:?}",
+                    ))
+                })?;
+                for logical_device_id in &store.logical_device_ids {
+                    if selector_capacity_bytes_by_logical_device
+                        .entry(selector_id.clone())
+                        .or_default()
+                        .insert(logical_device_id.clone(), budget)
+                        .is_some()
+                    {
+                        return Err(selected_resource_cache_error(format!(
+                            "selected-resource selector {selector_id:?} repeats logical cache target {logical_device_id:?}",
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(VulkanSelectedResourceConcurrentPeerSnapshot {
+            generation: state.generation,
+            streams: state
+                .stream_demands
+                .iter()
+                .filter(|(candidate, demand)| {
+                    **candidate != stream_id && !demand.concurrent_selectors.is_empty()
+                })
+                .map(|(candidate, demand)| VulkanSelectedResourceConcurrentPeerStream {
+                    stream_id: candidate.to_string(),
+                    selectors: demand.concurrent_selectors.clone(),
+                })
+                .collect(),
+            selector_capacity_bytes_by_logical_device,
+        })
+    }
+
+    fn replace_stream_demand_at_generation(
+        &self,
+        stream_id: u64,
+        expected_generation: u64,
         demand: VulkanSelectedResourceStreamCacheDemand,
     ) -> Result<(), VulkanResidentTokenModelPackageError> {
         let mut state = self.state.lock().map_err(|_| {
@@ -270,6 +384,15 @@ impl VulkanSelectedResourceCacheArbiter {
                 "selected-resource cache arbiter has no stream {stream_id}",
             )));
         }
+        if state.generation != expected_generation {
+            return Err(selected_resource_cache_error(format!(
+                "selected-resource cache peer generation changed from {expected_generation} to {} while planning",
+                state.generation,
+            )));
+        }
+        let next_generation = state.generation.checked_add(1).ok_or_else(|| {
+            selected_resource_cache_error("selected-resource cache generation overflowed")
+        })?;
         validate_vulkan_selected_resource_stream_cache_demand(&demand, &self.stores)?;
         let previous = state
             .stream_demands
@@ -279,16 +402,21 @@ impl VulkanSelectedResourceCacheArbiter {
             state.stream_demands.insert(stream_id, previous);
             return Err(error);
         }
+        state.generation = next_generation;
         Ok(())
     }
 
     fn unregister(&self, stream_id: u64) {
+        let Ok(_transaction) = self.adaptation_transaction.lock() else {
+            return;
+        };
         let Ok(mut state) = self.state.lock() else {
             return;
         };
         let Some(_) = state.stream_demands.remove(&stream_id) else {
             return;
         };
+        state.generation = state.generation.saturating_add(1);
         // Drop cannot report an error. Never retain a dead stream merely
         // because a store is concurrently failing or unloading; the next
         // successful stream update republishes the complete aggregate policy.
@@ -363,11 +491,47 @@ fn vulkan_selected_resource_cache_budget_replacement(
 }
 
 impl VulkanSelectedResourceCacheRegistration {
-    fn replace_demand(
+    #[cfg(test)]
+    fn peer_snapshot(
         &self,
+    ) -> Result<VulkanSelectedResourceConcurrentPeerSnapshot, VulkanResidentTokenModelPackageError>
+    {
+        let _transaction = self
+            .arbiter
+            .adaptation_transaction
+            .lock()
+            .map_err(|_| {
+                selected_resource_cache_error(
+                    "selected-resource adaptation transaction was poisoned",
+                )
+            })?;
+        self.arbiter.peer_snapshot(self.stream_id)
+    }
+
+    #[cfg(test)]
+    fn replace_demand_at_generation(
+        &self,
+        expected_generation: u64,
         demand: VulkanSelectedResourceStreamCacheDemand,
     ) -> Result<(), VulkanResidentTokenModelPackageError> {
-        self.arbiter.replace_stream_demand(self.stream_id, demand)
+        let _transaction = self
+            .arbiter
+            .adaptation_transaction
+            .lock()
+            .map_err(|_| {
+                selected_resource_cache_error(
+                    "selected-resource adaptation transaction was poisoned",
+                )
+            })?;
+        self.arbiter.replace_stream_demand_at_generation(
+            self.stream_id,
+            expected_generation,
+            demand,
+        )
+    }
+
+    fn stream_id(&self) -> u64 {
+        self.stream_id
     }
 }
 
@@ -387,6 +551,32 @@ fn validate_vulkan_selected_resource_stream_cache_demand(
     demand: &VulkanSelectedResourceStreamCacheDemand,
     stores: &BTreeMap<String, VulkanSelectedResourceCacheStore>,
 ) -> Result<(), VulkanResidentTokenModelPackageError> {
+    for (selector_id, state) in &demand.concurrent_selectors {
+        if selector_id.trim().is_empty()
+            || state.telemetry.resource_count == 0
+            || state.telemetry.selection_counts.len() != state.telemetry.resource_count
+            || state.assignments.len() != state.telemetry.resource_count
+        {
+            return Err(selected_resource_cache_error(
+                "selected-resource concurrent demand has an invalid selector or resource domain",
+            ));
+        }
+        let mut covered = BTreeSet::new();
+        for assignment in &state.assignments {
+            if assignment.device_id.trim().is_empty()
+                || assignment.resource_index >= state.telemetry.resource_count
+                || !covered.insert(assignment.resource_index)
+                || !stores.values().any(|store| {
+                    store.logical_device_ids.contains(&assignment.device_id)
+                        && store.resource_payload_bytes.contains_key(selector_id)
+                })
+            {
+                return Err(selected_resource_cache_error(format!(
+                    "selected-resource concurrent demand for selector {selector_id:?} repeats ownership or references an unavailable resource target",
+                )));
+            }
+        }
+    }
     for (store_id, selectors) in &demand.by_store_selector {
         let store = stores.get(store_id).ok_or_else(|| {
             selected_resource_cache_error(format!(
@@ -604,6 +794,71 @@ fn proportional_vulkan_selected_resource_cache_share(
 mod runtime_selected_resource_cache_arbiter_tests {
     use super::*;
 
+    fn test_arbiter_without_stores() -> Arc<VulkanSelectedResourceCacheArbiter> {
+        Arc::new(VulkanSelectedResourceCacheArbiter {
+            next_stream_id: std::sync::atomic::AtomicU64::new(1),
+            stores: BTreeMap::new(),
+            adaptation_transaction: std::sync::Mutex::new(()),
+            state: std::sync::Mutex::new(VulkanSelectedResourceCacheArbiterState::default()),
+        })
+    }
+
+    #[test]
+    fn peer_snapshot_is_generation_guarded_and_excludes_unpublished_streams() {
+        let arbiter = test_arbiter_without_stores();
+        let current = arbiter.register().unwrap();
+        let peer = arbiter.register().unwrap();
+        let initial = current.peer_snapshot().unwrap();
+        assert!(initial.streams.is_empty());
+        assert_eq!(initial.generation, 2);
+
+        {
+            let mut state = arbiter.state.lock().unwrap();
+            state
+                .stream_demands
+                .get_mut(&peer.stream_id)
+                .unwrap()
+                .concurrent_selectors
+                .insert(
+                    "experts".to_string(),
+                    VulkanSelectedResourceConcurrentSelectorState {
+                        telemetry: VulkanSelectionTelemetryDomainSnapshot {
+                            execution_scope: "target".to_string(),
+                            component_id: "layer".to_string(),
+                            node_id: "router".to_string(),
+                            domain_id: "bank".to_string(),
+                            resource_count: 1,
+                            selection_counts: vec![1],
+                            co_selection_counts: Vec::new(),
+                        },
+                        assignments: vec![VulkanSelectedResourceAssignment {
+                            resource_index: 0,
+                            device_id: "gpu0".to_string(),
+                        }],
+                    },
+                );
+        }
+        let populated = current.peer_snapshot().unwrap();
+        assert_eq!(populated.streams.len(), 1);
+        assert_eq!(populated.streams[0].stream_id, peer.stream_id.to_string());
+
+        peer.replace_demand_at_generation(
+            populated.generation,
+            VulkanSelectedResourceStreamCacheDemand::default(),
+        )
+        .unwrap();
+        assert!(
+            current
+                .replace_demand_at_generation(
+                    populated.generation,
+                    VulkanSelectedResourceStreamCacheDemand::default(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("generation changed")
+        );
+    }
+
     #[test]
     fn cache_budget_apportionment_preserves_hot_union_and_exact_capacity() {
         let baseline = BTreeMap::from([
@@ -653,6 +908,7 @@ mod runtime_selected_resource_cache_arbiter_tests {
                     },
                 )]),
             )]),
+            ..VulkanSelectedResourceStreamCacheDemand::default()
         };
         let first = stream(10, BTreeSet::from([0, 1]));
         let second = stream(20, BTreeSet::from([1, 2]));

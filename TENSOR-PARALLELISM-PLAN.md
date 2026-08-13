@@ -105,6 +105,21 @@ proves that a real package can select the exact executable contract family; it
 does not prove a real-model token, numerical equivalence, performance, or live
 teardown.
 
+Selected-resource replication is now represented separately from component
+TP. At a quiescent prompt boundary, the package can jointly score exact
+selection and co-selection telemetry from multiple live streams, hold every
+peer stream's arithmetic ownership fixed, and reassign only the current
+stream. If two streams execute one immutable resource on different targets,
+that resource has two physical copies but still exactly one arithmetic owner
+per stream. The solver counts each physical copy once against the live
+selector quota, uses compiler-bound measured execution and load costs, and
+accepts a move only when the joint per-device makespan improves enough to
+repay the destination load within the observed window. A package-level
+generation guard serializes this preload/ownership/cache-policy transaction
+without serializing token execution. This is hardware-neutral runtime support;
+live Vulkan replication behavior and performance remain unproven while the
+recorded inference quarantine is active.
+
 ## Runtime TP Completion Criteria
 
 Before automatic placement consumes benchmark results, manual TP must satisfy

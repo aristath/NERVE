@@ -122,6 +122,63 @@ where
     Ok(applied.len())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanSelectedResourceReplicaPreloadBatch {
+    selector_id: String,
+    destination_device_id: String,
+    resource_indices: Vec<usize>,
+}
+
+fn selected_resource_replica_preload_batches(
+    reconfigurations: &[VulkanSelectedResourceReconfigurationPlan],
+) -> Result<Vec<VulkanSelectedResourceReplicaPreloadBatch>, VulkanResidentTokenModelPackageError> {
+    let mut resources = BTreeMap::<(String, String), BTreeSet<usize>>::new();
+    let mut moved_resources = BTreeSet::new();
+    for reconfiguration in reconfigurations {
+        if reconfiguration.selector_id.trim().is_empty()
+            || reconfiguration.moves.is_empty()
+            || reconfiguration
+                .moves
+                .iter()
+                .any(|movement| movement.source_device_id == movement.destination_device_id)
+        {
+            return Err(VulkanResidentTokenModelPackageError::new(
+                "selected-resource replica preload has an empty selector, no moves, or a local move",
+            ));
+        }
+        for movement in &reconfiguration.moves {
+            if !moved_resources.insert((
+                reconfiguration.selector_id.as_str(),
+                movement.resource_index,
+            )) {
+                return Err(VulkanResidentTokenModelPackageError::new(format!(
+                    "selected-resource replica preload repeats selector {:?} resource {}",
+                    reconfiguration.selector_id, movement.resource_index,
+                )));
+            }
+            resources
+                .entry((
+                    reconfiguration.selector_id.clone(),
+                    movement.destination_device_id.clone(),
+                ))
+                .or_default()
+                .insert(movement.resource_index);
+        }
+    }
+    Ok(resources
+        .into_iter()
+        .map(
+            |((selector_id, destination_device_id), resource_indices)| {
+                VulkanSelectedResourceReplicaPreloadBatch {
+                    selector_id,
+                    destination_device_id,
+                    resource_indices: resource_indices.into_iter().collect(),
+                }
+            },
+        )
+        .collect())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_vulkan_runtime_selected_resource_reconfiguration_context(
     runtime_model: &VulkanResidentRuntimeModel,
@@ -234,12 +291,14 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
     fn adapt_selected_resource_ownership_at_prompt_boundary(
         &mut self,
         telemetry: &VulkanSelectionTelemetrySnapshot,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
         let Some(mut state) = self.selected_resource_adaptation.take() else {
             return Ok(0);
         };
         let result = self.adapt_selected_resource_ownership_with_state(
             telemetry,
+            devices,
             &mut state,
         );
         self.selected_resource_adaptation = Some(state);
@@ -249,6 +308,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
     fn adapt_selected_resource_ownership_with_state(
         &mut self,
         telemetry: &VulkanSelectionTelemetrySnapshot,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         state: &mut VulkanRuntimeSelectedResourceAdaptationState,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
         let window = state
@@ -263,6 +323,32 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .map(|baseline| telemetry.delta_since(baseline))
             .transpose()?
             .unwrap_or_else(|| telemetry.clone());
+        let (cache_arbiter, cache_stream_id) = {
+            let cache_registration = self
+                .selected_resource_cache_registration
+                .as_ref()
+                .ok_or_else(|| {
+                    selection_telemetry_error(
+                        "selected-resource adaptation has no cache registration".to_string(),
+                    )
+                })?;
+            (
+                Arc::clone(&cache_registration.arbiter),
+                cache_registration.stream_id(),
+            )
+        };
+        let _adaptation_transaction = cache_arbiter
+            .adaptation_transaction
+            .lock()
+            .map_err(|_| {
+                selection_telemetry_error(
+                    "selected-resource adaptation transaction was poisoned".to_string(),
+                )
+            })?;
+        let peers = cache_arbiter
+            .peer_snapshot(cache_stream_id)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+        let current_stream_id = cache_stream_id.to_string();
         let reconfigurations =
             try_plan_vulkan_runtime_warm_selected_resource_reconfigurations(
                 &state.execution_plans.decode,
@@ -270,6 +356,8 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 &state.context.catalog,
                 &state.context.capacities,
                 &window,
+                &current_stream_id,
+                &peers,
                 self.model.resource_residency_policy,
                 nerve_execution_contracts::ExecutionPhase::Decode,
             )
@@ -291,6 +379,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         let applied_count = if reconfigurations.is_empty() {
             0
         } else {
+            self.preload_selected_resource_replicas(
+                &reconfigurations,
+                devices,
+                &current_stream_id,
+            )?;
             apply_vulkan_selected_resource_reconfigurations_transactionally(
                 &reconfigurations,
                 |selector_id, proposed| {
@@ -314,14 +407,12 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .stream_demand(&state.execution_plans.decode, &cache_window)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Package);
         let cache_update = cache_demand.and_then(|cache_demand| {
-            self.selected_resource_cache_registration
-                .as_ref()
-                .ok_or_else(|| {
-                    selection_telemetry_error(
-                        "selected-resource adaptation has no cache registration".to_string(),
-                    )
-                })?
-                .replace_demand(cache_demand)
+            cache_arbiter
+                .replace_stream_demand_at_generation(
+                    cache_stream_id,
+                    peers.generation,
+                    cache_demand,
+                )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)
         });
         if let Err(error) = cache_update {
@@ -355,6 +446,56 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             self.temporal_block_executions.borrow_mut().clear();
         }
         Ok(applied_count)
+    }
+
+    fn preload_selected_resource_replicas(
+        &self,
+        reconfigurations: &[VulkanSelectedResourceReconfigurationPlan],
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        stream_id: &str,
+    ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        for batch in selected_resource_replica_preload_batches(reconfigurations)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?
+        {
+            let store = self
+                .model
+                .compiled_resource_device_stores
+                .get(&batch.destination_device_id)
+                .ok_or_else(|| {
+                    selection_telemetry_error(format!(
+                        "selected-resource replica destination {:?} has no compiled resource store",
+                        batch.destination_device_id,
+                    ))
+                })?;
+            let device = devices.get(&batch.destination_device_id).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: batch.destination_device_id.clone(),
+                }
+            })?;
+            let owner = DeviceResourceResidencyOwnerId::new(format!(
+                "replica:{}:{stream_id}:{}:{}",
+                self.model.package_id,
+                batch.selector_id,
+                batch.destination_device_id,
+            ))
+            .map_err(|error| selection_telemetry_error(error.to_string()))?;
+            store
+                .load_selector_resources(
+                    device,
+                    &batch.selector_id,
+                    &batch.resource_indices,
+                    owner,
+                )
+                .map_err(|error| {
+                    selection_telemetry_error(format!(
+                        "selected-resource replica preload failed for selector {:?} resources {:?} on {:?}: {error}",
+                        batch.selector_id,
+                        batch.resource_indices,
+                        batch.destination_device_id,
+                    ))
+                })?;
+        }
+        Ok(())
     }
 
     fn rollback_selected_resource_placements_at_quiescent_boundary(
@@ -552,7 +693,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
 #[cfg(test)]
 mod runtime_selected_resource_reconfiguration_tests {
     use super::*;
-    use crate::vulkan_distributed::VulkanSelectedResourceAssignment;
+    use crate::vulkan_distributed::{
+        VulkanSelectedResourceAssignment, VulkanSelectedResourcePlacementMove,
+    };
 
     fn empty_execution_plan(device_id: &str) -> VulkanDistributedExecutionPlan {
         VulkanDistributedExecutionPlan {
@@ -716,5 +859,76 @@ mod runtime_selected_resource_reconfiguration_tests {
         assert_eq!(mounted["first"].assignments[0].device_id, "old-first");
         assert_eq!(mounted["second"].assignments[0].device_id, "next-second");
         assert_eq!(mounted["third"].assignments[0].device_id, "old-third");
+    }
+
+    fn preload_reconfiguration(
+        selector_id: &str,
+        resource_index: usize,
+        destination_device_id: &str,
+    ) -> VulkanSelectedResourceReconfigurationPlan {
+        VulkanSelectedResourceReconfigurationPlan {
+            selector_id: selector_id.to_string(),
+            observed_activation_count: 10,
+            current_duration_ns_per_activation: 2,
+            proposed_duration_ns_per_activation: 1,
+            migration_critical_path_ns: 1,
+            break_even_activation_count: 1,
+            moves: vec![VulkanSelectedResourcePlacementMove {
+                resource_index,
+                source_device_id: "gpu0".to_string(),
+                destination_device_id: destination_device_id.to_string(),
+                payload_bytes: 10,
+                destination_load_duration_ns: 1,
+            }],
+            proposed: placement(selector_id, destination_device_id),
+        }
+    }
+
+    #[test]
+    fn replica_preload_batches_group_unique_resources_by_selector_and_destination() {
+        let mut first = preload_reconfiguration("experts", 2, "gpu1");
+        first.moves.push(VulkanSelectedResourcePlacementMove {
+            resource_index: 0,
+            source_device_id: "gpu0".to_string(),
+            destination_device_id: "gpu1".to_string(),
+            payload_bytes: 10,
+            destination_load_duration_ns: 1,
+        });
+        let batches = selected_resource_replica_preload_batches(&[
+            first,
+            preload_reconfiguration("other", 1, "gpu2"),
+        ])
+        .unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].selector_id, "experts");
+        assert_eq!(batches[0].destination_device_id, "gpu1");
+        assert_eq!(batches[0].resource_indices, vec![0, 2]);
+        assert_eq!(batches[1].selector_id, "other");
+        assert_eq!(batches[1].destination_device_id, "gpu2");
+        assert_eq!(batches[1].resource_indices, vec![1]);
+    }
+
+    #[test]
+    fn replica_preload_rejects_duplicate_or_local_moves_before_loading() {
+        let repeated = [
+            preload_reconfiguration("experts", 0, "gpu1"),
+            preload_reconfiguration("experts", 0, "gpu2"),
+        ];
+        assert!(
+            selected_resource_replica_preload_batches(&repeated)
+                .unwrap_err()
+                .to_string()
+                .contains("repeats")
+        );
+
+        let mut local = preload_reconfiguration("experts", 0, "gpu1");
+        local.moves[0].source_device_id = "gpu1".to_string();
+        assert!(
+            selected_resource_replica_preload_batches(&[local])
+                .unwrap_err()
+                .to_string()
+                .contains("local move")
+        );
     }
 }
