@@ -730,8 +730,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     if remaining_safe_host_visible_payload_bytes.is_none() {
                         let capacity = read_vulkan_host_memory_capacity()
                             .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
-                        remaining_safe_host_visible_payload_bytes =
-                            Some(capacity.safe_tiered_payload_bytes());
+                        remaining_safe_host_visible_payload_bytes = Some(
+                            remaining_vulkan_runtime_host_cache_bytes(
+                                capacity.safe_tiered_payload_bytes(),
+                                physical_execution_residency_plan
+                                    .total_stream_shared_host_bytes,
+                            )
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?,
+                        );
                     }
                     let remaining = remaining_safe_host_visible_payload_bytes
                         .as_mut()

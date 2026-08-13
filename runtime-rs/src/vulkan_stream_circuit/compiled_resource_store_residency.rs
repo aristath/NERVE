@@ -157,29 +157,84 @@ fn plan_compiled_resource_store_residency_for_ownership(
                 .to_string(),
         ));
     }
-    let maximum_load_wave_group_count = selected
-        .iter()
-        .map(|selector| {
-            selector
-                .encoding
-                .selection_count_per_activation
-                .min(
-                    ownership
-                        .resources(&selector.id)
-                        .map(BTreeSet::len)
-                        .unwrap_or(0),
+    let source_payload_bytes_by_slot = layout
+        .source_payload_bytes_by_address_slot_for_ownership(contract, ownership)
+        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+    let mut maximum_load_wave_group_count = 0usize;
+    let mut maximum_load_wave_payload_bytes = 0usize;
+    let mut observed_maximum_group_bytes = 0usize;
+    for selector in &selected {
+        let selector_layout = layout
+            .selectors
+            .iter()
+            .find(|layout| layout.selector_id == selector.id)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "compiled resource store selector {:?} has no address layout",
+                    selector.id,
+                ))
+            })?;
+        let mut owned_group_payload_bytes = ownership
+            .resources(&selector.id)
+            .into_iter()
+            .flatten()
+            .map(|resource_index| {
+                selector_layout
+                    .mapping
+                    .resource_slots(*resource_index)
+                    .ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "compiled resource store selector {:?} resource {resource_index} has no address slots",
+                            selector.id,
+                        ))
+                    })?
+                    .into_iter()
+                    .try_fold(0usize, |total, slot| {
+                        let bytes = source_payload_bytes_by_slot.get(&slot).ok_or_else(|| {
+                            VulkanRuntimeResidencyPlanError(format!(
+                                "compiled resource store selector {:?} address slot {slot} has no source payload",
+                                selector.id,
+                            ))
+                        })?;
+                        checked_residency_add(
+                            total,
+                            *bytes,
+                            "compiled resource selector group bytes",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        owned_group_payload_bytes.sort_unstable_by(|left, right| right.cmp(left));
+        let selection_count = selector
+            .encoding
+            .selection_count_per_activation
+            .min(owned_group_payload_bytes.len());
+        maximum_load_wave_group_count = maximum_load_wave_group_count.max(selection_count);
+        let selector_load_wave_bytes = owned_group_payload_bytes
+            .iter()
+            .take(selection_count)
+            .try_fold(0usize, |total, bytes| {
+                checked_residency_add(
+                    total,
+                    *bytes,
+                    "compiled resource maximum load-wave bytes",
                 )
-        })
-        .max()
-        .ok_or_else(|| {
-            VulkanRuntimeResidencyPlanError(
-                "compiled resource store has no selected load wave".to_string(),
-            )
-        })?;
+            })?;
+        maximum_load_wave_payload_bytes =
+            maximum_load_wave_payload_bytes.max(selector_load_wave_bytes);
+        observed_maximum_group_bytes = observed_maximum_group_bytes.max(
+            owned_group_payload_bytes.first().copied().unwrap_or_default(),
+        );
+    }
     if maximum_load_wave_group_count == 0 {
         return Err(VulkanRuntimeResidencyPlanError(
             "compiled resource store selector load wave is empty".to_string(),
         ));
+    }
+    if observed_maximum_group_bytes > maximum_group_byte_count {
+        return Err(VulkanRuntimeResidencyPlanError(format!(
+            "compiled resource store observes a {observed_maximum_group_bytes}-byte group but residency admits only {maximum_group_byte_count} bytes",
+        )));
     }
     let components_by_scope =
         compiled_resource_store_components_by_scope(contract, &allowed_selector_ids)?;
@@ -203,11 +258,6 @@ fn plan_compiled_resource_store_residency_for_ownership(
         address_table_device_bytes,
         parameter_slot_table_device_bytes,
         "compiled resource metadata bytes",
-    )?;
-    let maximum_load_wave_payload_bytes = checked_residency_mul(
-        maximum_group_byte_count,
-        maximum_load_wave_group_count,
-        "compiled resource maximum load-wave bytes",
     )?;
     let transfer_staging_slot_byte_capacity =
         maximum_load_wave_payload_bytes.max(address_table_device_bytes);

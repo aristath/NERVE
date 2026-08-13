@@ -262,3 +262,17 @@ fn physical_mount_resource_summary_uses_the_exact_store_plan() {
     );
     assert!(!retained.uses_shared_host_cache);
 }
+
+#[test]
+fn physical_mount_host_cache_capacity_preserves_the_stream_reservation() {
+    assert_eq!(
+        remaining_vulkan_runtime_host_cache_bytes(1_024, 256).unwrap(),
+        768,
+    );
+    assert_eq!(
+        remaining_vulkan_runtime_host_cache_bytes(1_024, 1_024).unwrap(),
+        0,
+    );
+    let error = remaining_vulkan_runtime_host_cache_bytes(1_023, 1_024).unwrap_err();
+    assert!(error.to_string().contains("stream needs 1024"));
+}

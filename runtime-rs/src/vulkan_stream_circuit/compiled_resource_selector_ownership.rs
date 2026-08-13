@@ -248,6 +248,75 @@ impl VulkanCompiledResourceSelectorOwnership {
     }
 }
 
+fn compiled_resource_selector_ownership_from_distributed_device_plan(
+    contract: &CompiledResourceResidencyContract,
+    device: &VulkanDistributedSelectedResourceDevicePlan,
+) -> Result<VulkanCompiledResourceSelectorOwnership, VulkanRuntimeResidencyPlanError> {
+    let mut resources_by_selector = BTreeMap::new();
+    let mut projections_by_selector = BTreeMap::new();
+    for selector in &device.selectors {
+        let whole = !selector.owned_resource_indices.is_empty();
+        let fragmented = !selector.fragmented_resources.is_empty();
+        if whole == fragmented {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "distributed selector {:?} on {:?} must own either whole resources or fragments",
+                selector.selector_id, device.device_id,
+            )));
+        }
+        if whole
+            && resources_by_selector
+                .insert(
+                    selector.selector_id.clone(),
+                    selector
+                        .owned_resource_indices
+                        .iter()
+                        .copied()
+                        .collect::<BTreeSet<_>>(),
+                )
+                .is_some()
+        {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "distributed selector {:?} is repeated on {:?}",
+                selector.selector_id, device.device_id,
+            )));
+        }
+        for fragment in &selector.fragmented_resources {
+            let projection = VulkanCompiledResourceSourceProjection {
+                resources: fragment
+                    .resources
+                    .iter()
+                    .map(|resource| {
+                        (
+                            resource.resource_id.clone(),
+                            VulkanCompiledResourceSourceRangeProjection {
+                                source_byte_count: resource.source_byte_count,
+                                byte_offset: resource.byte_offset,
+                                byte_count: resource.byte_count,
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            if projections_by_selector
+                .entry(selector.selector_id.clone())
+                .or_insert_with(BTreeMap::new)
+                .insert(fragment.resource_index, projection)
+                .is_some()
+            {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "distributed selector {:?} repeats fragment resource {} on {:?}",
+                    selector.selector_id, fragment.resource_index, device.device_id,
+                )));
+            }
+        }
+    }
+    VulkanCompiledResourceSelectorOwnership::from_resources_and_source_projections(
+        contract,
+        resources_by_selector,
+        projections_by_selector,
+    )
+}
+
 fn project_resolved_compiled_resource(
     mut resource: ResolvedCompiledResource,
     projection: &VulkanCompiledResourceSourceRangeProjection,
@@ -400,13 +469,47 @@ mod compiled_resource_selector_ownership_tests {
     use super::*;
 
     fn contract() -> CompiledResourceResidencyContract {
+        let resources = (0..8)
+            .map(|index| CompiledImmutableResource {
+                id: format!("resource-{index}"),
+                lifetime: CompiledResourceLifetime::Dynamic,
+                ranges: vec![CompiledResourceByteRange {
+                    artifact_path: "weights.bin".to_string(),
+                    byte_offset: index * 64,
+                    byte_count: (index + 1) * 8,
+                    alignment_bytes: 8,
+                    integrity: CompiledResourceRangeIntegrity {
+                        algorithm: "sha256".to_string(),
+                        digest: format!("{index:x}").repeat(64),
+                    },
+                }],
+                dependencies: Vec::new(),
+                compatibility: CompiledResourceCompatibility {
+                    device_api: "vulkan".to_string(),
+                    storage_class: "storage_buffer".to_string(),
+                    read_only: true,
+                    required_features: Vec::new(),
+                },
+                resident_derivation: None,
+            })
+            .collect::<Vec<_>>();
+        let atomic_groups = resources
+            .iter()
+            .enumerate()
+            .map(|(index, resource)| CompiledAtomicResidencyGroup {
+                id: format!("group-{index}"),
+                lifetime: CompiledResourceLifetime::Dynamic,
+                resource_ids: vec![resource.id.clone()],
+                dependencies: Vec::new(),
+            })
+            .collect();
         CompiledResourceResidencyContract {
             schema: "fixture".to_string(),
             identity_algorithm: "fixture".to_string(),
             state_machine_schema: "fixture".to_string(),
             supported_policies: Vec::new(),
-            resources: Vec::new(),
-            atomic_groups: Vec::new(),
+            resources,
+            atomic_groups,
             partition_templates: Vec::new(),
             bindings: Vec::new(),
             selectors: vec![CompiledResourceSelector {
@@ -546,12 +649,12 @@ mod compiled_resource_selector_ownership_tests {
             &contract,
             &layout,
             &ownership,
-            32,
+            64,
             4,
         )
         .unwrap();
         assert_eq!(residency.maximum_load_wave_group_count, 2);
-        assert_eq!(residency.maximum_load_wave_payload_bytes, 64);
+        assert_eq!(residency.maximum_load_wave_payload_bytes, 120);
         assert_eq!(residency.maximum_dynamic_allocation_padding_bytes, 12);
 
         let error = VulkanCompiledResourceSelectorOwnership::from_resource_indices(
@@ -621,6 +724,18 @@ mod compiled_resource_selector_ownership_tests {
             .all(|resource| resource.ranges.len() == 1 && resource.source_byte_count().unwrap() == 8));
         let index = CompiledResourceContractIndex::new(&contract).unwrap();
         let layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
+        let projected_payloads = layout
+            .source_payload_bytes_by_address_slot_for_ownership(&contract, &ownership)
+            .unwrap();
+        assert_eq!(projected_payloads.len(), 2);
+        assert!(projected_payloads.values().all(|bytes| *bytes == 8));
+        assert_eq!(projected_payloads.values().sum::<usize>(), 16);
+        let whole_payloads = layout
+            .source_payload_bytes_by_address_slot_for_ownership(&contract, &whole)
+            .unwrap();
+        assert_eq!(whole_payloads.len(), 2);
+        assert!(whole_payloads.values().all(|bytes| *bytes == 16));
+        assert_eq!(whole_payloads.values().sum::<usize>(), 32);
         let sparse = compiled_resource_sparse_group_layouts(
             &contract,
             &index,

@@ -4,6 +4,20 @@ struct VulkanRuntimeHybridExactCandidateResourcePlanner<'a> {
     planning_devices: &'a [VulkanRuntimePhysicalPlanningDevice],
     context_capacity_activations: usize,
     speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
+}
+
+#[derive(Default)]
+struct VulkanRuntimeHybridExactCandidateResourceRequirements {
+    shared_ranges: Vec<VulkanHybridSharedRangeRequirement>,
+    direct_claims: Vec<VulkanHybridResourceClaim>,
+}
+
+impl VulkanRuntimeHybridExactCandidateResourceRequirements {
+    fn extend(&mut self, other: Self) {
+        self.shared_ranges.extend(other.shared_ranges);
+        self.direct_claims.extend(other.direct_claims);
+    }
 }
 
 impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
@@ -39,7 +53,7 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
             .all(|device| eligible_identities.contains(device))
     }
 
-    fn shared_resource_requirements(
+    fn resource_requirements(
         &self,
         runtime_model: &VulkanResidentRuntimeModel,
         phase: VulkanTargetedComponentExecutionPhase,
@@ -48,7 +62,11 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
         region_execution: Option<&VulkanPlacementRegionExecutionCalibration>,
         tensor_index: &TensorIndex,
         resource_contract: &CompiledResourceResidencyContract,
-    ) -> Result<Vec<VulkanHybridSharedRangeRequirement>, VulkanRuntimeHybridPlacementError> {
+        resource_layout: &VulkanCompiledResourceAddressLayout,
+    ) -> Result<
+        VulkanRuntimeHybridExactCandidateResourceRequirements,
+        VulkanRuntimeHybridPlacementError,
+    > {
         let component_cases = if let Some(region) = region_execution {
             if region.component_cases.len() != component_ids.len()
                 || region.execution_case != *execution_case
@@ -82,8 +100,24 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
             .map(|device| device.storage_buffer_offset_alignment)
             .max()
             .unwrap_or(1);
+        let contract_alignment =
+            compiled_resource_contract_minimum_upload_alignment(resource_contract)
+                .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let upload_alignment_by_logical_device = self
+            .planning_devices
+            .iter()
+            .map(|device| {
+                (
+                    device.logical_device_id.clone(),
+                    device
+                        .storage_buffer_offset_alignment
+                        .max(contract_alignment)
+                        .max(std::mem::align_of::<u64>()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
 
-        let mut requirements = Vec::new();
+        let mut requirements = VulkanRuntimeHybridExactCandidateResourceRequirements::default();
         for (component_id, component_case) in component_ids.iter().zip(component_cases) {
             requirements.extend(exact_vulkan_runtime_hybrid_component_resource_requirements(
                 self.package_root,
@@ -98,6 +132,9 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
                 self.speculative_draft_tokens,
                 tensor_index,
                 resource_contract,
+                resource_layout,
+                &upload_alignment_by_logical_device,
+                self.residency_policy,
             )?);
         }
         Ok(requirements)
@@ -370,7 +407,13 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
     speculative_draft_tokens: usize,
     tensor_index: &TensorIndex,
     resource_contract: &CompiledResourceResidencyContract,
-) -> Result<Vec<VulkanHybridSharedRangeRequirement>, VulkanRuntimeHybridPlacementError> {
+    resource_layout: &VulkanCompiledResourceAddressLayout,
+    upload_alignment_by_logical_device: &BTreeMap<String, usize>,
+    residency_policy: ResourceResidencyPolicy,
+) -> Result<
+    VulkanRuntimeHybridExactCandidateResourceRequirements,
+    VulkanRuntimeHybridPlacementError,
+> {
     let owner_logical_device_id = logical_device_id_by_physical_device
         .get(&execution_case.owner_physical_device_id)
         .ok_or_else(|| {
@@ -431,7 +474,10 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
         if execution_case.strategy == VulkanPlacementExecutionStrategy::SingleDevice {
             BTreeMap::new()
         } else {
-            BTreeMap::from([(component_id.to_string(), participant_logical_device_ids)])
+            BTreeMap::from([(
+                component_id.to_string(),
+                participant_logical_device_ids.clone(),
+            )])
         };
     let mut execution_plan =
         VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_with_resource_contract(
@@ -455,6 +501,19 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
         &loaded_manifest,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let selected_resource_requirements =
+        exact_vulkan_runtime_hybrid_selected_resource_requirements(
+            &placed_model,
+            component_id,
+            &execution_plan,
+            &participant_logical_device_ids,
+            speculative_draft_tokens > 0,
+            resource_contract,
+            resource_layout,
+            identity_by_logical_device,
+            upload_alignment_by_logical_device,
+            residency_policy,
+        )?;
     let distributed_activation_requirements =
         exact_vulkan_runtime_hybrid_distributed_activation_requirements(
             runtime_model,
@@ -511,7 +570,299 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
         tensor_index,
     )?);
     component_requirements.extend(distributed_activation_requirements);
-    Ok(component_requirements)
+    component_requirements.extend(selected_resource_requirements.shared_ranges);
+    Ok(VulkanRuntimeHybridExactCandidateResourceRequirements {
+        shared_ranges: component_requirements,
+        direct_claims: selected_resource_requirements.direct_claims,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exact_vulkan_runtime_hybrid_selected_resource_requirements(
+    runtime_model: &VulkanResidentRuntimeModel,
+    component_id: &str,
+    execution_plan: &VulkanDistributedExecutionPlan,
+    participant_logical_device_ids: &[String],
+    mount_speculative_decoders: bool,
+    resource_contract: &CompiledResourceResidencyContract,
+    resource_layout: &VulkanCompiledResourceAddressLayout,
+    identity_by_logical_device: &BTreeMap<String, VulkanPlacementDeviceExecutionIdentity>,
+    upload_alignment_by_logical_device: &BTreeMap<String, usize>,
+    residency_policy: ResourceResidencyPolicy,
+) -> Result<
+    VulkanRuntimeHybridExactCandidateResourceRequirements,
+    VulkanRuntimeHybridPlacementError,
+> {
+    let mut component_plan = execution_plan.clone();
+    component_plan
+        .dispatches
+        .retain(|dispatch| dispatch.component_id == component_id);
+    let distributed_store_plan = VulkanDistributedSelectedResourceStorePlan::from_execution_plan(
+        &component_plan,
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let (input_component_id, output_component_id) = runtime_model
+        .circuit_graph
+        .signal_processor_endpoint_component_ids()
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let input_device_id = runtime_model
+        .placement
+        .device_for_component(&input_component_id);
+    let output_device_id = runtime_model
+        .placement
+        .device_for_component(&output_component_id);
+    let mut requirements = VulkanRuntimeHybridExactCandidateResourceRequirements::default();
+    for logical_device_id in participant_logical_device_ids {
+        let identity = identity_by_logical_device
+            .get(logical_device_id)
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(format!(
+                    "exact hybrid selected-resource store has no physical identity for {:?}",
+                    logical_device_id,
+                ))
+            })?;
+        let upload_alignment = upload_alignment_by_logical_device
+            .get(logical_device_id)
+            .copied()
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(format!(
+                    "exact hybrid selected-resource store has no upload alignment for {:?}",
+                    logical_device_id,
+                ))
+            })?;
+        let logical_device_ids = BTreeSet::from([logical_device_id.clone()]);
+        let Some(ownership) = compiled_resource_selector_ownership_for_device_set(
+            runtime_model,
+            resource_contract,
+            input_device_id,
+            output_device_id,
+            &logical_device_ids,
+            mount_speculative_decoders,
+            &distributed_store_plan,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
+        else {
+            continue;
+        };
+        let parameters =
+            plan_compiled_parameter_residency_for_device_set_with_selector_ownership(
+                runtime_model,
+                resource_contract,
+                input_device_id,
+                output_device_id,
+                &logical_device_ids,
+                mount_speculative_decoders,
+                residency_policy,
+                &ownership,
+            )
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        if parameters.staging_headroom_bytes == 0 {
+            return runtime_hybrid_error(format!(
+                "exact hybrid selected-resource store on {logical_device_id:?} has no atomic load wave",
+            ));
+        }
+        let store = plan_compiled_resource_store_residency_for_ownership(
+            resource_contract,
+            resource_layout,
+            &ownership,
+            parameters.staging_headroom_bytes,
+            upload_alignment,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let payload_bytes_by_slot = resource_layout
+            .source_payload_bytes_by_address_slot_for_ownership(resource_contract, &ownership)
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let dynamic_addressable_bytes = parameters
+            .maximum_addressable_bytes
+            .checked_sub(parameters.always_resident_bytes)
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(
+                    "exact hybrid dynamic addressability underflowed".to_string(),
+                )
+            })?;
+        let payload_bytes = payload_bytes_by_slot.values().try_fold(
+            0usize,
+            |total, bytes| {
+                total.checked_add(*bytes).ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(
+                        "exact hybrid selected-resource payload bytes overflowed".to_string(),
+                    )
+                })
+            },
+        )?;
+        if payload_bytes != dynamic_addressable_bytes {
+            return runtime_hybrid_error(format!(
+                "exact hybrid selected-resource slots contain {payload_bytes} bytes but residency on {logical_device_id:?} addresses {dynamic_addressable_bytes}",
+            ));
+        }
+        append_exact_vulkan_runtime_hybrid_store_fixed_requirements(
+            runtime_model,
+            component_id,
+            identity,
+            resource_layout,
+            &ownership,
+            &store,
+            upload_alignment,
+            &mut requirements.shared_ranges,
+        )?;
+        append_exact_vulkan_runtime_hybrid_cache_requirements(
+            runtime_model,
+            component_id,
+            identity,
+            &payload_bytes_by_slot,
+            store.maximum_load_wave_payload_bytes,
+            residency_policy,
+            &mut requirements,
+        )?;
+    }
+    Ok(requirements)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_exact_vulkan_runtime_hybrid_store_fixed_requirements(
+    runtime_model: &VulkanResidentRuntimeModel,
+    component_id: &str,
+    identity: &VulkanPlacementDeviceExecutionIdentity,
+    resource_layout: &VulkanCompiledResourceAddressLayout,
+    ownership: &VulkanCompiledResourceSelectorOwnership,
+    store: &VulkanCompiledResourceStoreResidencyBytes,
+    upload_alignment: usize,
+    requirements: &mut Vec<VulkanHybridSharedRangeRequirement>,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    let prefix = format!("runtime-cache:{}", runtime_model.execution_scope);
+    append_exact_vulkan_runtime_hybrid_shared_bytes(
+        requirements,
+        format!("{prefix}:address-table"),
+        identity,
+        VulkanHybridResourceClass::MutableState,
+        store.address_table_device_bytes,
+    );
+    append_exact_vulkan_runtime_hybrid_shared_bytes(
+        requirements,
+        format!("{prefix}:parameter-slots:{component_id}"),
+        identity,
+        VulkanHybridResourceClass::MutableState,
+        store.parameter_slot_table_device_bytes,
+    );
+    for slot in 0..store.transfer_staging_slot_count {
+        append_exact_vulkan_runtime_hybrid_shared_bytes(
+            requirements,
+            format!("{prefix}:transfer-staging:slot:{slot}"),
+            identity,
+            VulkanHybridResourceClass::MutableState,
+            store.transfer_staging_slot_byte_capacity,
+        );
+    }
+    let padding_per_slot = upload_alignment.saturating_sub(1);
+    if padding_per_slot > 0 {
+        for slot in resource_layout
+            .addressable_slots_for_ownership(ownership)
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
+        {
+            append_exact_vulkan_runtime_hybrid_shared_bytes(
+                requirements,
+                format!("{prefix}:allocation-padding:slot:{slot}"),
+                identity,
+                VulkanHybridResourceClass::MutableState,
+                padding_per_slot,
+            );
+        }
+    }
+    let planned_fixed = store
+        .fixed_device_bytes()
+        .and_then(|fixed| {
+            fixed
+                .checked_add(store.maximum_dynamic_allocation_padding_bytes)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(
+                        "exact hybrid selected-resource fixed bytes overflowed".to_string(),
+                    )
+                })
+        })
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let emitted_fixed = store
+        .address_table_device_bytes
+        .checked_add(store.parameter_slot_table_device_bytes)
+        .and_then(|bytes| bytes.checked_add(store.transfer_staging_device_bytes))
+        .and_then(|bytes| bytes.checked_add(store.maximum_dynamic_allocation_padding_bytes))
+        .ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(
+                "exact hybrid selected-resource emitted fixed bytes overflowed".to_string(),
+            )
+        })?;
+    if emitted_fixed != planned_fixed {
+        return runtime_hybrid_error(
+            "exact hybrid selected-resource fixed claims disagree with store residency",
+        );
+    }
+    Ok(())
+}
+
+fn append_exact_vulkan_runtime_hybrid_cache_requirements(
+    runtime_model: &VulkanResidentRuntimeModel,
+    component_id: &str,
+    identity: &VulkanPlacementDeviceExecutionIdentity,
+    payload_bytes_by_slot: &BTreeMap<usize, usize>,
+    maximum_load_wave_bytes: usize,
+    residency_policy: ResourceResidencyPolicy,
+    requirements: &mut VulkanRuntimeHybridExactCandidateResourceRequirements,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    if residency_policy == ResourceResidencyPolicy::DemandPaged {
+        append_exact_vulkan_runtime_hybrid_shared_bytes(
+            &mut requirements.shared_ranges,
+            format!("runtime-cache:{}:payload-arena", runtime_model.execution_scope),
+            identity,
+            VulkanHybridResourceClass::CacheQuota,
+            maximum_load_wave_bytes,
+        );
+    } else {
+        for (slot, bytes) in payload_bytes_by_slot {
+            append_exact_vulkan_runtime_hybrid_shared_bytes(
+                &mut requirements.shared_ranges,
+                format!(
+                    "runtime-cache:{}:retained-payload-slot:{slot}",
+                    runtime_model.execution_scope,
+                ),
+                identity,
+                VulkanHybridResourceClass::CacheQuota,
+                *bytes,
+            );
+        }
+    }
+    requirements
+        .direct_claims
+        .push(VulkanHybridResourceClaim::device(
+            format!(
+                "exact-load-wave:{}:{component_id}:{}:{}:{}:{}",
+                runtime_model.execution_scope,
+                identity.physical_device_id,
+                identity.api_version,
+                identity.driver_version,
+                maximum_load_wave_bytes,
+            ),
+            identity.clone(),
+            VulkanHybridResourceClass::AtomicLoadWave,
+            maximum_load_wave_bytes,
+        ));
+    Ok(())
+}
+
+fn append_exact_vulkan_runtime_hybrid_shared_bytes(
+    requirements: &mut Vec<VulkanHybridSharedRangeRequirement>,
+    resource_identity: String,
+    identity: &VulkanPlacementDeviceExecutionIdentity,
+    class: VulkanHybridResourceClass,
+    byte_count: usize,
+) {
+    if byte_count > 0 {
+        requirements.push(VulkanHybridSharedRangeRequirement {
+            resource_identity,
+            target: VulkanHybridResourceTarget::Device(identity.clone()),
+            class,
+            byte_offset: 0,
+            byte_count,
+        });
+    }
 }
 
 fn exact_vulkan_runtime_hybrid_distributed_activation_requirements(

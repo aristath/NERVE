@@ -413,17 +413,32 @@ For every numbered item below:
   boundary alias, stream-control allocation, or distributed buffer. A
   candidate cannot inherit unrelated components' state merely because the
   workload-free planning copy co-locates the rest of the graph on its owner.
-  Permanent and mutable-state capacity are now authoritative during partial
+  Exact selected-resource cache and load-wave claims now precede route search
+  too. Dynamic compiler-selected tensors are excluded from immutable parameter
+  claims and charged exactly once through the store that owns them. The planner
+  combines local and distributed selector ownership per physical participant,
+  reconstructs projected TP fragments, exact address slots, address/parameter
+  tables, double-buffered transfer staging, and allocation padding. Retained and
+  eager policies reserve the union of unique source-payload slots; demand-paged
+  routes reserve the true largest legal selector wave. That wave is calculated
+  from the largest actually owned groups rather than the conservative product
+  of one maximum group and the route count, and must fit inside its admitted
+  quota. Adaptive derived representations share that physical quota while the
+  mandatory source bytes remain available for construction and restoration.
+  Terminal shared-host cache capacity now excludes the stream's own shared-host
+  reservation instead of double-spending it. Permanent, mutable-state,
+  cache-quota, and atomic-load-wave capacity are authoritative during partial
   route search, while sampled calibration transients remain advisory.
   Exact sequential tests compare a complete local route with the ordinary
   workload-free residency plan, prove component scoping and same-device edge
   deduplication, exercise device-local/shared-host distributed backing, and
-  reject a candidate one byte below its exact permanent-plus-state need.
-  The remaining resource work includes cache quota, atomic load-wave, and
-  execution-transient claims per
-  candidate before search; these must replace their calibration aggregates
-  without making sampled evidence authoritative. Exact sequential tests also
-  cover insufficient parameter capacity, unchanged
+  reject a candidate one byte below its exact retained need. The remaining
+  resource work is exact execution-transient claims per candidate before
+  search; these must replace their calibration aggregates without making
+  sampled evidence authoritative. Exact sequential tests also cover source
+  projections, uneven selector waves, paged versus retained/eager quotas,
+  selected-resource exclusion from permanent graph fallback, insufficient
+  parameter and cache capacity, shared-host cache/stream isolation, unchanged
   non-parameter classes, malformed bindings, ineligible historical candidates,
   representation/decode and prefill discovery, joint mount, local full-route
   totals, and four-participant TP fragment totals.

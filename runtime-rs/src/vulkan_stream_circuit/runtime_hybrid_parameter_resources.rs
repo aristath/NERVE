@@ -8,7 +8,7 @@ struct VulkanHybridPreparedDispatchIdentity {
 
 pub(crate) struct VulkanHybridDispatchParameterRequirements {
     pub requirements_by_component: BTreeMap<String, Vec<VulkanHybridSharedRangeRequirement>>,
-    prepared_parameter_tensors: BTreeSet<(String, String)>,
+    pub prepared_parameter_tensors: BTreeSet<(String, String)>,
 }
 
 /// Reconstructs exact immutable parameter byte ranges for every mounted
@@ -111,18 +111,21 @@ pub(crate) fn append_vulkan_hybrid_graph_parameter_requirements(
             requirements_by_component
                 .entry(component.component_id.clone())
                 .or_default()
-                .push(VulkanHybridSharedRangeRequirement::device_parameter(
-                    exact_vulkan_hybrid_fixed_resource_identity(
+                .extend(exact_vulkan_hybrid_fixed_resource_identity(
                         resource_contract,
                         &runtime_model.execution_scope,
                         &component.component_id,
                         None,
                         parameter_id,
-                    )?,
-                    physical_identity.clone(),
-                    0,
-                    tensor_byte_count,
-                ));
+                    )?
+                    .map(|resource_identity| {
+                        VulkanHybridSharedRangeRequirement::device_parameter(
+                            resource_identity,
+                            physical_identity.clone(),
+                            0,
+                            tensor_byte_count,
+                        )
+                    }));
         }
     }
     Ok(())
@@ -135,7 +138,7 @@ fn exact_vulkan_hybrid_parameter_resource_identity_for_tensor(
     prepared: &VulkanPreparedDispatch,
     parameter_id: &str,
     actual_tensor: &str,
-) -> Result<String, VulkanHybridResourceError> {
+) -> Result<Option<String>, VulkanHybridResourceError> {
     let prepared_tensor = prepared
         .descriptors
         .iter()
@@ -151,16 +154,20 @@ fn exact_vulkan_hybrid_parameter_resource_identity_for_tensor(
                 prepared.component_id,
             ))
         })?;
+    let Some(fixed_identity) = exact_vulkan_hybrid_fixed_resource_identity(
+        resource_contract,
+        &runtime_model.execution_scope,
+        &prepared.component_id,
+        Some(&prepared.node_id),
+        parameter_id,
+    )?
+    else {
+        return Ok(None);
+    };
     if actual_tensor == prepared_tensor {
-        exact_vulkan_hybrid_fixed_resource_identity(
-            resource_contract,
-            &runtime_model.execution_scope,
-            &prepared.component_id,
-            Some(&prepared.node_id),
-            parameter_id,
-        )
+        Ok(Some(fixed_identity))
     } else {
-        vulkan_hybrid_physical_tensor_resource_identity(tensor_index, actual_tensor)
+        vulkan_hybrid_physical_tensor_resource_identity(tensor_index, actual_tensor).map(Some)
     }
 }
 
@@ -172,7 +179,11 @@ pub(crate) fn vulkan_hybrid_dispatch_parameter_requirements_by_component<F>(
     mut resource_identity: F,
 ) -> Result<VulkanHybridDispatchParameterRequirements, VulkanHybridResourceError>
 where
-    F: FnMut(&VulkanPreparedDispatch, &str, &str) -> Result<String, VulkanHybridResourceError>,
+    F: FnMut(
+        &VulkanPreparedDispatch,
+        &str,
+        &str,
+    ) -> Result<Option<String>, VulkanHybridResourceError>,
 {
     let mut prepared_by_identity = BTreeMap::new();
     let mut prepared_parameter_tensors = BTreeSet::new();
@@ -300,11 +311,16 @@ where
                             fragment.byte_offset,
                             fragment.byte_count,
                         )?;
+                        let Some(resource_identity) =
+                            resource_identity(prepared, param_id, &fragment.tensor)?
+                        else {
+                            continue;
+                        };
                         requirements_by_component
                             .entry(distributed.component_id.clone())
                             .or_default()
                             .push(VulkanHybridSharedRangeRequirement::device_parameter(
-                                resource_identity(prepared, param_id, &fragment.tensor)?,
+                                resource_identity,
                                 physical_identity.clone(),
                                 fragment.byte_offset,
                                 fragment.byte_count,
@@ -329,11 +345,14 @@ where
                         "exact hybrid local parameter {tensor:?} declares {byte_count:?} bytes but the tensor index requires {tensor_byte_count}",
                     )));
                 }
+                let Some(resource_identity) = resource_identity(prepared, param_id, tensor)? else {
+                    continue;
+                };
                 requirements_by_component
                     .entry(prepared.component_id.clone())
                     .or_default()
                     .push(VulkanHybridSharedRangeRequirement::device_parameter(
-                        resource_identity(prepared, param_id, tensor)?,
+                        resource_identity,
                         (*owner_physical_identity).clone(),
                         0,
                         tensor_byte_count,
@@ -353,8 +372,8 @@ fn exact_vulkan_hybrid_fixed_resource_identity(
     component_id: &str,
     node_id: Option<&str>,
     parameter_id: &str,
-) -> Result<String, VulkanHybridResourceError> {
-    let identities = resource_contract
+) -> Result<Option<String>, VulkanHybridResourceError> {
+    let mappings = resource_contract
         .bindings
         .iter()
         .filter(|binding| {
@@ -365,28 +384,35 @@ fn exact_vulkan_hybrid_fixed_resource_identity(
         })
         .map(|binding| match &binding.mapping {
             CompiledResourceBindingMapping::AtomicGroup { resource_id, .. } => {
-                Ok(resource_id.clone())
+                Ok(Some(resource_id.clone()))
             }
             CompiledResourceBindingMapping::SelectedAtomicGroup { .. }
             | CompiledResourceBindingMapping::PartitionTemplateMember { .. } => {
-                Err(VulkanHybridResourceError(format!(
-                    "exact fixed parameter {}.{parameter_id} resolves to a selected resource mapping",
-                    component_id,
-                )))
+                Ok(None)
             }
         })
-        .collect::<Result<BTreeSet<_>, _>>()?;
+        .collect::<Result<BTreeSet<_>, VulkanHybridResourceError>>()?;
+    if mappings == BTreeSet::from([None]) {
+        return Ok(None);
+    }
+    if mappings.contains(&None) {
+        return Err(VulkanHybridResourceError(format!(
+            "exact parameter {}.{parameter_id} mixes fixed and selected mappings",
+            component_id,
+        )));
+    }
+    let identities = mappings.into_iter().flatten().collect::<BTreeSet<_>>();
     if identities.len() != 1 {
         return Err(VulkanHybridResourceError(format!(
-            "exact fixed parameter {}.{parameter_id} resolves to {} compiled resource identities",
+            "exact parameter {}.{parameter_id} resolves to {} fixed identities or mixes fixed and selected mappings",
             component_id,
             identities.len(),
         )));
     }
-    Ok(identities
+    Ok(Some(identities
         .into_iter()
         .next()
-        .expect("one exact resource identity was proved"))
+        .expect("one exact resource identity was proved")))
 }
 
 fn vulkan_hybrid_tensor_byte_count(

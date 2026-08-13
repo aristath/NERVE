@@ -755,7 +755,7 @@ mod tests {
             &plans,
             &fixture_tensor_index("row_major"),
             &identities,
-            |_dispatch, parameter_id, _tensor| Ok(format!("resource:{parameter_id}")),
+            |_dispatch, parameter_id, _tensor| Ok(Some(format!("resource:{parameter_id}"))),
         )
         .unwrap();
         let resources = canonical_vulkan_hybrid_shared_range_resources(
@@ -800,6 +800,45 @@ mod tests {
         assert_eq!(actual_by_physical_device, expected_by_physical_device);
         assert!(actual_by_physical_device["physical-owner"] > 0);
         assert!(actual_by_physical_device["physical-helper-a"] > 0);
+    }
+
+    #[test]
+    fn hybrid_parameter_claims_exclude_selected_resources_without_losing_graph_coverage() {
+        let prepared = fixture_prepared_plan();
+        let plan = fixture_plan("row_major");
+        let plans = VulkanDistributedExecutionPlanSet {
+            decode: plan.clone(),
+            decode_batch: plan.clone(),
+            prefill: plan,
+        };
+        let identities = ["owner", "helper-a", "helper-b", "helper-c"]
+            .into_iter()
+            .map(|logical| {
+                (
+                    logical.to_string(),
+                    VulkanPlacementDeviceExecutionIdentity {
+                        physical_device_id: format!("physical-{logical}"),
+                        api_version: 1,
+                        driver_version: 2,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let requirements = vulkan_hybrid_dispatch_parameter_requirements_by_component(
+            &[("owner", &prepared)],
+            &plans,
+            &fixture_tensor_index("row_major"),
+            &identities,
+            |_dispatch, _parameter_id, _tensor| Ok(None),
+        )
+        .unwrap();
+
+        assert!(requirements.requirements_by_component.is_empty());
+        assert!(
+            !requirements.prepared_parameter_tensors.is_empty(),
+            "selected-resource parameters must remain dispatch-covered so graph fallback cannot charge them again as permanent tensors",
+        );
     }
 
     #[test]

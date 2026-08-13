@@ -83,59 +83,17 @@ fn mount_distributed_calibration_selected_resources(
                 device_plan.device_id,
             ))
         })?;
-        let mut resources_by_selector = BTreeMap::new();
-        let mut projections_by_selector = BTreeMap::new();
         for selector in &device_plan.selectors {
-                if selector.execution_scope != execution_scope {
-                    return distributed_calibration_error(format!(
-                        "distributed selector {:?} belongs to execution scope {:?}, expected {execution_scope:?}",
-                        selector.selector_id, selector.execution_scope,
-                    ));
-                }
-                if !selector.owned_resource_indices.is_empty() {
-                    resources_by_selector.insert(
-                    selector.selector_id.clone(),
-                    selector
-                        .owned_resource_indices
-                        .iter()
-                        .copied()
-                        .collect::<BTreeSet<_>>(),
-                    );
-                }
-                for fragment in &selector.fragmented_resources {
-                    let projection = VulkanCompiledResourceSourceProjection {
-                        resources: fragment
-                            .resources
-                            .iter()
-                            .map(|resource| {
-                                (
-                                    resource.resource_id.clone(),
-                                    VulkanCompiledResourceSourceRangeProjection {
-                                        source_byte_count: resource.source_byte_count,
-                                        byte_offset: resource.byte_offset,
-                                        byte_count: resource.byte_count,
-                                    },
-                                )
-                            })
-                            .collect(),
-                    };
-                    if projections_by_selector
-                        .entry(selector.selector_id.clone())
-                        .or_insert_with(BTreeMap::new)
-                        .insert(fragment.resource_index, projection)
-                        .is_some()
-                    {
-                        return distributed_calibration_error(format!(
-                            "distributed selector {:?} repeats fragment resource {} on {:?}",
-                            selector.selector_id, fragment.resource_index, device_plan.device_id,
-                        ));
-                    }
-                }
+            if selector.execution_scope != execution_scope {
+                return distributed_calibration_error(format!(
+                    "distributed selector {:?} belongs to execution scope {:?}, expected {execution_scope:?}",
+                    selector.selector_id, selector.execution_scope,
+                ));
+            }
         }
-        let ownership = VulkanCompiledResourceSelectorOwnership::from_resources_and_source_projections(
+        let ownership = compiled_resource_selector_ownership_from_distributed_device_plan(
             contract,
-            resources_by_selector,
-            projections_by_selector,
+            device_plan,
         )
         .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         let upload_alignment = compiled_resource_upload_alignment(contract, device)

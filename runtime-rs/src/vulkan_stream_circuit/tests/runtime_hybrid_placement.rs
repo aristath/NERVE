@@ -1390,6 +1390,7 @@ fn runtime_hybrid_exact_candidate_resources_prune_before_terminal_mount() {
         planning_devices: &planning_devices,
         context_capacity_activations: 64,
         speculative_draft_tokens: 0,
+        residency_policy: ResourceResidencyPolicy::Eager,
     };
     let candidates = runtime_hybrid_candidate_graph(
         &model,
@@ -1405,6 +1406,8 @@ fn runtime_hybrid_exact_candidate_resources_prune_before_terminal_mount() {
         BTreeSet::from([
             VulkanHybridResourceClass::Permanent,
             VulkanHybridResourceClass::MutableState,
+            VulkanHybridResourceClass::CacheQuota,
+            VulkanHybridResourceClass::AtomicLoadWave,
         ])
     );
 
@@ -1518,6 +1521,7 @@ fn runtime_hybrid_exact_candidate_parameters_require_complete_physical_bindings(
         planning_devices: &planning_devices,
         context_capacity_activations: 64,
         speculative_draft_tokens: 0,
+        residency_policy: ResourceResidencyPolicy::Eager,
     };
 
     let error = match runtime_hybrid_candidate_graph(
@@ -1568,6 +1572,7 @@ fn runtime_hybrid_exact_state_deduplicates_same_device_component_edges() {
         planning_devices: &planning_devices,
         context_capacity_activations: 64,
         speculative_draft_tokens: 0,
+        residency_policy: ResourceResidencyPolicy::Eager,
     };
     let candidates = runtime_hybrid_candidate_graph(
         &model,
@@ -1798,6 +1803,205 @@ fn runtime_hybrid_exact_state_accounts_distributed_shared_and_private_activation
     assert_eq!(
         device_local.device_bytes[&hybrid_test_device("gpu1")].mutable_state_bytes,
         24
+    );
+}
+
+fn exact_candidate_resources_for_model(
+    model: &VulkanResidentRuntimeModel,
+    policy: ResourceResidencyPolicy,
+) -> VulkanHybridCandidateResources {
+    let catalog = hybrid_test_catalog(model);
+    let package_root = tiny_model_dir();
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "gpu0".to_string()),
+        ("gpu1".to_string(), "gpu1".to_string()),
+    ]);
+    let planning_devices = [
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu0".to_string(),
+            identity: hybrid_test_device("gpu0"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu1".to_string(),
+            identity: hybrid_test_device("gpu1"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+    ];
+    let planner = VulkanRuntimeHybridExactCandidateResourcePlanner {
+        package_root: &package_root,
+        logical_device_id_by_physical_device: &bindings,
+        planning_devices: &planning_devices,
+        context_capacity_activations: 64,
+        speculative_draft_tokens: 0,
+        residency_policy: policy,
+    };
+    let candidates = runtime_hybrid_candidate_graph(
+        model,
+        &catalog,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        None,
+        VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+        Some(&planner),
+    )
+    .unwrap();
+    let candidate = candidates
+        .region_candidates
+        .iter()
+        .find(|candidate| candidate.execution_case.owner_physical_device_id == "gpu0")
+        .unwrap();
+    candidates.resource_catalog.region_resources_by_candidate_id[&candidate.candidate_id].clone()
+}
+
+fn exact_candidate_reservations_for_model(
+    model: &VulkanResidentRuntimeModel,
+    policy: ResourceResidencyPolicy,
+) -> VulkanHybridResourceReservations {
+    let resources = exact_candidate_resources_for_model(model, policy);
+    VulkanHybridResourceReservations::default()
+        .reserve(
+            &resources,
+            &VulkanPlacementCapacityEnvelope {
+                available_bytes_by_device: BTreeMap::from([
+                    (hybrid_test_device("gpu0"), usize::MAX),
+                    (hybrid_test_device("gpu1"), usize::MAX),
+                ]),
+                host_available_bytes: usize::MAX,
+            },
+        )
+        .unwrap()
+        .unwrap()
+}
+
+fn exact_dynamic_candidate_reservations(
+    policy: ResourceResidencyPolicy,
+) -> VulkanHybridResourceReservations {
+    exact_candidate_reservations_for_model(
+        &fixture_model_runtime_model_with_dynamic_partition(1_000, 64),
+        policy,
+    )
+}
+
+#[test]
+fn runtime_hybrid_exact_dynamic_resources_reject_one_byte_below_capacity() {
+    let model = fixture_model_runtime_model_with_dynamic_partition(1_000, 64);
+    let resources = exact_candidate_resources_for_model(
+        &model,
+        ResourceResidencyPolicy::DemandRetained,
+    );
+    let unbounded = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), usize::MAX),
+            (hybrid_test_device("gpu1"), usize::MAX),
+        ]),
+        host_available_bytes: usize::MAX,
+    };
+    let exact = VulkanHybridResourceReservations::default()
+        .reserve(&resources, &unbounded)
+        .unwrap()
+        .unwrap();
+    let required_gpu0 = exact.device_bytes[&hybrid_test_device("gpu0")]
+        .required_capacity_bytes()
+        .unwrap();
+    let exact_capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: exact
+            .device_bytes
+            .iter()
+            .map(|(device, bytes)| {
+                (device.clone(), bytes.required_capacity_bytes().unwrap())
+            })
+            .collect(),
+        host_available_bytes: exact.host_bytes.required_capacity_bytes().unwrap(),
+    };
+    assert!(
+        VulkanHybridResourceReservations::default()
+            .reserve(&resources, &exact_capacity)
+            .unwrap()
+            .is_some(),
+        "the exact physical capacity must admit the candidate",
+    );
+    let mut insufficient = exact_capacity;
+    insufficient
+        .available_bytes_by_device
+        .insert(hybrid_test_device("gpu0"), required_gpu0 - 1);
+    assert!(
+        VulkanHybridResourceReservations::default()
+            .reserve(&resources, &insufficient)
+            .unwrap()
+            .is_none(),
+        "one byte below the exact retained plus transient requirement must reject before terminal mount",
+    );
+}
+
+#[test]
+fn runtime_hybrid_exact_cache_distinguishes_paged_and_retained_residency() {
+    let paged = exact_dynamic_candidate_reservations(ResourceResidencyPolicy::DemandPaged);
+    let retained = exact_dynamic_candidate_reservations(ResourceResidencyPolicy::DemandRetained);
+    let eager = exact_dynamic_candidate_reservations(ResourceResidencyPolicy::Eager);
+    let paged = &paged.device_bytes[&hybrid_test_device("gpu0")];
+    let retained = &retained.device_bytes[&hybrid_test_device("gpu0")];
+    let eager = &eager.device_bytes[&hybrid_test_device("gpu0")];
+
+    assert_eq!(paged.atomic_load_wave_bytes, 64);
+    assert_eq!(paged.cache_quota_bytes, 64);
+    assert_eq!(retained.atomic_load_wave_bytes, 64);
+    assert_eq!(retained.cache_quota_bytes, 64_000);
+    assert_eq!(eager.atomic_load_wave_bytes, 64);
+    assert_eq!(eager.cache_quota_bytes, 64_000);
+    assert!(paged.mutable_state_bytes > 0);
+    assert_eq!(paged.mutable_state_bytes, retained.mutable_state_bytes);
+    assert_eq!(retained.mutable_state_bytes, eager.mutable_state_bytes);
+
+    let model = fixture_model_runtime_model_with_dynamic_partition(1_000, 64);
+    let package_root = tiny_model_dir();
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let plan = plan_vulkan_runtime_residency(
+        &package_root,
+        &model,
+        &tensor_index,
+        64,
+        0,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+    let [device] = plan.device_plans.as_slice() else {
+        panic!("the dynamic fixture must have one logical residency device");
+    };
+    let expected_mutable = device
+        .resource_store
+        .maximum_extra_device_bytes()
+        .unwrap()
+        .checked_add(device.working_set.transient_state_bytes)
+        .and_then(|bytes| bytes.checked_add(device.working_set.activation_headroom_bytes))
+        .unwrap();
+    assert_eq!(retained.mutable_state_bytes, expected_mutable);
+    let static_model = fixture_model_runtime_model();
+    let static_reservations = exact_candidate_reservations_for_model(
+        &static_model,
+        ResourceResidencyPolicy::DemandRetained,
+    );
+    let static_bytes = &static_reservations.device_bytes[&hybrid_test_device("gpu0")];
+    let static_tensor_index = static_model.load_runtime_tensor_index(&package_root).unwrap();
+    let selected_tensor = static_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .params
+        .refs["ffn_down"]
+        .tensor
+        .as_ref()
+        .unwrap();
+    let selected_bytes = static_tensor_index.tensors[selected_tensor]
+        .byte_count
+        .unwrap();
+    assert_eq!(
+        static_bytes.permanent_bytes - retained.permanent_bytes,
+        selected_bytes,
+        "selected expert payload must move from permanent storage into cache quota exactly once",
     );
 }
 

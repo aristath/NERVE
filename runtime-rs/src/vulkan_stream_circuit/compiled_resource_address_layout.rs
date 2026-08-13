@@ -728,6 +728,13 @@ impl VulkanCompiledResourceAddressLayout {
         &self,
         ownership: &VulkanCompiledResourceSelectorOwnership,
     ) -> Result<usize, VulkanCompiledResourceAddressLayoutError> {
+        Ok(self.addressable_slots_for_ownership(ownership)?.len())
+    }
+
+    pub fn addressable_slots_for_ownership(
+        &self,
+        ownership: &VulkanCompiledResourceSelectorOwnership,
+    ) -> Result<BTreeSet<usize>, VulkanCompiledResourceAddressLayoutError> {
         let mut slots = BTreeSet::new();
         for (selector_id, resource_indices) in ownership.iter() {
             let selector = self
@@ -751,7 +758,147 @@ impl VulkanCompiledResourceAddressLayout {
                 slots.extend(resource_slots);
             }
         }
-        Ok(slots.len())
+        Ok(slots)
+    }
+
+    /// Returns the mandatory source-representation payload behind every
+    /// addressable slot owned by one physical store. Resident derivations are
+    /// adaptive secondary allocations: they can replace a published address,
+    /// but the source bytes remain the authoritative cache payload needed to
+    /// construct or restore that representation.
+    pub fn source_payload_bytes_by_address_slot_for_ownership(
+        &self,
+        contract: &CompiledResourceResidencyContract,
+        ownership: &VulkanCompiledResourceSelectorOwnership,
+    ) -> Result<BTreeMap<usize, usize>, VulkanCompiledResourceAddressLayoutError> {
+        let contract_index = CompiledResourceContractIndex::new(contract).map_err(|error| {
+            VulkanCompiledResourceAddressLayoutError(error.to_string())
+        })?;
+        let mut payload_by_slot = BTreeMap::new();
+        for (selector_id, resource_indices) in ownership.iter() {
+            let selector = contract
+                .selectors
+                .iter()
+                .find(|selector| selector.id == selector_id)
+                .ok_or_else(|| {
+                    VulkanCompiledResourceAddressLayoutError(format!(
+                        "compiled ownership selector {selector_id:?} has no contract",
+                    ))
+                })?;
+            let layout = self
+                .selectors
+                .iter()
+                .find(|layout| layout.selector_id == selector_id)
+                .ok_or_else(|| {
+                    VulkanCompiledResourceAddressLayoutError(format!(
+                        "compiled ownership selector {selector_id:?} has no address layout",
+                    ))
+                })?;
+            for resource_index in resource_indices {
+                let slots = layout.mapping.resource_slots(*resource_index).ok_or_else(|| {
+                    VulkanCompiledResourceAddressLayoutError(format!(
+                        "compiled ownership selector {selector_id:?} resource {resource_index} has no address slots",
+                    ))
+                })?;
+                let payloads = match &selector.mapping {
+                    CompiledResourceSelectorMapping::GroupTable { atomic_group_ids } => {
+                        let group_id = atomic_group_ids.get(*resource_index).ok_or_else(|| {
+                            VulkanCompiledResourceAddressLayoutError(format!(
+                                "compiled ownership selector {selector_id:?} resource {resource_index} has no atomic group",
+                            ))
+                        })?;
+                        let group = contract_index.atomic_group(contract, group_id).ok_or_else(|| {
+                            VulkanCompiledResourceAddressLayoutError(format!(
+                                "compiled ownership selector {selector_id:?} references missing group {group_id:?}",
+                            ))
+                        })?;
+                        let projection = ownership.source_projection(selector_id, *resource_index);
+                        group
+                            .resource_ids
+                            .iter()
+                            .map(|resource_id| {
+                                if let Some(projection) = projection {
+                                    projection
+                                        .resources
+                                        .get(resource_id)
+                                        .map(|resource| resource.byte_count)
+                                        .ok_or_else(|| {
+                                            VulkanCompiledResourceAddressLayoutError(format!(
+                                                "compiled ownership projection omits resource {resource_id:?}",
+                                            ))
+                                        })
+                                } else {
+                                    let resource = contract_index
+                                        .resource(contract, resource_id)
+                                        .ok_or_else(|| {
+                                            VulkanCompiledResourceAddressLayoutError(format!(
+                                                "compiled ownership group references missing resource {resource_id:?}",
+                                            ))
+                                        })?;
+                                    compiled_resource_bytes(resource).map_err(|error| {
+                                        VulkanCompiledResourceAddressLayoutError(error.to_string())
+                                    })
+                                }
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    }
+                    CompiledResourceSelectorMapping::PartitionTemplate {
+                        partition_template_id,
+                    } => {
+                        if ownership.source_projection(selector_id, *resource_index).is_some() {
+                            return Err(VulkanCompiledResourceAddressLayoutError(format!(
+                                "compiled partition selector {selector_id:?} cannot use a source projection",
+                            )));
+                        }
+                        let template = contract_index
+                            .partition_template(contract, partition_template_id)
+                            .ok_or_else(|| {
+                                VulkanCompiledResourceAddressLayoutError(format!(
+                                    "compiled ownership selector {selector_id:?} references missing template {partition_template_id:?}",
+                                ))
+                            })?;
+                        template
+                            .member_templates
+                            .iter()
+                            .map(|member| {
+                                member.range_templates.iter().try_fold(
+                                    0usize,
+                                    |total, range| {
+                                        total.checked_add(range.byte_count).ok_or_else(|| {
+                                            VulkanCompiledResourceAddressLayoutError(
+                                                "compiled partition payload bytes overflowed"
+                                                    .to_string(),
+                                            )
+                                        })
+                                    },
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    }
+                };
+                if slots.len() != payloads.len() {
+                    return Err(VulkanCompiledResourceAddressLayoutError(format!(
+                        "compiled ownership selector {selector_id:?} resource {resource_index} has {} slots but {} payloads",
+                        slots.len(), payloads.len(),
+                    )));
+                }
+                for (slot, bytes) in slots.into_iter().zip(payloads) {
+                    if bytes == 0 {
+                        return Err(VulkanCompiledResourceAddressLayoutError(
+                            "compiled ownership payload slot is empty".to_string(),
+                        ));
+                    }
+                    if let Some(previous) = payload_by_slot.insert(slot, bytes)
+                        && previous != bytes
+                    {
+                        return Err(VulkanCompiledResourceAddressLayoutError(format!(
+                            "compiled ownership address slot {slot} changes from {previous} to {bytes} bytes",
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(payload_by_slot)
     }
 
     pub fn selector(

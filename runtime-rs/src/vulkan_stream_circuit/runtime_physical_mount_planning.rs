@@ -238,6 +238,21 @@ pub fn plan_vulkan_runtime_physical_mount(
         &selected_resource_cache_quota_bytes_by_logical_device,
         resource_residency_policy,
     );
+    let shared_host_cache_quota_bytes = if selected_resource_summary.uses_shared_host_cache {
+        let remaining = remaining_vulkan_runtime_host_cache_bytes(
+            host_safe_capacity_bytes,
+            resolution
+                .plans
+                .physical_execution_residency_plan
+                .total_stream_shared_host_bytes,
+        )?;
+        if remaining == 0 {
+            return Ok(None);
+        }
+        remaining
+    } else {
+        0
+    };
     Ok(Some(VulkanRuntimePhysicalMountPlan {
         physical_execution_residency_plan: resolution.plans.physical_execution_residency_plan,
         exact_parameter_resources_by_component,
@@ -245,12 +260,21 @@ pub fn plan_vulkan_runtime_physical_mount(
         selected_resource_cache_quota_bytes_by_logical_device,
         maximum_load_wave_bytes_by_logical_device: selected_resource_summary
             .maximum_load_wave_bytes_by_logical_device,
-        shared_host_cache_quota_bytes: if selected_resource_summary.uses_shared_host_cache {
-            host_safe_capacity_bytes
-        } else {
-            0
-        },
+        shared_host_cache_quota_bytes,
     }))
+}
+
+fn remaining_vulkan_runtime_host_cache_bytes(
+    safe_host_capacity_bytes: usize,
+    stream_shared_host_bytes: usize,
+) -> Result<usize, VulkanResidentTokenModelPackageError> {
+    safe_host_capacity_bytes
+        .checked_sub(stream_shared_host_bytes)
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "runtime stream needs {stream_shared_host_bytes} shared-host bytes but only {safe_host_capacity_bytes} safe host bytes are available",
+            ))
+        })
 }
 
 fn summarize_vulkan_runtime_physical_selected_resources(
