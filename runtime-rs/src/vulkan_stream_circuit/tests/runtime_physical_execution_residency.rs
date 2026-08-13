@@ -143,17 +143,20 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
         participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
         byte_capacity: 19,
         concern: "test allocation".to_string(),
+        lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
     };
     let device_transients = vec![
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "owner".to_string(),
             byte_capacity: 33,
             concern: "owner test allocation".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "helper".to_string(),
             byte_capacity: 17,
             concern: "helper test allocation".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::DeferredReusable,
         },
     ];
 
@@ -224,11 +227,13 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
                     logical_device_id: "owner".to_string(),
                     byte_capacity: 1,
                     concern: "valid prefix".to_string(),
+                    lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
                 },
                 VulkanRuntimeDeviceLocalTransientAllocation {
                     logical_device_id: "absent".to_string(),
                     byte_capacity: 1,
                     concern: "invalid suffix".to_string(),
+                    lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
                 },
             ],
             &[],
@@ -607,16 +612,19 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
             logical_device_id: "".to_string(),
             byte_capacity: 19,
             concern: "missing device".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "owner".to_string(),
             byte_capacity: 0,
             concern: "zero capacity".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "owner".to_string(),
             byte_capacity: 19,
             concern: "".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
     ] {
         let error = plan
@@ -633,6 +641,7 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
             participant_device_ids: vec!["helper".to_string()],
             byte_capacity: 19,
             concern: "missing owner".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
         VulkanRuntimeSharedHostTransientAllocation {
             mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
@@ -640,6 +649,7 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
             participant_device_ids: vec!["owner".to_string(), "owner".to_string()],
             byte_capacity: 19,
             concern: "duplicate participant".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
         VulkanRuntimeSharedHostTransientAllocation {
             mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
@@ -647,6 +657,7 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
             participant_device_ids: vec!["owner".to_string()],
             byte_capacity: 0,
             concern: "zero capacity".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
         VulkanRuntimeSharedHostTransientAllocation {
             mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
@@ -654,6 +665,7 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
             participant_device_ids: vec!["absent".to_string(), "owner".to_string()],
             byte_capacity: 19,
             concern: "unknown participant".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
         VulkanRuntimeSharedHostTransientAllocation {
             mode: VulkanRuntimeSharedHostTransientAllocationMode::CrossDeviceTimelineStaging,
@@ -661,6 +673,7 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
             participant_device_ids: vec!["owner".to_string()],
             byte_capacity: 19,
             concern: "incomplete boundary".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
     ] {
         let error = plan
@@ -680,6 +693,7 @@ fn execution_transient_host_requirements_are_queried_and_aligned_per_allocation(
             participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
             byte_capacity: 17,
             concern: "signal".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
         VulkanRuntimeSharedHostTransientAllocation {
             mode: VulkanRuntimeSharedHostTransientAllocationMode::CrossDeviceTimelineStaging,
@@ -687,6 +701,7 @@ fn execution_transient_host_requirements_are_queried_and_aligned_per_allocation(
             participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
             byte_capacity: 29,
             concern: "edge".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::DeferredReusable,
         },
     ];
     let mut queried = Vec::new();
@@ -725,11 +740,13 @@ fn execution_transient_device_requirements_are_queried_and_aligned_per_allocatio
             logical_device_id: "owner".to_string(),
             byte_capacity: 17,
             concern: "signal".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
         },
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "owner".to_string(),
             byte_capacity: 29,
             concern: "control".to_string(),
+            lifetime: VulkanRuntimeStreamAllocationLifetime::DeferredReusable,
         },
     ];
     let mut queried = Vec::new();

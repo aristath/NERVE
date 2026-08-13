@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v8";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v9";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

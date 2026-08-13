@@ -53,6 +53,7 @@ impl VulkanParallelSpeculativeFeedbackAllocationPlan {
                         "speculative decoder {decoder_id} resident feedback state ingestion {:?}",
                         allocation.kind,
                     ),
+                    lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
                 }
             }));
             for (destination_signal_id, byte_capacity) in histories {
@@ -70,6 +71,7 @@ impl VulkanParallelSpeculativeFeedbackAllocationPlan {
                     concern: format!(
                         "speculative decoder {decoder_id} resident feedback source history {destination_signal_id}",
                     ),
+                    lifetime: VulkanRuntimeStreamAllocationLifetime::Permanent,
                 });
             }
         }

@@ -21,12 +21,22 @@ fn runtime_hybrid_shared_host_ledger_extends_without_collapsing_allocations() {
         )
         .unwrap();
 
-    normal.extend(verification).unwrap();
+    normal
+        .extend(verification.into_deferred_reusable())
+        .unwrap();
 
     assert_eq!(normal.host_bytes(), 46);
     assert_eq!(normal.shared_host_allocations.len(), 2);
     assert_eq!(normal.shared_host_allocations[0].byte_capacity, 17);
     assert_eq!(normal.shared_host_allocations[1].byte_capacity, 29);
+    assert_eq!(
+        normal.shared_host_allocations[0].lifetime,
+        VulkanRuntimeStreamAllocationLifetime::Permanent,
+    );
+    assert_eq!(
+        normal.shared_host_allocations[1].lifetime,
+        VulkanRuntimeStreamAllocationLifetime::DeferredReusable,
+    );
     let original = normal.clone();
     let malformed = normal
         .add_shared_host_allocation(
@@ -97,6 +107,9 @@ fn speculative_catch_up_transient_matches_one_canonical_component_batch_and_embe
         planned.device_allocations.len(),
         component_plan.allocations.len() + 2,
     );
+    assert!(planned.device_allocations.iter().all(|allocation| {
+        allocation.lifetime == VulkanRuntimeStreamAllocationLifetime::DeferredReusable
+    }));
     assert!(planned.shared_host_allocations.is_empty());
 
     let prompt_lane_capacity = speculative_catch_up_execution_lane_capacity(17, 7).unwrap();
@@ -380,6 +393,9 @@ fn parallel_speculative_processor_transient_matches_mounted_permanent_allocation
         planned.device_allocations.len(),
         proposal.allocations.len() + committed.allocations.len() + 3,
     );
+    assert!(planned.device_allocations.iter().all(|allocation| {
+        allocation.lifetime == VulkanRuntimeStreamAllocationLifetime::Permanent
+    }));
 
     let (same_model, same_slices, mut same_devices) =
         fixture_parallel_speculative_runtime_model("source_gpu");
@@ -494,6 +510,9 @@ fn parallel_speculative_state_ingestion_accounts_both_cached_lane_classes() {
         planned.device_allocations.len(),
         normal.allocations.len() + verification.allocations.len() + 4,
     );
+    assert!(planned.device_allocations.iter().all(|allocation| {
+        allocation.lifetime == VulkanRuntimeStreamAllocationLifetime::DeferredReusable
+    }));
 
     let demand = exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
         &model,
@@ -590,19 +609,25 @@ fn physical_mount_admits_parallel_speculative_processor_allocations() {
         .collect::<Vec<_>>();
     assert!(allocations
         .iter()
-        .any(|allocation| allocation.concern.contains("proposal")));
+        .any(|allocation| allocation.concern.contains("proposal")
+            && allocation.lifetime == VulkanRuntimeStreamAllocationLifetime::Permanent));
     assert!(allocations
         .iter()
-        .any(|allocation| allocation.concern.contains("committed context")));
+        .any(|allocation| allocation.concern.contains("committed context")
+            && allocation.lifetime == VulkanRuntimeStreamAllocationLifetime::Permanent));
     assert!(allocations
         .iter()
-        .any(|allocation| allocation.concern.contains("output readback")));
+        .any(|allocation| allocation.concern.contains("output readback")
+            && allocation.lifetime == VulkanRuntimeStreamAllocationLifetime::Permanent));
     assert!(allocations
         .iter()
-        .any(|allocation| allocation.concern.contains("normal prefill state ingestion")));
+        .any(|allocation| allocation.concern.contains("normal prefill state ingestion")
+            && allocation.lifetime
+                == VulkanRuntimeStreamAllocationLifetime::DeferredReusable));
     assert!(allocations.iter().any(|allocation| allocation
         .concern
-        .contains("causal verification state ingestion")));
+        .contains("causal verification state ingestion")
+        && allocation.lifetime == VulkanRuntimeStreamAllocationLifetime::DeferredReusable));
 }
 
 #[test]

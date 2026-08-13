@@ -5,11 +5,19 @@ struct VulkanRuntimeHybridExecutionTransientPlan {
     shared_host_allocations: Vec<VulkanRuntimeSharedHostTransientAllocation>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanRuntimeStreamAllocationLifetime {
+    Permanent,
+    DeferredReusable,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeDeviceLocalTransientAllocation {
     pub logical_device_id: String,
     pub byte_capacity: usize,
     pub concern: String,
+    pub lifetime: VulkanRuntimeStreamAllocationLifetime,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -19,6 +27,7 @@ pub struct VulkanRuntimeSharedHostTransientAllocation {
     pub participant_device_ids: Vec<String>,
     pub byte_capacity: usize,
     pub concern: String,
+    pub lifetime: VulkanRuntimeStreamAllocationLifetime,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -29,25 +38,37 @@ pub enum VulkanRuntimeSharedHostTransientAllocationMode {
 }
 
 impl VulkanRuntimeHybridExecutionTransientPlan {
+    fn into_deferred_reusable(mut self) -> Self {
+        for allocation in &mut self.device_allocations {
+            allocation.lifetime = VulkanRuntimeStreamAllocationLifetime::DeferredReusable;
+        }
+        for allocation in &mut self.shared_host_allocations {
+            allocation.lifetime = VulkanRuntimeStreamAllocationLifetime::DeferredReusable;
+        }
+        self
+    }
+
     fn extend(
         &mut self,
         other: Self,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
         let mut next = self.clone();
         for allocation in other.device_allocations {
-            next.add_device_allocation(
+            next.add_device_allocation_with_lifetime(
                 &allocation.logical_device_id,
                 allocation.byte_capacity,
                 &allocation.concern,
+                allocation.lifetime,
             )?;
         }
         for allocation in other.shared_host_allocations {
-            next.add_shared_host_allocation(
+            next.add_shared_host_allocation_with_lifetime(
                 allocation.mode,
                 &allocation.owner_device_id,
                 allocation.participant_device_ids,
                 allocation.byte_capacity,
                 &allocation.concern,
+                allocation.lifetime,
             )?;
         }
         *self = next;
@@ -59,6 +80,21 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         logical_device_id: &str,
         byte_count: usize,
         concern: &str,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        self.add_device_allocation_with_lifetime(
+            logical_device_id,
+            byte_count,
+            concern,
+            VulkanRuntimeStreamAllocationLifetime::Permanent,
+        )
+    }
+
+    fn add_device_allocation_with_lifetime(
+        &mut self,
+        logical_device_id: &str,
+        byte_count: usize,
+        concern: &str,
+        lifetime: VulkanRuntimeStreamAllocationLifetime,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
         if logical_device_id.trim().is_empty() || byte_count == 0 || concern.trim().is_empty() {
             return Err(VulkanRuntimeHybridPlacementError(
@@ -80,6 +116,7 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
                 logical_device_id: logical_device_id.to_string(),
                 byte_capacity: byte_count,
                 concern: concern.to_string(),
+                lifetime,
             });
         Ok(())
     }
@@ -98,6 +135,25 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         participant_device_ids: impl IntoIterator<Item = String>,
         byte_count: usize,
         concern: &str,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        self.add_shared_host_allocation_with_lifetime(
+            mode,
+            owner_device_id,
+            participant_device_ids,
+            byte_count,
+            concern,
+            VulkanRuntimeStreamAllocationLifetime::Permanent,
+        )
+    }
+
+    fn add_shared_host_allocation_with_lifetime(
+        &mut self,
+        mode: VulkanRuntimeSharedHostTransientAllocationMode,
+        owner_device_id: &str,
+        participant_device_ids: impl IntoIterator<Item = String>,
+        byte_count: usize,
+        concern: &str,
+        lifetime: VulkanRuntimeStreamAllocationLifetime,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
         let participant_device_ids = participant_device_ids
             .into_iter()
@@ -126,6 +182,7 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
                 participant_device_ids,
                 byte_capacity: byte_count,
                 concern: concern.to_string(),
+                lifetime,
             });
         Ok(())
     }
@@ -182,7 +239,7 @@ fn exact_vulkan_runtime_hybrid_prefill_runners_transient_plan(
             true,
         )?)?;
     }
-    Ok(transient)
+    Ok(transient.into_deferred_reusable())
 }
 
 fn exact_vulkan_runtime_mounted_prefill_transient_plan(
@@ -323,7 +380,7 @@ fn exact_vulkan_runtime_speculative_catch_up_transient_plan(
                 })?;
         }
     }
-    Ok(transient)
+    Ok(transient.into_deferred_reusable())
 }
 
 fn exact_vulkan_runtime_speculative_source_tap_device_id<'a>(
@@ -700,7 +757,7 @@ fn exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
             )?;
         }
     }
-    Ok(transient)
+    Ok(transient.into_deferred_reusable())
 }
 
 fn vulkan_runtime_normal_prefill_lane_capacity_candidates(
