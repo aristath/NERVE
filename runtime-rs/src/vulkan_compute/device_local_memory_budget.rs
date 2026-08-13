@@ -647,6 +647,31 @@ impl VulkanDeviceLocalMemoryPermit {
             byte_count: allocation_byte_count,
         }))
     }
+
+    /// Removes an exact child credit from this already-admitted permit.
+    ///
+    /// Splitting does not change the tracker's pending total: the parent and
+    /// child continue to account for exactly the bytes admitted by the
+    /// original transaction. This lets one atomic stream admission be
+    /// consumed by the individual Vulkan allocations that physically realize
+    /// it without readmitting each allocation against a moving heap snapshot.
+    fn take(&mut self, byte_count: u64) -> Result<Self, VulkanError> {
+        if byte_count == 0 || byte_count > self.byte_count {
+            return Err(VulkanError(format!(
+                "device-local capacity permit holds {} bytes but cannot provide a {byte_count}-byte child",
+                self.byte_count,
+            )));
+        }
+        self.byte_count -= byte_count;
+        Ok(Self {
+            tracker: Arc::clone(&self.tracker),
+            byte_count,
+        })
+    }
+
+    fn remaining_byte_count(&self) -> u64 {
+        self.byte_count
+    }
 }
 
 impl Drop for VulkanDeviceLocalMemoryPermit {

@@ -554,6 +554,63 @@ fn device_local_capacity_permit_commit_does_not_readmit_async_counter_changes() 
 }
 
 #[test]
+fn device_local_capacity_permit_splits_without_double_counting() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let mut parent =
+        VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 400_000).unwrap();
+
+    let first = parent.take(125_000).unwrap();
+    let second = parent.take(75_000).unwrap();
+    assert_eq!(parent.remaining_byte_count(), 200_000);
+    assert_eq!(first.remaining_byte_count(), 125_000);
+    assert_eq!(second.remaining_byte_count(), 75_000);
+    assert_eq!(
+        tracker.lock().unwrap().pending_reservation_bytes,
+        400_000,
+        "splitting an admitted permit must preserve one aggregate pending claim",
+    );
+
+    let first_allocation = first.commit(120_000).unwrap();
+    let after_first = tracker.lock().unwrap().accounting_at(880_000);
+    assert_eq!(after_first.tracked_allocation_bytes, 120_000);
+    assert_eq!(after_first.pending_reservation_bytes, 275_000);
+
+    drop(second);
+    assert_eq!(
+        tracker.lock().unwrap().pending_reservation_bytes,
+        200_000,
+    );
+    drop(parent);
+    let released = tracker.lock().unwrap().accounting_at(880_000);
+    assert_eq!(released.tracked_allocation_bytes, 120_000);
+    assert_eq!(released.pending_reservation_bytes, 0);
+    drop(first_allocation);
+}
+
+#[test]
+fn device_local_capacity_permit_rejects_invalid_split_without_mutation() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let mut permit =
+        VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 400_000).unwrap();
+
+    assert!(permit.take(0).is_err());
+    assert!(permit.take(400_001).is_err());
+    assert_eq!(permit.remaining_byte_count(), 400_000);
+    assert_eq!(
+        tracker.lock().unwrap().pending_reservation_bytes,
+        400_000,
+    );
+    drop(permit);
+    assert_eq!(tracker.lock().unwrap().pending_reservation_bytes, 0);
+}
+
+#[test]
 fn device_local_memory_counter_tolerance_is_bounded_by_protected_headroom() {
     let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
     let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
