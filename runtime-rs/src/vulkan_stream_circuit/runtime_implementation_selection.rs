@@ -10,6 +10,22 @@ struct VulkanRuntimeComponentOverlay {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct VulkanRuntimeComponentRegionOverlay {
+    schema: String,
+    source_component_id: String,
+    source: VulkanRuntimeComponentRegion,
+    replacement: VulkanRuntimeComponentRegion,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VulkanRuntimeComponentRegion {
+    nodes: Vec<crate::stream_circuit::CircuitNode>,
+    kernels: Vec<VulkanResidentComponentKernelSpec>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VulkanRuntimeOutputTransducerOverlay {
     schema: String,
     source_component_id: String,
@@ -499,8 +515,11 @@ impl VulkanResidentRuntimeModel {
         let mut loaded_tensor_fragments = BTreeSet::new();
         let mut mounted_resident_derivation_sources = BTreeMap::new();
 
-        for selected in &selection.selected {
-            let loaded = implementations
+        let mut applications = selection
+            .selected
+            .iter()
+            .map(|selected| {
+                let loaded = implementations
                 .get(selected.implementation_id.as_str())
                 .ok_or_else(|| {
                     VulkanResidentTokenModelPackageError::new(format!(
@@ -508,7 +527,38 @@ impl VulkanResidentRuntimeModel {
                         selected.implementation_id
                     ))
                 })?;
-            validate_selected_implementation(selected, loaded)?;
+                validate_selected_implementation(selected, loaded)?;
+                Ok((selected, *loaded))
+            })
+            .collect::<Result<Vec<_>, VulkanResidentTokenModelPackageError>>()?;
+        for left in 0..applications.len() {
+            for right in (left + 1)..applications.len() {
+                if !runtime_applications_are_composable(
+                    applications[left].0,
+                    applications[left].1,
+                    applications[right].0,
+                    applications[right].1,
+                ) {
+                    return Err(VulkanResidentTokenModelPackageError::new(
+                        "runtime implementation selection contains conflicting applications",
+                    ));
+                }
+            }
+        }
+        applications.sort_by(|left, right| {
+            (
+                runtime_mount_plan_is_region_only(&left.1.mount_plan),
+                left.0.instance_ids.as_slice(),
+                left.0.implementation_id.as_str(),
+            )
+                .cmp(&(
+                    runtime_mount_plan_is_region_only(&right.1.mount_plan),
+                    right.0.instance_ids.as_slice(),
+                    right.0.implementation_id.as_str(),
+                ))
+        });
+
+        for (selected, loaded) in applications {
             mount_runtime_candidate_application(
                 &mut self,
                 package_root,
@@ -786,6 +836,38 @@ struct RuntimeCandidateMountLedger<'a> {
         &'a mut BTreeMap<String, Vec<VulkanRuntimeParameterResidentDerivation>>,
 }
 
+fn runtime_mount_plan_is_region_only(
+    mount_plan: &crate::RuntimeMountPlan,
+) -> bool {
+    mount_plan
+        .regions
+        .iter()
+        .flat_map(|region| &region.replacements)
+        .all(crate::RuntimeReplacement::is_component_region)
+}
+
+fn runtime_applications_are_composable(
+    left: &crate::RuntimeSelectedImplementation,
+    left_loaded: &crate::LoadedRuntimeImplementation,
+    right: &crate::RuntimeSelectedImplementation,
+    right_loaded: &crate::LoadedRuntimeImplementation,
+) -> bool {
+    let shared_instance = left
+        .instance_ids
+        .iter()
+        .any(|instance| right.instance_ids.contains(instance));
+    if !shared_instance {
+        return true;
+    }
+    let overlapping_scope = left
+        .scope_ids
+        .iter()
+        .any(|scope| right.scope_ids.contains(scope));
+    !overlapping_scope
+        && (runtime_mount_plan_is_region_only(&left_loaded.mount_plan)
+            || runtime_mount_plan_is_region_only(&right_loaded.mount_plan))
+}
+
 fn mount_runtime_candidate_application(
     runtime_model: &mut VulkanResidentRuntimeModel,
     package_root: &Path,
@@ -913,13 +995,7 @@ fn mount_runtime_candidate_region_application(
                         "runtime candidate application {application_id:?} references unknown instance {instance_id:?}",
                     ))
                 })?;
-            if !ledger.mounted_instances.insert(instance_id.clone()) {
-                return Err(VulkanResidentTokenModelPackageError::new(
-                    format!(
-                        "runtime instance {instance_id:?} has overlapping candidate applications",
-                    ),
-                ));
-            }
+            ledger.mounted_instances.insert(instance_id.clone());
             Ok((instance_id.as_str(), instance))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
@@ -1034,6 +1110,39 @@ fn mount_runtime_candidate_region_application(
                     runtime_model,
                     matching_instances[0].instance_id.as_str(),
                     overlay,
+                )?;
+            }
+            crate::RuntimeReplacement::ComponentRegion { .. } => {
+                let mut overlay: VulkanRuntimeComponentRegionOverlay =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "invalid runtime component-region overlay {overlay_path:?}: {error}"
+                        ))
+                    })?;
+                validate_runtime_component_region_overlay(
+                    &overlay,
+                    &source,
+                    runtime_model
+                        .package
+                        .component_executions
+                        .iter()
+                        .find(|execution| execution.component_id == source_component_id)
+                        .ok_or_else(|| {
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "runtime component-region overlay cannot find source execution for {source_component_id:?}"
+                            ))
+                        })?,
+                )?;
+                rebase_component_region_shader_paths(
+                    &mut overlay,
+                    package_root,
+                    candidate_root,
+                )?;
+                mount_runtime_component_region_overlay(
+                    runtime_model,
+                    matching_instances[0].instance_id.as_str(),
+                    overlay,
+                    package_root,
                 )?;
             }
             crate::RuntimeReplacement::OutputTransducer { .. } => {
@@ -1226,6 +1335,105 @@ fn validate_runtime_component_overlay(
         effective_edges,
         graph_boundary,
     )
+}
+
+fn validate_runtime_component_region_overlay(
+    overlay: &VulkanRuntimeComponentRegionOverlay,
+    source: &VulkanResidentPackageComponentCircuit,
+    source_execution: &VulkanResidentComponentExecutionSpec,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    if overlay.schema != crate::VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA
+        || overlay.source_component_id != source.component_id
+        || source_execution.component_id != source.component_id
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "runtime component-region overlay for {:?} changes its logical source identity",
+            source.component_id
+        )));
+    }
+    let source_node_ids = component_region_node_ids(
+        &overlay.source.nodes,
+        "component-region source nodes",
+    )?;
+    let source_kernel_ids = component_region_kernel_ids(
+        &overlay.source.kernels,
+        "component-region source kernels",
+    )?;
+    let replacement_node_ids = component_region_node_ids(
+        &overlay.replacement.nodes,
+        "component-region replacement nodes",
+    )?;
+    let replacement_kernel_ids = component_region_kernel_ids(
+        &overlay.replacement.kernels,
+        "component-region replacement kernels",
+    )?;
+    if source_node_ids != source_kernel_ids
+        || replacement_node_ids != replacement_kernel_ids
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime component-region nodes and kernels cover different identities",
+        ));
+    }
+    for node in &overlay.source.nodes {
+        if source
+            .circuit
+            .nodes
+            .iter()
+            .find(|candidate| candidate.id == node.id)
+            != Some(node)
+        {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "runtime component-region source node {:?} is stale",
+                node.id
+            )));
+        }
+    }
+    for kernel in &overlay.source.kernels {
+        if source_execution
+            .kernels
+            .iter()
+            .find(|candidate| candidate.node_id == kernel.node_id)
+            != Some(kernel)
+        {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "runtime component-region source kernel {:?} is stale",
+                kernel.node_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn component_region_node_ids(
+    nodes: &[crate::stream_circuit::CircuitNode],
+    label: &str,
+) -> Result<BTreeSet<String>, VulkanResidentTokenModelPackageError> {
+    let ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    if nodes.is_empty() || ids.len() != nodes.len() || ids.contains("") {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "{label} must be non-empty and uniquely identified",
+        )));
+    }
+    Ok(ids)
+}
+
+fn component_region_kernel_ids(
+    kernels: &[VulkanResidentComponentKernelSpec],
+    label: &str,
+) -> Result<BTreeSet<String>, VulkanResidentTokenModelPackageError> {
+    let ids = kernels
+        .iter()
+        .map(|kernel| kernel.node_id.clone())
+        .collect::<BTreeSet<_>>();
+    if kernels.is_empty() || ids.len() != kernels.len() || ids.contains("") {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "{label} must be non-empty and uniquely identified",
+        )));
+    }
+    Ok(ids)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1496,6 +1704,34 @@ fn rebase_overlay_shader_paths(
     Ok(())
 }
 
+fn rebase_component_region_shader_paths(
+    overlay: &mut VulkanRuntimeComponentRegionOverlay,
+    package_root: &Path,
+    candidate_root: &Path,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    for kernel in &mut overlay.replacement.kernels {
+        kernel.shader_path = rebase_overlay_shader_path(
+            &kernel.shader_path,
+            None,
+            package_root,
+            candidate_root,
+            "runtime component-region shader",
+        )?;
+        for implementation in &mut kernel.batch_implementations {
+            for stage in &mut implementation.stages {
+                stage.shader_path = rebase_overlay_shader_path(
+                    &stage.shader_path,
+                    None,
+                    package_root,
+                    candidate_root,
+                    "runtime component-region batch shader",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn source_batch_implementation_for_overlay<'a>(
     source_kernel: &'a VulkanResidentComponentKernelSpec,
     overlay: &VulkanResidentComponentBatchImplementationSpec,
@@ -1685,6 +1921,222 @@ fn mount_runtime_component_overlay(
         })?;
     *execution = overlay.execution;
     Ok(())
+}
+
+fn mount_runtime_component_region_overlay(
+    runtime_model: &mut VulkanResidentRuntimeModel,
+    runtime_instance_id: &str,
+    overlay: VulkanRuntimeComponentRegionOverlay,
+    package_root: &Path,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    let component = runtime_model
+        .circuit_graph
+        .components
+        .iter_mut()
+        .find(|component| component.component_id == runtime_instance_id)
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "runtime component-region implementation cannot find component {runtime_instance_id:?}"
+            ))
+        })?;
+    let execution = runtime_model
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == runtime_instance_id)
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "runtime component-region implementation cannot find execution for {runtime_instance_id:?}"
+            ))
+        })?;
+
+    let source_node_ids = component_region_node_ids(
+        &overlay.source.nodes,
+        "component-region source nodes",
+    )?;
+    let replacement_node_ids = component_region_node_ids(
+        &overlay.replacement.nodes,
+        "component-region replacement nodes",
+    )?;
+    let source_kernel_ids = component_region_kernel_ids(
+        &overlay.source.kernels,
+        "component-region source kernels",
+    )?;
+    let replacement_kernel_ids = component_region_kernel_ids(
+        &overlay.replacement.kernels,
+        "component-region replacement kernels",
+    )?;
+    if source_node_ids != source_kernel_ids
+        || replacement_node_ids != replacement_kernel_ids
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime component-region nodes and kernels cover different identities",
+        ));
+    }
+    if component.circuit.nodes.iter().any(|node| {
+        replacement_node_ids.contains(&node.id)
+            && !source_node_ids.contains(&node.id)
+    }) || execution.kernels.iter().any(|kernel| {
+        replacement_kernel_ids.contains(&kernel.node_id)
+            && !source_kernel_ids.contains(&kernel.node_id)
+    }) {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime component-region replacement collides with an unrelated node",
+        ));
+    }
+    for source in &overlay.source.nodes {
+        if component
+            .circuit
+            .nodes
+            .iter()
+            .find(|node| node.id == source.id)
+            != Some(source)
+        {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "runtime component-region source node {:?} changed before composition",
+                source.id
+            )));
+        }
+    }
+    for source in &overlay.source.kernels {
+        let current = execution
+            .kernels
+            .iter()
+            .find(|kernel| kernel.node_id == source.node_id)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "runtime component-region source kernel {:?} is missing before composition",
+                    source.node_id
+                ))
+            })?;
+        if !runtime_kernel_matches_region_source(
+            current,
+            source,
+            package_root,
+        )? {
+            return Err(VulkanResidentTokenModelPackageError::new(format!(
+                "runtime component-region source kernel {:?} changed before composition",
+                source.node_id
+            )));
+        }
+    }
+
+    component.circuit.nodes = replace_component_region_records(
+        std::mem::take(&mut component.circuit.nodes),
+        &source_node_ids,
+        overlay.replacement.nodes,
+        |node| node.id.as_str(),
+    )?;
+    execution.kernels = replace_component_region_records(
+        std::mem::take(&mut execution.kernels),
+        &source_kernel_ids,
+        overlay.replacement.kernels,
+        |kernel| kernel.node_id.as_str(),
+    )?;
+    for (execution_index, kernel) in
+        execution.kernels.iter_mut().enumerate()
+    {
+        kernel.execution_index = execution_index;
+    }
+    Ok(())
+}
+
+fn runtime_kernel_matches_region_source(
+    current: &VulkanResidentComponentKernelSpec,
+    source: &VulkanResidentComponentKernelSpec,
+    package_root: &Path,
+) -> Result<bool, VulkanResidentTokenModelPackageError> {
+    let mut normalized = current.clone();
+    normalized.execution_index = source.execution_index;
+    if !runtime_shader_reference_matches_source(
+        &normalized.shader_path,
+        &source.shader_path,
+        package_root,
+    )? {
+        return Ok(false);
+    }
+    normalized.shader_path = source.shader_path.clone();
+    if normalized.batch_implementations.len()
+        != source.batch_implementations.len()
+    {
+        return Ok(false);
+    }
+    for (current_implementation, source_implementation) in normalized
+        .batch_implementations
+        .iter_mut()
+        .zip(&source.batch_implementations)
+    {
+        if current_implementation.stages.len()
+            != source_implementation.stages.len()
+        {
+            return Ok(false);
+        }
+        for (current_stage, source_stage) in current_implementation
+            .stages
+            .iter_mut()
+            .zip(&source_implementation.stages)
+        {
+            if !runtime_shader_reference_matches_source(
+                &current_stage.shader_path,
+                &source_stage.shader_path,
+                package_root,
+            )? {
+                return Ok(false);
+            }
+            current_stage.shader_path = source_stage.shader_path.clone();
+        }
+    }
+    Ok(&normalized == source)
+}
+
+fn runtime_shader_reference_matches_source(
+    current: &str,
+    source: &str,
+    package_root: &Path,
+) -> Result<bool, VulkanResidentTokenModelPackageError> {
+    if current == source {
+        return Ok(true);
+    }
+    Ok(Path::new(current)
+        == contained_package_artifact(
+            package_root,
+            source,
+            "runtime component-region source shader",
+        )?)
+}
+
+fn replace_component_region_records<T, F>(
+    current: Vec<T>,
+    source_ids: &BTreeSet<String>,
+    replacement: Vec<T>,
+    id: F,
+) -> Result<Vec<T>, VulkanResidentTokenModelPackageError>
+where
+    F: Fn(&T) -> &str,
+{
+    let mut replacement = Some(replacement);
+    let mut replaced = BTreeSet::new();
+    let mut output = Vec::with_capacity(current.len());
+    for record in current {
+        let record_id = id(&record);
+        if source_ids.contains(record_id) {
+            if replacement.is_some() {
+                output.extend(
+                    replacement
+                        .take()
+                        .expect("checked component-region replacement"),
+                );
+            }
+            replaced.insert(record_id.to_string());
+        } else {
+            output.push(record);
+        }
+    }
+    if replaced != *source_ids {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "runtime component-region did not replace its exact source set",
+        ));
+    }
+    Ok(output)
 }
 
 fn mount_runtime_output_transducer_overlay(

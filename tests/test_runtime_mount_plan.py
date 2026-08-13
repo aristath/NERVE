@@ -336,6 +336,81 @@ def test_component_resident_derivation_rejects_invalid_nested_contract(
         validate_runtime_mount_artifacts(tmp_path, mount)
 
 
+def component_region_document() -> dict[str, object]:
+    return {
+        "schema": "nerve.optimizer.vulkan_component_region_overlay.v1",
+        "source_component_id": "component",
+        "source": {
+            "nodes": [{"id": "producer"}, {"id": "consumer"}],
+            "kernels": [
+                {"node_id": "producer"},
+                {"node_id": "consumer"},
+            ],
+        },
+        "replacement": {
+            "nodes": [{"id": "producer__consumer"}],
+            "kernels": [{"node_id": "producer__consumer"}],
+        },
+    }
+
+
+def test_mount_artifacts_accept_exact_component_region_overlay(tmp_path: Path):
+    document = mount_document()
+    document["regions"][0]["replacements"][0]["kind"] = "component_region"
+    overlay = tmp_path / "overlays" / "component.json"
+    overlay.parent.mkdir()
+    overlay.write_text(json.dumps(component_region_document()))
+    (tmp_path / "tensor_fragment.json").write_text(
+        json.dumps({"schema": "nerve.tensor_index.v1", "tensors": {}})
+    )
+    mount = RuntimeMountPlan.from_json(
+        document,
+        candidate_id="candidate_fixture",
+        build_plan=build_plan(),
+    )
+
+    validate_runtime_mount_artifacts(tmp_path, mount)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing_source_kernel", "same region"),
+        ("duplicate_source_node", "unique ids"),
+        ("empty_replacement", "must not be empty"),
+    ],
+)
+def test_component_region_overlay_rejects_incomplete_or_ambiguous_edits(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+):
+    document = mount_document()
+    document["regions"][0]["replacements"][0]["kind"] = "component_region"
+    payload = component_region_document()
+    if mutation == "missing_source_kernel":
+        payload["source"]["kernels"].pop()
+    elif mutation == "duplicate_source_node":
+        payload["source"]["nodes"].append({"id": "producer"})
+    else:
+        payload["replacement"]["nodes"] = []
+        payload["replacement"]["kernels"] = []
+    overlay = tmp_path / "overlays" / "component.json"
+    overlay.parent.mkdir()
+    overlay.write_text(json.dumps(payload))
+    (tmp_path / "tensor_fragment.json").write_text(
+        json.dumps({"schema": "nerve.tensor_index.v1", "tensors": {}})
+    )
+    mount = RuntimeMountPlan.from_json(
+        document,
+        candidate_id="candidate_fixture",
+        build_plan=build_plan(),
+    )
+
+    with pytest.raises(ContractValidationError, match=message):
+        validate_runtime_mount_artifacts(tmp_path, mount)
+
+
 def test_mount_artifacts_accept_output_transducer_overlay_as_semantic_unit(
     tmp_path: Path,
 ):

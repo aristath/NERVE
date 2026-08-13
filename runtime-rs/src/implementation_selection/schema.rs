@@ -14,6 +14,8 @@ pub const BENCHMARK_RECORD_SCHEMA: &str = "nerve.optimizer.benchmark_record.v3";
 pub const VALIDATION_RECORD_SCHEMA: &str = "nerve.optimizer.validation_record.v2";
 pub const RUNTIME_MOUNT_PLAN_SCHEMA: &str = "nerve.optimizer.runtime_mount_plan.v3";
 pub const VULKAN_COMPONENT_OVERLAY_SCHEMA: &str = "nerve.optimizer.vulkan_component_overlay.v2";
+pub const VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA: &str =
+    "nerve.optimizer.vulkan_component_region_overlay.v1";
 pub const VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA: &str =
     "nerve.optimizer.vulkan_output_transducer_overlay.v1";
 pub const VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER: &str = "vulkan_stream_circuit_overlay.v2";
@@ -240,6 +242,10 @@ pub enum RuntimeReplacement {
         source_component_id: String,
         overlay_ref: String,
     },
+    ComponentRegion {
+        source_component_id: String,
+        overlay_ref: String,
+    },
     OutputTransducer {
         source_component_id: String,
         overlay_ref: String,
@@ -253,6 +259,10 @@ impl RuntimeReplacement {
                 source_component_id,
                 ..
             }
+            | Self::ComponentRegion {
+                source_component_id,
+                ..
+            }
             | Self::OutputTransducer {
                 source_component_id,
                 ..
@@ -262,10 +272,14 @@ impl RuntimeReplacement {
 
     pub fn overlay_ref(&self) -> &str {
         match self {
-            Self::Component { overlay_ref, .. } | Self::OutputTransducer { overlay_ref, .. } => {
-                overlay_ref
-            }
+            Self::Component { overlay_ref, .. }
+            | Self::ComponentRegion { overlay_ref, .. }
+            | Self::OutputTransducer { overlay_ref, .. } => overlay_ref,
         }
+    }
+
+    pub fn is_component_region(&self) -> bool {
+        matches!(self, Self::ComponentRegion { .. })
     }
 }
 

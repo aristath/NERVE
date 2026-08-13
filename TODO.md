@@ -748,8 +748,19 @@ For every numbered item below:
 ### 8. Reduce the remaining non-expert critical path
 
 - Add measured execution-island candidates for the four-way hyper-connection
-  structure. Evaluate branch parallelism, local fusion, and selective TP while
-  preserving Sinkhorn, reduction, and residual ordering.
+  structure. The exact compiled baseline must remain portable across every
+  compatible target. Today the compiler admits fused hyper-connection/RMS
+  execution only when every compile target exposes FP8, subgroup arithmetic,
+  subgroup size 64, and a 1024-wide workgroup; one less-capable target therefore
+  suppresses the candidate on every capable AMD GPU. Move this fusion into a
+  structure-discovered optimizer implementation with an exact capability
+  predicate, source-anchored component-region overlay, independent
+  decode/prefill benchmark, and source-behavior proof. The runtime must be able
+  to compose the fused region with unrelated representation implementations,
+  select it per component on compatible targets, and retain the exact unfused
+  region on other targets in the same mounted model. Evaluate branch parallelism
+  and selective TP only after this local fused transaction is independently
+  measured, while preserving Sinkhorn, reduction, and residual ordering.
 - Treat attention as its own partition family. Define legal query/head,
   indexer, latent-state, KV/state, output-projection, and reduction contracts
   rather than reusing the FFN partition rules.

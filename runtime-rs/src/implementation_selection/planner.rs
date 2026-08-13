@@ -274,29 +274,31 @@ impl RuntimeImplementationCatalog {
         }
 
         let mut covered_instances = BTreeSet::new();
+        let mut chosen_applications: Vec<&EligibleApplication<'_>> = Vec::new();
         for chosen in &selected {
-            if !eligible
+            let application = eligible
                 .iter()
-                .any(|application| application.selected == *chosen)
+                .find(|application| application.selected == *chosen)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "runtime physical selection contains an ineligible or altered application {:?} for instances {:?}",
+                            chosen.implementation_id, chosen.instance_ids,
+                        ),
+                    )
+                })?;
+            if chosen_applications
+                .iter()
+                .any(|existing| !applications_are_composable(existing, application))
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "runtime physical selection contains an ineligible or altered application {:?} for instances {:?}",
-                        chosen.implementation_id, chosen.instance_ids,
-                    ),
+                    "runtime physical selection contains conflicting implementation applications",
                 ));
             }
-            if chosen
-                .instance_ids
-                .iter()
-                .any(|instance_id| !covered_instances.insert(instance_id.clone()))
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "runtime physical selection contains overlapping implementation applications",
-                ));
-            }
+            covered_instances.extend(chosen.instance_ids.iter().cloned());
+            chosen_applications.push(application);
         }
 
         let exact_instance_ids = request
@@ -999,6 +1001,36 @@ fn application_order(left: &EligibleApplication<'_>, right: &EligibleApplication
         ))
 }
 
+fn application_is_region_only(application: &EligibleApplication<'_>) -> bool {
+    application
+        .loaded
+        .mount_plan
+        .regions
+        .iter()
+        .flat_map(|region| &region.replacements)
+        .all(super::RuntimeReplacement::is_component_region)
+}
+
+fn applications_are_composable(
+    left: &EligibleApplication<'_>,
+    right: &EligibleApplication<'_>,
+) -> bool {
+    let shared_instance = left
+        .instance_ids
+        .iter()
+        .any(|instance| right.instance_ids.contains(instance));
+    if !shared_instance {
+        return true;
+    }
+    let overlapping_scope = left
+        .loaded
+        .implementation
+        .scope_ids
+        .iter()
+        .any(|scope| right.loaded.implementation.scope_ids.contains(scope));
+    !overlapping_scope && (application_is_region_only(left) || application_is_region_only(right))
+}
+
 fn optimal_nonoverlapping_applications(
     applications: &[EligibleApplication<'_>],
     required_covered_instances: &BTreeSet<String>,
@@ -1018,7 +1050,7 @@ fn optimal_nonoverlapping_applications(
         applications,
         &suffix_savings,
         0,
-        &mut BTreeSet::new(),
+        &mut BTreeMap::new(),
         &mut SelectionSet::default(),
         &mut best,
         required_covered_instances,
@@ -1042,13 +1074,15 @@ fn search_selection_sets(
     applications: &[EligibleApplication<'_>],
     suffix_savings: &[u64],
     index: usize,
-    occupied_instances: &mut BTreeSet<String>,
+    occupied_instances: &mut BTreeMap<String, usize>,
     current: &mut SelectionSet,
     best: &mut SelectionSet,
     required_covered_instances: &BTreeSet<String>,
 ) {
     if index == applications.len() {
-        if required_covered_instances.is_subset(occupied_instances)
+        if required_covered_instances
+            .iter()
+            .all(|instance| occupied_instances.contains_key(instance))
             && selection_set_is_better(current, best, applications)
         {
             *best = current.clone();
@@ -1060,12 +1094,14 @@ fn search_selection_sets(
         return;
     }
     let application = &applications[index];
-    if application
-        .instance_ids
+    if current
+        .indices
         .iter()
-        .all(|instance| !occupied_instances.contains(instance))
+        .all(|selected| applications_are_composable(&applications[*selected], application))
     {
-        occupied_instances.extend(application.instance_ids.iter().cloned());
+        for instance in &application.instance_ids {
+            *occupied_instances.entry(instance.clone()).or_default() += 1;
+        }
         current.indices.push(index);
         current.savings = current
             .savings
@@ -1114,7 +1150,13 @@ fn search_selection_sets(
             .conversions
             .saturating_sub(application.selected.conversion_ns);
         for instance in &application.instance_ids {
-            occupied_instances.remove(instance);
+            let count = occupied_instances
+                .get_mut(instance)
+                .expect("selected application must occupy every instance");
+            *count -= 1;
+            if *count == 0 {
+                occupied_instances.remove(instance);
+            }
         }
     }
     search_selection_sets(

@@ -22,6 +22,9 @@ VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER = (
 VULKAN_COMPONENT_OVERLAY_SCHEMA = (
     "nerve.optimizer.vulkan_component_overlay.v2"
 )
+VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA = (
+    "nerve.optimizer.vulkan_component_region_overlay.v1"
+)
 VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA = (
     "nerve.optimizer.vulkan_output_transducer_overlay.v1"
 )
@@ -128,6 +131,7 @@ def validate_runtime_mount_plan(
             )
             if replacement_kind not in {
                 "component",
+                "component_region",
                 "output_transducer",
             }:
                 raise ContractValidationError(
@@ -210,6 +214,15 @@ def validate_runtime_mount_artifacts(
                     "resident_derivations",
                 }
                 expected_schema = VULKAN_COMPONENT_OVERLAY_SCHEMA
+            elif kind == "component_region":
+                label = "Vulkan component-region overlay"
+                expected_fields = {
+                    "schema",
+                    "source_component_id",
+                    "source",
+                    "replacement",
+                }
+                expected_schema = VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA
             else:
                 label = "Vulkan output-transducer overlay"
                 expected_fields = {
@@ -233,11 +246,11 @@ def validate_runtime_mount_artifacts(
                     f"{label} source component disagrees "
                     "with its mount plan"
                 )
-            _object(
-                overlay["component"],
-                f"{label} component",
-            )
             if kind == "component":
+                _object(
+                    overlay["component"],
+                    f"{label} component",
+                )
                 _object(
                     overlay["execution"],
                     "Vulkan component overlay execution",
@@ -282,7 +295,13 @@ def validate_runtime_mount_artifacts(
                     raise ContractValidationError(
                         "Vulkan component overlay resident derivations must be sorted and unique"
                     )
+            elif kind == "component_region":
+                _validate_component_region_overlay(overlay, label)
             else:
+                _object(
+                    overlay["component"],
+                    f"{label} component",
+                )
                 _object(
                     overlay["output_transducer"],
                     "Vulkan output-transducer package",
@@ -327,6 +346,57 @@ def validate_runtime_mount_artifacts(
             fragment.get("tensors"),
             "runtime tensor-index fragment tensors",
         )
+
+
+def _validate_component_region_overlay(overlay: Json, label: str) -> None:
+    source = _object(overlay["source"], f"{label} source")
+    replacement = _object(
+        overlay["replacement"],
+        f"{label} replacement",
+    )
+    _fields(source, {"nodes", "kernels"}, f"{label} source")
+    _fields(
+        replacement,
+        {"nodes", "kernels"},
+        f"{label} replacement",
+    )
+    source_node_ids = _region_record_ids(
+        source["nodes"],
+        f"{label} source nodes",
+    )
+    source_kernel_ids = _region_record_ids(
+        source["kernels"],
+        f"{label} source kernels",
+    )
+    replacement_node_ids = _region_record_ids(
+        replacement["nodes"],
+        f"{label} replacement nodes",
+    )
+    replacement_kernel_ids = _region_record_ids(
+        replacement["kernels"],
+        f"{label} replacement kernels",
+    )
+    if set(source_node_ids) != set(source_kernel_ids):
+        raise ContractValidationError(
+            f"{label} source nodes and kernels must cover the same region"
+        )
+    if set(replacement_node_ids) != set(replacement_kernel_ids):
+        raise ContractValidationError(
+            f"{label} replacement nodes and kernels must cover the same region"
+        )
+
+
+def _region_record_ids(value: object, label: str) -> list[str]:
+    records = _list(value, label)
+    if not records:
+        raise ContractValidationError(f"{label} must not be empty")
+    identifiers = []
+    for index, raw_record in enumerate(records):
+        record = _object(raw_record, f"{label}[{index}]")
+        identifiers.append(_text(record.get("node_id", record.get("id")), f"{label}[{index}] id"))
+    if len(identifiers) != len(set(identifiers)):
+        raise ContractValidationError(f"{label} must have unique ids")
+    return identifiers
 
 
 def _declared_mount_artifact(

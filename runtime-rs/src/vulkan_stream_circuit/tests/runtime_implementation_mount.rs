@@ -186,6 +186,183 @@ fn runtime_overlay_rejects_ambiguous_batch_implementation_identity() {
     assert!(error.to_string().contains("ambiguous source identity"));
 }
 
+#[test]
+fn component_region_overlay_composes_after_an_unrelated_full_overlay() {
+    let (root, package_root, _candidate_root, mut runtime_model) =
+        staged_runtime_candidate_fixture();
+    let source_component = runtime_model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let source_execution = runtime_model
+        .package
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    assert!(source_execution.kernels.len() > 1);
+
+    let mut full_component = source_component.clone();
+    full_component.implementation = "resident_representation".to_string();
+    full_component.circuit.implementation =
+        "resident_representation".to_string();
+    let mut full_execution = source_execution.clone();
+    full_execution.implementation = "resident_representation".to_string();
+    let unrelated = full_execution.kernels.len() - 1;
+    full_execution.kernels[unrelated].shader_path =
+        "/candidate/resident-expert.spv".to_string();
+    mount_runtime_component_overlay(
+        &mut runtime_model,
+        "layer_00",
+        VulkanRuntimeComponentOverlay {
+            schema: crate::VULKAN_COMPONENT_OVERLAY_SCHEMA.to_string(),
+            source_component_id: "layer_00".to_string(),
+            component: full_component,
+            execution: full_execution,
+            resident_derivations: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    let source_node = source_component.circuit.nodes[0].clone();
+    let source_kernel = source_execution.kernels[0].clone();
+    let replacement_node = source_node.clone();
+    let mut replacement_kernel = source_kernel.clone();
+    replacement_kernel.shader_path =
+        "/candidate/fused-region.spv".to_string();
+    let region = VulkanRuntimeComponentRegionOverlay {
+        schema: crate::VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA.to_string(),
+        source_component_id: "layer_00".to_string(),
+        source: VulkanRuntimeComponentRegion {
+            nodes: vec![source_node],
+            kernels: vec![source_kernel],
+        },
+        replacement: VulkanRuntimeComponentRegion {
+            nodes: vec![replacement_node],
+            kernels: vec![replacement_kernel],
+        },
+    };
+    validate_runtime_component_region_overlay(
+        &region,
+        &source_component,
+        &source_execution,
+    )
+    .unwrap();
+    mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        region,
+        &package_root,
+    )
+    .unwrap();
+
+    let mounted = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap();
+    assert_eq!(mounted.implementation, "resident_representation");
+    assert_eq!(
+        mounted.kernels[0].shader_path,
+        "/candidate/fused-region.spv"
+    );
+    assert_eq!(
+        mounted.kernels[unrelated].shader_path,
+        "/candidate/resident-expert.spv"
+    );
+    assert!(mounted
+        .kernels
+        .iter()
+        .enumerate()
+        .all(|(index, kernel)| kernel.execution_index == index));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn component_region_overlay_rejects_a_stale_or_colliding_source_anchor() {
+    let (root, package_root, _candidate_root, mut runtime_model) =
+        staged_runtime_candidate_fixture();
+    let source_component = runtime_model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let source_execution = runtime_model
+        .package
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let source_node = source_component.circuit.nodes[0].clone();
+    let source_kernel = source_execution.kernels[0].clone();
+    runtime_model
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .kernels[0]
+        .workgroup_count_x += 1;
+    let stale = VulkanRuntimeComponentRegionOverlay {
+        schema: crate::VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA.to_string(),
+        source_component_id: "layer_00".to_string(),
+        source: VulkanRuntimeComponentRegion {
+            nodes: vec![source_node.clone()],
+            kernels: vec![source_kernel.clone()],
+        },
+        replacement: VulkanRuntimeComponentRegion {
+            nodes: vec![source_node.clone()],
+            kernels: vec![source_kernel.clone()],
+        },
+    };
+    let error = mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        stale,
+        &package_root,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("changed before composition"));
+
+    runtime_model
+        .component_executions
+        .iter_mut()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .kernels[0] = source_kernel.clone();
+    let colliding_node = source_component.circuit.nodes[1].clone();
+    let colliding_kernel = source_execution.kernels[1].clone();
+    let collision = VulkanRuntimeComponentRegionOverlay {
+        schema: crate::VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA.to_string(),
+        source_component_id: "layer_00".to_string(),
+        source: VulkanRuntimeComponentRegion {
+            nodes: vec![source_node],
+            kernels: vec![source_kernel],
+        },
+        replacement: VulkanRuntimeComponentRegion {
+            nodes: vec![colliding_node],
+            kernels: vec![colliding_kernel],
+        },
+    };
+    let error = mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        collision,
+        &package_root,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("collides with an unrelated node"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn staged_runtime_candidate_fixture() -> (
     PathBuf,
     PathBuf,

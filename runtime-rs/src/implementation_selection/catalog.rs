@@ -4,7 +4,8 @@ use super::{
     RUNTIME_MOUNT_PLAN_SCHEMA, RuntimeImplementationCatalog, RuntimeImplementationRegistry,
     RuntimeImplementationWorkloadMetrics, RuntimeMountPlan, RuntimeOptimizationScope,
     RuntimeReplacement, VALIDATION_RECORD_SCHEMA, VULKAN_COMPONENT_OVERLAY_SCHEMA,
-    VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA, VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER,
+    VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA, VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA,
+    VULKAN_STREAM_CIRCUIT_OVERLAY_ADAPTER,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -396,6 +397,12 @@ pub(super) fn validate_mount_plan(
                         .is_ok_and(Value::is_object)
                     && required(&overlay, "resident_derivations", "runtime overlay")
                         .is_ok_and(Value::is_array),
+            ),
+            RuntimeReplacement::ComponentRegion { .. } => (
+                VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA,
+                required(&overlay, "source", "runtime overlay").is_ok_and(Value::is_object)
+                    && required(&overlay, "replacement", "runtime overlay")
+                        .is_ok_and(Value::is_object),
             ),
             RuntimeReplacement::OutputTransducer { .. } => (
                 VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA,

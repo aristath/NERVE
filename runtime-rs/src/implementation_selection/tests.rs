@@ -303,6 +303,30 @@ fn loaded_implementation(
     }
 }
 
+fn as_component_region(
+    mut implementation: LoadedRuntimeImplementation,
+) -> LoadedRuntimeImplementation {
+    for replacement in implementation
+        .mount_plan
+        .regions
+        .iter_mut()
+        .flat_map(|region| &mut region.replacements)
+    {
+        let RuntimeReplacement::Component {
+            source_component_id,
+            overlay_ref,
+        } = replacement
+        else {
+            panic!("fixture component replacement changed kind")
+        };
+        *replacement = RuntimeReplacement::ComponentRegion {
+            source_component_id: std::mem::take(source_component_id),
+            overlay_ref: std::mem::take(overlay_ref),
+        };
+    }
+    implementation
+}
+
 fn selection_device(logical: &str, profile: HardwareProcessProfile) -> RuntimeSelectionDevice {
     RuntimeSelectionDevice {
         logical_device_id: logical.to_string(),
@@ -383,6 +407,126 @@ fn paired_comparison_uses_only_the_binary_microbenchmark_decision() {
     }))
     .unwrap_err();
     assert!(statistical_record.to_string().contains("unknown field"));
+}
+
+#[test]
+fn selector_composes_disjoint_region_and_full_component_implementations() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu-a", "gfx-fixture", "vulkan");
+    let target = predicate(&[&gpu], "local");
+    let full = loaded_implementation(
+        "resident_experts",
+        &["layer"],
+        &["scope_experts"],
+        target.clone(),
+        1_000,
+        700,
+        0,
+    );
+    let region = as_component_region(loaded_implementation(
+        "fused_hyper_norm",
+        &["layer"],
+        &["scope_hyper_norm"],
+        target,
+        1_000,
+        800,
+        0,
+    ));
+    let catalog = RuntimeImplementationCatalog {
+        package_id: "package".to_string(),
+        package_root: PathBuf::from("."),
+        stage_status: "optimized".to_string(),
+        scopes: BTreeMap::new(),
+        exact_baseline: RuntimeExactImplementation {
+            artifact_ref: "exact.json".to_string(),
+            contract_digest: "exact".to_string(),
+            mutable: false,
+        },
+        implementations: vec![full, region],
+    };
+    let request = request(
+        vec![selection_device("gpu0", gpu)],
+        &[("layer0", "layer", &["gpu0"])],
+        &[],
+    );
+
+    let report = catalog.select(&request).unwrap();
+
+    assert_eq!(report.selected.len(), 2);
+    assert_eq!(report.total_estimated_saved_ns, 500);
+    assert_eq!(report.exact_instance_ids, Vec::<String>::new());
+    assert_eq!(
+        report
+            .selected
+            .iter()
+            .map(|selected| selected.implementation_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["fused_hyper_norm", "resident_experts"]),
+    );
+}
+
+#[test]
+fn selector_rejects_two_full_or_semantically_overlapping_region_overlays() {
+    let gpu = profile(HardwareDeviceKind::Gpu, "gpu-a", "gfx-fixture", "vulkan");
+    let target = predicate(&[&gpu], "local");
+    let full_a = loaded_implementation(
+        "full_a",
+        &["layer"],
+        &["scope_a"],
+        target.clone(),
+        1_000,
+        800,
+        0,
+    );
+    let full_b = loaded_implementation(
+        "full_b",
+        &["layer"],
+        &["scope_b"],
+        target.clone(),
+        1_000,
+        700,
+        0,
+    );
+    let region_a = as_component_region(loaded_implementation(
+        "region_a",
+        &["layer"],
+        &["scope_shared"],
+        target.clone(),
+        1_000,
+        650,
+        0,
+    ));
+    let region_b = as_component_region(loaded_implementation(
+        "region_b",
+        &["layer"],
+        &["scope_shared"],
+        target,
+        1_000,
+        600,
+        0,
+    ));
+    let request = request(
+        vec![selection_device("gpu0", gpu)],
+        &[("layer0", "layer", &["gpu0"])],
+        &[],
+    );
+
+    for implementations in [vec![full_a, full_b], vec![region_a, region_b]] {
+        let report = RuntimeImplementationCatalog {
+            package_id: "package".to_string(),
+            package_root: PathBuf::from("."),
+            stage_status: "optimized".to_string(),
+            scopes: BTreeMap::new(),
+            exact_baseline: RuntimeExactImplementation {
+                artifact_ref: "exact.json".to_string(),
+                contract_digest: "exact".to_string(),
+                mutable: false,
+            },
+            implementations,
+        }
+        .select(&request)
+        .unwrap();
+        assert_eq!(report.selected.len(), 1);
+    }
 }
 
 #[test]
