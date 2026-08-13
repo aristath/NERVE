@@ -359,8 +359,15 @@ For every numbered item below:
   and one canonical mount transaction. Whole-expert, replicated-resource, and
   general DAG candidate families remain to be incorporated into that same
   solve without reintroducing whole-model device assumptions.
-- Attach exact permanent, transient-peak, KV/state, cache-quota, and atomic
-  load-wave byte vectors to every candidate.
+- The ordered-graph solver now retains mounted bytes and the maximum execution
+  transient as separate per-device and host dimensions. Capacity is checked
+  against the final union of mounted regions plus every earlier transient, and
+  Pareto pruning cannot discard a slower route merely because its lower
+  transient pressure was previously invisible. Replace calibration-session
+  aggregates with exact permanent, KV/state, cache-quota, and atomic load-wave
+  claims derived for the requested context, speculation, residency policy, and
+  lowered physical plan; shared claims must be deduplicated by identity rather
+  than summed once per component.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
   durations. Model compute and transfer queues, dependency edges, collectives,
   independent expert branches, resource contention, and legal overlap.

@@ -36,7 +36,10 @@ pub struct VulkanHybridPlacementPlan {
     pub steps: Vec<VulkanHybridScheduledStep>,
     pub predicted_duration_ns_per_activation: u128,
     pub resident_bytes_by_device: BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
+    pub transient_peak_bytes_by_device:
+        BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
     pub host_resident_bytes: usize,
+    pub host_transient_peak_bytes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,7 +72,10 @@ struct VulkanHybridPlacementState {
     steps: Vec<VulkanHybridScheduledStep>,
     predicted_duration_ns_per_activation: u128,
     resident_bytes_by_device: BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
+    transient_peak_bytes_by_device:
+        BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
     host_resident_bytes: usize,
+    host_transient_peak_bytes: usize,
 }
 
 /// Selects exact measured physical islands for a canonical ordered graph.
@@ -241,7 +247,9 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
         steps: Vec::new(),
         predicted_duration_ns_per_activation: 0,
         resident_bytes_by_device: BTreeMap::new(),
+        transient_peak_bytes_by_device: BTreeMap::new(),
         host_resident_bytes: 0,
+        host_transient_peak_bytes: 0,
     });
 
     for cursor in 0..component_count {
@@ -261,7 +269,12 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
                     let Some(mut next) = apply_hybrid_boundary(&state, boundary, capacity)? else {
                         continue;
                     };
-                    let Some((resident_bytes_by_device, host_resident_bytes)) =
+                    let Some((
+                        resident_bytes_by_device,
+                        transient_peak_bytes_by_device,
+                        host_resident_bytes,
+                        host_transient_peak_bytes,
+                    )) =
                         reserve_hybrid_observation_resources(
                             &next,
                             candidate.observation,
@@ -279,7 +292,9 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
                             )
                         })?;
                     next.resident_bytes_by_device = resident_bytes_by_device;
+                    next.transient_peak_bytes_by_device = transient_peak_bytes_by_device;
                     next.host_resident_bytes = host_resident_bytes;
+                    next.host_transient_peak_bytes = host_transient_peak_bytes;
                     next.cursor = candidate.request.component_end;
                     next.output_physical_device_id = Some(
                         candidate
@@ -317,7 +332,9 @@ pub fn try_plan_vulkan_hybrid_ordered_graph(
         steps: best.steps,
         predicted_duration_ns_per_activation: best.predicted_duration_ns_per_activation,
         resident_bytes_by_device: best.resident_bytes_by_device,
+        transient_peak_bytes_by_device: best.transient_peak_bytes_by_device,
         host_resident_bytes: best.host_resident_bytes,
+        host_transient_peak_bytes: best.host_transient_peak_bytes,
     }))
 }
 
@@ -404,7 +421,12 @@ fn apply_hybrid_boundary(
     let Some(boundary) = boundary else {
         return Ok(Some(state.clone()));
     };
-    let Some((resident_bytes_by_device, host_resident_bytes)) =
+    let Some((
+        resident_bytes_by_device,
+        transient_peak_bytes_by_device,
+        host_resident_bytes,
+        host_transient_peak_bytes,
+    )) =
         reserve_hybrid_observation_resources(state, boundary.observation, capacity)?
     else {
         return Ok(None);
@@ -417,7 +439,9 @@ fn apply_hybrid_boundary(
             VulkanHybridPlacementError("hybrid boundary predicted duration overflowed".to_string())
         })?;
     next.resident_bytes_by_device = resident_bytes_by_device;
+    next.transient_peak_bytes_by_device = transient_peak_bytes_by_device;
     next.host_resident_bytes = host_resident_bytes;
+    next.host_transient_peak_bytes = host_transient_peak_bytes;
     next.steps.push(VulkanHybridScheduledStep::Boundary {
         boundary_index: boundary.request.boundary_index,
         execution_case: boundary.observation.execution_case.clone(),
@@ -432,15 +456,18 @@ fn reserve_hybrid_observation_resources(
 ) -> Result<
     Option<(
         BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
+        BTreeMap<VulkanPlacementDeviceExecutionIdentity, usize>,
+        usize,
         usize,
     )>,
     VulkanHybridPlacementError,
 > {
     let mut resident_bytes_by_device = state.resident_bytes_by_device.clone();
+    let mut transient_peak_bytes_by_device = state.transient_peak_bytes_by_device.clone();
     for device in &observation.execution_case.devices {
-        let Some(available) = capacity.available_bytes_by_device.get(device).copied() else {
+        if !capacity.available_bytes_by_device.contains_key(device) {
             return Ok(None);
-        };
+        }
         let resident = observation
             .resident_bytes_by_physical_device
             .get(&device.physical_device_id)
@@ -471,13 +498,26 @@ fn reserve_hybrid_observation_resources(
                     "hybrid device resident-byte accounting overflowed".to_string(),
                 )
             })?;
+        resident_bytes_by_device.insert(device.clone(), retained);
+        transient_peak_bytes_by_device
+            .entry(device.clone())
+            .and_modify(|peak| *peak = (*peak).max(transient))
+            .or_insert(transient);
+    }
+    for (device, retained) in &resident_bytes_by_device {
+        let Some(available) = capacity.available_bytes_by_device.get(device).copied() else {
+            return Ok(None);
+        };
+        let transient = transient_peak_bytes_by_device
+            .get(device)
+            .copied()
+            .unwrap_or(0);
         if retained
             .checked_add(transient)
             .is_none_or(|required| required > available)
         {
             return Ok(None);
         }
-        resident_bytes_by_device.insert(device.clone(), retained);
     }
     let host_resident_bytes = state
         .host_resident_bytes
@@ -487,13 +527,21 @@ fn reserve_hybrid_observation_resources(
                 "hybrid host resident-byte accounting overflowed".to_string(),
             )
         })?;
+    let host_transient_peak_bytes = state
+        .host_transient_peak_bytes
+        .max(observation.host_transient_peak_bytes);
     if host_resident_bytes
-        .checked_add(observation.host_transient_peak_bytes)
+        .checked_add(host_transient_peak_bytes)
         .is_none_or(|required| required > capacity.host_available_bytes)
     {
         return Ok(None);
     }
-    Ok(Some((resident_bytes_by_device, host_resident_bytes)))
+    Ok(Some((
+        resident_bytes_by_device,
+        transient_peak_bytes_by_device,
+        host_resident_bytes,
+        host_transient_peak_bytes,
+    )))
 }
 
 fn normalized_hybrid_duration_ns(
@@ -534,6 +582,7 @@ fn hybrid_state_dominates(
         || left.output_physical_device_id != right.output_physical_device_id
         || left.predicted_duration_ns_per_activation > right.predicted_duration_ns_per_activation
         || left.host_resident_bytes > right.host_resident_bytes
+        || left.host_transient_peak_bytes > right.host_transient_peak_bytes
     {
         return false;
     }
@@ -552,12 +601,22 @@ fn hybrid_state_dominates(
                 .get(device)
                 .copied()
                 .unwrap_or(0)
+            && left
+                .transient_peak_bytes_by_device
+                .get(device)
+                .copied()
+                .unwrap_or(0)
+                <= right
+                    .transient_peak_bytes_by_device
+                    .get(device)
+                    .copied()
+                    .unwrap_or(0)
     })
 }
 
 fn hybrid_state_ordering_key(
     state: &VulkanHybridPlacementState,
-) -> (u128, usize, usize, Vec<String>) {
+) -> (u128, usize, usize, usize, usize, Vec<String>) {
     let resident_bytes = state
         .resident_bytes_by_device
         .values()
@@ -573,10 +632,17 @@ fn hybrid_state_ordering_key(
             VulkanHybridScheduledStep::Region { candidate_id, .. } => candidate_id.clone(),
         })
         .collect();
+    let transient_peak_bytes = state
+        .transient_peak_bytes_by_device
+        .values()
+        .copied()
+        .fold(0usize, usize::saturating_add);
     (
         state.predicted_duration_ns_per_activation,
         resident_bytes,
+        transient_peak_bytes,
         state.host_resident_bytes,
+        state.host_transient_peak_bytes,
         step_ids,
     )
 }
@@ -1251,6 +1317,154 @@ mod hybrid_placement_optimizer_tests {
             .unwrap_err()
             .0
             .contains("no exact measured")
+        );
+    }
+
+    #[test]
+    fn final_residency_preserves_every_candidate_transient_peak() {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let mut first_observation = region_observation(
+            region_behavior("first"),
+            VulkanPlacementExecutionStrategy::SingleDevice,
+            &[("gpu0", 10)],
+            "gpu0",
+            "gpu0",
+            "gpu0",
+            5,
+            1,
+        );
+        first_observation
+            .transient_peak_bytes_by_physical_device
+            .insert("gpu0".to_string(), 50);
+        let first = record(&mut catalog, first_observation);
+        let second = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("second"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 50)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                5,
+                1,
+            ),
+        );
+
+        let plan = try_plan_vulkan_hybrid_ordered_graph(
+            &catalog,
+            2,
+            &[
+                VulkanHybridRegionCandidate {
+                    candidate_id: "first".to_string(),
+                    component_start: 0,
+                    component_end: 1,
+                    semantic_contract_id: "first".to_string(),
+                    execution_case: first,
+                },
+                VulkanHybridRegionCandidate {
+                    candidate_id: "second".to_string(),
+                    component_start: 1,
+                    component_end: 2,
+                    semantic_contract_id: "second".to_string(),
+                    execution_case: second,
+                },
+            ],
+            &[],
+            &capacity(2, 60, 100),
+        )
+        .unwrap();
+
+        assert!(
+            plan.is_none(),
+            "all permanently mounted regions must leave headroom for the largest execution transient"
+        );
+    }
+
+    #[test]
+    fn pareto_frontier_keeps_a_slower_path_with_less_transient_pressure() {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let mut fast_observation = region_observation(
+            region_behavior("first"),
+            VulkanPlacementExecutionStrategy::SingleDevice,
+            &[("gpu0", 10)],
+            "gpu0",
+            "gpu0",
+            "gpu0",
+            5,
+            1,
+        );
+        fast_observation
+            .transient_peak_bytes_by_physical_device
+            .insert("gpu0".to_string(), 80);
+        let fast = record(&mut catalog, fast_observation);
+        let mut slower_observation = region_observation(
+            region_behavior("first"),
+            VulkanPlacementExecutionStrategy::SingleDevice,
+            &[("gpu0", 20)],
+            "gpu0",
+            "gpu0",
+            "gpu0",
+            8,
+            1,
+        );
+        slower_observation.execution_case.implementation_digests = vec![digest('e')];
+        slower_observation.execution_case.artifact_digest = digest('f');
+        let slower = record(&mut catalog, slower_observation);
+        let second = record(
+            &mut catalog,
+            region_observation(
+                region_behavior("second"),
+                VulkanPlacementExecutionStrategy::SingleDevice,
+                &[("gpu0", 70)],
+                "gpu0",
+                "gpu0",
+                "gpu0",
+                5,
+                1,
+            ),
+        );
+
+        let plan = plan_vulkan_hybrid_ordered_graph(
+            &catalog,
+            2,
+            &[
+                VulkanHybridRegionCandidate {
+                    candidate_id: "fast-high-transient".to_string(),
+                    component_start: 0,
+                    component_end: 1,
+                    semantic_contract_id: "first".to_string(),
+                    execution_case: fast,
+                },
+                VulkanHybridRegionCandidate {
+                    candidate_id: "slow-low-transient".to_string(),
+                    component_start: 0,
+                    component_end: 1,
+                    semantic_contract_id: "first".to_string(),
+                    execution_case: slower,
+                },
+                VulkanHybridRegionCandidate {
+                    candidate_id: "second".to_string(),
+                    component_start: 1,
+                    component_end: 2,
+                    semantic_contract_id: "second".to_string(),
+                    execution_case: second,
+                },
+            ],
+            &[],
+            &capacity(2, 100, 100),
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected_region_ids(&plan),
+            ["slow-low-transient", "second"]
+        );
+        assert_eq!(plan.predicted_duration_ns_per_activation, 13);
+        assert_eq!(plan.resident_bytes_by_device[&device("gpu0", 2)], 90);
+        assert_eq!(
+            plan.transient_peak_bytes_by_device[&device("gpu0", 2)],
+            0
         );
     }
 }
