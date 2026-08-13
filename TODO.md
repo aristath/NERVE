@@ -393,11 +393,14 @@ For every numbered item below:
   now reconstructs fixed parameter claims from local prepared descriptors,
   exact replayed TP fragments, non-dispatch transducer parameters, every mounted
   phase, and compiled resource identities so tied or aliased tensors share one
-  allocation. Its local full-route total is checked against physical residency,
-  and a four-participant TP test checks the exact fragment total on every
-  target. The remaining work is to move this derivation from accepted complete
-  routes to each candidate island, add mutable state, cache quota, load-wave,
-  and transient claims, and replace calibration aggregates before search.
+  allocation. Compiler-generated physical layouts instead retain their own
+  immutable storage-range identity, so they cannot be incorrectly deduplicated
+  against their canonical source tensor. The local full-route total is checked
+  against physical residency, and a four-participant TP test checks the exact
+  fragment total on every target. The remaining work is to move this derivation
+  from accepted complete routes to each candidate island, add mutable state,
+  cache quota, load-wave, and transient claims, and replace calibration
+  aggregates before search.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
   durations. Model compute and transfer queues, dependency edges, collectives,
   independent expert branches, resource contention, and legal overlap.

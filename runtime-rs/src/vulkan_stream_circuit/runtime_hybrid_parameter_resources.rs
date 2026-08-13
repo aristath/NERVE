@@ -36,14 +36,35 @@ pub fn vulkan_runtime_hybrid_parameter_resources_by_component(
         execution_plans,
         tensor_index,
         identity_by_logical_device,
-        |prepared, parameter_id| {
-            exact_vulkan_hybrid_fixed_resource_identity(
-                resource_contract,
-                &runtime_model.execution_scope,
-                &prepared.component_id,
-                Some(&prepared.node_id),
-                parameter_id,
-            )
+        |prepared, parameter_id, actual_tensor| {
+            let prepared_tensor = prepared
+                .descriptors
+                .iter()
+                .find_map(|descriptor| match &descriptor.resource {
+                    VulkanDescriptorResourceAddress::PermanentParameter {
+                        param_id,
+                        tensor,
+                        ..
+                    } if param_id == parameter_id => Some(tensor.as_str()),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    VulkanHybridResourceError(format!(
+                        "exact hybrid prepared parameter {}.{parameter_id} has no descriptor",
+                        prepared.component_id,
+                    ))
+                })?;
+            if actual_tensor == prepared_tensor {
+                exact_vulkan_hybrid_fixed_resource_identity(
+                    resource_contract,
+                    &runtime_model.execution_scope,
+                    &prepared.component_id,
+                    Some(&prepared.node_id),
+                    parameter_id,
+                )
+            } else {
+                vulkan_hybrid_physical_tensor_resource_identity(tensor_index, actual_tensor)
+            }
         },
     )?;
 
@@ -108,7 +129,7 @@ pub(crate) fn vulkan_hybrid_dispatch_parameter_requirements_by_component<F>(
     mut resource_identity: F,
 ) -> Result<VulkanHybridDispatchParameterRequirements, VulkanHybridResourceError>
 where
-    F: FnMut(&VulkanPreparedDispatch, &str) -> Result<String, VulkanHybridResourceError>,
+    F: FnMut(&VulkanPreparedDispatch, &str, &str) -> Result<String, VulkanHybridResourceError>,
 {
     let mut prepared_by_identity = BTreeMap::new();
     let mut prepared_parameter_tensors = BTreeSet::new();
@@ -230,7 +251,7 @@ where
                             .entry(distributed.component_id.clone())
                             .or_default()
                             .push(VulkanHybridSharedRangeRequirement::device_parameter(
-                                resource_identity(prepared, param_id)?,
+                                resource_identity(prepared, param_id, &fragment.tensor)?,
                                 physical_identity.clone(),
                                 fragment.byte_offset,
                                 fragment.byte_count,
@@ -259,7 +280,7 @@ where
                     .entry(prepared.component_id.clone())
                     .or_default()
                     .push(VulkanHybridSharedRangeRequirement::device_parameter(
-                        resource_identity(prepared, param_id)?,
+                        resource_identity(prepared, param_id, tensor)?,
                         (*owner_physical_identity).clone(),
                         0,
                         tensor_byte_count,
@@ -334,6 +355,43 @@ fn vulkan_hybrid_tensor_byte_count(
         )));
     }
     Ok(byte_count)
+}
+
+fn vulkan_hybrid_physical_tensor_resource_identity(
+    tensor_index: &TensorIndex,
+    tensor: &str,
+) -> Result<String, VulkanHybridResourceError> {
+    let metadata = tensor_index.tensors.get(tensor).ok_or_else(|| {
+        VulkanHybridResourceError(format!(
+            "exact hybrid physical tensor {tensor:?} has no tensor metadata",
+        ))
+    })?;
+    let digest = metadata
+        .immutable_content_identity(tensor)
+        .map_err(|error| {
+            VulkanHybridResourceError(format!(
+                "exact hybrid physical tensor identity is invalid: {error}",
+            ))
+        })?;
+    let source_file = metadata.source_file.as_deref().ok_or_else(|| {
+        VulkanHybridResourceError(format!(
+            "exact hybrid physical tensor {tensor:?} has no source file identity",
+        ))
+    })?;
+    let offsets = metadata.data_offsets.as_deref().ok_or_else(|| {
+        VulkanHybridResourceError(format!(
+            "exact hybrid physical tensor {tensor:?} has no source byte range",
+        ))
+    })?;
+    if offsets.len() != 2 || offsets[0] >= offsets[1] {
+        return Err(VulkanHybridResourceError(format!(
+            "exact hybrid physical tensor {tensor:?} has an invalid source byte range",
+        )));
+    }
+    Ok(format!(
+        "physical-tensor:{source_file}:{}:{}:{digest}",
+        offsets[0], offsets[1],
+    ))
 }
 
 fn validate_vulkan_hybrid_parameter_range(

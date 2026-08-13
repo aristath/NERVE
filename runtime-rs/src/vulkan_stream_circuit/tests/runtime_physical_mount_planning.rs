@@ -124,6 +124,32 @@ fn physical_mount_plan_rejects_missing_and_duplicate_device_records() {
 }
 
 #[test]
+fn physical_parameter_identity_distinguishes_compiled_layout_storage() {
+    let model = fixture_model_runtime_model();
+    let tensor_index = model.load_runtime_tensor_index(tiny_model_dir()).unwrap();
+    let source = vulkan_hybrid_physical_tensor_resource_identity(
+        &tensor_index,
+        "model.layers.0.mlp.down_proj.weight",
+    )
+    .unwrap();
+    let optimized = vulkan_hybrid_physical_tensor_resource_identity(
+        &tensor_index,
+        "model.layers.0.mlp.down_proj.weight.__nerve_input_block_major_b128",
+    )
+    .unwrap();
+
+    assert_ne!(source, optimized);
+    assert_eq!(
+        optimized,
+        vulkan_hybrid_physical_tensor_resource_identity(
+            &tensor_index,
+            "model.layers.0.mlp.down_proj.weight.__nerve_input_block_major_b128",
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn physical_mount_plan_reports_full_context_capacity_infeasibility_without_allocating() {
     let model = fixture_model_runtime_model();
     let physical = VulkanRuntimePhysicalExecutionPlan::uniform(&model);

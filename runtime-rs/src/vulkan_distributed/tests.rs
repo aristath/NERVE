@@ -755,7 +755,7 @@ mod tests {
             &plans,
             &fixture_tensor_index("row_major"),
             &identities,
-            |_dispatch, parameter_id| Ok(format!("resource:{parameter_id}")),
+            |_dispatch, parameter_id, _tensor| Ok(format!("resource:{parameter_id}")),
         )
         .unwrap();
         let resources = canonical_vulkan_hybrid_shared_range_resources(
