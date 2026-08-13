@@ -284,7 +284,6 @@ pub(crate) fn vulkan_distributed_execution_graph_digest(
                 );
             }
             Ok(serde_json::json!({
-                "contract_id": dispatch.physical_execution_contract_id,
                 "implementation_digest": dispatch.implementation_digest,
                 "strategy": distributed_execution_strategy_name(dispatch.execution_strategy),
                 "contract_member_count": dispatch.contract_member_node_ids.len(),
@@ -366,7 +365,7 @@ pub(crate) fn vulkan_distributed_execution_graph_digest(
     }
 
     let payload = serde_json::to_vec(&serde_json::json!({
-        "schema": "nerve.distributed_execution_graph.v3",
+        "schema": "nerve.distributed_execution_graph.v4",
         "compiled_execution_signature": compiled_execution_signature,
         "dispatches": dispatches,
         "islands": islands,

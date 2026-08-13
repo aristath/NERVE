@@ -483,12 +483,7 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
                 let mut physical_contracts = kernel
                     .physical_execution_contracts
                     .iter()
-                    .map(|contract| {
-                        (
-                            contract.contract_id.as_str(),
-                            contract.implementation_digest.as_str(),
-                        )
-                    })
+                    .map(|contract| contract.implementation_digest.as_str())
                     .collect::<Vec<_>>();
                 physical_contracts.sort_unstable();
                 (
@@ -520,6 +515,73 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
         implementation: execution.implementation.clone(),
         planned_resident_parameter_bytes: 0,
     })
+}
+
+#[cfg(test)]
+mod runtime_placement_signature_tests {
+    use super::*;
+    use crate::test_support::tiny_model_package_manifest_path;
+
+    fn fixture_execution() -> VulkanResidentComponentExecutionSpec {
+        VulkanResidentModelPackageManifest::from_json_file(tiny_model_package_manifest_path())
+            .unwrap()
+            .component_executions
+            .into_iter()
+            .next()
+            .expect("tiny model fixture must contain a component execution")
+    }
+
+    #[test]
+    fn calibration_signature_reuses_equivalent_component_contract_labels() {
+        let first = fixture_execution();
+        let mut relabelled = first.clone();
+        for (kernel_ordinal, kernel) in relabelled.kernels.iter_mut().enumerate() {
+            for (contract_ordinal, contract) in
+                kernel.physical_execution_contracts.iter_mut().enumerate()
+            {
+                contract.contract_id =
+                    format!("component-b:{kernel_ordinal}:{contract_ordinal}");
+            }
+        }
+
+        let first_target = vulkan_runtime_placement_calibration_target_from_execution(
+            "component-a",
+            &first,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
+        let relabelled_target = vulkan_runtime_placement_calibration_target_from_execution(
+            "component-b",
+            &relabelled,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
+
+        assert_eq!(first_target.signature_id, relabelled_target.signature_id);
+    }
+
+    #[test]
+    fn calibration_signature_rejects_changed_contract_implementation() {
+        let first = fixture_execution();
+        let mut changed = first.clone();
+        changed.kernels[0].physical_execution_contracts[0].implementation_digest =
+            format!("sha256:{}", "f".repeat(64));
+
+        let first_target = vulkan_runtime_placement_calibration_target_from_execution(
+            "component-a",
+            &first,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
+        let changed_target = vulkan_runtime_placement_calibration_target_from_execution(
+            "component-b",
+            &changed,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
+
+        assert_ne!(first_target.signature_id, changed_target.signature_id);
+    }
 }
 
 fn vulkan_runtime_placement_execution_supports_phase(

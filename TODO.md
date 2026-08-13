@@ -143,20 +143,27 @@ the local placement calibration, and the mounted graph.
   Therefore the package proves that TP is compiled and mountable, not that an
   inference token has executed through TP; selection, equivalence, performance,
   and teardown remain part of the explicitly authorized live gate.
-- The workload-free calibration preflight now resolves that package on the five
-  R9700 targets at 128K context, package-default seven-token speculation, and
-  demand-paged residency without opening compute devices or submitting GPU
-  work. It exposes 225 decode and 225 width-four causal-prefill component cases,
-  no unsupported requested phase, 430 whole-expert and 430 intra-expert TP
-  candidates across both phases, 344 unique distributed contracts, 40 directed
-  boundary cases, and 2,760 selected-resource load-wave cases. For each phase
-  and owner, the 43 transformer components expose distributed candidates while
-  the input and output stream adapters correctly retain their scalar-lane
-  causal fallback. Prefill identities now include the selected compiler batch
-  artifact and requested width; a causal-scan width overflow is rejected, while
-  a legal scalar-per-lane fallback is accounted as the exact repeated primary
-  contract. This is authoritative preflight evidence, not live TP execution or
-  performance evidence.
+- Calibration now separates a component-instance-independent compiled
+  transaction signature from the exact component contracts used at replay.
+  Repeated layers with identical implementation digests, artifacts, operation
+  geometry, graph topology, representation dispatch, batching, and phase are
+  measured once. Before execution, the selected observation is rebound to the
+  current layer's exact contract IDs and selected-resource identities; changed
+  implementations, SPIR-V, geometry, graph topology, equivalence, shard shape,
+  or expert-fragment layout still fail closed. The placement-catalog schema is
+  v13 so older evidence cannot cross this identity boundary.
+- The refreshed workload-free DeepSeek preflight at 128K context,
+  package-default seven-token speculation, and demand-paged residency preserves
+  all 720 component occurrences across the eight currently detected targets,
+  while reducing the measurement surface from 720 instance cases to 96
+  structural cases. It exposes 48 decode and 48 width-four causal-prefill
+  cases, 64 whole-expert and 64 intra-expert TP candidates across both phases,
+  32 representative distributed contracts, 112 directed boundary cases, and
+  4,416 selected-resource load-wave cases. The 43 transformer occurrences per
+  target and phase collapse into four exact structural cohorts; input and
+  output adapters retain their scalar-lane causal fallback. This dry plan opens
+  no compute device and submits no GPU work. It is authoritative preflight
+  evidence, not live TP execution or performance evidence.
 - The calibration suite now produces canonical serialized and predicted
   mixed-hybrid region evidence from bounded, complete mounted transactions.
   It measures compute, synchronization, transfers, collectives, output, state,

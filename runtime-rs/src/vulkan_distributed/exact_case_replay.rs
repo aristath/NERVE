@@ -1,10 +1,3 @@
-use crate::vulkan_stream_circuit::{
-    VulkanPlacementDeviceExecutionIdentity, VulkanPlacementExecutionCaseIdentity,
-    VulkanPlacementExecutionStrategy, vulkan_distributed_execution_artifact_digest,
-    vulkan_distributed_execution_equivalence, vulkan_distributed_execution_graph_digest,
-    vulkan_distributed_execution_operations,
-};
-
 impl VulkanDistributedExecutionPlanSet {
     pub fn apply_exact_execution_cases(
         &mut self,
@@ -153,6 +146,14 @@ fn replay_exact_distributed_component_case(
             case.behavior.phase,
         )?;
     }
+    let rebound_case = rebind_exact_execution_case_to_runtime_component(
+        execution_plan,
+        component_id,
+        dispatch_indices,
+        case,
+        loaded_manifest,
+    )?;
+    let case = &rebound_case;
     let mut runtime_contracts = BTreeMap::<&str, &str>::new();
     for dispatch_index in dispatch_indices {
         let dispatch = &execution_plan.dispatches[*dispatch_index];
@@ -984,6 +985,117 @@ mod exact_case_replay_tests {
         )
     }
 
+    fn fragmented_tensor_parallel_dispatch(
+        instance: &str,
+    ) -> VulkanDistributedDispatchPlan {
+        let mut dispatch = dispatch();
+        dispatch.component_id = instance.to_string();
+        dispatch.node_id = format!("{instance}:down");
+        dispatch.physical_execution_contract_id = format!("{instance}:contract");
+        dispatch.execution_strategy =
+            nerve_execution_contracts::ExecutionStrategy::TensorParallelExpert;
+        dispatch.selected_resource_partitions[0].parameter_partitions =
+            vec![VulkanDistributedSelectedResourceParameterPartitionPlan {
+                parameter_slot: 0,
+                dimension: 0,
+                kind: nerve_execution_contracts::ParameterPartitionKind::Contiguous,
+                alignment_elements: 1,
+                logical_elements_per_index: 1,
+            }];
+        let partition = &mut dispatch.selected_resource_partitions[0];
+        partition.parameters_per_resource = 1;
+        partition.atomic_group_ids = (0..4)
+            .map(|index| format!("{instance}:expert-{index}"))
+            .collect();
+        partition.atomic_group_byte_counts = vec![4; 4];
+        partition.atomic_group_resource_ids = (0..4)
+            .map(|index| vec![format!("{instance}:resource-{index}-0")])
+            .collect();
+        partition.parameter_resource_ids = partition.atomic_group_resource_ids.clone();
+        partition.parameter_resource_byte_counts = vec![vec![4]; 4];
+        for shard in &mut dispatch.shards {
+            shard.selected_resource_indices.clear();
+            shard.selected_resource_fragments = BTreeMap::from([(
+                "selector".to_string(),
+                (0..4)
+                    .map(
+                        |resource_index| VulkanDistributedSelectedResourceFragmentPlan {
+                            resource_index,
+                            atomic_group_id: format!("{instance}:expert-{resource_index}"),
+                            logical_start: shard.row_start,
+                            logical_count: shard.row_count,
+                            parameters: vec![
+                                VulkanDistributedSelectedResourceParameterFragmentPlan {
+                                    parameter_slot: 0,
+                                    resource_id: format!(
+                                        "{instance}:resource-{resource_index}-0"
+                                    ),
+                                    resource_byte_count: 4,
+                                    byte_offset: shard.row_start,
+                                    byte_count: shard.row_count,
+                                },
+                            ],
+                        },
+                    )
+                    .collect(),
+            )]);
+        }
+        dispatch
+    }
+
+    fn fragmented_tensor_parallel_exact_case(
+        instance: &str,
+    ) -> VulkanPlacementExecutionCaseIdentity {
+        let dispatch = fragmented_tensor_parallel_dispatch(instance);
+        let plan = plan_with_dispatch(dispatch.clone());
+        let mut execution_case = exact_case(&[], &[]);
+        execution_case.contract_ids = vec![dispatch.physical_execution_contract_id.clone()];
+        execution_case.strategy = VulkanPlacementExecutionStrategy::IntraExpertTensorParallel;
+        for (participant_ordinal, exact_shard) in execution_case.shards.iter_mut().enumerate() {
+            exact_shard.selected_resource_indices_by_partition.clear();
+            exact_shard.selected_resource_fragments_by_partition =
+                exact_runtime_selected_resource_fragments(
+                    &dispatch.selected_resource_partitions,
+                    &dispatch.shards[participant_ordinal],
+                )
+                .unwrap();
+        }
+        synchronize_executable_identity(execution_case, &plan)
+    }
+
+    fn replay_case_with_dispatch(
+        component_id: &str,
+        dispatch: VulkanDistributedDispatchPlan,
+        execution_case: VulkanPlacementExecutionCaseIdentity,
+    ) -> Result<VulkanDistributedExecutionPlanSet, VulkanDistributedPlanError> {
+        let empty = || VulkanDistributedExecutionPlan {
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            storage_buffer_offset_alignment: 4,
+            dispatches: Vec::new(),
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 16,
+            shared_output_byte_capacity: 16,
+            distributed_parameter_byte_count: 0,
+        };
+        let mut plans = VulkanDistributedExecutionPlanSet {
+            decode: VulkanDistributedExecutionPlan {
+                dispatches: vec![dispatch],
+                ..empty()
+            },
+            decode_batch: empty(),
+            prefill: empty(),
+        };
+        plans.apply_exact_execution_cases(
+            &BTreeMap::from([(component_id.to_string(), execution_case)]),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &device_execution_identities(),
+            &loaded_manifest(),
+        )?;
+        Ok(plans)
+    }
+
     fn device_execution_identities() -> BTreeMap<String, VulkanPlacementDeviceExecutionIdentity> {
         BTreeMap::from([
             (
@@ -1046,6 +1158,8 @@ mod exact_case_replay_tests {
         relabeled.dispatches[0].component_id = "another-layer".to_string();
         relabeled.dispatches[0].node_id = "another-node".to_string();
         relabeled.dispatches[0].physical_artifact_id = "another-artifact-label".to_string();
+        relabeled.dispatches[0].physical_execution_contract_id =
+            "another-component-contract-label".to_string();
         relabeled.execution_islands = resolved_physical_execution_islands_for_phase(
             &relabeled.dispatches,
             relabeled.shared_activation_route,
@@ -1063,6 +1177,87 @@ mod exact_case_replay_tests {
 
         assert_eq!(first, relabeled_digest);
         assert_ne!(first, different_digest);
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rebinds_equivalent_component_contract_labels() {
+        let measured = tensor_parallel_exact_case();
+        let mut relabelled_dispatch = tensor_parallel_dispatch();
+        relabelled_dispatch.component_id = "another-layer".to_string();
+        relabelled_dispatch.node_id = "another-down".to_string();
+        relabelled_dispatch.physical_execution_contract_id =
+            "another-component-contract-label".to_string();
+        let empty = || VulkanDistributedExecutionPlan {
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            storage_buffer_offset_alignment: 4,
+            dispatches: Vec::new(),
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 16,
+            shared_output_byte_capacity: 16,
+            distributed_parameter_byte_count: 0,
+        };
+        let mut plans = VulkanDistributedExecutionPlanSet {
+            decode: VulkanDistributedExecutionPlan {
+                dispatches: vec![relabelled_dispatch],
+                ..empty()
+            },
+            decode_batch: empty(),
+            prefill: empty(),
+        };
+
+        plans
+            .apply_exact_execution_cases(
+                &BTreeMap::from([("another-layer".to_string(), measured)]),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &device_execution_identities(),
+                &loaded_manifest(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            plans.decode.dispatches[0].physical_execution_contract_id,
+            "another-component-contract-label",
+        );
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rebinds_equivalent_expert_fragment_labels() {
+        let plans = replay_case_with_dispatch(
+            "runtime-layer",
+            fragmented_tensor_parallel_dispatch("runtime-layer"),
+            fragmented_tensor_parallel_exact_case("measured-layer"),
+        )
+        .unwrap();
+
+        let runtime_fragment = &plans.decode.dispatches[0].shards[0]
+            .selected_resource_fragments["selector"][0];
+        assert_eq!(runtime_fragment.atomic_group_id, "runtime-layer:expert-0");
+        assert_eq!(
+            runtime_fragment.parameters[0].resource_id,
+            "runtime-layer:resource-0-0",
+        );
+    }
+
+    #[test]
+    fn exact_plan_set_replay_rejects_changed_expert_fragment_geometry() {
+        let mut runtime_dispatch = fragmented_tensor_parallel_dispatch("runtime-layer");
+        runtime_dispatch.shards[0]
+            .selected_resource_fragments
+            .get_mut("selector")
+            .unwrap()[0]
+            .parameters[0]
+            .byte_count += 1;
+
+        let error = replay_case_with_dispatch(
+            "runtime-layer",
+            runtime_dispatch,
+            fragmented_tensor_parallel_exact_case("measured-layer"),
+        )
+        .unwrap_err();
+
+        assert!(error.0.contains("selected-resource fragment geometry"));
     }
 
     #[test]

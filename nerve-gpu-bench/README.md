@@ -112,7 +112,7 @@ cargo run --manifest-path nerve-gpu-bench/Cargo.toml -- summarize \
 ```
 
 The validator and summarizer also accept NERVE's exact
-`nerve.vulkan_placement_calibration_catalog.v12` catalogs. Those catalogs retain
+`nerve.vulkan_placement_calibration_catalog.v13` catalogs. Those catalogs retain
 compiler artifact, contract, phase, geometry, device UUID, driver, shard,
 owner, endpoint, transport, resource, output, state, and compiler-declared
 equivalence identity. Numerically tolerant distributed outputs retain their
