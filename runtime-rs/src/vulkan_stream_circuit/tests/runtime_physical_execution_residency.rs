@@ -396,6 +396,197 @@ fn physical_execution_residency_rejects_corrupt_allocation_summaries() {
     assert!(activation_error.to_string().contains("summary disagrees"));
 }
 
+#[test]
+fn physical_execution_stream_control_moves_to_one_shared_host_allocation_across_devices() {
+    let mut base = physical_execution_residency_base_plan(1_000, 100);
+    base.device_plans[0].breakdown.stream_control_bytes =
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    add_helper_stream_control_device(&mut base);
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &physical_execution_activation_plan(VulkanSharedResidentBufferRoute::SharedHost),
+    )
+    .unwrap();
+    let baseline = plan.clone();
+
+    plan.bind_stream_control_memory_domain(&BTreeMap::from([
+        ("owner".to_string(), "physical-a".to_string()),
+        ("helper".to_string(), "physical-b".to_string()),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        plan.total_stream_device_local_bytes,
+        baseline.total_stream_device_local_bytes - 2 * VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    );
+    assert_eq!(
+        plan.total_stream_shared_host_bytes,
+        baseline.total_stream_shared_host_bytes + VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    );
+    assert_eq!(
+        plan.shared_stream_control_host_bytes_per_stream,
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    );
+    assert_eq!(
+        plan.device_plans
+            .iter()
+            .map(|device| {
+                device
+                    .breakdown
+                    .owner_stream_control_device_bytes_per_stream
+            })
+            .sum::<usize>(),
+        0
+    );
+    assert_eq!(
+        plan.device_plans
+            .iter()
+            .map(|device| device.stream_shared_host_bytes)
+            .sum::<usize>(),
+        plan.total_stream_shared_host_bytes
+    );
+}
+
+#[test]
+fn aliased_logical_devices_retain_exactly_one_device_local_stream_control() {
+    let mut base = physical_execution_residency_base_plan(1_000, 100);
+    base.device_plans[0].breakdown.stream_control_bytes =
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    add_helper_stream_control_device(&mut base);
+
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &physical_execution_activation_plan(VulkanSharedResidentBufferRoute::SharedHost),
+    )
+    .unwrap();
+    let baseline = plan.clone();
+
+    plan.bind_stream_control_memory_domain(&BTreeMap::from([
+        ("owner".to_string(), "same-physical".to_string()),
+        ("helper".to_string(), "same-physical".to_string()),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        plan.device_plans
+            .iter()
+            .map(|device| {
+                device
+                    .breakdown
+                    .owner_stream_control_device_bytes_per_stream
+            })
+            .sum::<usize>(),
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    );
+    assert_eq!(
+        plan.total_stream_device_local_bytes,
+        baseline.total_stream_device_local_bytes - VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    );
+    assert_eq!(
+        plan.total_stream_shared_host_bytes,
+        baseline.total_stream_shared_host_bytes
+    );
+    assert_eq!(plan.shared_stream_control_host_bytes_per_stream, 0);
+}
+
+#[test]
+fn stream_control_binding_rejects_incomplete_repeated_or_extra_maps_atomically() {
+    let mut base = physical_execution_residency_base_plan(1_000, 100);
+    base.device_plans[0].breakdown.stream_control_bytes =
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &physical_execution_activation_plan(VulkanSharedResidentBufferRoute::SharedHost),
+    )
+    .unwrap();
+    let original = plan.clone();
+
+    let incomplete = plan
+        .bind_stream_control_memory_domain(&BTreeMap::from([(
+            "owner".to_string(),
+            "physical-a".to_string(),
+        )]))
+        .unwrap_err();
+    assert!(incomplete.to_string().contains("has no physical device"));
+    assert_eq!(plan, original);
+
+    let extra = plan
+        .bind_stream_control_memory_domain(&BTreeMap::from([
+            ("owner".to_string(), "physical-a".to_string()),
+            ("helper".to_string(), "physical-b".to_string()),
+            ("absent".to_string(), "physical-c".to_string()),
+        ]))
+        .unwrap_err();
+    assert!(extra.to_string().contains("contains extra logical devices"));
+    assert_eq!(plan, original);
+
+    let valid_binding = BTreeMap::from([
+        ("owner".to_string(), "physical-a".to_string()),
+        ("helper".to_string(), "physical-b".to_string()),
+    ]);
+    plan.bind_stream_control_memory_domain(&valid_binding)
+        .unwrap();
+    let once_bound = plan.clone();
+    let repeated = plan
+        .bind_stream_control_memory_domain(&valid_binding)
+        .unwrap_err();
+    assert!(repeated.to_string().contains("bound more than once"));
+    assert_eq!(plan, once_bound);
+}
+
+fn empty_physical_execution_parameter_allocations(
+) -> VulkanDistributedParameterAllocationPlan {
+    VulkanDistributedParameterAllocationPlan {
+        allocations: Vec::new(),
+        allocation_count: 0,
+        tensor_count: 0,
+        total_byte_capacity: 0,
+    }
+}
+
+fn empty_physical_execution_parameter_exclusions() -> VulkanDistributedParameterExclusionPlan {
+    VulkanDistributedParameterExclusionPlan {
+        devices: Vec::new(),
+        device_count: 0,
+        unique_tensor_count: 0,
+        excluded_full_allocation_count: 0,
+        excluded_full_byte_capacity: 0,
+    }
+}
+
+fn add_helper_stream_control_device(base: &mut VulkanRuntimeResidencyPlan) {
+    let mut helper = base.device_plans[0].clone();
+    helper.device_id = "helper".to_string();
+    helper.parameter_residency = VulkanRuntimeParameterResidencyBytes {
+        always_resident_bytes: 0,
+        initial_dynamic_bytes: 0,
+        current_resident_bytes: 0,
+        maximum_addressable_bytes: 0,
+        staging_headroom_bytes: 0,
+    };
+    helper.resource_store = VulkanCompiledResourceStoreResidencyBytes::default();
+    helper.working_set = VulkanRuntimeWorkingSetBytes {
+        transient_state_bytes: VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+        activation_headroom_bytes: 0,
+    };
+    helper.breakdown = VulkanRuntimeDeviceResidencyBreakdown {
+        stream_control_bytes: VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+        ..VulkanRuntimeDeviceResidencyBreakdown::default()
+    };
+    helper.initial_device_resident_bytes = VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    base.device_plans.push(helper);
+    base.total_initial_device_resident_bytes += VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+}
+
 fn physical_execution_residency_base_plan(
     initial_device_resident_bytes: usize,
     resource_store_bytes: usize,

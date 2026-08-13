@@ -180,6 +180,13 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
             .map_err(|error| {
                 physical_mount_planning_error("execution transient residency", error)
             })?;
+        resolution
+            .plans
+            .physical_execution_residency_plan
+            .bind_stream_control_memory_domain(&physical_device_by_logical_device)
+            .map_err(|error| {
+                physical_mount_planning_error("stream-control memory-domain binding", error)
+            })?;
         if runtime_physical_mount_fits(
             &resolution.plans.physical_execution_residency_plan,
             &physical_device_by_logical_device,

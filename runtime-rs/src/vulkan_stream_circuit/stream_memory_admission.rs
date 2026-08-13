@@ -135,6 +135,21 @@ where
         )
     })?;
 
+    let expected_shared_stream_control_bytes = if physical_devices.len() > 1 {
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    } else {
+        0
+    };
+    if plan.shared_stream_control_host_bytes_per_stream != expected_shared_stream_control_bytes {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "physical execution stream-control memory domain declares {} shared-host bytes for {} physical device(s), expected {expected_shared_stream_control_bytes}",
+                plan.shared_stream_control_host_bytes_per_stream,
+                physical_devices.len(),
+            )),
+        ));
+    }
+
     let distributed_shared_host_logical_bytes =
         if package.distributed_activation_plan.route == VulkanSharedResidentBufferRoute::SharedHost
         {
@@ -145,6 +160,9 @@ where
     let non_distributed_shared_host_bytes = plan
         .total_stream_shared_host_bytes
         .checked_sub(distributed_shared_host_logical_bytes)
+        .and_then(|bytes| {
+            bytes.checked_sub(plan.shared_stream_control_host_bytes_per_stream)
+        })
         .ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::Package(
                 VulkanResidentTokenModelPackageError::new(

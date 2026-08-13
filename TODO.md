@@ -482,10 +482,14 @@ For every numbered item below:
   The remaining resource work is an allocation-level terminal ledger. Replace
   every residual logical-capacity aggregate with the exact Vulkan requirement
   for each concrete allocation before acquiring the transaction; include
-  per-allocation shared-host alignment for prefill/verification transients;
-  move the one multi-device stream-control allocation from per-device working
-  sets to shared-host residency. Provisional distributed graph-edge buffers no
-  longer contribute a hidden mount peak: their generic route is left
+  per-allocation shared-host alignment for prefill/verification transients.
+  The stream-control allocation now follows its actual physical memory domain:
+  logical slices aliased to one physical device retain one device-local charge,
+  while a multi-device stream replaces every imported-device charge with one
+  shared-host allocation. Admission and mounting select the same deterministic
+  physical owner, and malformed, duplicate, or incomplete bindings fail
+  atomically. Provisional distributed graph-edge buffers no longer contribute a
+  hidden mount peak: their generic route is left
   unmaterialized, boundary mounting installs the selected final physical route
   once, and finalization rejects missing, extra, or substituted participant
   buffers before dispatch construction.

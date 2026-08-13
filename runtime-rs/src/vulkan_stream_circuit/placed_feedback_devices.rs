@@ -1881,6 +1881,12 @@ where
             unique_devices.push((device, vec![slice.device_id.clone()]));
         }
     }
+    // Admission keys physical devices by this stable identifier. Select the
+    // shared allocation owner in the same order because Vulkan memory-type
+    // alignment can differ by owner.
+    unique_devices.sort_by(|(left, _), (right, _)| {
+        left.physical_device_id().cmp(right.physical_device_id())
+    });
     let mut stream_control_buffers = BTreeMap::new();
     let feedback_stream_control_is_resident_replayable = true;
     if let Some((owner_device, _)) = unique_devices.first() {

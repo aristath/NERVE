@@ -7,6 +7,7 @@ pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
     pub excluded_owner_parameter_bytes: usize,
     pub independently_admitted_resource_store_bytes: usize,
     pub owner_stream_device_bytes: usize,
+    pub owner_stream_control_device_bytes_per_stream: usize,
     pub distributed_parameter_bytes: usize,
     pub distributed_shared_activation_device_bytes_per_stream: usize,
     pub distributed_private_activation_device_bytes_per_stream: usize,
@@ -32,6 +33,7 @@ pub struct VulkanRuntimePhysicalExecutionResidencyPlan {
     pub total_stream_device_local_bytes: usize,
     pub total_stream_shared_host_bytes: usize,
     pub execution_transient_shared_host_bytes_per_stream: usize,
+    pub shared_stream_control_host_bytes_per_stream: usize,
 }
 
 impl VulkanRuntimePhysicalExecutionResidencyPlan {
@@ -132,6 +134,8 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             breakdown.independently_admitted_resource_store_bytes =
                 independently_admitted_resource_store_bytes;
             breakdown.owner_stream_device_bytes = owner_stream_device_bytes;
+            breakdown.owner_stream_control_device_bytes_per_stream =
+                device.breakdown.stream_control_bytes;
         }
 
         let mut exclusion_devices = BTreeSet::new();
@@ -303,7 +307,122 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             total_stream_device_local_bytes,
             total_stream_shared_host_bytes,
             execution_transient_shared_host_bytes_per_stream: 0,
+            shared_stream_control_host_bytes_per_stream: 0,
         })
+    }
+
+    fn bind_stream_control_memory_domain(
+        &mut self,
+        physical_device_by_logical_device: &BTreeMap<String, String>,
+    ) -> Result<(), VulkanRuntimeResidencyPlanError> {
+        let mut next = self.clone();
+        let mut indices_by_physical_device = BTreeMap::<String, Vec<usize>>::new();
+        for (index, device) in next.device_plans.iter().enumerate() {
+            let physical_device_id = physical_device_by_logical_device
+                .get(&device.device_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "stream-control binding has no physical device for {:?}",
+                        device.device_id,
+                    ))
+                })?;
+            indices_by_physical_device
+                .entry(physical_device_id.clone())
+                .or_default()
+                .push(index);
+        }
+        if indices_by_physical_device.is_empty()
+            || physical_device_by_logical_device.len() != next.device_plans.len()
+        {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "stream-control binding is incomplete or contains extra logical devices"
+                    .to_string(),
+            ));
+        }
+
+        let spans_physical_devices = indices_by_physical_device.len() > 1;
+        let mut removed_device_bytes = 0usize;
+        for indices in indices_by_physical_device.values() {
+            let retained_index = (!spans_physical_devices)
+                .then(|| {
+                    indices.iter().copied().find(|index| {
+                        next.device_plans[*index]
+                            .breakdown
+                            .owner_stream_control_device_bytes_per_stream
+                            > 0
+                    })
+                })
+                .flatten();
+            for index in indices {
+                if Some(*index) == retained_index {
+                    continue;
+                }
+                let device = &mut next.device_plans[*index];
+                let control_bytes = device
+                    .breakdown
+                    .owner_stream_control_device_bytes_per_stream;
+                device.breakdown.owner_stream_control_device_bytes_per_stream = 0;
+                device.breakdown.owner_stream_device_bytes = device
+                    .breakdown
+                    .owner_stream_device_bytes
+                    .checked_sub(control_bytes)
+                    .ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "stream-control bytes exceed owner working set on {:?}",
+                            device.device_id,
+                        ))
+                    })?;
+                device.stream_device_local_bytes = device
+                    .stream_device_local_bytes
+                    .checked_sub(control_bytes)
+                    .ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "stream-control bytes exceed stream residency on {:?}",
+                            device.device_id,
+                        ))
+                    })?;
+                removed_device_bytes = checked_residency_add(
+                    removed_device_bytes,
+                    control_bytes,
+                    "physically bound stream-control residency",
+                )?;
+            }
+        }
+        next.total_stream_device_local_bytes = next
+            .total_stream_device_local_bytes
+            .checked_sub(removed_device_bytes)
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "stream-control total device residency underflowed".to_string(),
+                )
+            })?;
+
+        if spans_physical_devices {
+            if next.shared_stream_control_host_bytes_per_stream != 0 {
+                return Err(VulkanRuntimeResidencyPlanError(
+                    "stream-control memory domain was bound more than once".to_string(),
+                ));
+            }
+            let representative = next.device_plans.first_mut().ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "stream-control binding has no representative device".to_string(),
+                )
+            })?;
+            representative.stream_shared_host_bytes = checked_residency_add(
+                representative.stream_shared_host_bytes,
+                VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                "shared stream-control device residency",
+            )?;
+            next.total_stream_shared_host_bytes = checked_residency_add(
+                next.total_stream_shared_host_bytes,
+                VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                "shared stream-control total residency",
+            )?;
+            next.shared_stream_control_host_bytes_per_stream =
+                VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+        }
+        *self = next;
+        Ok(())
     }
 
     fn add_execution_transient_reservation(
