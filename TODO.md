@@ -374,10 +374,13 @@ For every numbered item below:
   neighbors retain their exact implementation. The editor and production
   runtime use one shared shader/capability validator and require a profile for
   every assigned owner or shard. Representation candidates and local measured
-  TP/serialized/hybrid physical cases now share one semantic candidate graph
-  and one canonical mount transaction. Whole-expert, replicated-resource, and
-  general DAG candidate families remain to be incorporated into that same
-  solve without reintroducing whole-model device assumptions.
+  TP, serialized, hybrid, whole-expert, and intra-expert TP physical cases now
+  share one semantic candidate graph and one canonical mount transaction. The
+  production optimizer accepts the two expert-parallel families directly;
+  exact replay separately proves whole-expert ordinal ownership and fragmented
+  intra-expert geometry. Replicated-resource and general DAG candidate families
+  remain to be incorporated into that same solve without reintroducing
+  whole-model device assumptions.
 - The ordered-graph solver now retains mounted bytes and the maximum execution
   transient as separate per-device and host dimensions. Capacity is checked
   against the final union of mounted regions plus every earlier transient, and

@@ -147,6 +147,18 @@ fn hybrid_test_distributed_observation(
     behavior: VulkanPlacementBehaviorIdentity,
     duration_ns: u64,
 ) -> VulkanPlacementCalibrationObservation {
+    hybrid_test_distributed_observation_with_strategy(
+        behavior,
+        duration_ns,
+        VulkanPlacementExecutionStrategy::TensorParallel,
+    )
+}
+
+fn hybrid_test_distributed_observation_with_strategy(
+    behavior: VulkanPlacementBehaviorIdentity,
+    duration_ns: u64,
+    strategy: VulkanPlacementExecutionStrategy,
+) -> VulkanPlacementCalibrationObservation {
     VulkanPlacementCalibrationObservation {
         execution_case: VulkanPlacementExecutionCaseIdentity {
             behavior,
@@ -165,7 +177,7 @@ fn hybrid_test_distributed_observation(
                 },
             }],
             equivalence: VulkanPlacementEquivalenceIdentity::bit_exact(),
-            strategy: VulkanPlacementExecutionStrategy::TensorParallel,
+            strategy,
             devices: vec![hybrid_test_device("gpu0"), hybrid_test_device("gpu1")],
             shards: vec![
                 VulkanPlacementShardIdentity {
@@ -801,6 +813,16 @@ fn hybrid_test_implementation_catalog(
 fn hybrid_test_distributed_catalog(
     model: &VulkanResidentRuntimeModel,
 ) -> VulkanPlacementCalibrationCatalog {
+    hybrid_test_distributed_catalog_with_strategy(
+        model,
+        VulkanPlacementExecutionStrategy::TensorParallel,
+    )
+}
+
+fn hybrid_test_distributed_catalog_with_strategy(
+    model: &VulkanResidentRuntimeModel,
+    strategy: VulkanPlacementExecutionStrategy,
+) -> VulkanPlacementCalibrationCatalog {
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
     let mut signatures = model
         .circuit_graph
@@ -830,10 +852,47 @@ fn hybrid_test_distributed_catalog(
             })
             .unwrap();
         catalog
-            .record_observation(hybrid_test_distributed_observation(behavior, 8))
+            .record_observation(hybrid_test_distributed_observation_with_strategy(
+                behavior,
+                8,
+                strategy,
+            ))
             .unwrap();
     }
     catalog
+}
+
+#[test]
+fn runtime_hybrid_planner_accepts_measured_expert_parallel_families() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+
+    for strategy in [
+        VulkanPlacementExecutionStrategy::WholeExpertParallel,
+        VulkanPlacementExecutionStrategy::IntraExpertTensorParallel,
+    ] {
+        let catalog = hybrid_test_distributed_catalog_with_strategy(&model, strategy);
+        let placement = plan_vulkan_runtime_hybrid_ordered_graph(
+            &model,
+            &catalog,
+            &capacity,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
+
+        assert_eq!(placement.plan.predicted_duration_ns_per_activation, 24);
+        assert!(placement.plan.steps.iter().all(|step| matches!(
+            step,
+            VulkanHybridScheduledStep::Region { execution_case, .. }
+                if execution_case.strategy == strategy
+        )));
+    }
 }
 
 #[test]
