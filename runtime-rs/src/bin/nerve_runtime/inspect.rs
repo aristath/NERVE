@@ -321,6 +321,29 @@ fn inspect_graph(
     manifest_dir: &Path,
     manifest: VulkanResidentModelPackageManifest,
 ) -> Result<(), Box<dyn Error>> {
+    let explicit_physical_execution = if args.component_shard_devices.is_empty() {
+        None
+    } else {
+        let mut runtime_model = manifest.clone().mount_runtime_graph_controls(
+            args.default_device_id.as_deref(),
+            &args.node_devices,
+            &args.duplicate_after,
+            args.source_chain.as_deref(),
+        )?;
+        for (component_id, device_ids) in &args.component_shard_devices {
+            runtime_model =
+                runtime_model.with_component_shard_devices(component_id, device_ids.clone())?;
+        }
+        let plan = explicit_runtime_physical_execution_plan(args, &runtime_model)?;
+        (!args.component_physical_strategies.is_empty()).then(|| {
+            RuntimeExplicitPhysicalExecutionReport {
+                decode_contract_ids_by_component: plan.decode_contract_ids_by_component,
+                decode_batch_contract_ids_by_component: plan
+                    .decode_batch_contract_ids_by_component,
+                prefill_contract_ids_by_component: plan.prefill_contract_ids_by_component,
+            }
+        })
+    };
     let source_graph = manifest.resolved_source_graph(manifest_dir.to_path_buf())?;
     let runtime_graph = manifest.runtime_graph_from_controls(
         args.default_device_id.as_deref(),
@@ -349,6 +372,7 @@ fn inspect_graph(
         ),
         effective_component_count: instance_count,
         effective_edge_count: edge_count,
+        explicit_physical_execution,
         placement: RuntimeGraphPlacementReport {
             schema: placement.schema,
             topology: placement.topology,

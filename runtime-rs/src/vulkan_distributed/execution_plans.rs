@@ -578,19 +578,26 @@ impl VulkanDistributedExecutionPlanSet {
             String,
             crate::vulkan_stream_circuit::VulkanPlacementExecutionCaseIdentity,
         >,
+        decode_explicit_contracts: &BTreeMap<String, BTreeSet<String>>,
+        decode_batch_explicit_contracts: &BTreeMap<String, BTreeSet<String>>,
+        prefill_explicit_contracts: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<Self, VulkanDistributedPlanError> {
-        let selected_contracts = |cases: &BTreeMap<
-            String,
-            crate::vulkan_stream_circuit::VulkanPlacementExecutionCaseIdentity,
-        >| {
-            cases
+        let selected_contracts =
+            |cases: &BTreeMap<
+                String,
+                crate::vulkan_stream_circuit::VulkanPlacementExecutionCaseIdentity,
+            >,
+             explicit: &BTreeMap<String, BTreeSet<String>>| {
+                cases
                 .values()
                 .flat_map(|case| case.contract_ids.iter().cloned())
+                .chain(explicit.values().flatten().cloned())
                 .collect::<BTreeSet<_>>()
-        };
-        let decode_contracts = selected_contracts(decode_cases);
-        let decode_batch_contracts = selected_contracts(decode_batch_cases);
-        let prefill_contracts = selected_contracts(prefill_cases);
+            };
+        let decode_contracts = selected_contracts(decode_cases, decode_explicit_contracts);
+        let decode_batch_contracts =
+            selected_contracts(decode_batch_cases, decode_batch_explicit_contracts);
+        let prefill_contracts = selected_contracts(prefill_cases, prefill_explicit_contracts);
         let resource_context = Some((execution_scope, resource_contract));
         let build = |pools: &BTreeMap<String, Vec<String>>,
                      phase,

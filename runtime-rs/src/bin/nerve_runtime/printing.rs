@@ -639,6 +639,9 @@ Options:
   --place-node <NODE=DEV>    Assign one runtime node instance to a logical device.
   --shard-component <NODE=DEV,DEV>
                              Shard eligible internal work while preserving the logical node boundary.
+  --physical-strategy <NODE=STRATEGY>
+                             Select one complete compiler-declared strategy for a manually sharded node.
+                             STRATEGY: tensor_parallel, expert_parallel, or tensor_parallel_expert.
   --bind-device <DEV=TARGET> Bind a logical device to a discovered Vulkan device ID.
   --allow-physical-device <vulkan-uuid:UUID>
                              Restrict discovery and execution to this physical device; may be repeated.

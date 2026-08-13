@@ -74,6 +74,27 @@ fn runtime_graph_report(args: &Args) -> RuntimeGraphControls {
         default_device_id: args.default_device_id.clone(),
         node_devices: args.node_devices.clone(),
         component_shard_devices: args.component_shard_devices.clone(),
+        component_physical_strategies: args
+            .component_physical_strategies
+            .iter()
+            .map(|(component_id, strategy)| {
+                let name = match strategy {
+                    nerve_runtime::execution_contracts::ExecutionStrategy::TensorParallel => {
+                        "tensor_parallel"
+                    }
+                    nerve_runtime::execution_contracts::ExecutionStrategy::ExpertParallel => {
+                        "expert_parallel"
+                    }
+                    nerve_runtime::execution_contracts::ExecutionStrategy::TensorParallelExpert => {
+                        "tensor_parallel_expert"
+                    }
+                    nerve_runtime::execution_contracts::ExecutionStrategy::SingleDevice => {
+                        unreachable!("argument parsing rejects local physical strategies")
+                    }
+                };
+                (component_id.clone(), name.to_string())
+            })
+            .collect(),
         source_chain: args.source_chain.as_ref().map(|source_chain| {
             source_chain
                 .iter()

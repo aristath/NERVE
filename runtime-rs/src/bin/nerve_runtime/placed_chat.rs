@@ -13,8 +13,10 @@ fn mount_placed_chat_stream(
 ) -> Result<VulkanResidentInProcessPlacedPromptStream, Box<dyn Error>> {
     runtime_model.package.sampler.spec =
         sampler_runtime_config(args).apply_to(&runtime_model.package.sampler.spec)?;
-    let physical_execution_plan = physical_execution_plan
-        .unwrap_or_else(|| VulkanRuntimePhysicalExecutionPlan::uniform(&runtime_model));
+    let physical_execution_plan = match physical_execution_plan {
+        Some(plan) => plan,
+        None => explicit_runtime_physical_execution_plan(args, &runtime_model)?,
+    };
     let package = Arc::new(
         VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_physical_execution_plan(
             devices,
@@ -34,6 +36,17 @@ fn mount_placed_chat_stream(
             .with_speculative_draft_tokens(speculative_draft_tokens)?
             .with_speculative_confidence_threshold(args.speculative_confidence_threshold)?,
     )
+}
+
+fn explicit_runtime_physical_execution_plan(
+    args: &Args,
+    runtime_model: &VulkanResidentRuntimeModel,
+) -> Result<VulkanRuntimePhysicalExecutionPlan, Box<dyn Error>> {
+    Ok(VulkanRuntimePhysicalExecutionPlan::uniform(runtime_model)
+        .with_explicit_distributed_strategies(
+            runtime_model,
+            &args.component_physical_strategies,
+        )?)
 }
 
 fn resolve_runtime_hybrid_physical_execution(

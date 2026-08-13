@@ -316,6 +316,29 @@ unavailable, decode remains exact and prefill stays on the stable decode-owned
 coordinators. The compact standalone GPU ranking is diagnostic evidence and is
 never consumed as an inference plan.
 
+For a bounded manual execution proof, name both the logical participants and
+the compiler-declared physical strategy. The first device remains the stable
+component owner:
+
+```bash
+nerve-runtime \
+  --package /path/to/compiled/vulkan_resident_package.json \
+  --chat \
+  --device gpu0 \
+  --shard-component transformer.block.7=gpu0,gpu1 \
+  --physical-strategy transformer.block.7=tensor_parallel \
+  --bind-device gpu0=vulkan-uuid:FIRST_UUID \
+  --bind-device gpu1=vulkan-uuid:SECOND_UUID
+```
+
+Accepted strategy names are `tensor_parallel`, `expert_parallel`, and
+`tensor_parallel_expert`. This is an explicit diagnostic/runtime choice, not
+benchmark evidence. NERVE resolves one complete compiler-emitted contract set
+for decode, batched decode, and prefill and rejects missing or ambiguous
+coverage before allocating the model. Replace `--chat` with
+`--inspect-graph --json` to inspect the resolved contract IDs without starting
+inference.
+
 ### Adding a representation provider
 
 To add a representation without changing model-specific runtime code:

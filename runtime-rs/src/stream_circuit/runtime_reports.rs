@@ -100,6 +100,8 @@ pub struct RuntimeGraphControls {
     pub default_device_id: Option<String>,
     pub node_devices: BTreeMap<String, String>,
     pub component_shard_devices: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub component_physical_strategies: BTreeMap<String, String>,
     pub source_chain: Option<Vec<RuntimeGraphSourceChainEntry>>,
     pub duplicate_after: Vec<RuntimeGraphDuplicateAfterControl>,
 }
@@ -217,7 +219,16 @@ pub struct RuntimeGraphInspectionReport {
     pub device_bindings: RuntimeDeviceBindings,
     pub effective_component_count: usize,
     pub effective_edge_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicit_physical_execution: Option<RuntimeExplicitPhysicalExecutionReport>,
     pub placement: RuntimeGraphPlacementReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeExplicitPhysicalExecutionReport {
+    pub decode_contract_ids_by_component: BTreeMap<String, BTreeSet<String>>,
+    pub decode_batch_contract_ids_by_component: BTreeMap<String, BTreeSet<String>>,
+    pub prefill_contract_ids_by_component: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

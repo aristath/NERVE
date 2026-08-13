@@ -23,13 +23,21 @@ The codebase already contains more distributed execution infrastructure than a
 simple serialized runtime.
 
 Runtime placement supports ordinary component ownership plus optional internal
-component shard pools. The CLI exposes this through `--shard-component`, which
-populates `component_shard_devices`.
+component shard pools. The CLI exposes the participants through
+`--shard-component`. A bounded manual proof may pair that pool with
+`--physical-strategy` to select one compiler-declared `tensor_parallel`,
+`expert_parallel`, or `tensor_parallel_expert` family. The runtime resolves a
+unique maximal complete contract set independently for immediate decode,
+multi-lane decode, and prefill; missing or ambiguous phase coverage fails
+before model allocation. `--inspect-graph` reports the resolved contract IDs
+without entering inference. These manual contracts remain explicitly
+unmeasured and cannot masquerade as automatic placement calibration.
 
 Relevant code:
 
 - `runtime-rs/src/bin/nerve_runtime/args_parsing.rs`
 - `runtime-rs/src/stream_circuit/runtime_graph/placement_spec.rs`
+- `runtime-rs/src/vulkan_stream_circuit/runtime_physical_execution_plan.rs`
 
 The Vulkan loader already lowers those shard pools into:
 
@@ -88,6 +96,14 @@ every physical format, or lazy MoE residency.
 
 That is closer to "local tensor parallelism inside selected components" than
 to global model-wide tensor parallelism.
+
+The current DeepSeek package now also passes a workload-free manual preflight
+for both whole-expert and intra-expert TP on a selected transformer component.
+For intra-expert TP, it resolves the gate/up plus down pair for single-lane
+decode and the corresponding pair for both multi-lane decode and prefill. This
+proves that a real package can select the exact executable contract family; it
+does not prove a real-model token, numerical equivalence, performance, or live
+teardown.
 
 ## Runtime TP Completion Criteria
 

@@ -71,6 +71,20 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
                     ));
                 }
             }
+            "--physical-strategy" => {
+                let assignment = next_value(&mut raw, &arg)?;
+                let (component_id, strategy) =
+                    parse_component_physical_strategy_assignment(&assignment)?;
+                if parsed
+                    .component_physical_strategies
+                    .insert(component_id.clone(), strategy)
+                    .is_some()
+                {
+                    return Err(format!(
+                        "duplicate physical strategy for component {component_id:?}"
+                    ));
+                }
+            }
             "--bind-device" => {
                 let assignment = next_value(&mut raw, &arg)?;
                 let (device_id, target) = parse_device_binding_assignment(&assignment)?;
@@ -215,6 +229,9 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
     if parsed.chat && parsed.json {
         return Err("--json is not supported with --chat yet".to_string());
     }
+    if !parsed.chat && !parsed.inspect_graph && !parsed.component_physical_strategies.is_empty() {
+        return Err("--physical-strategy requires --chat or --inspect-graph".to_string());
+    }
     if !parsed.chat && !parsed.chat_template_variables.is_empty() {
         return Err("--chat-template-var requires --chat".to_string());
     }
@@ -223,6 +240,15 @@ fn parse_args_from(raw: impl IntoIterator<Item = String>) -> Result<Args, String
     }
     if matches!(parsed.default_device_id.as_deref(), Some("")) {
         return Err("--device must not be empty".to_string());
+    }
+    if let Some(component_id) = parsed
+        .component_physical_strategies
+        .keys()
+        .find(|component_id| !parsed.component_shard_devices.contains_key(*component_id))
+    {
+        return Err(format!(
+            "--physical-strategy for {component_id:?} requires a matching --shard-component"
+        ));
     }
     if parsed.max_new_tokens == 0 {
         return Err("--max-new-tokens must be at least 1".to_string());
@@ -355,6 +381,45 @@ fn parse_component_shard_assignment(raw: &str) -> Result<(String, Vec<String>), 
         ));
     }
     Ok((component_id.to_string(), device_ids))
+}
+
+fn parse_component_physical_strategy_assignment(
+    raw: &str,
+) -> Result<
+    (
+        String,
+        nerve_runtime::execution_contracts::ExecutionStrategy,
+    ),
+    String,
+> {
+    let (component_id, raw_strategy) = raw.split_once('=').ok_or_else(|| {
+        format!(
+            "invalid physical strategy assignment {raw:?}; expected COMPONENT=STRATEGY"
+        )
+    })?;
+    let component_id = component_id.trim();
+    if component_id.is_empty() {
+        return Err(format!(
+            "invalid physical strategy assignment {raw:?}; component id must not be empty"
+        ));
+    }
+    let strategy = match raw_strategy.trim() {
+        "tensor_parallel" => {
+            nerve_runtime::execution_contracts::ExecutionStrategy::TensorParallel
+        }
+        "expert_parallel" => {
+            nerve_runtime::execution_contracts::ExecutionStrategy::ExpertParallel
+        }
+        "tensor_parallel_expert" => {
+            nerve_runtime::execution_contracts::ExecutionStrategy::TensorParallelExpert
+        }
+        other => {
+            return Err(format!(
+                "invalid physical strategy {other:?}; expected tensor_parallel, expert_parallel, or tensor_parallel_expert"
+            ));
+        }
+    };
+    Ok((component_id.to_string(), strategy))
 }
 
 fn parse_device_binding_assignment(raw: &str) -> Result<(String, String), String> {

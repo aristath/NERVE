@@ -62,6 +62,9 @@ fn canonical_runtime_execution_identity(
             "decode_execution_cases_by_component": physical_execution_plan.decode_execution_cases_by_component,
             "decode_batch_execution_cases_by_component": physical_execution_plan.decode_batch_execution_cases_by_component,
             "prefill_execution_cases_by_component": physical_execution_plan.prefill_execution_cases_by_component,
+            "decode_contract_ids_by_component": physical_execution_plan.decode_contract_ids_by_component,
+            "decode_batch_contract_ids_by_component": physical_execution_plan.decode_batch_contract_ids_by_component,
+            "prefill_contract_ids_by_component": physical_execution_plan.prefill_contract_ids_by_component,
         },
         "state_capacity_activations": dynamic_state_capacity_activations,
         "speculative_decoders_enabled": speculative_decoders_enabled,
@@ -225,6 +228,23 @@ mod runtime_execution_identity_tests {
                 4096,
                 false,
                 ResourceResidencyPolicy::DemandRetained,
+            )
+            .unwrap()
+        );
+
+        let mut explicit_contract = VulkanRuntimePhysicalExecutionPlan::uniform(&model);
+        explicit_contract.decode_contract_ids_by_component.insert(
+            model.circuit_graph.components[0].component_id.clone(),
+            BTreeSet::from(["sha256:manual-contract".to_string()]),
+        );
+        assert_ne!(
+            base,
+            canonical_runtime_execution_identity(
+                &model,
+                &explicit_contract,
+                4096,
+                false,
+                ResourceResidencyPolicy::Eager,
             )
             .unwrap()
         );

@@ -454,6 +454,9 @@ fn plan_vulkan_runtime_physical_mount(
         &physical_execution_plan.decode_execution_cases_by_component,
         &physical_execution_plan.decode_batch_execution_cases_by_component,
         &physical_execution_plan.prefill_execution_cases_by_component,
+        &physical_execution_plan.decode_contract_ids_by_component,
+        &physical_execution_plan.decode_batch_contract_ids_by_component,
+        &physical_execution_plan.prefill_contract_ids_by_component,
     )
     .map_err(|error| physical_mount_planning_error("distributed execution planning", error))?;
     let identity_by_logical_device = devices

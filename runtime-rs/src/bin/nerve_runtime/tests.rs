@@ -371,6 +371,9 @@ mod tests {
                 "layer_07=gpu1",
                 "--shard-component",
                 "layer_07=gpu1,gpu2,gpu3",
+                "--physical-strategy",
+                "layer_07=tensor_parallel_expert",
+                "--chat",
             ]
             .into_iter()
             .map(str::to_string),
@@ -384,6 +387,65 @@ mod tests {
                 vec!["gpu1".to_string(), "gpu2".to_string(), "gpu3".to_string()],
             )])
         );
+        assert_eq!(
+            args.component_physical_strategies,
+            BTreeMap::from([(
+                "layer_07".to_string(),
+                nerve_runtime::execution_contracts::ExecutionStrategy::TensorParallelExpert,
+            )]),
+        );
+    }
+
+    #[test]
+    fn physical_strategy_requires_a_manual_shard_and_chat() {
+        let without_shard = parse_args_from(
+            [
+                "--chat",
+                "--physical-strategy",
+                "layer_07=tensor_parallel_expert",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(without_shard.contains("requires a matching --shard-component"));
+
+        let without_chat = parse_args_from(
+            [
+                "--shard-component",
+                "layer_07=gpu0,gpu1",
+                "--physical-strategy",
+                "layer_07=tensor_parallel_expert",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(without_chat.contains("requires --chat or --inspect-graph"));
+    }
+
+    #[test]
+    fn physical_strategy_rejects_untyped_or_local_values() {
+        for invalid in [
+            "layer_07=single_device",
+            "layer_07=tp",
+            "layer_07=hybrid",
+            "=tensor_parallel",
+        ] {
+            let error = parse_args_from(
+                [
+                    "--chat",
+                    "--shard-component",
+                    "layer_07=gpu0,gpu1",
+                    "--physical-strategy",
+                    invalid,
+                ]
+                .into_iter()
+                .map(str::to_string),
+            )
+            .unwrap_err();
+            assert!(error.contains("physical strategy"), "{invalid:?}: {error}");
+        }
     }
 
     #[test]

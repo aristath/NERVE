@@ -260,6 +260,7 @@
                 default_device_id: Some("gpu0".to_string()),
                 node_devices: BTreeMap::new(),
                 component_shard_devices: BTreeMap::new(),
+                component_physical_strategies: BTreeMap::new(),
                 source_chain: None,
                 duplicate_after: vec![RuntimeGraphDuplicateAfterControl {
                     after_instance_id: "layer_00".to_string(),
@@ -385,6 +386,7 @@
                 default_device_id: None,
                 node_devices: BTreeMap::new(),
                 component_shard_devices: BTreeMap::new(),
+                component_physical_strategies: BTreeMap::new(),
                 source_chain: None,
                 duplicate_after: Vec::new(),
             },
@@ -434,6 +436,7 @@
                 default_device_id: Some("gpu0".to_string()),
                 node_devices: BTreeMap::new(),
                 component_shard_devices: BTreeMap::new(),
+                component_physical_strategies: BTreeMap::new(),
                 source_chain: Some(vec![RuntimeGraphSourceChainEntry {
                     instance_id: "layer_05_repeat".to_string(),
                     source_component_id: "layer_05".to_string(),
@@ -489,6 +492,20 @@
             ),
             effective_component_count: 1,
             effective_edge_count: 0,
+            explicit_physical_execution: Some(RuntimeExplicitPhysicalExecutionReport {
+                decode_contract_ids_by_component: BTreeMap::from([(
+                    "layer_05_repeat".to_string(),
+                    BTreeSet::from(["decode-contract".to_string()]),
+                )]),
+                decode_batch_contract_ids_by_component: BTreeMap::from([(
+                    "layer_05_repeat".to_string(),
+                    BTreeSet::from(["decode-batch-contract".to_string()]),
+                )]),
+                prefill_contract_ids_by_component: BTreeMap::from([(
+                    "layer_05_repeat".to_string(),
+                    BTreeSet::from(["prefill-contract".to_string()]),
+                )]),
+            }),
             placement: RuntimeGraphPlacementReport {
                 schema: STREAM_CIRCUIT_PLACEMENT_SCHEMA.to_string(),
                 topology: "series".to_string(),
@@ -527,6 +544,11 @@
             "layer_05_repeat"
         );
         assert_eq!(payload["placement"]["components"][0]["device_id"], "vulkan:5");
+        assert_eq!(
+            payload["explicit_physical_execution"]["decode_contract_ids_by_component"]
+                ["layer_05_repeat"][0],
+            "decode-contract"
+        );
     }
 
     #[test]
@@ -618,6 +640,7 @@
                 default_device_id: Some("gpu0".to_string()),
                 node_devices: BTreeMap::new(),
                 component_shard_devices: BTreeMap::new(),
+                component_physical_strategies: BTreeMap::new(),
                 source_chain: None,
                 duplicate_after: Vec::new(),
             },
@@ -768,6 +791,7 @@
                 default_device_id: Some("gpu0".to_string()),
                 node_devices: BTreeMap::new(),
                 component_shard_devices: BTreeMap::new(),
+                component_physical_strategies: BTreeMap::new(),
                 source_chain: None,
                 duplicate_after: Vec::new(),
             },

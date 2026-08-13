@@ -336,6 +336,9 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 &physical_execution_plan.decode_execution_cases_by_component,
                 &physical_execution_plan.decode_batch_execution_cases_by_component,
                 &physical_execution_plan.prefill_execution_cases_by_component,
+                &physical_execution_plan.decode_contract_ids_by_component,
+                &physical_execution_plan.decode_batch_contract_ids_by_component,
+                &physical_execution_plan.prefill_contract_ids_by_component,
             )
             .map_err(|error| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(

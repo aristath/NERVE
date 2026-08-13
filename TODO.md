@@ -143,6 +143,17 @@ the local placement calibration, and the mounted graph.
   Therefore the package proves that TP is compiled and mountable, not that an
   inference token has executed through TP; selection, equivalence, performance,
   and teardown remain part of the explicitly authorized live gate.
+- Manual physical execution now separates participant placement from strategy
+  selection. `--shard-component` declares the ordered devices while
+  `--physical-strategy` selects one compiler-declared tensor-parallel,
+  whole-expert, or intra-expert family. The runtime resolves a unique maximal
+  complete contract set independently for decode, batched decode, and prefill,
+  incorporates it into the mounted execution identity, and rejects unavailable
+  or ambiguous families before model allocation. Workload-free inspection of
+  DeepSeek `layer_00` resolves exact gate/up plus down pairs for all three
+  intra-expert TP phase/shape paths, and separately resolves all three
+  whole-expert paths. This closes the manual-selection ambiguity but remains
+  preflight evidence, not a real-model TP token.
 - Calibration now separates a component-instance-independent compiled
   transaction signature from the exact component contracts used at replay.
   Repeated layers with identical implementation digests, artifacts, operation
@@ -233,8 +244,11 @@ For every numbered item below:
   canonical use prevents exclusion; a natively supported format without a
   distributed implementation remains local; and successful immediate and
   causal-batch submissions feed the normal per-turn decode/prefill strategy
-  counters used by the conversation gate. The remaining acceptance below is
-  the explicitly authorized mounted real-model proof.
+  counters used by the conversation gate. Manual participant selection now
+  also requires a unique typed strategy whenever a compiler exposes competing
+  distributed families, and the resolved decode/batched-decode/prefill contract
+  IDs can be inspected without model allocation. The remaining acceptance
+  below is the explicitly authorized mounted real-model proof.
 - On an explicitly selected real transformer component, compare immediate
   decode and package-supported prefill output plus persistent state against the
   canonical single-device execution. Exercise the compiler-declared BF16 and

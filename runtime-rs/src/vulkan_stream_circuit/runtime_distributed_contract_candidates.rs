@@ -16,27 +16,6 @@ pub fn vulkan_runtime_distributed_contract_candidates(
     target: &VulkanRuntimePlacementCalibrationTarget,
     phase: VulkanTargetedComponentExecutionPhase,
 ) -> Result<Vec<VulkanRuntimeDistributedContractCandidate>, VulkanRuntimeResidencyPlanError> {
-    let execution = runtime_model
-        .component_executions
-        .iter()
-        .find(|execution| execution.component_id == target.component_id)
-        .ok_or_else(|| {
-            VulkanRuntimeResidencyPlanError(format!(
-                "distributed contract discovery found no execution for component {:?}",
-                target.component_id,
-            ))
-        })?;
-    let component = runtime_model
-        .circuit_graph
-        .components
-        .iter()
-        .find(|component| component.component_id == target.component_id)
-        .ok_or_else(|| {
-            VulkanRuntimeResidencyPlanError(format!(
-                "distributed contract discovery found no circuit for component {:?}",
-                target.component_id,
-            ))
-        })?;
     let (execution_phase, execution_shape) = match phase {
         VulkanTargetedComponentExecutionPhase::Decode => (
             nerve_execution_contracts::ExecutionPhase::Decode,
@@ -57,6 +36,46 @@ pub fn vulkan_runtime_distributed_contract_candidates(
             )
         }
     };
+    vulkan_runtime_distributed_contract_candidates_for_execution(
+        runtime_model,
+        &target.component_id,
+        execution_phase,
+        execution_shape,
+    )
+}
+
+pub fn vulkan_runtime_distributed_contract_candidates_for_execution(
+    runtime_model: &VulkanResidentRuntimeModel,
+    component_id: &str,
+    execution_phase: nerve_execution_contracts::ExecutionPhase,
+    execution_shape: nerve_execution_contracts::ExecutionShape,
+) -> Result<Vec<VulkanRuntimeDistributedContractCandidate>, VulkanRuntimeResidencyPlanError> {
+    if component_id.is_empty() {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "distributed contract discovery requires a component ID".to_string(),
+        ));
+    }
+    let execution = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == component_id)
+        .ok_or_else(|| {
+            VulkanRuntimeResidencyPlanError(format!(
+                "distributed contract discovery found no execution for component {:?}",
+                component_id,
+            ))
+        })?;
+    let component = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == component_id)
+        .ok_or_else(|| {
+            VulkanRuntimeResidencyPlanError(format!(
+                "distributed contract discovery found no circuit for component {:?}",
+                component_id,
+            ))
+        })?;
     let mut alternatives = execution
         .kernels
         .iter()
@@ -84,7 +103,7 @@ pub fn vulkan_runtime_distributed_contract_candidates(
                 .ok_or_else(|| {
                     VulkanRuntimeResidencyPlanError(format!(
                         "distributed contract discovery found no circuit node for kernel {}.{}",
-                        target.component_id, kernel.node_id,
+                        component_id, kernel.node_id,
                     ))
                 })?;
             Ok::<_, VulkanRuntimeResidencyPlanError>(Some(

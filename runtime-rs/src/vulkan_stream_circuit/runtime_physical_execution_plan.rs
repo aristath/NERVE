@@ -34,6 +34,14 @@ pub struct VulkanRuntimePhysicalExecutionPlan {
         BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
     pub prefill_execution_cases_by_component:
         BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
+    /// Explicit compiler contract sets selected by a caller for an unmeasured
+    /// manual execution proof. Measured automatic placement continues to use
+    /// the exact execution-case maps above. Keeping these surfaces separate
+    /// prevents a manually requested strategy from masquerading as calibrated
+    /// placement evidence.
+    pub decode_contract_ids_by_component: BTreeMap<String, BTreeSet<String>>,
+    pub decode_batch_contract_ids_by_component: BTreeMap<String, BTreeSet<String>>,
+    pub prefill_contract_ids_by_component: BTreeMap<String, BTreeSet<String>>,
     pub decode_boundary_executions:
         BTreeMap<usize, VulkanRuntimePhysicalBoundaryExecution>,
     pub decode_batch_boundary_executions:
@@ -53,6 +61,64 @@ impl VulkanRuntimePhysicalExecutionPlan {
             ),
             ..Self::default()
         }
+    }
+
+    pub fn with_explicit_distributed_strategies(
+        mut self,
+        runtime_model: &VulkanResidentRuntimeModel,
+        strategy_by_component: &BTreeMap<
+            String,
+            nerve_execution_contracts::ExecutionStrategy,
+        >,
+    ) -> Result<Self, VulkanRuntimeHybridPlacementError> {
+        for (component_id, strategy) in strategy_by_component {
+            if !strategy.is_distributed() {
+                return runtime_hybrid_error(format!(
+                    "explicit physical strategy for {component_id:?} must be distributed"
+                ));
+            }
+            if !self
+                .component_device_pools
+                .decode
+                .contains_key(component_id)
+            {
+                return runtime_hybrid_error(format!(
+                    "explicit physical strategy for {component_id:?} has no component shard pool"
+                ));
+            }
+            self.decode_contract_ids_by_component.insert(
+                component_id.clone(),
+                explicit_distributed_contract_candidate(
+                    runtime_model,
+                    component_id,
+                    nerve_execution_contracts::ExecutionPhase::Decode,
+                    nerve_execution_contracts::ExecutionShape::SingleLane,
+                    *strategy,
+                )?,
+            );
+            self.decode_batch_contract_ids_by_component.insert(
+                component_id.clone(),
+                explicit_distributed_contract_candidate(
+                    runtime_model,
+                    component_id,
+                    nerve_execution_contracts::ExecutionPhase::Decode,
+                    nerve_execution_contracts::ExecutionShape::MultiLane,
+                    *strategy,
+                )?,
+            );
+            self.prefill_contract_ids_by_component.insert(
+                component_id.clone(),
+                explicit_distributed_contract_candidate(
+                    runtime_model,
+                    component_id,
+                    nerve_execution_contracts::ExecutionPhase::Prefill,
+                    nerve_execution_contracts::ExecutionShape::MultiLane,
+                    *strategy,
+                )?,
+            );
+        }
+        self.validate(runtime_model)?;
+        Ok(self)
     }
 
     pub fn validate(
@@ -117,6 +183,60 @@ impl VulkanRuntimePhysicalExecutionPlan {
             &self.component_device_pools.prefill,
             &self.prefill_execution_cases_by_component,
         )?;
+        self.validate_explicit_phase_contracts(
+            runtime_model,
+            "decode",
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            nerve_execution_contracts::ExecutionShape::SingleLane,
+            &self.component_device_pools.decode,
+            &self.decode_execution_cases_by_component,
+            &self.decode_contract_ids_by_component,
+        )?;
+        self.validate_explicit_phase_contracts(
+            runtime_model,
+            "decode_batch",
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            nerve_execution_contracts::ExecutionShape::MultiLane,
+            &self.component_device_pools.decode_batch,
+            &self.decode_batch_execution_cases_by_component,
+            &self.decode_batch_contract_ids_by_component,
+        )?;
+        self.validate_explicit_phase_contracts(
+            runtime_model,
+            "prefill",
+            nerve_execution_contracts::ExecutionPhase::Prefill,
+            nerve_execution_contracts::ExecutionShape::MultiLane,
+            &self.component_device_pools.prefill,
+            &self.prefill_execution_cases_by_component,
+            &self.prefill_contract_ids_by_component,
+        )?;
+        self.validate_unmeasured_phase_contract_selection(
+            runtime_model,
+            "decode",
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            nerve_execution_contracts::ExecutionShape::SingleLane,
+            &self.component_device_pools.decode,
+            &self.decode_execution_cases_by_component,
+            &self.decode_contract_ids_by_component,
+        )?;
+        self.validate_unmeasured_phase_contract_selection(
+            runtime_model,
+            "decode_batch",
+            nerve_execution_contracts::ExecutionPhase::Decode,
+            nerve_execution_contracts::ExecutionShape::MultiLane,
+            &self.component_device_pools.decode_batch,
+            &self.decode_batch_execution_cases_by_component,
+            &self.decode_batch_contract_ids_by_component,
+        )?;
+        self.validate_unmeasured_phase_contract_selection(
+            runtime_model,
+            "prefill",
+            nerve_execution_contracts::ExecutionPhase::Prefill,
+            nerve_execution_contracts::ExecutionShape::MultiLane,
+            &self.component_device_pools.prefill,
+            &self.prefill_execution_cases_by_component,
+            &self.prefill_contract_ids_by_component,
+        )?;
         self.validate_exact_boundary_executions(
             runtime_model,
             "decode",
@@ -142,6 +262,108 @@ impl VulkanRuntimePhysicalExecutionPlan {
             &self.prefill_boundary_executions,
         )?;
         self.validate_stable_boundary_routes()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_explicit_phase_contracts(
+        &self,
+        runtime_model: &VulkanResidentRuntimeModel,
+        phase_name: &str,
+        execution_phase: nerve_execution_contracts::ExecutionPhase,
+        execution_shape: nerve_execution_contracts::ExecutionShape,
+        component_pools: &BTreeMap<String, Vec<String>>,
+        exact_cases: &BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
+        explicit_contracts: &BTreeMap<String, BTreeSet<String>>,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        for (component_id, contract_ids) in explicit_contracts {
+            if !component_pools.contains_key(component_id) {
+                return runtime_hybrid_error(format!(
+                    "explicit {phase_name} contracts for {component_id:?} have no shard pool"
+                ));
+            }
+            if exact_cases.contains_key(component_id) {
+                return runtime_hybrid_error(format!(
+                    "component {component_id:?} has both explicit and measured {phase_name} execution contracts"
+                ));
+            }
+            if contract_ids.is_empty() {
+                return runtime_hybrid_error(format!(
+                    "explicit {phase_name} contracts for {component_id:?} are empty"
+                ));
+            }
+            let candidates = vulkan_runtime_distributed_contract_candidates_for_execution(
+                runtime_model,
+                component_id,
+                execution_phase,
+                execution_shape,
+            )
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+            if !candidates
+                .iter()
+                .any(|candidate| candidate.contract_ids == *contract_ids)
+            {
+                return runtime_hybrid_error(format!(
+                    "explicit {phase_name} contracts for {component_id:?} are not one complete compiler-declared candidate"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_unmeasured_phase_contract_selection(
+        &self,
+        runtime_model: &VulkanResidentRuntimeModel,
+        phase_name: &str,
+        execution_phase: nerve_execution_contracts::ExecutionPhase,
+        execution_shape: nerve_execution_contracts::ExecutionShape,
+        component_pools: &BTreeMap<String, Vec<String>>,
+        exact_cases: &BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
+        explicit_contracts: &BTreeMap<String, BTreeSet<String>>,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        for component_id in component_pools.keys() {
+            if exact_cases.contains_key(component_id)
+                || explicit_contracts.contains_key(component_id)
+            {
+                continue;
+            }
+            let execution = runtime_model
+                .component_executions
+                .iter()
+                .find(|execution| execution.component_id == *component_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(format!(
+                        "unmeasured {phase_name} shard pool found no execution for component {component_id:?}"
+                    ))
+                })?;
+            let mut distributed_kernel_count = 0usize;
+            for kernel in &execution.kernels {
+                let contract_count = kernel
+                    .physical_execution_contracts
+                    .iter()
+                    .filter(|contract| {
+                        contract.strategy.is_distributed()
+                            && contract.phases.contains(&execution_phase)
+                            && contract.execution_shape.supports(execution_shape)
+                            && contract.operation_family == kernel.op
+                            && contract.member_node_ids.contains(&kernel.node_id)
+                    })
+                    .count();
+                if contract_count > 1 {
+                    return runtime_hybrid_error(format!(
+                        "unmeasured {phase_name} shard pool for {component_id:?} has {contract_count} compiler strategies for kernel {:?}; select one with --physical-strategy or use an exact measured plan",
+                        kernel.node_id,
+                    ));
+                }
+                distributed_kernel_count += usize::from(contract_count == 1);
+            }
+            if distributed_kernel_count == 0 {
+                return runtime_hybrid_error(format!(
+                    "unmeasured {phase_name} shard pool for {component_id:?} has no compatible compiler-declared distributed kernel"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -464,6 +686,60 @@ impl VulkanRuntimePhysicalExecutionPlan {
     }
 }
 
+fn explicit_distributed_contract_candidate(
+    runtime_model: &VulkanResidentRuntimeModel,
+    component_id: &str,
+    execution_phase: nerve_execution_contracts::ExecutionPhase,
+    execution_shape: nerve_execution_contracts::ExecutionShape,
+    strategy: nerve_execution_contracts::ExecutionStrategy,
+) -> Result<BTreeSet<String>, VulkanRuntimeHybridPlacementError> {
+    let execution = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == component_id)
+        .ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(format!(
+                "explicit physical strategy found no execution for component {component_id:?}"
+            ))
+        })?;
+    let strategy_by_contract_id = execution
+        .kernels
+        .iter()
+        .flat_map(|kernel| &kernel.physical_execution_contracts)
+        .map(|contract| (contract.contract_id.as_str(), contract.strategy))
+        .collect::<BTreeMap<_, _>>();
+    let matching = vulkan_runtime_distributed_contract_candidates_for_execution(
+        runtime_model,
+        component_id,
+        execution_phase,
+        execution_shape,
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
+    .into_iter()
+    .filter(|candidate| {
+        candidate.contract_ids.iter().all(|contract_id| {
+            strategy_by_contract_id.get(contract_id.as_str()) == Some(&strategy)
+        })
+    })
+    .collect::<Vec<_>>();
+    let maximal = matching
+        .iter()
+        .filter(|candidate| {
+            !matching.iter().any(|other| {
+                candidate.contract_ids.len() < other.contract_ids.len()
+                    && candidate.contract_ids.is_subset(&other.contract_ids)
+            })
+        })
+        .collect::<Vec<_>>();
+    let [selected] = maximal.as_slice() else {
+        return runtime_hybrid_error(format!(
+            "explicit {strategy:?} strategy for {component_id:?} has {} maximal complete {execution_phase:?}/{execution_shape:?} contract candidates; expected exactly one",
+            maximal.len(),
+        ));
+    };
+    Ok(selected.contract_ids.clone())
+}
+
 fn runtime_mounted_boundary_route(
     route: &str,
 ) -> Result<VulkanPlacedEdgeTransferRoute, VulkanRuntimeHybridPlacementError> {
@@ -576,6 +852,136 @@ mod runtime_physical_execution_plan_tests {
             plan.component_device_pools.prefill
         );
         assert_eq!(plan.device_ids(&model), ["gpu0", "gpu1"]);
+    }
+
+    #[test]
+    fn explicit_strategy_selects_one_complete_maximal_contract_set_per_phase() {
+        let canonical = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let component_id = canonical
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.runtime_role.is_signal_processor())
+            .unwrap()
+            .component_id
+            .clone();
+        let model = canonical
+            .with_component_shard_devices(
+                &component_id,
+                vec!["gpu0".to_string(), "gpu1".to_string()],
+            )
+            .unwrap();
+        let plan = VulkanRuntimePhysicalExecutionPlan::uniform(&model)
+            .with_explicit_distributed_strategies(
+                &model,
+                &BTreeMap::from([(
+                    component_id.clone(),
+                    nerve_execution_contracts::ExecutionStrategy::TensorParallel,
+                )]),
+            )
+            .unwrap();
+
+        for contracts in [
+            &plan.decode_contract_ids_by_component,
+            &plan.decode_batch_contract_ids_by_component,
+            &plan.prefill_contract_ids_by_component,
+        ] {
+            assert!(!contracts[&component_id].is_empty());
+        }
+        assert!(plan.decode_execution_cases_by_component.is_empty());
+        plan.validate(&model).unwrap();
+    }
+
+    #[test]
+    fn explicit_strategy_rejects_unsharded_or_unavailable_families() {
+        let canonical = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let component_id = canonical
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.runtime_role.is_signal_processor())
+            .unwrap()
+            .component_id
+            .clone();
+        let unsharded = VulkanRuntimePhysicalExecutionPlan::uniform(&canonical)
+            .with_explicit_distributed_strategies(
+                &canonical,
+                &BTreeMap::from([(
+                    component_id.clone(),
+                    nerve_execution_contracts::ExecutionStrategy::TensorParallel,
+                )]),
+            )
+            .unwrap_err();
+        assert!(unsharded.0.contains("has no component shard pool"));
+
+        let sharded = canonical
+            .with_component_shard_devices(
+                &component_id,
+                vec!["gpu0".to_string(), "gpu1".to_string()],
+            )
+            .unwrap();
+        let unavailable = VulkanRuntimePhysicalExecutionPlan::uniform(&sharded)
+            .with_explicit_distributed_strategies(
+                &sharded,
+                &BTreeMap::from([(
+                    component_id,
+                    nerve_execution_contracts::ExecutionStrategy::ExpertParallel,
+                )]),
+            )
+            .unwrap_err();
+        assert!(unavailable.0.contains("0 maximal complete"));
+    }
+
+    #[test]
+    fn unmeasured_manual_shards_reject_ambiguous_compiler_strategies() {
+        let canonical = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let component_id = canonical
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.runtime_role.is_signal_processor())
+            .unwrap()
+            .component_id
+            .clone();
+        let mut model = canonical
+            .with_component_shard_devices(
+                &component_id,
+                vec!["gpu0".to_string(), "gpu1".to_string()],
+            )
+            .unwrap();
+        let kernel = model
+            .component_executions
+            .iter_mut()
+            .find(|execution| execution.component_id == component_id)
+            .unwrap()
+            .kernels
+            .iter_mut()
+            .find(|kernel| {
+                kernel
+                    .physical_execution_contracts
+                    .iter()
+                    .any(|contract| contract.strategy.is_distributed())
+            })
+            .unwrap();
+        let mut duplicate = kernel
+            .physical_execution_contracts
+            .iter()
+            .find(|contract| contract.strategy.is_distributed())
+            .unwrap()
+            .clone();
+        duplicate.contract_id = "sha256:ambiguous".to_string();
+        kernel.physical_execution_contracts.push(duplicate);
+
+        let error = VulkanRuntimePhysicalExecutionPlan::uniform(&model)
+            .validate(&model)
+            .unwrap_err();
+        assert!(error.0.contains("select one with --physical-strategy"));
     }
 
     #[test]
