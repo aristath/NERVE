@@ -7,9 +7,11 @@ struct VulkanRuntimeHybridExecutionTransientPlan {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum VulkanRuntimeStreamAllocationLifetime {
+pub enum VulkanRuntimeStreamAllocationClass {
     Permanent,
-    DeferredReusable,
+    PromptRunner,
+    VerificationRunner,
+    CatchUpRunner,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -17,7 +19,7 @@ pub struct VulkanRuntimeDeviceLocalTransientAllocation {
     pub logical_device_id: String,
     pub byte_capacity: usize,
     pub concern: String,
-    pub lifetime: VulkanRuntimeStreamAllocationLifetime,
+    pub allocation_class: VulkanRuntimeStreamAllocationClass,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -27,7 +29,7 @@ pub struct VulkanRuntimeSharedHostTransientAllocation {
     pub participant_device_ids: Vec<String>,
     pub byte_capacity: usize,
     pub concern: String,
-    pub lifetime: VulkanRuntimeStreamAllocationLifetime,
+    pub allocation_class: VulkanRuntimeStreamAllocationClass,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -38,12 +40,12 @@ pub enum VulkanRuntimeSharedHostTransientAllocationMode {
 }
 
 impl VulkanRuntimeHybridExecutionTransientPlan {
-    fn into_deferred_reusable(mut self) -> Self {
+    fn into_allocation_class(mut self, allocation_class: VulkanRuntimeStreamAllocationClass) -> Self {
         for allocation in &mut self.device_allocations {
-            allocation.lifetime = VulkanRuntimeStreamAllocationLifetime::DeferredReusable;
+            allocation.allocation_class = allocation_class;
         }
         for allocation in &mut self.shared_host_allocations {
-            allocation.lifetime = VulkanRuntimeStreamAllocationLifetime::DeferredReusable;
+            allocation.allocation_class = allocation_class;
         }
         self
     }
@@ -54,21 +56,21 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
         let mut next = self.clone();
         for allocation in other.device_allocations {
-            next.add_device_allocation_with_lifetime(
+            next.add_device_allocation_with_class(
                 &allocation.logical_device_id,
                 allocation.byte_capacity,
                 &allocation.concern,
-                allocation.lifetime,
+                allocation.allocation_class,
             )?;
         }
         for allocation in other.shared_host_allocations {
-            next.add_shared_host_allocation_with_lifetime(
+            next.add_shared_host_allocation_with_class(
                 allocation.mode,
                 &allocation.owner_device_id,
                 allocation.participant_device_ids,
                 allocation.byte_capacity,
                 &allocation.concern,
-                allocation.lifetime,
+                allocation.allocation_class,
             )?;
         }
         *self = next;
@@ -81,20 +83,20 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         byte_count: usize,
         concern: &str,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
-        self.add_device_allocation_with_lifetime(
+        self.add_device_allocation_with_class(
             logical_device_id,
             byte_count,
             concern,
-            VulkanRuntimeStreamAllocationLifetime::Permanent,
+            VulkanRuntimeStreamAllocationClass::Permanent,
         )
     }
 
-    fn add_device_allocation_with_lifetime(
+    fn add_device_allocation_with_class(
         &mut self,
         logical_device_id: &str,
         byte_count: usize,
         concern: &str,
-        lifetime: VulkanRuntimeStreamAllocationLifetime,
+        allocation_class: VulkanRuntimeStreamAllocationClass,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
         if logical_device_id.trim().is_empty() || byte_count == 0 || concern.trim().is_empty() {
             return Err(VulkanRuntimeHybridPlacementError(
@@ -116,7 +118,7 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
                 logical_device_id: logical_device_id.to_string(),
                 byte_capacity: byte_count,
                 concern: concern.to_string(),
-                lifetime,
+                allocation_class,
             });
         Ok(())
     }
@@ -136,24 +138,24 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         byte_count: usize,
         concern: &str,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
-        self.add_shared_host_allocation_with_lifetime(
+        self.add_shared_host_allocation_with_class(
             mode,
             owner_device_id,
             participant_device_ids,
             byte_count,
             concern,
-            VulkanRuntimeStreamAllocationLifetime::Permanent,
+            VulkanRuntimeStreamAllocationClass::Permanent,
         )
     }
 
-    fn add_shared_host_allocation_with_lifetime(
+    fn add_shared_host_allocation_with_class(
         &mut self,
         mode: VulkanRuntimeSharedHostTransientAllocationMode,
         owner_device_id: &str,
         participant_device_ids: impl IntoIterator<Item = String>,
         byte_count: usize,
         concern: &str,
-        lifetime: VulkanRuntimeStreamAllocationLifetime,
+        allocation_class: VulkanRuntimeStreamAllocationClass,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
         let participant_device_ids = participant_device_ids
             .into_iter()
@@ -182,7 +184,7 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
                 participant_device_ids,
                 byte_capacity: byte_count,
                 concern: concern.to_string(),
-                lifetime,
+                allocation_class,
             });
         Ok(())
     }
@@ -215,7 +217,8 @@ fn exact_vulkan_runtime_hybrid_prefill_runners_transient_plan(
         residency_policy,
         retain_speculative_source_taps,
         false,
-    )?;
+    )?
+    .into_allocation_class(VulkanRuntimeStreamAllocationClass::PromptRunner);
     if retain_speculative_source_taps {
         let verification_width = causal_component_block_lane_capacity(
             speculative_draft_tokens.checked_add(1).ok_or_else(|| {
@@ -225,21 +228,24 @@ fn exact_vulkan_runtime_hybrid_prefill_runners_transient_plan(
             })?,
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-        transient.extend(exact_vulkan_runtime_hybrid_prefill_transient_plan(
-            runtime_model,
-            component_ids,
-            slice_plans,
-            execution_plan,
-            verification_width,
-            verification_width,
-            resource_contract,
-            resource_layout,
-            residency_policy,
-            true,
-            true,
-        )?)?;
+        transient.extend(
+            exact_vulkan_runtime_hybrid_prefill_transient_plan(
+                runtime_model,
+                component_ids,
+                slice_plans,
+                execution_plan,
+                verification_width,
+                verification_width,
+                resource_contract,
+                resource_layout,
+                residency_policy,
+                true,
+                true,
+            )?
+            .into_allocation_class(VulkanRuntimeStreamAllocationClass::VerificationRunner),
+        )?;
     }
-    Ok(transient.into_deferred_reusable())
+    Ok(transient)
 }
 
 fn exact_vulkan_runtime_mounted_prefill_transient_plan(
@@ -380,7 +386,7 @@ fn exact_vulkan_runtime_speculative_catch_up_transient_plan(
                 })?;
         }
     }
-    Ok(transient.into_deferred_reusable())
+    Ok(transient.into_allocation_class(VulkanRuntimeStreamAllocationClass::CatchUpRunner))
 }
 
 fn exact_vulkan_runtime_speculative_source_tap_device_id<'a>(
@@ -717,10 +723,19 @@ fn exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
             scopes.state_ingestion_node_ids_by_component,
         )
         .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
-        for (lane_class, lane_capacity) in [
-            ("normal prefill", normal_lane_capacity),
-            ("causal verification", verification_lane_capacity),
+        for (lane_class, allocation_class, lane_capacity) in [
+            (
+                "normal prefill",
+                VulkanRuntimeStreamAllocationClass::PromptRunner,
+                normal_lane_capacity,
+            ),
+            (
+                "causal verification",
+                VulkanRuntimeStreamAllocationClass::VerificationRunner,
+                verification_lane_capacity,
+            ),
         ] {
+            let mut lane_transient = VulkanRuntimeHybridExecutionTransientPlan::default();
             let allocation_plan = VulkanComponentBatchResidentAllocationPlan::for_single_device(
                 &slice.placed_plan,
                 &slice.prepared_plan,
@@ -739,14 +754,14 @@ fn exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
                 ))
             })?;
             exact_vulkan_runtime_add_component_batch_allocations(
-                &mut transient,
+                &mut lane_transient,
                 &slice.device_id,
                 &decoder.id,
                 &format!("{lane_class} state ingestion"),
                 allocation_plan,
             )?;
             exact_vulkan_runtime_add_speculative_source_tap_staging(
-                &mut transient,
+                &mut lane_transient,
                 runtime_model,
                 decoder,
                 slice,
@@ -755,9 +770,12 @@ fn exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
                 lane_capacity,
                 &format!("{lane_class} state ingestion"),
             )?;
+            transient
+                .extend(lane_transient.into_allocation_class(allocation_class))
+                .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
         }
     }
-    Ok(transient.into_deferred_reusable())
+    Ok(transient)
 }
 
 fn vulkan_runtime_normal_prefill_lane_capacity_candidates(

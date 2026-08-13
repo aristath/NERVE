@@ -564,17 +564,25 @@ For every numbered item below:
   now also fails closed unless every exact physical device/host permit byte is
   consumed, so a requirement/alignment mismatch cannot survive as unexplained
   credit. An ineligible feedback loop or a stream with no parallel decoder
-  reserves nothing. The remaining completion work is the exact consumed-credit
-  proof for the main stream's intentionally deferred allocations across the
-  complete local, staged, speculative, and TP shapes plus the explicitly
-  authorized live gate.
-  Deferred prompt, causal-verification, verification-state, and serial catch-up
-  allocations now use reusable admission leases: releasing or replacing a
-  cached runner atomically converts its tracked device/host bytes back into the
-  owning stream's pending credit. Permanent mount allocations remain one-shot.
-  A failed or non-exact reusable commit returns its complete child credit, and
-  session reset or placement-driven runner invalidation can remount without
-  silently escaping the stream transaction or spending the reservation twice.
+  reserves nothing. Main-stream physical admission is now partitioned into
+  permanent, prompt-runner, verification-runner, and catch-up-runner classes.
+  The permanent class is reconciled after the base mount; prompt,
+  causal-verification, verification-state, and serial catch-up allocations are
+  reconciled when their complete canonical runner class is first materialized.
+  No class may borrow another class's device or host credit. Deferred classes
+  use reusable admission leases: releasing, replacing, or rolling back a cached
+  runner atomically converts its tracked device/host bytes back into the owning
+  stream's same-class pending credit, while permanent allocations remain
+  one-shot. Failed construction, unexplained credit, and non-exact reusable
+  commits tear down transaction-owned caches and return their complete credit.
+  Unique scope identities preserve the innermost allocation class even under
+  out-of-order teardown. Exact sequential tests cover all four class mappings,
+  class isolation, nested and out-of-order scopes, partial commits, recycling,
+  physical ledgers, prompt/verification state-ingestion separation, permanent
+  speculative runners, and catch-up classification. The remaining completion
+  is the explicitly authorized live proof of physical requirement consumption,
+  output/state equivalence, and teardown on local, staged, speculative, and TP
+  model transactions.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one
@@ -585,10 +593,10 @@ For every numbered item below:
   unmaterialized, boundary mounting installs the selected final physical route
   once, and finalization rejects missing, extra, or substituted participant
   buffers before dispatch construction.
-  Prove that the admitted device/host totals are consumed exactly—neither
-  exhausted early nor left as unexplained credit—on local, staged, direct
-  device-local, speculative, and TP stream shapes. Exact
-  sequential tests also cover source
+  On the authorized live gate, prove that admitted device/host totals are
+  consumed exactly—neither exhausted early nor left as unexplained credit—on
+  local, staged, direct device-local, speculative, and TP stream shapes. Exact
+  sequential hardware-neutral tests also cover source
   projections, uneven selector waves, paged versus retained/eager quotas,
   selected-resource exclusion from permanent graph fallback, insufficient
   parameter and cache capacity, shared-host cache/stream isolation, unchanged

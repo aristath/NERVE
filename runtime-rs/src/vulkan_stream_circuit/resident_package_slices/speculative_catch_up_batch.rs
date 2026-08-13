@@ -61,6 +61,10 @@ fn speculative_catch_up_preceding_target_bytes(
 }
 
 impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
+    fn discard_catch_up_batch(&self) {
+        self.catch_up_batch.borrow_mut().take();
+    }
+
     fn run_batched_catch_up_window(
         &self,
         device: &VulkanComputeDevice,

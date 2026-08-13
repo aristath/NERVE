@@ -414,7 +414,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         // stream transaction that was acquired before the base stream was
         // constructed; otherwise lazy mounting could race another stream for
         // capacity that the physical plan already promised to this one.
-        let _stream_memory_scope = self.stream_memory_admission.enter_reusable();
+        let _stream_memory_scope = if capture_causal_state_snapshots {
+            self.stream_memory_admission.enter_verification_runner()
+        } else {
+            self.stream_memory_admission.enter_prompt_runner()
+        };
         // Normal prompt ingestion has no causal rollback snapshots, so one
         // full-width runner avoids retaining a new activation bank for every
         // prompt remainder. Verification is different: its snapshot storage
@@ -434,20 +438,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             ));
         }
         if mounted_capacity.is_some() {
-            let removed = self
-                .temporal_block_executions
-                .borrow_mut()
-                .remove(&capture_causal_state_snapshots);
-            if let Some(runner) = removed {
-                if let Some(source) = runner.speculative_target_output.as_ref().map(|output| {
-                    &output.projection.norm.normalized_frames_buffer
-                }) {
-                    for decoder in &self.speculative_decoders {
-                        decoder.invalidate_catch_up_source_binding(source);
-                    }
-                }
-                drop(runner);
-            }
+            self.remove_temporal_block_execution(capture_causal_state_snapshots);
         }
         let pipeline = self.linear_pipeline_device_indices()?;
         let mut prepared_physical_devices = BTreeSet::new();
@@ -659,7 +650,38 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 pipeline,
             },
         );
+        if !capture_causal_state_snapshots {
+            if let Err(error) = self
+                .stream_memory_admission
+                .ensure_class_fully_consumed(
+                    VulkanMemoryAdmissionAllocationClass::PromptRunner,
+                    "prompt runner",
+                )
+            {
+                self.remove_temporal_block_execution(false);
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(error));
+            }
+        }
         Ok(())
+    }
+
+    fn remove_temporal_block_execution(&self, capture_causal_state_snapshots: bool) {
+        let removed = self
+            .temporal_block_executions
+            .borrow_mut()
+            .remove(&capture_causal_state_snapshots);
+        if let Some(runner) = removed {
+            if let Some(source) = runner
+                .speculative_target_output
+                .as_ref()
+                .map(|output| &output.projection.norm.normalized_frames_buffer)
+            {
+                for decoder in &self.speculative_decoders {
+                    decoder.invalidate_catch_up_source_binding(source);
+                }
+            }
+            drop(runner);
+        }
     }
 
     fn run_causal_component_block(

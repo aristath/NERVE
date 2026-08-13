@@ -36,12 +36,8 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
 
 impl Drop for VulkanResidentInProcessPlacedStreamProcessor {
     fn drop(&mut self) {
-        for decoder in &mut self.speculative_decoders {
-            if let VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) =
-                &mut decoder.execution
-            {
-                processor.catch_up_batch.get_mut().take();
-            }
+        for decoder in &self.speculative_decoders {
+            decoder.discard_catch_up_batch();
         }
     }
 }

@@ -795,21 +795,23 @@ fn reusable_stream_memory_admission_recycles_released_device_and_host_capacity()
     let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
     let device_key = Arc::as_ptr(&device) as usize;
     let host_key = Arc::as_ptr(&host) as usize;
-    let admission = VulkanMemoryAdmission::from_test_permits(
+    let admission = VulkanMemoryAdmission::from_test_partitioned_permits(
         vec![(
             device_key,
+            VulkanMemoryAdmissionAllocationClass::PromptRunner,
             VulkanDeviceLocalMemoryPermit::acquire(&device, 1_000_000, 100_000).unwrap(),
         )],
-        Some((
+        vec![(
+            VulkanMemoryAdmissionAllocationClass::PromptRunner,
             host_key,
             VulkanHostMemoryPermit::acquire(&host, 1_000_000, 50_000).unwrap(),
-        )),
+        )],
     );
 
     let first_device_allocation;
     let first_host_allocation;
     {
-        let _scope = admission.enter_reusable();
+        let _scope = admission.enter_prompt_runner();
         first_device_allocation = take_scoped_device_local_memory_capacity(&device, 100_000)
             .expect("device is in the reusable admission")
             .unwrap()
@@ -835,7 +837,7 @@ fn reusable_stream_memory_admission_recycles_released_device_and_host_capacity()
     let second_device_allocation;
     let second_host_allocation;
     {
-        let _scope = admission.enter_reusable();
+        let _scope = admission.enter_prompt_runner();
         second_device_allocation = take_scoped_device_local_memory_capacity(&device, 100_000)
             .expect("recycled device capacity is reusable")
             .unwrap()
@@ -867,19 +869,21 @@ fn reusable_stream_memory_admission_rejects_partial_commit_without_losing_credit
     let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
     let device_key = Arc::as_ptr(&device) as usize;
     let host_key = Arc::as_ptr(&host) as usize;
-    let admission = VulkanMemoryAdmission::from_test_permits(
+    let admission = VulkanMemoryAdmission::from_test_partitioned_permits(
         vec![(
             device_key,
+            VulkanMemoryAdmissionAllocationClass::PromptRunner,
             VulkanDeviceLocalMemoryPermit::acquire(&device, 1_000_000, 100_000).unwrap(),
         )],
-        Some((
+        vec![(
+            VulkanMemoryAdmissionAllocationClass::PromptRunner,
             host_key,
             VulkanHostMemoryPermit::acquire(&host, 1_000_000, 50_000).unwrap(),
-        )),
+        )],
     );
 
     {
-        let _scope = admission.enter_reusable();
+        let _scope = admission.enter_prompt_runner();
         let device_error = take_scoped_device_local_memory_capacity(&device, 100_000)
             .unwrap()
             .unwrap()
@@ -903,6 +907,297 @@ fn reusable_stream_memory_admission_rejects_partial_commit_without_losing_credit
     drop(admission);
     assert_eq!(device.lock().unwrap().pending_reservation_bytes, 0);
     assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
+}
+
+#[test]
+fn classified_stream_memory_admission_never_borrows_between_runner_classes() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let device = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let device_key = Arc::as_ptr(&device) as usize;
+    let host_key = Arc::as_ptr(&host) as usize;
+    let admission = VulkanMemoryAdmission::from_test_partitioned_permits(
+        vec![
+            (
+                device_key,
+                VulkanMemoryAdmissionAllocationClass::Permanent,
+                VulkanDeviceLocalMemoryPermit::acquire(&device, 1_000_000, 100_000).unwrap(),
+            ),
+            (
+                device_key,
+                VulkanMemoryAdmissionAllocationClass::PromptRunner,
+                VulkanDeviceLocalMemoryPermit::acquire(&device, 1_000_000, 200_000).unwrap(),
+            ),
+        ],
+        vec![
+            (
+                VulkanMemoryAdmissionAllocationClass::Permanent,
+                host_key,
+                VulkanHostMemoryPermit::acquire(&host, 1_000_000, 50_000).unwrap(),
+            ),
+            (
+                VulkanMemoryAdmissionAllocationClass::PromptRunner,
+                host_key,
+                VulkanHostMemoryPermit::acquire(&host, 1_000_000, 60_000).unwrap(),
+            ),
+        ],
+    );
+
+    let permanent_device_allocation;
+    let permanent_host_allocation;
+    {
+        let _scope = admission.enter();
+        permanent_device_allocation = take_scoped_device_local_memory_capacity(&device, 100_000)
+            .unwrap()
+            .unwrap()
+            .commit(100_000)
+            .unwrap();
+        permanent_host_allocation = take_scoped_host_memory_capacity(&host, 50_000)
+            .unwrap()
+            .unwrap()
+            .commit(50_000)
+            .unwrap();
+        assert!(
+            take_scoped_device_local_memory_capacity(&device, 1)
+                .unwrap()
+                .is_err(),
+            "permanent allocation must not borrow prompt-runner device credit",
+        );
+        assert!(
+            take_scoped_host_memory_capacity(&host, 1)
+                .unwrap()
+                .is_err(),
+            "permanent allocation must not borrow prompt-runner host credit",
+        );
+    }
+    admission
+        .ensure_class_fully_consumed(
+            VulkanMemoryAdmissionAllocationClass::Permanent,
+            "permanent fixture",
+        )
+        .unwrap();
+    let prompt_error = admission
+        .ensure_class_fully_consumed(
+            VulkanMemoryAdmissionAllocationClass::PromptRunner,
+            "prompt fixture",
+        )
+        .unwrap_err();
+    assert!(prompt_error.to_string().contains("200000 device bytes"));
+    assert!(prompt_error.to_string().contains("60000 host bytes"));
+    assert_eq!(
+        admission.remaining_device_bytes_for_class(
+            device_key,
+            VulkanMemoryAdmissionAllocationClass::Permanent,
+        ),
+        0,
+    );
+    assert_eq!(
+        admission.remaining_device_bytes_for_class(
+            device_key,
+            VulkanMemoryAdmissionAllocationClass::PromptRunner,
+        ),
+        200_000,
+    );
+
+    let prompt_device_allocation;
+    let prompt_host_allocation;
+    {
+        let _scope = admission.enter_prompt_runner();
+        prompt_device_allocation = take_scoped_device_local_memory_capacity(&device, 200_000)
+            .unwrap()
+            .unwrap()
+            .commit(200_000)
+            .unwrap();
+        prompt_host_allocation = take_scoped_host_memory_capacity(&host, 60_000)
+            .unwrap()
+            .unwrap()
+            .commit(60_000)
+            .unwrap();
+    }
+    admission.ensure_fully_consumed("complete fixture").unwrap();
+
+    drop(prompt_device_allocation);
+    drop(prompt_host_allocation);
+    assert_eq!(
+        admission.remaining_device_bytes_for_class(
+            device_key,
+            VulkanMemoryAdmissionAllocationClass::PromptRunner,
+        ),
+        200_000,
+    );
+    drop(admission);
+    drop(permanent_device_allocation);
+    drop(permanent_host_allocation);
+    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
+fn reusable_stream_memory_admission_isolates_every_lazy_runner_class() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let device = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let device_key = Arc::as_ptr(&device) as usize;
+    let host_key = Arc::as_ptr(&host) as usize;
+    let classes: [(VulkanMemoryAdmissionAllocationClass, usize, usize); 3] = [
+        (VulkanMemoryAdmissionAllocationClass::PromptRunner, 10_000, 11_000),
+        (
+            VulkanMemoryAdmissionAllocationClass::VerificationRunner,
+            20_000,
+            21_000,
+        ),
+        (
+            VulkanMemoryAdmissionAllocationClass::CatchUpRunner,
+            30_000,
+            31_000,
+        ),
+    ];
+    let admission = VulkanMemoryAdmission::from_test_partitioned_permits(
+        classes
+            .iter()
+            .map(|(allocation_class, device_bytes, _)| {
+                (
+                    device_key,
+                    *allocation_class,
+                    VulkanDeviceLocalMemoryPermit::acquire(
+                        &device,
+                        1_000_000,
+                        u64::try_from(*device_bytes).unwrap(),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect(),
+        classes
+            .iter()
+            .map(|(allocation_class, _, host_bytes)| {
+                (
+                    *allocation_class,
+                    host_key,
+                    VulkanHostMemoryPermit::acquire(&host, 1_000_000, *host_bytes).unwrap(),
+                )
+            })
+            .collect(),
+    );
+
+    let mut allocations = Vec::new();
+    for (allocation_class, device_bytes, host_bytes) in classes {
+        let _scope = match allocation_class {
+            VulkanMemoryAdmissionAllocationClass::PromptRunner => {
+                admission.enter_prompt_runner()
+            }
+            VulkanMemoryAdmissionAllocationClass::VerificationRunner => {
+                admission.enter_verification_runner()
+            }
+            VulkanMemoryAdmissionAllocationClass::CatchUpRunner => {
+                admission.enter_catch_up_runner()
+            }
+            VulkanMemoryAdmissionAllocationClass::Permanent => unreachable!(),
+        };
+        let device_allocation = take_scoped_device_local_memory_capacity(&device, device_bytes)
+            .unwrap()
+            .unwrap()
+            .commit(u64::try_from(device_bytes).unwrap())
+            .unwrap();
+        let host_allocation = take_scoped_host_memory_capacity(&host, host_bytes)
+            .unwrap()
+            .unwrap()
+            .commit(host_bytes)
+            .unwrap();
+        assert!(
+            take_scoped_device_local_memory_capacity(&device, 1)
+                .unwrap()
+                .is_err(),
+            "{allocation_class:?} must not borrow another class's device credit",
+        );
+        assert!(
+            take_scoped_host_memory_capacity(&host, 1)
+                .unwrap()
+                .is_err(),
+            "{allocation_class:?} must not borrow another class's host credit",
+        );
+        admission
+            .ensure_class_fully_consumed(allocation_class, "mounted lazy runner")
+            .unwrap();
+        allocations.push((device_allocation, host_allocation));
+    }
+    admission.ensure_fully_consumed("all lazy runners").unwrap();
+
+    for (device_allocation, host_allocation) in allocations {
+        drop(device_allocation);
+        drop(host_allocation);
+    }
+    for (allocation_class, device_bytes, _) in classes {
+        assert_eq!(
+            admission.remaining_device_bytes_for_class(device_key, allocation_class),
+            device_bytes,
+        );
+    }
+    drop(admission);
+    assert_eq!(device.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
+fn dropping_an_outer_stream_scope_preserves_the_active_inner_class() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let tracker = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let key = Arc::as_ptr(&tracker) as usize;
+    let admission = VulkanMemoryAdmission::from_test_partitioned_permits(
+        vec![
+            (
+                key,
+                VulkanMemoryAdmissionAllocationClass::Permanent,
+                VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 10_000).unwrap(),
+            ),
+            (
+                key,
+                VulkanMemoryAdmissionAllocationClass::PromptRunner,
+                VulkanDeviceLocalMemoryPermit::acquire(&tracker, 1_000_000, 20_000).unwrap(),
+            ),
+        ],
+        Vec::new(),
+    );
+
+    let outer = admission.enter();
+    let inner = admission.enter_prompt_runner();
+    drop(outer);
+    let prompt_allocation = take_scoped_device_local_memory_capacity(&tracker, 20_000)
+        .expect("the inner prompt scope remains active")
+        .unwrap()
+        .commit(20_000)
+        .unwrap();
+    assert_eq!(
+        admission.remaining_device_bytes_for_class(
+            key,
+            VulkanMemoryAdmissionAllocationClass::Permanent,
+        ),
+        10_000,
+    );
+    assert_eq!(
+        admission.remaining_device_bytes_for_class(
+            key,
+            VulkanMemoryAdmissionAllocationClass::PromptRunner,
+        ),
+        0,
+    );
+
+    drop(inner);
+    assert!(take_scoped_device_local_memory_capacity(&tracker, 1).is_none());
+    drop(prompt_allocation);
+    drop(admission);
+    assert_eq!(tracker.lock().unwrap().pending_reservation_bytes, 0);
+    assert_eq!(tracker.lock().unwrap().tracked_allocation_bytes, 0);
 }
 
 #[test]

@@ -125,26 +125,52 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         normalized_target_frames: &VulkanResidentBuffer,
         frame_byte_capacity: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let _stream_memory_scope = self.stream_memory_admission.enter_reusable();
+        let _stream_memory_scope = self.stream_memory_admission.enter_catch_up_runner();
+        let run_result = (|| {
+            for decoder in self
+                .speculative_decoders
+                .iter()
+                .filter(|decoder| !decoder.is_parallel_block())
+            {
+                let draft_device = devices.get(&decoder.device_id).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                        device_id: decoder.device_id.clone(),
+                    }
+                })?;
+                decoder.run_catch_up_window(
+                    draft_device,
+                    input_token_ids,
+                    start_stream_tick,
+                    normalized_target_frames,
+                    frame_byte_capacity,
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = run_result {
+            self.discard_speculative_catch_up_batches();
+            return Err(error);
+        }
+        if input_token_ids.len() > 1
+            && let Err(error) = self.stream_memory_admission.ensure_class_fully_consumed(
+                VulkanMemoryAdmissionAllocationClass::CatchUpRunner,
+                "speculative catch-up runners",
+            )
+        {
+            self.discard_speculative_catch_up_batches();
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(error));
+        }
+        Ok(())
+    }
+
+    fn discard_speculative_catch_up_batches(&self) {
         for decoder in self
             .speculative_decoders
             .iter()
             .filter(|decoder| !decoder.is_parallel_block())
         {
-            let draft_device = devices.get(&decoder.device_id).ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                    device_id: decoder.device_id.clone(),
-                }
-            })?;
-            decoder.run_catch_up_window(
-                draft_device,
-                input_token_ids,
-                start_stream_tick,
-                normalized_target_frames,
-                frame_byte_capacity,
-            )?;
+            decoder.discard_catch_up_batch();
         }
-        Ok(())
     }
 
     fn ensure_verification_state_transactions(
@@ -172,7 +198,9 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         if transactions_are_sufficient && causal_window_is_sufficient {
             return Ok(());
         }
-        let _stream_memory_scope = self.stream_memory_admission.enter_reusable();
+        let _stream_memory_scope = self
+            .stream_memory_admission
+            .enter_verification_runner();
         if !transactions_are_sufficient {
             let transactions = create_placed_state_transactions(
                 &self.device_slices,
@@ -190,7 +218,23 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             )?;
             *self.verification_state_transactions.borrow_mut() = Some(transactions);
         }
-        self.ensure_temporal_block_execution(devices, batch_width, true)
+        if let Err(error) = self.ensure_temporal_block_execution(devices, batch_width, true) {
+            self.remove_temporal_block_execution(true);
+            self.verification_state_transactions.borrow_mut().take();
+            return Err(error);
+        }
+        if let Err(error) = self
+            .stream_memory_admission
+            .ensure_class_fully_consumed(
+                VulkanMemoryAdmissionAllocationClass::VerificationRunner,
+                "verification runner",
+            )
+        {
+            self.remove_temporal_block_execution(true);
+            self.verification_state_transactions.borrow_mut().take();
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(error));
+        }
+        Ok(())
     }
 
     fn run_causal_verification_window(
@@ -377,8 +421,8 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .projection
             .norm
             .normalized_frames_buffer;
-        let _stream_memory_scope = self.stream_memory_admission.enter_reusable();
-        decoder.run_catch_up_window(
+        let _stream_memory_scope = self.stream_memory_admission.enter_catch_up_runner();
+        let result = decoder.run_catch_up_window(
             draft_device,
             input_token_ids,
             start_stream_tick,
@@ -386,7 +430,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             self.model
                 .output_transducer_spec
                 .normalized_frame_byte_capacity,
-        )
+        );
+        if result.is_err() {
+            decoder.discard_catch_up_batch();
+        }
+        result
     }
 
     fn commit_speculative_feedback_control(

@@ -184,6 +184,41 @@ where
     })
 }
 
+fn resident_stream_allocation_class(
+    allocation: &VulkanRuntimeResidentStreamAllocation,
+) -> VulkanMemoryAdmissionAllocationClass {
+    if allocation.scope == VulkanRuntimeResidentStreamAllocationScope::Target
+        && matches!(
+            allocation.kind,
+            VulkanRuntimeResidentStreamAllocationKind::StateTransaction { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot { .. }
+        )
+    {
+        VulkanMemoryAdmissionAllocationClass::VerificationRunner
+    } else {
+        VulkanMemoryAdmissionAllocationClass::Permanent
+    }
+}
+
+fn stream_transient_allocation_class(
+    allocation_class: VulkanRuntimeStreamAllocationClass,
+) -> VulkanMemoryAdmissionAllocationClass {
+    match allocation_class {
+        VulkanRuntimeStreamAllocationClass::Permanent => {
+            VulkanMemoryAdmissionAllocationClass::Permanent
+        }
+        VulkanRuntimeStreamAllocationClass::PromptRunner => {
+            VulkanMemoryAdmissionAllocationClass::PromptRunner
+        }
+        VulkanRuntimeStreamAllocationClass::VerificationRunner => {
+            VulkanMemoryAdmissionAllocationClass::VerificationRunner
+        }
+        VulkanRuntimeStreamAllocationClass::CatchUpRunner => {
+            VulkanMemoryAdmissionAllocationClass::CatchUpRunner
+        }
+    }
+}
+
 fn external_device_local_resident_requirement_bytes<'a, F>(
     allocations: &[VulkanRuntimeExternalDeviceLocalResidentAllocation],
     device_for: &F,
@@ -378,39 +413,89 @@ where
                         )),
                     )
                 })?;
-            let exact_resident_bytes = resident_stream_device_requirement_bytes_with(
-                &device_plan.resident_stream_device_allocations,
-                |allocation| {
-                    device
-                        .resident_buffer_memory_requirement_bytes(allocation.byte_capacity)
-                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-                },
-            )?;
+            let exact_resident_bytes_for =
+                |allocation_class: VulkanMemoryAdmissionAllocationClass| {
+                    resident_stream_device_requirement_bytes_with(
+                        &device_plan
+                            .resident_stream_device_allocations
+                            .iter()
+                            .filter(|allocation| {
+                                resident_stream_allocation_class(allocation) == allocation_class
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        |allocation| {
+                            device
+                                .resident_buffer_memory_requirement_bytes(
+                                    allocation.byte_capacity,
+                                )
+                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                        },
+                    )
+                };
             let exact_external_bytes = external_device_local_resident_requirement_bytes(
                 &device_plan.external_device_local_resident_allocations,
                 device_for,
             )?;
-            let exact_transient_bytes = execution_transient_device_requirement_bytes_with(
-                &device_plan.execution_transient_device_allocations,
-                |allocation| {
-                    device
-                        .resident_buffer_memory_requirement_bytes(allocation.byte_capacity)
-                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-                },
-            )?;
-            let exact_stream_bytes = residual_logical_bytes
-                .checked_add(exact_resident_bytes)
-                .and_then(|bytes| bytes.checked_add(exact_external_bytes))
-                .and_then(|bytes| bytes.checked_add(exact_transient_bytes))
+            let exact_transient_bytes_for =
+                |allocation_class: VulkanMemoryAdmissionAllocationClass| {
+                    execution_transient_device_requirement_bytes_with(
+                        &device_plan
+                            .execution_transient_device_allocations
+                            .iter()
+                            .filter(|allocation| {
+                                stream_transient_allocation_class(allocation.allocation_class)
+                                    == allocation_class
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        |allocation| {
+                            device
+                                .resident_buffer_memory_requirement_bytes(
+                                    allocation.byte_capacity,
+                                )
+                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                        },
+                    )
+                };
+            let permanent_base_bytes = residual_logical_bytes
+                .checked_add(exact_external_bytes)
                 .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
                         VulkanResidentTokenModelPackageError::new(format!(
-                            "physical execution device {:?} exact stream requirement overflowed",
+                            "physical execution device {:?} permanent base stream requirement overflowed",
                             device_plan.device_id,
                         )),
                     )
                 })?;
-            Ok((device, exact_stream_bytes))
+            let mut requirements_by_class = BTreeMap::from([(
+                VulkanMemoryAdmissionAllocationClass::Permanent,
+                permanent_base_bytes,
+            )]);
+            for allocation_class in VulkanMemoryAdmissionAllocationClass::ALL {
+                let exact_class_bytes = exact_resident_bytes_for(allocation_class)?
+                    .checked_add(exact_transient_bytes_for(allocation_class)?)
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "physical execution device {:?} {allocation_class:?} stream requirement overflowed",
+                                device_plan.device_id,
+                            )),
+                        )
+                    })?;
+                if exact_class_bytes > 0 {
+                    let class_total = requirements_by_class.entry(allocation_class).or_default();
+                    *class_total = class_total.checked_add(exact_class_bytes).ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "physical execution device {:?} {allocation_class:?} stream requirement overflowed",
+                                device_plan.device_id,
+                            )),
+                        )
+                    })?;
+                }
+            }
+            Ok((device, requirements_by_class))
         })
         .collect::<Result<Vec<_>, VulkanResidentInProcessPlacedRuntimeError>>()?;
 
@@ -512,20 +597,29 @@ where
         })?;
     let shared_stream_control_requirement =
         shared_stream_control_requirement_bytes(&physical_devices)?;
-    let execution_transient_shared_host_requirement =
-        execution_transient_shared_host_requirement_bytes(
-            &plan.execution_transient_shared_host_allocations,
-            device_for,
-        )?;
+    let execution_transient_shared_host_requirement_for =
+        |allocation_class: VulkanMemoryAdmissionAllocationClass| {
+            execution_transient_shared_host_requirement_bytes(
+                &plan
+                    .execution_transient_shared_host_allocations
+                    .iter()
+                    .filter(|allocation| {
+                        stream_transient_allocation_class(allocation.allocation_class)
+                            == allocation_class
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                device_for,
+            )
+        };
     let resident_shared_host_requirement = resident_shared_host_requirement_bytes(
         &plan.resident_shared_host_allocations,
         device_for,
     )?;
-    let stream_host_requirement_bytes =
+    let permanent_base_host_requirement_bytes =
         distributed_shared_host_requirement_bytes(&package.distributed_activation_plan, device_for)?
             .checked_add(non_distributed_shared_host_bytes)
             .and_then(|bytes| bytes.checked_add(resident_shared_host_requirement))
-            .and_then(|bytes| bytes.checked_add(execution_transient_shared_host_requirement))
             .and_then(|bytes| bytes.checked_add(shared_stream_control_requirement))
             .ok_or_else(|| {
         VulkanResidentInProcessPlacedRuntimeError::Package(
@@ -534,7 +628,30 @@ where
             ),
         )
     })?;
-    let stream_host_requirement = if stream_host_requirement_bytes == 0 {
+    let mut host_requirements_by_class = BTreeMap::new();
+    if permanent_base_host_requirement_bytes > 0 {
+        host_requirements_by_class.insert(
+            VulkanMemoryAdmissionAllocationClass::Permanent,
+            permanent_base_host_requirement_bytes,
+        );
+    }
+    for allocation_class in VulkanMemoryAdmissionAllocationClass::ALL {
+        let exact_class_bytes =
+            execution_transient_shared_host_requirement_for(allocation_class)?;
+        if exact_class_bytes > 0 {
+            let class_total = host_requirements_by_class
+                .entry(allocation_class)
+                .or_default();
+            *class_total = class_total.checked_add(exact_class_bytes).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "physical execution {allocation_class:?} shared-host reservation overflowed",
+                    )),
+                )
+            })?;
+        }
+    }
+    let representative = if host_requirements_by_class.is_empty() {
         None
     } else {
         let representative = physical_devices.values().next().copied().ok_or_else(|| {
@@ -544,13 +661,31 @@ where
                 ),
             )
         })?;
-        Some((
-            representative,
-            safe_host_bytes,
-            stream_host_requirement_bytes,
-        ))
+        Some(representative)
     };
-    VulkanMemoryAdmission::reserve(&stream_device_requirements, stream_host_requirement)
+    let classified_host_requirements = host_requirements_by_class
+        .iter()
+        .map(|(allocation_class, byte_count)| {
+            (
+                *allocation_class,
+                representative.expect("nonempty classified host requirements have a device"),
+                safe_host_bytes,
+                *byte_count,
+            )
+        })
+        .collect::<Vec<_>>();
+    let classified_device_requirements = stream_device_requirements
+        .iter()
+        .flat_map(|(device, requirements_by_class)| {
+            requirements_by_class.iter().map(|(allocation_class, byte_count)| {
+                (*allocation_class, *device, *byte_count)
+            })
+        })
+        .collect::<Vec<_>>();
+    VulkanMemoryAdmission::reserve_classified(
+        &classified_device_requirements,
+        &classified_host_requirements,
+    )
         .map(Arc::new)
         .map_err(|error| {
             VulkanResidentInProcessPlacedRuntimeError::Package(

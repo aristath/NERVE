@@ -2013,6 +2013,12 @@ impl VulkanResidentInProcessPlacedModelPackage {
         } else {
             None
         };
+        stream_memory_admission
+            .ensure_class_fully_consumed(
+                VulkanMemoryAdmissionAllocationClass::Permanent,
+                "permanent stream mount",
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let execution_quantum_calibrators = devices
             .iter()
             .map(|slice| {

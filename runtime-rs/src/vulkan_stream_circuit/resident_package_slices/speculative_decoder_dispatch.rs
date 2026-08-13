@@ -200,6 +200,14 @@ impl VulkanResidentSpeculativeDecoderProcessor {
         }
     }
 
+    fn discard_catch_up_batch(&self) {
+        if let VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) =
+            &self.execution
+        {
+            processor.discard_catch_up_batch();
+        }
+    }
+
     fn capture_baseline(&self) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         match &self.execution {
             VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) => {
