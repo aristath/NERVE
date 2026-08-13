@@ -840,6 +840,11 @@ fn hybrid_test_distributed_catalog(
 fn runtime_hybrid_planner_maps_compiler_signatures_to_every_component_instance() {
     let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let catalog = hybrid_test_catalog(&model);
+    assert_eq!(
+        catalog.observation_count(),
+        2,
+        "one measurement per physical target must cover every equivalent component instance",
+    );
     let capacity = VulkanPlacementCapacityEnvelope {
         available_bytes_by_device: BTreeMap::from([
             (hybrid_test_device("gpu0"), 100),

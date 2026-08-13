@@ -150,8 +150,10 @@ the local placement calibration, and the mounted graph.
   measured once. Before execution, the selected observation is rebound to the
   current layer's exact contract IDs and selected-resource identities; changed
   implementations, SPIR-V, geometry, graph topology, equivalence, shard shape,
-  or expert-fragment layout still fail closed. The placement-catalog schema is
-  v13 so older evidence cannot cross this identity boundary.
+  or expert-fragment layout still fail closed. Production hybrid selection
+  expands one observation per physical target to every matching component
+  instance before exact replay. The placement-catalog schema is v13 so older
+  evidence cannot cross this identity boundary.
 - The refreshed workload-free DeepSeek preflight at 128K context,
   package-default seven-token speculation, and demand-paged residency preserves
   all 720 component occurrences across the eight currently detected targets,
