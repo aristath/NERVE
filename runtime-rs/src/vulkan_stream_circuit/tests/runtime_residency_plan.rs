@@ -137,6 +137,92 @@ fn runtime_residency_accounts_selection_telemetry_as_a_physical_allocation() {
 }
 
 #[test]
+fn resident_edge_ledger_allocates_fanout_once_and_honors_boundary_aliases() {
+    let plan = mixed_fanout_edge_plan();
+    let (bytes, allocations) = plan_edge_residency_allocations_with_passthrough(
+        &plan,
+        &BTreeSet::new(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(bytes, 8_192);
+    assert_eq!(allocations.len(), 1);
+    assert_eq!(allocations[0].byte_capacity, 8_192);
+    assert_eq!(
+        allocations[0].kind,
+        VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort {
+            component_id: "input_adapter".to_string(),
+            port_id: "shared_context".to_string(),
+            edge_indices: vec![4, 5, 6],
+        }
+    );
+
+    let (aliased_bytes, aliased) = plan_edge_residency_allocations_with_passthrough(
+        &plan,
+        &BTreeSet::from([(
+            "input_adapter".to_string(),
+            "shared_context".to_string(),
+        )]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(aliased_bytes, 0);
+    assert!(aliased.is_empty());
+
+    let mut incompatible = plan;
+    incompatible.local_edges[0].byte_capacity = Some(4_096);
+    let error = plan_edge_residency_allocations_with_passthrough(
+        &incompatible,
+        &BTreeSet::new(),
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("incompatible capacities"));
+}
+
+#[test]
+fn resident_edge_ledger_scopes_incoming_storage_to_its_component() {
+    let outgoing = outgoing_fanout_endpoint(0, 5, "gpu1", "draft_01");
+    let incoming = incoming_fanout_endpoint(&outgoing);
+    let plan = VulkanPlacedEdgeIoPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "gpu1".to_string(),
+        signal_element_bytes: Some(2),
+        local_edges: Vec::new(),
+        endpoints: vec![incoming],
+        local_edge_count: 0,
+        incoming_endpoint_count: 1,
+        outgoing_endpoint_count: 0,
+        total_buffer_count: 1,
+        total_endpoint_count: 1,
+        total_byte_capacity: Some(8_192),
+        unresolved_byte_edges: Vec::new(),
+    };
+
+    let (bytes, allocations) = plan_edge_residency_allocations_with_passthrough(
+        &plan,
+        &BTreeSet::new(),
+        Some("draft_01"),
+    )
+    .unwrap();
+    assert_eq!(bytes, 8_192);
+    assert_eq!(
+        allocations[0].kind,
+        VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming { edge_index: 5 }
+    );
+
+    let (other_bytes, other) = plan_edge_residency_allocations_with_passthrough(
+        &plan,
+        &BTreeSet::new(),
+        Some("other"),
+    )
+    .unwrap();
+    assert_eq!(other_bytes, 0);
+    assert!(other.is_empty());
+}
+
+#[test]
 fn runtime_residency_plan_sizes_verification_snapshots_to_the_requested_window() {
     let mut runtime_model = fixture_model_runtime_model();
     let component = runtime_model

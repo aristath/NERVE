@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_residency_plan.v4";
+    "nerve.vulkan_runtime_residency_plan.v5";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeResidencyPlan {
@@ -86,6 +86,14 @@ pub enum VulkanRuntimeResidentStreamAllocationKind {
     BoundaryOutput {
         component_id: String,
         signal_id: String,
+    },
+    EdgeProducedPort {
+        component_id: String,
+        port_id: String,
+        edge_indices: Vec<usize>,
+    },
+    EdgeIncoming {
+        edge_index: usize,
     },
 }
 
@@ -623,10 +631,13 @@ fn plan_stream_circuit_residency_for_component(
         &placed_plan.placed_resident_plan,
     )
     .map_err(residency_display_error)?;
-    let edge_bytes = match component_id {
-        None => required_optional_bytes(edge_plan.total_byte_capacity, "placed edge buffers")?,
-        Some(component_id) => component_edge_buffer_bytes(&edge_plan, component_id)?,
-    };
+    let (edge_bytes, edge_allocations) = plan_edge_residency_allocations(
+        placed_plan,
+        &edge_plan,
+        &boundary_plan,
+        component_id,
+    )?;
+    allocations.extend(edge_allocations);
     Ok(StreamCircuitResidencyBytes {
         state_bytes,
         transaction_bytes,
@@ -639,30 +650,127 @@ fn plan_stream_circuit_residency_for_component(
     })
 }
 
-fn component_edge_buffer_bytes(
+fn plan_edge_residency_allocations(
+    placed_plan: &VulkanPlacedStreamCircuitPlan,
     plan: &VulkanPlacedEdgeIoPlan,
-    component_id: &str,
-) -> Result<usize, VulkanRuntimeResidencyPlanError> {
-    plan.local_edges
+    boundary_plan: &VulkanModelBoundaryBufferPlan,
+    component_id: Option<&str>,
+) -> Result<(usize, Vec<VulkanRuntimeResidentStreamAllocation>), VulkanRuntimeResidencyPlanError> {
+    let passthrough_produced_ports = placed_plan
+        .binding_plan
+        .circuits
         .iter()
-        .filter(|edge| {
-            edge.source_component_id == component_id
-                || edge.destination_component_id == component_id
+        .flat_map(|circuit| {
+            circuit.output_ports.iter().filter_map(|output| {
+                let source_signal_id = output.source.as_deref()?;
+                boundary_plan
+                    .inputs
+                    .iter()
+                    .any(|input| {
+                        input.component_id == circuit.component_id
+                            && input.signal_id == source_signal_id
+                            && input.shape == output.shape
+                    })
+                    .then(|| (circuit.component_id.clone(), output.id.clone()))
+            })
         })
-        .map(|edge| edge.byte_capacity)
+        .collect::<BTreeSet<_>>();
+    plan_edge_residency_allocations_with_passthrough(
+        plan,
+        &passthrough_produced_ports,
+        component_id,
+    )
+}
+
+fn plan_edge_residency_allocations_with_passthrough(
+    plan: &VulkanPlacedEdgeIoPlan,
+    passthrough_produced_ports: &BTreeSet<(String, String)>,
+    component_id: Option<&str>,
+) -> Result<(usize, Vec<VulkanRuntimeResidentStreamAllocation>), VulkanRuntimeResidencyPlanError> {
+    let mut produced_ports = BTreeMap::<(String, String), (usize, BTreeSet<usize>)>::new();
+    for (producer_component_id, producer_port_id, edge_index, byte_capacity) in plan
+        .local_edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.source_component_id.as_str(),
+                edge.source_port_id.as_str(),
+                edge.edge_index,
+                edge.byte_capacity,
+            )
+        })
         .chain(
             plan.endpoints
                 .iter()
-                .filter(|endpoint| endpoint.local_component_id == component_id)
-                .map(|endpoint| endpoint.byte_capacity),
+                .filter(|endpoint| endpoint.direction == VulkanPlacedEdgeDirection::Outgoing)
+                .map(|endpoint| {
+                    (
+                        endpoint.local_component_id.as_str(),
+                        endpoint.local_port_id.as_str(),
+                        endpoint.edge_index,
+                        endpoint.byte_capacity,
+                    )
+                }),
         )
-        .try_fold(0usize, |total, bytes| {
-            checked_residency_add(
-                total,
-                required_optional_bytes(bytes, "placed component edge buffer")?,
-                "placed component edge buffers",
-            )
-        })
+    {
+        let byte_capacity =
+            required_optional_bytes(byte_capacity, "placed produced-port buffer")?;
+        let key = (
+            producer_component_id.to_string(),
+            producer_port_id.to_string(),
+        );
+        match produced_ports.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((byte_capacity, BTreeSet::from([edge_index])));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let (existing_capacity, edge_indices) = entry.get_mut();
+                if *existing_capacity != byte_capacity {
+                    return Err(VulkanRuntimeResidencyPlanError(format!(
+                        "placed produced port {producer_component_id}.{producer_port_id} has incompatible capacities {existing_capacity} and {byte_capacity}",
+                    )));
+                }
+                edge_indices.insert(edge_index);
+            }
+        }
+    }
+
+    let mut total = 0usize;
+    let mut allocations = Vec::new();
+    for ((producer_component_id, port_id), (byte_capacity, edge_indices)) in produced_ports {
+        if component_id.is_some_and(|component| component != producer_component_id)
+            || passthrough_produced_ports
+                .contains(&(producer_component_id.clone(), port_id.clone()))
+        {
+            continue;
+        }
+        total = checked_residency_add(total, byte_capacity, "placed edge buffers")?;
+        allocations.push(VulkanRuntimeResidentStreamAllocation {
+            kind: VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort {
+                component_id: producer_component_id,
+                port_id,
+                edge_indices: edge_indices.into_iter().collect(),
+            },
+            byte_capacity,
+        });
+    }
+    for endpoint in &plan.endpoints {
+        if endpoint.direction != VulkanPlacedEdgeDirection::Incoming
+            || component_id.is_some_and(|component| component != endpoint.local_component_id)
+        {
+            continue;
+        }
+        let byte_capacity =
+            required_optional_bytes(endpoint.byte_capacity, "placed incoming edge buffer")?;
+        total = checked_residency_add(total, byte_capacity, "placed edge buffers")?;
+        allocations.push(VulkanRuntimeResidentStreamAllocation {
+            kind: VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming {
+                edge_index: endpoint.edge_index,
+            },
+            byte_capacity,
+        });
+    }
+    Ok((total, allocations))
 }
 
 #[allow(clippy::too_many_arguments)]

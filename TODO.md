@@ -499,10 +499,14 @@ For every numbered item below:
   admission queries every retained Vulkan allocation separately. Empty,
   repeated, missing, capacity-mismatched, and identity-mismatched ledgers fail
   closed. This also closes an omitted-residency defect for physically allocated
-  selection telemetry. The remaining resource work is to extend equivalent
-  allocation-level accounting across resident graph-edge storage, sampler,
-  feedback, and speculative-decoder allocations that still enter terminal
-  admission as class aggregates.
+  selection telemetry. Resident graph edges now preserve the mount's actual
+  allocation topology as well: local and outgoing fan-out from one produced
+  port shares one ledger entry, incoming storage remains distinct, and a
+  boundary-input passthrough adds no second allocation. The remaining edge work
+  is to rebind those identities to the selected cross-device produced-port
+  route and its physical memory domain. Sampler, feedback, and
+  speculative-decoder allocations also still enter terminal admission as class
+  aggregates.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v4";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v5";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
@@ -653,6 +653,7 @@ fn validate_resident_stream_allocation_ledger(
     let mut selection_telemetry_bytes = 0usize;
     let mut activation_slot_bytes = 0usize;
     let mut boundary_buffer_bytes = 0usize;
+    let mut edge_buffer_bytes = 0usize;
     for allocation in &device.resident_stream_device_allocations {
         if allocation.byte_capacity == 0 || !identities.insert(&allocation.kind) {
             return Err(VulkanRuntimeResidencyPlanError(format!(
@@ -680,6 +681,10 @@ fn validate_resident_stream_allocation_ledger(
             VulkanRuntimeResidentStreamAllocationKind::BoundaryInput { .. }
             | VulkanRuntimeResidentStreamAllocationKind::BoundaryOutput { .. } => {
                 (&mut boundary_buffer_bytes, "resident boundary buffer")
+            }
+            VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort { .. }
+            | VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming { .. } => {
+                (&mut edge_buffer_bytes, "resident edge buffer")
             }
         };
         *bytes = checked_residency_add(*bytes, allocation.byte_capacity, label)?;
@@ -712,6 +717,7 @@ fn validate_resident_stream_allocation_ledger(
             boundary_buffer_bytes,
             declared.boundary_buffer_bytes,
         ),
+        ("edge buffer", edge_buffer_bytes, declared.edge_buffer_bytes),
     ];
     if let Some((label, allocation_bytes, breakdown_bytes)) = actual
         .into_iter()
