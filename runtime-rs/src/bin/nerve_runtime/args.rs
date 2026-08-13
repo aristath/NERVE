@@ -11,6 +11,7 @@ use nerve_runtime::{
     HardwareProcessProfile, RUNTIME_DEFAULT_LOGICAL_DEVICE_ID, RUNTIME_TOPOLOGY_SCHEMA,
     ResourceResidencyPolicy, RuntimeAssistantStreamProtocolAction, RuntimeAvailableDevice,
     RuntimeBoundDevice, RuntimeChatGeneratedOutputControl, RuntimeChatSession,
+    RuntimeCanonicalCommitMode,
     RuntimeCompiledExecutionGraphSummary, RuntimeComponentPortSummary, RuntimeCriticalPathPhase,
     RuntimeCriticalPathReport, RuntimeDeviceBindings, RuntimeDeviceSliceReport,
     RuntimeDeviceTickPlanReport, RuntimeEdgeRouteTarget, RuntimeEdgeRoutes,

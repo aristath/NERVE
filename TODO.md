@@ -841,7 +841,18 @@ For every numbered item below:
   generation and canonical branches as independent streams over the same
   immutable model package; and let a compiler-declared streaming chat
   transducer publish only token prefixes proven stable in the final canonical
-  assistant rendering. For reasoning models, the canonical branch may consume
+  assistant rendering. The exact-prefix fast path is now complete
+  hardware-neutrally: after exact assistant rendering, a generation branch is
+  adopted only when its complete physical prompt-plus-generation token stream
+  is a byte-for-byte token prefix of the canonical assistant delta, and only
+  when the engine has committed that exact historical prefix with no pending
+  feedback; only the remaining canonical suffix is executed. Normal chat and
+  validation report whether state was adopted or replayed; protocol trimming,
+  private reasoning, tool rerendering, malformed output, and every other mismatch fail
+  closed to rollback plus full canonical replay. This removes avoidable replay
+  for already-canonical templates without claiming the reasoning-model shadow
+  below or changing the fallback's exact state semantics. For reasoning models,
+  the canonical branch may consume
   the known assistant/non-reasoning prefix immediately, discard private
   reasoning, and consume answer content after the reasoning boundary. Buffer
   tool markup or any other structurally uncertain suffix until complete parse

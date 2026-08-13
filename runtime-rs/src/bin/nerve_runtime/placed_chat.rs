@@ -462,10 +462,16 @@ fn run_placed_chat(
                     )
                 })?;
                     let engine_runs = [
-                        &transaction.user_run.engine_run,
-                        &transaction.generation_run.engine_run,
-                        &transaction.canonical_commit_run.engine_run,
-                    ];
+                        Some(&transaction.user_run.engine_run),
+                        Some(&transaction.generation_run.engine_run),
+                        transaction
+                            .canonical_commit_run
+                            .as_ref()
+                            .map(|run| &run.engine_run),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                     let prefill_activation_count: usize = engine_runs
                         .iter()
                         .map(|run| run.prefill_activation_count)
@@ -538,7 +544,9 @@ fn run_placed_chat(
                     );
                     let prefix_state_cache = transaction
                         .canonical_commit_run
-                        .engine_run
+                        .as_ref()
+                        .map(|run| &run.engine_run)
+                        .unwrap_or(&transaction.generation_run.engine_run)
                         .prefix_state_cache
                         .clone();
                     let speculative_decode = submitted_run
@@ -577,6 +585,7 @@ fn run_placed_chat(
                         generated_token_ids: transaction.generated_token_ids,
                         assistant_message: transaction.assistant_message,
                         canonical_committed_token_ids: transaction.canonical_committed_token_ids,
+                        canonical_commit_mode: transaction.canonical_commit_mode,
                         generated_token_digest,
                         selection_counter_digest,
                         resident_state_digest,

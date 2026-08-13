@@ -122,6 +122,17 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         ))
     }
 
+    pub(crate) fn stream_has_exact_committed_state_tokens(
+        &self,
+        stream_id: &str,
+        expected_token_ids: &[u32],
+    ) -> bool {
+        self.stream_histories.get(stream_id).is_some_and(|history| {
+            history.pending_feedback_token_ids.is_empty()
+                && history.committed_state_token_ids == expected_token_ids
+        })
+    }
+
     pub fn fork_stream(
         &mut self,
         source_stream_id: &str,

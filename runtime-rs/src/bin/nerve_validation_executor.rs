@@ -1129,10 +1129,16 @@ impl MountedValidation {
                 return Err(error);
             }
             let engine_runs = [
-                &transaction.user_run.engine_run,
-                &transaction.generation_run.engine_run,
-                &transaction.canonical_commit_run.engine_run,
-            ];
+                Some(&transaction.user_run.engine_run),
+                Some(&transaction.generation_run.engine_run),
+                transaction
+                    .canonical_commit_run
+                    .as_ref()
+                    .map(|run| &run.engine_run),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
             let model_activations = engine_runs
                 .iter()
                 .map(|run| {
@@ -1187,6 +1193,7 @@ impl MountedValidation {
                 "assistant": transaction.assistant_content,
                 "generated_token_ids": transaction.generated_token_ids,
                 "canonical_committed_token_ids": transaction.canonical_committed_token_ids,
+                "canonical_commit_mode": transaction.canonical_commit_mode,
                 "stop_reason": stop_reason,
                 "state_digest": turn_state_digest,
                 "model_activations": model_activations,

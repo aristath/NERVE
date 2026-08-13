@@ -795,6 +795,41 @@ fn placed_prompt_engine_nested_transactions_use_page_cow_without_full_state_snap
 #[derive(Clone, Copy)]
 struct RejectingGeneratedChatCodec;
 
+#[test]
+fn canonical_branch_adoption_requires_exact_committed_tokens_without_pending_feedback() {
+    let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
+    engine.stream_histories.insert(
+        "main".to_string(),
+        VulkanResidentInProcessPlacedPromptEngineStreamHistory {
+            committed_state_token_ids: vec![1, 2, 3],
+            pending_feedback_token_ids: VecDeque::new(),
+        },
+    );
+
+    assert!(
+        engine
+            .stream_has_exact_committed_state_tokens("main", &[1, 2, 3])
+    );
+    assert!(
+        !engine
+            .stream_has_exact_committed_state_tokens("main", &[1, 2])
+    );
+
+    engine
+        .stream_histories
+        .get_mut("main")
+        .unwrap()
+        .pending_feedback_token_ids
+        .push_back(4);
+    assert!(
+        !engine
+            .stream_has_exact_committed_state_tokens("main", &[1, 2, 3])
+    );
+    assert!(
+        !engine.stream_has_exact_committed_state_tokens("missing", &[])
+    );
+}
+
 #[cfg(feature = "tokenizers")]
 impl crate::VulkanResidentTokenTextCodec for RejectingGeneratedChatCodec {
     fn encode_text(

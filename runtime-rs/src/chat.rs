@@ -14,11 +14,10 @@ use crate::{
     RuntimeCriticalPathPhase, RuntimeCriticalPathReport, VulkanResidentExecutionCounters,
     VulkanResidentHfTokenizerTextCodec, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun, VulkanResidentModelPackageManifest,
-    VulkanResidentOutputControl, VulkanResidentTokenInputEvent,
-    VulkanResidentTokenRuntimeSchedulerOutputEvent, VulkanResidentTokenTextCodec,
-    reset_runtime_critical_path_counters, reset_vulkan_resident_execution_counters,
-    runtime_critical_path_device_phase_scope, runtime_critical_path_report,
-    runtime_critical_path_span, vulkan_resident_execution_counters,
+    VulkanResidentTokenInputEvent, VulkanResidentTokenRuntimeSchedulerOutputEvent,
+    VulkanResidentTokenTextCodec, reset_runtime_critical_path_counters,
+    reset_vulkan_resident_execution_counters, runtime_critical_path_device_phase_scope,
+    runtime_critical_path_report, runtime_critical_path_span, vulkan_resident_execution_counters,
 };
 
 mod compiled_codec;
@@ -54,11 +53,28 @@ pub struct VulkanResidentChatTransactionRun {
     pub generation_event_id: String,
     pub user_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
     pub generation_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
-    pub canonical_commit_run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
+    pub canonical_commit_run: Option<VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun>,
+    pub canonical_commit_mode: RuntimeCanonicalCommitMode,
     pub execution_counters: VulkanResidentExecutionCounters,
     pub critical_path: RuntimeCriticalPathReport,
     pub generation_terminated_by_protocol: bool,
     pub elapsed_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCanonicalCommitMode {
+    AdoptedGenerationBranch,
+    ReplayedCanonicalDelta,
+}
+
+impl RuntimeCanonicalCommitMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdoptedGenerationBranch => "adopted_generation_branch",
+            Self::ReplayedCanonicalDelta => "replayed_canonical_delta",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +88,16 @@ pub enum VulkanResidentChatTransactionPhase {
     UserCommitted,
     GenerationBranchCompleted,
     CanonicalTurnCommitted,
+}
+
+struct PreparedGenerationBranch {
+    run: VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun,
+    generated_token_ids: Vec<u32>,
+    assistant_content: String,
+    assistant_message: serde_json::Value,
+    canonical_committed_token_ids: Vec<u32>,
+    assistant_token_delta: Vec<u32>,
+    generation_terminated_by_protocol: bool,
 }
 
 #[derive(Debug)]
@@ -158,24 +184,32 @@ where
         if !stop_token_ids.is_empty() {
             generation_event = generation_event.with_stop_tokens(stop_token_ids.to_vec());
         }
-        let mut output_error: Option<Box<dyn Error>> = None;
-        let mut observed_generated_token_count = 0usize;
-        let mut protocol_retained_token_count = None;
-        let generation_run = engine.submit_input_event_transactionally_until_idle_with_output(
-            stream_id,
-            generation_event,
-            |event| {
-                observed_generated_token_count = observed_generated_token_count.saturating_add(1);
-                if output_error.is_some() || protocol_retained_token_count.is_some() {
-                    return VulkanResidentOutputControl::Abort;
-                }
-                let _protocol = runtime_critical_path_span(RuntimeCriticalPathPhase::Protocol);
-                match on_output_event(event) {
-                    Ok(RuntimeChatGeneratedOutputControl::Continue) => {
-                        VulkanResidentOutputControl::Continue
+        let generation_transaction = {
+            let _state_commit = runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+            engine.begin_stream_transaction(stream_id)?
+        };
+        let generation = (|| -> Result<PreparedGenerationBranch, Box<dyn Error>> {
+            let mut output_error: Option<Box<dyn Error>> = None;
+            let mut observed_generated_token_count = 0usize;
+            let mut protocol_retained_token_count = None;
+            let abort_requested = std::cell::Cell::new(false);
+            let run = engine.submit_input_event_until_idle_abortable_with_output(
+                stream_id,
+                generation_event,
+                &abort_requested,
+                |event| {
+                    observed_generated_token_count =
+                        observed_generated_token_count.saturating_add(1);
+                    if output_error.is_some() || protocol_retained_token_count.is_some() {
+                        return;
                     }
-                    Ok(RuntimeChatGeneratedOutputControl::TerminateAndTrim { token_count }) => {
-                        match observed_generated_token_count.checked_sub(token_count) {
+                    let _protocol =
+                        runtime_critical_path_span(RuntimeCriticalPathPhase::Protocol);
+                    match on_output_event(event) {
+                        Ok(RuntimeChatGeneratedOutputControl::Continue) => {}
+                        Ok(RuntimeChatGeneratedOutputControl::TerminateAndTrim {
+                            token_count,
+                        }) => match observed_generated_token_count.checked_sub(token_count) {
                             Some(retained_token_count) if token_count > 0 => {
                                 protocol_retained_token_count = Some(retained_token_count);
                             }
@@ -187,94 +221,183 @@ where
                                     ),
                                 )));
                             }
-                        }
-                        VulkanResidentOutputControl::Abort
+                        },
+                        Err(error) => output_error = Some(error),
                     }
-                    Err(error) => {
-                        output_error = Some(error);
-                        VulkanResidentOutputControl::Abort
+                    if output_error.is_some() || protocol_retained_token_count.is_some() {
+                        abort_requested.set(true);
                     }
-                }
-            },
-        )?;
-        {
-            let _telemetry = runtime_critical_path_span(RuntimeCriticalPathPhase::Telemetry);
-            on_phase_completed(
-                VulkanResidentChatTransactionPhase::GenerationBranchCompleted,
-                engine,
+                },
             )?;
-        }
-        if let Some(error) = output_error {
-            return Err(recoverable_chat_turn_error(
-                "streaming generated assistant output failed before canonical commit",
-                error,
-            ));
-        }
-        let mut generated_token_ids = generation_run.generated_token_ids.clone();
-        normalize_generated_tokens_at_protocol_boundary(
-            &mut generated_token_ids,
-            protocol_retained_token_count,
-        )
-        .map_err(|error| {
-            recoverable_chat_turn_error(
-                "normalizing generated assistant protocol boundary failed before canonical commit",
-                Box::new(error),
+            {
+                let _telemetry = runtime_critical_path_span(RuntimeCriticalPathPhase::Telemetry);
+                on_phase_completed(
+                    VulkanResidentChatTransactionPhase::GenerationBranchCompleted,
+                    engine,
+                )?;
+            }
+            if let Some(error) = output_error {
+                return Err(recoverable_chat_turn_error(
+                    "streaming generated assistant output failed before canonical commit",
+                    error,
+                ));
+            }
+            let mut generated_token_ids = run.generated_token_ids.clone();
+            normalize_generated_tokens_at_protocol_boundary(
+                &mut generated_token_ids,
+                protocol_retained_token_count,
             )
-        })?;
-        let generation_terminated_by_protocol = protocol_retained_token_count.is_some();
-        let assistant_stopped = generation_terminated_by_protocol
-            || generated_token_ids
-                .last()
-                .is_some_and(|token_id| stop_token_ids.contains(token_id));
-        let assistant_content = transcript_codec
-            .decode_tokens(assistant_content_token_ids(
-                &generated_token_ids,
-                stop_token_ids,
-            ))
             .map_err(|error| {
                 recoverable_chat_turn_error(
-                    "decoding generated assistant output failed before canonical commit",
+                    "normalizing generated assistant protocol boundary failed before canonical commit",
                     Box::new(error),
                 )
             })?;
-        let assistant_message = chat_session
-            .formatter
-            .parse_assistant_completion(&assistant_content, assistant_stopped)
-            .map_err(|error| {
-                recoverable_chat_turn_error(
-                    "generated assistant protocol validation failed before canonical commit",
-                    error,
+            let generation_terminated_by_protocol = protocol_retained_token_count.is_some();
+            let assistant_stopped = generation_terminated_by_protocol
+                || generated_token_ids
+                    .last()
+                    .is_some_and(|token_id| stop_token_ids.contains(token_id));
+            let assistant_content = transcript_codec
+                .decode_tokens(assistant_content_token_ids(
+                    &generated_token_ids,
+                    stop_token_ids,
+                ))
+                .map_err(|error| {
+                    recoverable_chat_turn_error(
+                        "decoding generated assistant output failed before canonical commit",
+                        Box::new(error),
+                    )
+                })?;
+            let assistant_message = chat_session
+                .formatter
+                .parse_assistant_completion(&assistant_content, assistant_stopped)
+                .map_err(|error| {
+                    recoverable_chat_turn_error(
+                        "generated assistant protocol validation failed before canonical commit",
+                        error,
+                    )
+                })?;
+            let (assistant_token_delta, canonical_committed_token_ids) = chat_session
+                .render_assistant_commit_token_delta(
+                    prepared,
+                    user_content,
+                    &assistant_message,
+                    transcript_codec,
                 )
-            })?;
-        let (assistant_token_delta, canonical_committed_token_ids) = chat_session
-            .render_assistant_commit_token_delta(
-                prepared,
-                user_content,
-                &assistant_message,
-                transcript_codec,
+                .map_err(|error| {
+                    recoverable_chat_turn_error(
+                        "rendering the canonical assistant turn failed before commit",
+                        error,
+                    )
+                })?;
+            Ok(PreparedGenerationBranch {
+                run,
+                generated_token_ids,
+                assistant_content,
+                assistant_message,
+                canonical_committed_token_ids,
+                assistant_token_delta,
+                generation_terminated_by_protocol,
+            })
+        })();
+        let generation = match generation {
+            Ok(generation) => generation,
+            Err(error) => {
+                let restore = {
+                    let _state_commit =
+                        runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+                    engine.restore_stream_transaction(generation_transaction)
+                };
+                return match restore {
+                    Ok(()) => Err(error),
+                    Err(restore_error) => Err(Box::new(io::Error::other(format!(
+                        "generation branch failed ({error}) and branch rollback also failed ({restore_error})",
+                    )))),
+                };
+            }
+        };
+        let reusable_generation_prefix_len = match canonical_assistant_generation_prefix_len(
+            prepared,
+            &generation.run.generated_token_ids,
+            &generation.assistant_token_delta,
+        ) {
+            Some(prefix_len) => {
+                let mut expected_state_token_ids = prepared.canonical_user_token_ids.clone();
+                expected_state_token_ids
+                    .extend_from_slice(&generation.assistant_token_delta[..prefix_len]);
+                engine
+                    .stream_has_exact_committed_state_tokens(stream_id, &expected_state_token_ids)
+                    .then_some(prefix_len)
+            }
+            None => None,
+        };
+        let (canonical_commit_run, canonical_commit_mode) = if let Some(prefix_len) =
+            reusable_generation_prefix_len
+        {
+            {
+                let _state_commit =
+                    runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+                engine.commit_stream_transaction(generation_transaction)?;
+            }
+            let suffix = &generation.assistant_token_delta[prefix_len..];
+            let run = if suffix.is_empty() {
+                None
+            } else {
+                let _state_commit =
+                    runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+                let _device_state_commit =
+                    runtime_critical_path_device_phase_scope(RuntimeCriticalPathPhase::StateCommit);
+                Some(
+                    engine.submit_input_event_until_idle(
+                        stream_id,
+                        VulkanResidentTokenInputEvent::new(
+                            format!("chat_{turn_index}_canonical_assistant_suffix"),
+                            suffix.to_vec(),
+                            0,
+                        )
+                        .with_origin("runtime_chat_canonical_assistant_suffix"),
+                    )?,
+                )
+            };
+            (run, RuntimeCanonicalCommitMode::AdoptedGenerationBranch)
+        } else {
+            {
+                let _state_commit =
+                    runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+                engine.restore_stream_transaction(generation_transaction)?;
+            }
+            let run = {
+                let _state_commit =
+                    runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
+                let _device_state_commit =
+                    runtime_critical_path_device_phase_scope(RuntimeCriticalPathPhase::StateCommit);
+                engine.submit_input_event_until_idle(
+                    stream_id,
+                    VulkanResidentTokenInputEvent::new(
+                        format!("chat_{turn_index}_canonical_assistant"),
+                        generation.assistant_token_delta.clone(),
+                        0,
+                    )
+                    .with_origin("runtime_chat_canonical_assistant"),
+                )?
+            };
+            (
+                Some(run),
+                RuntimeCanonicalCommitMode::ReplayedCanonicalDelta,
             )
-            .map_err(|error| {
-                recoverable_chat_turn_error(
-                    "rendering the canonical assistant turn failed before commit",
-                    error,
-                )
-            })?;
+        };
+        let PreparedGenerationBranch {
+            run: generation_run,
+            generated_token_ids,
+            assistant_content,
+            assistant_message,
+            canonical_committed_token_ids,
+            assistant_token_delta,
+            generation_terminated_by_protocol,
+        } = generation;
         let mut canonical_turn_token_delta = prepared.user_token_delta.clone();
         canonical_turn_token_delta.extend_from_slice(&assistant_token_delta);
-        let canonical_commit_run = {
-            let _state_commit = runtime_critical_path_span(RuntimeCriticalPathPhase::StateCommit);
-            let _device_state_commit =
-                runtime_critical_path_device_phase_scope(RuntimeCriticalPathPhase::StateCommit);
-            engine.submit_input_event_until_idle(
-                stream_id,
-                VulkanResidentTokenInputEvent::new(
-                    format!("chat_{turn_index}_canonical_assistant"),
-                    assistant_token_delta.clone(),
-                    0,
-                )
-                .with_origin("runtime_chat_canonical_assistant"),
-            )?
-        };
         {
             let _telemetry = runtime_critical_path_span(RuntimeCriticalPathPhase::Telemetry);
             on_phase_completed(
@@ -293,6 +416,7 @@ where
             user_run,
             generation_run,
             canonical_commit_run,
+            canonical_commit_mode,
             execution_counters: vulkan_resident_execution_counters(),
             critical_path: RuntimeCriticalPathReport::default(),
             generation_terminated_by_protocol,
@@ -355,6 +479,25 @@ pub fn normalize_generated_tokens_at_protocol_boundary(
     }
     generated_token_ids.truncate(retained_token_count);
     Ok(())
+}
+
+pub fn canonical_assistant_generation_prefix_len(
+    prepared: &RuntimePreparedChatTurn,
+    actual_generated_token_ids: &[u32],
+    assistant_token_delta: &[u32],
+) -> Option<usize> {
+    let physical_len = prepared
+        .generation_prompt_token_delta
+        .len()
+        .checked_add(actual_generated_token_ids.len())?;
+    (physical_len <= assistant_token_delta.len()
+        && prepared
+            .generation_prompt_token_delta
+            .iter()
+            .chain(actual_generated_token_ids)
+            .copied()
+            .eq(assistant_token_delta[..physical_len].iter().copied()))
+    .then_some(physical_len)
 }
 
 pub fn chat_transcript_codec(

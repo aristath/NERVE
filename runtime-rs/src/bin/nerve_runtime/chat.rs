@@ -3,6 +3,7 @@ struct RuntimeChatTurn {
     generated_token_ids: Vec<u32>,
     assistant_message: serde_json::Value,
     canonical_committed_token_ids: Vec<u32>,
+    canonical_commit_mode: RuntimeCanonicalCommitMode,
     generated_token_digest: String,
     selection_counter_digest: String,
     resident_state_digest: String,
@@ -245,6 +246,10 @@ where
                 print_chat_response(&generated_text);
             }
             print_runtime_timing_stats("stats", &turn.timing);
+            println!(
+                "canonical_commit: mode={}",
+                turn.canonical_commit_mode.as_str(),
+            );
             print_runtime_sustained_decode_stats(
                 &turn.sustained_decode,
             );

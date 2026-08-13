@@ -12,10 +12,11 @@ mod tests {
 
     use nerve_runtime::{
         ResourceResidencyPolicy, RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
-        RuntimeRecoverableChatTurnError, VulkanComputeDeviceInfo,
+        RuntimePreparedChatTurn, RuntimeRecoverableChatTurnError, VulkanComputeDeviceInfo,
         VulkanResidentDistributedExecutionPhaseCounters,
         VulkanResidentHfTokenizerTextCodec, VulkanResidentTokenTextCodec,
-        VulkanResidentTokenTextCodecError, assistant_content_token_ids, chat_transcript_codec,
+        VulkanResidentTokenTextCodecError, assistant_content_token_ids,
+        canonical_assistant_generation_prefix_len, chat_transcript_codec,
         model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
         normalize_generated_tokens_at_protocol_boundary,
     };
@@ -1026,6 +1027,41 @@ mod tests {
                 .unwrap(),
             "[assistant]<think>"
         );
+    }
+
+    #[test]
+    fn canonical_commit_adopts_only_an_exact_physical_generation_prefix() {
+        let prepared = RuntimePreparedChatTurn {
+            canonical_user_token_ids: vec![1, 2],
+            user_token_delta: vec![2],
+            generation_prompt_token_delta: vec![3, 4],
+        };
+
+        assert_eq!(canonical_assistant_generation_prefix_len(
+            &prepared,
+            &[5, 6],
+            &[3, 4, 5, 6],
+        ), Some(4));
+        assert_eq!(canonical_assistant_generation_prefix_len(
+            &prepared,
+            &[5, 6],
+            &[3, 4, 5, 6, 8, 9],
+        ), Some(4));
+        assert_eq!(canonical_assistant_generation_prefix_len(
+            &prepared,
+            &[5, 6, 7],
+            &[3, 4, 5, 6],
+        ), None);
+        assert_eq!(canonical_assistant_generation_prefix_len(
+            &prepared,
+            &[90, 91, 5, 6],
+            &[3, 4, 5, 6],
+        ), None);
+        assert_eq!(canonical_assistant_generation_prefix_len(
+            &prepared,
+            &[5, 6],
+            &[8, 5, 6],
+        ), None);
     }
 
     #[test]
