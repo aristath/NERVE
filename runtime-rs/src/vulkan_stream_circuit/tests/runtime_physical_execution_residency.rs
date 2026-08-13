@@ -113,6 +113,86 @@ fn physical_execution_residency_charges_shared_host_once_without_device_local_al
 }
 
 #[test]
+fn physical_execution_residency_admits_exact_execution_transients_atomically() {
+    let base = physical_execution_residency_base_plan(1_000, 100);
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &VulkanDistributedParameterAllocationPlan {
+            allocations: Vec::new(),
+            allocation_count: 0,
+            tensor_count: 0,
+            total_byte_capacity: 0,
+        },
+        &VulkanDistributedParameterExclusionPlan {
+            devices: Vec::new(),
+            device_count: 0,
+            unique_tensor_count: 0,
+            excluded_full_allocation_count: 0,
+            excluded_full_byte_capacity: 0,
+        },
+        &physical_execution_activation_plan(VulkanSharedResidentBufferRoute::SharedHost),
+    )
+    .unwrap();
+    let baseline = plan.clone();
+
+    plan.add_execution_transient_reservation(
+        &BTreeMap::from([("owner".to_string(), 33), ("helper".to_string(), 17)]),
+        19,
+    )
+    .unwrap();
+
+    let owner = plan
+        .device_plans
+        .iter()
+        .find(|device| device.device_id == "owner")
+        .unwrap();
+    let helper = plan
+        .device_plans
+        .iter()
+        .find(|device| device.device_id == "helper")
+        .unwrap();
+    assert_eq!(owner.breakdown.execution_transient_device_bytes_per_stream, 33);
+    assert_eq!(helper.breakdown.execution_transient_device_bytes_per_stream, 17);
+    assert_eq!(
+        plan.total_stream_device_local_bytes,
+        baseline.total_stream_device_local_bytes + 50
+    );
+    assert_eq!(plan.execution_transient_shared_host_bytes_per_stream, 19);
+    assert_eq!(
+        plan.total_stream_shared_host_bytes,
+        baseline.total_stream_shared_host_bytes + 19
+    );
+    assert_eq!(
+        physical_execution_stream_working_set_bytes(
+            &plan,
+            &BTreeSet::from(["owner".to_string(), "helper".to_string()]),
+        )
+        .unwrap(),
+        plan.total_stream_device_local_bytes
+    );
+    assert!(
+        physical_execution_stream_working_set_bytes(
+            &plan,
+            &BTreeSet::from(["absent".to_string()]),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("no stream plan")
+    );
+
+    let accepted = plan.clone();
+    let error = plan
+        .add_execution_transient_reservation(
+            &BTreeMap::from([("owner".to_string(), 1), ("absent".to_string(), 1)]),
+            1,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("absent logical device"));
+    assert_eq!(plan, accepted);
+}
+
+#[test]
 fn physical_execution_residency_aggregates_aliases_before_admission() {
     let base = physical_execution_residency_base_plan(1_000, 100);
     let plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(

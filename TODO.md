@@ -394,8 +394,20 @@ For every numbered item below:
   into shared physical byte-range blocks with exact target identity and
   deterministic claim IDs. This lets exact parameter infeasibility prune
   partial routes without double-charging aliases or full/fragment overlap.
-  Sampled calibration transients remain advisory and cannot reject a route
-  before terminal mount. Workload-free physical mounting independently
+  Sampled calibration transients are replaced by workload-free physical
+  geometry. Candidate-local execution-transient claims remain advisory because
+  graph-wide activation liveness aliases buffers across component boundaries;
+  treating those lower bounds as additive during partial search would reject
+  valid routes. Every complete prefill route is instead replayed into its exact
+  owner slices and distributed execution plan before acceptance. That replay
+  accounts for activation liveness and retained speculative source taps, shared
+  and private distributed activations, F32 reduction planes, host edge staging,
+  stream/token/control buffers, demand-residency gates, and the simultaneously
+  cached normal-prompt and causal-verification runners. The complete-route
+  transient reservation is authoritative and a one-byte-short route is
+  rejected. Input-column and physical output-row TP use their compiler-declared
+  multi-lane artifacts directly and therefore do not inherit nonexistent batch
+  control allocations. Workload-free physical mounting independently
   reconstructs the same fixed claims from local prepared descriptors, exact
   replayed TP fragments, non-dispatch transducer parameters, every mounted
   phase, and compiled resource identities. Compiler-generated physical layouts
@@ -428,14 +440,31 @@ For every numbered item below:
   Terminal shared-host cache capacity now excludes the stream's own shared-host
   reservation instead of double-spending it. Permanent, mutable-state,
   cache-quota, and atomic-load-wave capacity are authoritative during partial
-  route search, while sampled calibration transients remain advisory.
+  route search. Execution transients become authoritative only at complete-route
+  admission; their candidate-local projections remain advisory.
   Exact sequential tests compare a complete local route with the ordinary
   workload-free residency plan, prove component scoping and same-device edge
   deduplication, exercise device-local/shared-host distributed backing, and
-  reject a candidate one byte below its exact retained need. The remaining
-  resource work is exact execution-transient claims per candidate before
-  search; these must replace their calibration aggregates without making
-  sampled evidence authoritative. Exact sequential tests also cover source
+  reject a candidate one byte below its exact retained need. Terminal physical
+  mounting and the real package loader now reconstruct the selected route's
+  complete prompt and causal-verification runners from the final replayed
+  execution plans. Selected-resource placement and transient sizing iterate to
+  a fixed point, so moving resource gates cannot leave stale participant
+  memory. The resulting device and shared-host bytes reduce cache capacity,
+  augment the authoritative mount and per-stream residency plan, and are
+  checked again against live capacity. The mounted normal-prompt runner is
+  capped at the same lane width that was calibrated and admitted; it can no
+  longer grow opportunistically after placement. Physical store headroom uses
+  the augmented per-stream plan rather than the older local-only working-set
+  estimate. Exact terminal tests prove the selected prefill width contributes
+  nonzero residency and that one byte below the complete mount plus stream
+  requirement is rejected.
+
+  The remaining resource work is to replace the local/unmeasured fallback's
+  adaptive prompt-runner width with an exact capacity-selected contract, and
+  to make multi-stream admission one atomic device/host reservation transaction
+  whose permits are consumed by the subsequent buffer allocations. Exact
+  sequential tests also cover source
   projections, uneven selector waves, paged versus retained/eager quotas,
   selected-resource exclusion from permanent graph fallback, insufficient
   parameter and cache capacity, shared-host cache/stream isolation, unchanged

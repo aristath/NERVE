@@ -11,6 +11,7 @@ pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
     pub distributed_shared_activation_device_bytes_per_stream: usize,
     pub distributed_private_activation_device_bytes_per_stream: usize,
     pub distributed_shared_host_bytes_per_stream: usize,
+    pub execution_transient_device_bytes_per_stream: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -30,6 +31,7 @@ pub struct VulkanRuntimePhysicalExecutionResidencyPlan {
     pub total_mount_device_local_bytes: usize,
     pub total_stream_device_local_bytes: usize,
     pub total_stream_shared_host_bytes: usize,
+    pub execution_transient_shared_host_bytes_per_stream: usize,
 }
 
 impl VulkanRuntimePhysicalExecutionResidencyPlan {
@@ -300,7 +302,60 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             total_mount_device_local_bytes,
             total_stream_device_local_bytes,
             total_stream_shared_host_bytes,
+            execution_transient_shared_host_bytes_per_stream: 0,
         })
+    }
+
+    fn add_execution_transient_reservation(
+        &mut self,
+        device_bytes_by_logical_device: &BTreeMap<String, usize>,
+        shared_host_bytes: usize,
+    ) -> Result<(), VulkanRuntimeResidencyPlanError> {
+        // Construct the augmented plan off to the side. A stale logical
+        // binding or arithmetic failure must not partially mutate the
+        // authoritative admission plan.
+        let mut next = self.clone();
+        for (logical_device_id, byte_count) in device_bytes_by_logical_device {
+            let device = next
+                .device_plans
+                .iter_mut()
+                .find(|device| device.device_id == *logical_device_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "execution transient reservation references absent logical device {logical_device_id:?}",
+                    ))
+                })?;
+            device.breakdown.execution_transient_device_bytes_per_stream =
+                checked_residency_add(
+                    device
+                        .breakdown
+                        .execution_transient_device_bytes_per_stream,
+                    *byte_count,
+                    "execution transient device residency",
+                )?;
+            device.stream_device_local_bytes = checked_residency_add(
+                device.stream_device_local_bytes,
+                *byte_count,
+                "execution transient stream residency",
+            )?;
+            next.total_stream_device_local_bytes = checked_residency_add(
+                next.total_stream_device_local_bytes,
+                *byte_count,
+                "execution transient total stream residency",
+            )?;
+        }
+        next.execution_transient_shared_host_bytes_per_stream = checked_residency_add(
+            next.execution_transient_shared_host_bytes_per_stream,
+            shared_host_bytes,
+            "execution transient shared-host residency",
+        )?;
+        next.total_stream_shared_host_bytes = checked_residency_add(
+            next.total_stream_shared_host_bytes,
+            shared_host_bytes,
+            "execution transient total shared-host residency",
+        )?;
+        *self = next;
+        Ok(())
     }
 }
 

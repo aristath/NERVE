@@ -5,6 +5,30 @@ struct VulkanDemandPagedSharedTierCapacities {
     host_visible_payload_bytes: usize,
 }
 
+fn physical_execution_stream_working_set_bytes(
+    plan: &VulkanRuntimePhysicalExecutionResidencyPlan,
+    logical_device_ids: &BTreeSet<String>,
+) -> Result<usize, VulkanResidentTokenModelPackageError> {
+    logical_device_ids.iter().try_fold(0usize, |total, device_id| {
+        let device = plan
+            .device_plans
+            .iter()
+            .find(|device| device.device_id == *device_id)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "physical execution residency has no stream plan for selected-resource slice {device_id:?}",
+                ))
+            })?;
+        total
+            .checked_add(device.stream_device_local_bytes)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(
+                    "physical stream working-set accounting overflowed",
+                )
+            })
+    })
+}
+
 fn demand_paged_shared_tier_capacities(
     maximum_store_payload_bytes: usize,
     device_payload_bytes: usize,
@@ -336,19 +360,21 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 upload_alignment,
             });
         }
-        let selected_resource_resolution = resolve_vulkan_runtime_selected_resource_mount(
+        let (selected_resource_resolution, execution_transient) =
+            resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
             &runtime_model,
             &compiled_resource_contract,
             &distributed_loaded_manifest,
-            distributed_execution_plans,
+            &distributed_execution_plans,
             &residency_plan,
             &device_ids,
-            &prepared_plans,
+            &device_slice_plans,
             &tensor_index,
             &selected_resource_mount_devices,
             &input_device_id,
             &output_device_id,
-            mount_speculative_decoders,
+            physical_execution_plan.prefill_activation_batch_width,
+            speculative_draft_tokens,
             resource_residency_policy,
             placement_calibration_catalog,
             None,
@@ -367,8 +393,20 @@ impl VulkanResidentInProcessPlacedModelPackage {
             selected_resource_execution_ownership_plan:
                 distributed_selected_resource_execution_ownership_plan,
             selected_resource_store_plan: distributed_selected_resource_store_plan,
-            physical_execution_residency_plan,
+            mut physical_execution_residency_plan,
         } = selected_resource_resolution.plans;
+        physical_execution_residency_plan
+            .add_execution_transient_reservation(
+                &execution_transient.device_bytes_by_logical_device,
+                execution_transient.host_bytes,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to admit mounted prefill execution transients: {error}",
+                    )),
+                )
+            })?;
         admit_vulkan_runtime_physical_execution_mount(
             &physical_execution_residency_plan,
             &physical_device_by_logical_device,
@@ -561,29 +599,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 ));
             }
             let allowed_selector_ids = selector_ownership.selector_ids();
-            let working_set_bytes =
-                logical_device_ids
-                    .iter()
-                    .try_fold(0usize, |total, device_id| {
-                        let Some(plan) = residency_plan
-                            .device_plans
-                            .iter()
-                            .find(|plan| plan.device_id == *device_id)
-                        else {
-                            return Ok(total);
-                        };
-                        plan.working_set
-                            .transient_state_bytes
-                            .checked_add(plan.working_set.activation_headroom_bytes)
-                            .and_then(|bytes| total.checked_add(bytes))
-                            .ok_or_else(|| {
-                                VulkanResidentInProcessPlacedRuntimeError::Package(
-                                    VulkanResidentTokenModelPackageError::new(
-                                        "physical working-set accounting overflowed",
-                                    ),
-                                )
-                            })
-                    })?;
+            let working_set_bytes = physical_execution_stream_working_set_bytes(
+                &physical_execution_residency_plan,
+                &logical_device_ids,
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
             let representative_device_id = logical_device_id_list[0].clone();
             let physical_device = device_for(&representative_device_id)?;
             let physical_device_id = physical_device.physical_device_id().to_string();
@@ -1187,6 +1207,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
             input_device_id,
             output_device_id,
             dynamic_state_capacity_activations: capacity,
+            normal_prefill_lane_capacity: physical_execution_plan
+                .prefill_activation_batch_width,
             device_count: device_ids.len(),
             device_ids,
             hosted_component_count,

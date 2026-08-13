@@ -53,6 +53,7 @@ fn canonical_runtime_execution_identity(
         "execution_scope": runtime_model.execution_scope,
         "implementation_selection": runtime_model.implementation_selection,
         "physical_execution_plan": {
+            "prefill_activation_batch_width": physical_execution_plan.prefill_activation_batch_width,
             "component_device_pools": {
                 "decode": physical_execution_plan.component_device_pools.decode,
                 "decode_batch": physical_execution_plan.component_device_pools.decode_batch,

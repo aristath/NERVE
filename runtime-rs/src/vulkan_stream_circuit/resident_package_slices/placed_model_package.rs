@@ -6,6 +6,9 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     pub input_device_id: String,
     pub output_device_id: String,
     pub dynamic_state_capacity_activations: usize,
+    /// The exact normal-prompt runner width selected, calibrated, and admitted
+    /// by the physical plan. `None` retains the legacy adaptive local path.
+    normal_prefill_lane_capacity: Option<usize>,
     pub device_ids: Vec<String>,
     pub device_count: usize,
     pub hosted_component_count: usize,

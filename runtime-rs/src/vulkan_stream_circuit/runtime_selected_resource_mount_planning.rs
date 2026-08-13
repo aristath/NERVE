@@ -108,6 +108,7 @@ fn resolve_vulkan_runtime_selected_resource_mount(
     residency_policy: ResourceResidencyPolicy,
     catalog: Option<&VulkanPlacementCalibrationCatalog>,
     telemetry: Option<&VulkanSelectionTelemetrySnapshot>,
+    execution_transient_device_bytes_by_logical_device: &BTreeMap<String, usize>,
 ) -> Result<VulkanRuntimeSelectedResourceMountResolution, VulkanResidentTokenModelPackageError> {
     let baseline = VulkanRuntimeDistributedMountPlans::derive(
         baseline_execution_plans.clone(),
@@ -150,6 +151,7 @@ fn resolve_vulkan_runtime_selected_resource_mount(
             output_device_id,
             mount_speculative_decoders,
             residency_policy,
+            execution_transient_device_bytes_by_logical_device,
         )? else {
             break;
         };
@@ -197,6 +199,7 @@ fn resolve_vulkan_runtime_selected_resource_mount(
             output_device_id,
             mount_speculative_decoders,
             residency_policy,
+            execution_transient_device_bytes_by_logical_device,
         )? else {
             current = candidate;
             continue;
@@ -242,6 +245,7 @@ fn selected_resource_mount_capacities(
     output_device_id: &str,
     mount_speculative_decoders: bool,
     residency_policy: ResourceResidencyPolicy,
+    execution_transient_device_bytes_by_logical_device: &BTreeMap<String, usize>,
 ) -> Result<Option<Vec<VulkanPlacementSelectedResourceDeviceCapacity>>, VulkanResidentTokenModelPackageError>
 {
     if devices.is_empty() {
@@ -305,6 +309,18 @@ fn selected_resource_mount_capacities(
             .ok_or_else(|| {
                 VulkanResidentTokenModelPackageError::new(
                     "selected-resource fixed mount capacity overflowed",
+                )
+            })?;
+        fixed_bytes = fixed_bytes
+            .checked_add(
+                execution_transient_device_bytes_by_logical_device
+                    .get(&device.logical_device_id)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(
+                    "selected-resource execution transient capacity overflowed",
                 )
             })?;
         if let Some(ownership) = ownership {

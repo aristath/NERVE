@@ -2323,12 +2323,24 @@ fn distributed_batch_private_intermediate_uses_each_local_shard_stride() {
     assert!(!distributed_component_batch_uses_physical_output_row_artifact(
         &down
     ));
+    assert_eq!(
+        distributed_component_batch_kernel_path(&gate),
+        VulkanDistributedComponentBatchKernelPath::OutputRowPhysicalArtifact,
+    );
+    assert_eq!(
+        distributed_component_batch_kernel_path(&down),
+        VulkanDistributedComponentBatchKernelPath::InputColumnPhysicalArtifact,
+    );
     let mut whole_expert = gate.clone();
     whole_expert.execution_strategy =
         nerve_execution_contracts::ExecutionStrategy::ExpertParallel;
     assert!(!distributed_component_batch_uses_physical_output_row_artifact(
         &whole_expert
     ));
+    assert_eq!(
+        distributed_component_batch_kernel_path(&whole_expert),
+        VulkanDistributedComponentBatchKernelPath::CompiledBatchArtifact,
+    );
     let plan = VulkanDistributedExecutionPlan {
         device_ids: vec!["gpu0".to_string(), "gpu1".to_string()],
         storage_buffer_offset_alignment: 256,

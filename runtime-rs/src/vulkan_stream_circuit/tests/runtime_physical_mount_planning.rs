@@ -225,6 +225,110 @@ fn physical_mount_plan_reports_full_context_capacity_infeasibility_without_alloc
 }
 
 #[test]
+fn physical_mount_plan_admits_the_exact_selected_prefill_runner_geometry() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    record_hybrid_phase_candidates(
+        &model,
+        &mut catalog,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        10,
+        20,
+    );
+    record_hybrid_phase_candidates(
+        &model,
+        &mut catalog,
+        VulkanTargetedComponentExecutionPhase::Prefill {
+            activation_batch_width: 4,
+        },
+        10,
+        20,
+    );
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), usize::MAX),
+            (hybrid_test_device("gpu1"), usize::MAX),
+        ]),
+        host_available_bytes: usize::MAX,
+    };
+    let phase_set =
+        plan_vulkan_runtime_hybrid_phase_set(&model, &catalog, &capacity, Some(4)).unwrap();
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "logical0".to_string()),
+        ("gpu1".to_string(), "logical1".to_string()),
+    ]);
+    let (runtime_model, physical) =
+        lower_vulkan_runtime_hybrid_phase_set(&model, &phase_set, &bindings).unwrap();
+    assert_eq!(physical.prefill_activation_batch_width, Some(4));
+    let mut devices = physical
+        .device_ids(&runtime_model)
+        .into_iter()
+        .map(|logical_device_id| VulkanRuntimePhysicalPlanningDevice {
+            identity: hybrid_test_device(if logical_device_id == "logical0" {
+                "gpu0"
+            } else {
+                "gpu1"
+            }),
+            logical_device_id,
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        })
+        .collect::<Vec<_>>();
+    let exact = plan_vulkan_runtime_physical_mount(
+        tiny_model_dir(),
+        &runtime_model,
+        &physical,
+        Some(&catalog),
+        64,
+        0,
+        ResourceResidencyPolicy::Eager,
+        &devices,
+        usize::MAX,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        exact
+            .physical_execution_residency_plan
+            .device_plans
+            .iter()
+            .map(|device| {
+                device
+                    .breakdown
+                    .execution_transient_device_bytes_per_stream
+            })
+            .sum::<usize>()
+            > 0
+    );
+    for device in &mut devices {
+        let required = exact
+            .physical_execution_residency_plan
+            .device_plans
+            .iter()
+            .find(|plan| plan.device_id == device.logical_device_id)
+            .map(|plan| plan.mount_device_local_bytes + plan.stream_device_local_bytes)
+            .unwrap();
+        device.safe_capacity_bytes = required;
+    }
+    devices[0].safe_capacity_bytes -= 1;
+    assert!(
+        plan_vulkan_runtime_physical_mount(
+            tiny_model_dir(),
+            &runtime_model,
+            &physical,
+            Some(&catalog),
+            64,
+            0,
+            ResourceResidencyPolicy::Eager,
+            &devices,
+            usize::MAX,
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
 fn physical_mount_resource_summary_uses_the_exact_store_plan() {
     let store_plan = VulkanDistributedSelectedResourceStorePlan {
         devices: vec![crate::VulkanDistributedSelectedResourceDevicePlan {

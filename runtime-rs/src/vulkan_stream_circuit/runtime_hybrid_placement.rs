@@ -229,6 +229,18 @@ where
                 },
             )
             .map_err(|error| VulkanHybridPlacementError(error.to_string()))?;
+            if !runtime_hybrid_route_execution_transient_fits(
+                exact_parameter_planner,
+                runtime_model,
+                phase,
+                &placement.ordered_placement,
+                route,
+                eligible_capacity,
+            )
+            .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
+            {
+                return Ok(None);
+            }
             visitor(placement).map_err(|error| VulkanHybridPlacementError(error.to_string()))
         },
     )
@@ -845,7 +857,7 @@ where
         &candidates.authoritative_resource_classes,
         eligible_capacity,
         |route| {
-            visitor(runtime_hybrid_ordered_placement_from_plan(
+            let placement = runtime_hybrid_ordered_placement_from_plan(
                 &candidates,
                 VulkanHybridPlacementPlan {
                     steps: route.steps.clone(),
@@ -853,11 +865,45 @@ where
                         .predicted_duration_ns_per_activation,
                     resource_reservations: route.calibration_resource_reservations.clone(),
                 },
-            ))
-            .map_err(|error| VulkanHybridPlacementError(error.to_string()))
+            );
+            if !runtime_hybrid_route_execution_transient_fits(
+                exact_parameter_planner,
+                runtime_model,
+                phase,
+                &placement,
+                route,
+                eligible_capacity,
+            )
+            .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
+            {
+                return Ok(None);
+            }
+            visitor(placement).map_err(|error| VulkanHybridPlacementError(error.to_string()))
         },
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))
+}
+
+fn runtime_hybrid_route_execution_transient_fits(
+    planner: Option<&VulkanRuntimeHybridExactCandidateResourcePlanner<'_>>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    phase: VulkanTargetedComponentExecutionPhase,
+    placement: &VulkanRuntimeHybridOrderedPlacement,
+    route: &VulkanHybridPlacementRoute,
+    capacity: &VulkanPlacementCapacityEnvelope,
+) -> Result<bool, VulkanRuntimeHybridPlacementError> {
+    let Some(planner) = planner else {
+        return Ok(true);
+    };
+    let claims = planner.route_execution_transient_claims(runtime_model, phase, placement)?;
+    if claims.is_empty() {
+        return Ok(true);
+    }
+    route
+        .authoritative_resource_reservations
+        .reserve(&VulkanHybridCandidateResources::new(claims), capacity)
+        .map(|reservation| reservation.is_some())
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))
 }
 
 fn runtime_hybrid_ordered_placement_from_plan(
@@ -1183,6 +1229,12 @@ fn runtime_hybrid_candidate_graph(
             &exact_direct_claims_by_candidate_id,
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        apply_runtime_hybrid_exact_boundary_resources(
+            &mut resource_catalog,
+            runtime_model,
+            &boundary_candidates,
+            phase,
+        )?;
     }
     Ok(VulkanRuntimeHybridCandidateGraph {
         component_ids,
@@ -1212,6 +1264,12 @@ fn runtime_hybrid_exact_authoritative_resource_classes(
     ])
 }
 
+fn runtime_hybrid_exact_replaced_resource_classes() -> BTreeSet<VulkanHybridResourceClass> {
+    let mut classes = runtime_hybrid_exact_authoritative_resource_classes();
+    classes.insert(VulkanHybridResourceClass::ExecutionTransient);
+    classes
+}
+
 fn apply_runtime_hybrid_exact_candidate_resources(
     resource_catalog: &mut VulkanHybridCandidateResourceCatalog,
     shared_requirements_by_candidate_id: &BTreeMap<
@@ -1231,7 +1289,7 @@ fn apply_runtime_hybrid_exact_candidate_resources(
             .claims
             .extend(claims.iter().cloned());
     }
-    let classes = runtime_hybrid_exact_authoritative_resource_classes();
+    let classes = runtime_hybrid_exact_replaced_resource_classes();
     for (candidate_id, resources) in exact_resources {
         for class in &classes {
             resource_catalog
@@ -1244,6 +1302,87 @@ fn apply_runtime_hybrid_exact_candidate_resources(
                         .filter(|claim| claim.class == *class)
                         .cloned()
                         .collect(),
+                )
+                .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_runtime_hybrid_exact_boundary_resources(
+    resource_catalog: &mut VulkanHybridCandidateResourceCatalog,
+    runtime_model: &VulkanResidentRuntimeModel,
+    boundary_candidates: &[VulkanHybridBoundaryCandidate],
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    let classes = runtime_hybrid_exact_replaced_resource_classes();
+    for candidate in boundary_candidates {
+        let width = phase.activation_batch_width();
+        let base_byte_count = candidate.byte_count.checked_div(width).filter(|base| {
+            base.checked_mul(width) == Some(candidate.byte_count)
+        }).ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(
+                "exact hybrid boundary byte geometry is not divisible by its lane width"
+                    .to_string(),
+            )
+        })?;
+        for class in &classes {
+            let mut claims = Vec::new();
+            if *class == VulkanHybridResourceClass::MutableState {
+                let mut requirements = Vec::new();
+                append_exact_vulkan_runtime_hybrid_staged_boundary_requirements(
+                    runtime_model,
+                    candidate.boundary_index,
+                    base_byte_count,
+                    &candidate.execution_case,
+                    &mut requirements,
+                )?;
+                claims.extend(requirements.into_iter().map(|requirement| {
+                    match requirement.target {
+                        VulkanHybridResourceTarget::Device(device) => {
+                            VulkanHybridResourceClaim::device(
+                                requirement.resource_identity,
+                                device,
+                                requirement.class,
+                                requirement.byte_count,
+                            )
+                        }
+                        VulkanHybridResourceTarget::Host => VulkanHybridResourceClaim::host(
+                            requirement.resource_identity,
+                            requirement.class,
+                            requirement.byte_count,
+                        ),
+                    }
+                }));
+            }
+            if *class == VulkanHybridResourceClass::ExecutionTransient
+                && matches!(phase, VulkanTargetedComponentExecutionPhase::Prefill { .. })
+                && candidate
+                    .execution_case
+                    .transports
+                    .first()
+                    .is_some_and(|transport| {
+                        runtime_mounted_boundary_route(&transport.route)
+                            == Ok(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging)
+                    })
+            {
+                claims.push(VulkanHybridResourceClaim::exclusive_host(
+                    format!(
+                        "runtime-boundary:{}:{}:{}:prefill-staging",
+                        candidate.boundary_index,
+                        candidate.execution_case.input_physical_device_id,
+                        candidate.execution_case.output_physical_device_id,
+                    ),
+                    VulkanHybridResourceClass::ExecutionTransient,
+                    candidate.byte_count,
+                ));
+            }
+            resource_catalog
+                .replace_boundary_resource_class_claims(
+                    candidate.boundary_index,
+                    &candidate.execution_case,
+                    *class,
+                    claims,
                 )
                 .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         }
@@ -1678,6 +1817,8 @@ pub fn lower_vulkan_runtime_hybrid_phase_set(
         ..VulkanRuntimePhysicalExecutionPlan::default()
     };
     if let Some(prefill) = prefill {
+        physical_execution_plan.prefill_activation_batch_width =
+            Some(prefill.activation_batch_width);
         physical_execution_plan.component_device_pools.prefill = prefill.component_device_pools;
         physical_execution_plan.prefill_execution_cases_by_component =
             prefill.execution_cases_by_component;

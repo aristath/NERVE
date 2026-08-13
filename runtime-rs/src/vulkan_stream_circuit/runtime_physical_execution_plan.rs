@@ -23,6 +23,10 @@ struct VulkanRuntimeMountedBoundaryRoute {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VulkanRuntimePhysicalExecutionPlan {
+    /// Canonical lane capacity for the mounted normal prompt runner. Exact
+    /// prefill cases are calibrated and admitted at this width; the runtime
+    /// must not silently mount a wider runner after placement succeeds.
+    pub prefill_activation_batch_width: Option<usize>,
     pub component_device_pools: VulkanDistributedPhaseComponentDevicePools,
     pub decode_execution_cases_by_component:
         BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
@@ -108,7 +112,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
             runtime_model,
             "prefill",
             nerve_execution_contracts::ExecutionPhase::Prefill,
-            None,
+            self.prefill_activation_batch_width,
             &component_ids,
             &self.component_device_pools.prefill,
             &self.prefill_execution_cases_by_component,
@@ -133,7 +137,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
             runtime_model,
             "prefill",
             nerve_execution_contracts::ExecutionPhase::Prefill,
-            None,
+            self.prefill_activation_batch_width,
             &self.prefill_execution_cases_by_component,
             &self.prefill_boundary_executions,
         )?;
@@ -289,6 +293,22 @@ impl VulkanRuntimePhysicalExecutionPlan {
         pools: &BTreeMap<String, Vec<String>>,
         cases: &BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        if phase_name == "prefill"
+            && self
+                .prefill_activation_batch_width
+                .is_some_and(|width| width < 2)
+        {
+            return runtime_hybrid_error(
+                "exact physical prefill lane capacity must be at least two",
+            );
+        }
+        if phase_name == "prefill"
+            && self.prefill_activation_batch_width.is_some() != !cases.is_empty()
+        {
+            return runtime_hybrid_error(
+                "exact physical prefill geometry and component cases must be declared together",
+            );
+        }
         if cases.is_empty() {
             return Ok(());
         }

@@ -721,7 +721,11 @@ impl VulkanResidentComponentBatchSliceRunner {
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     let shared = device
-                        .create_shared_resident_buffers(&peers, byte_capacity)
+                        .create_shared_resident_buffers_for_route(
+                            &peers,
+                            byte_capacity,
+                            distributed_execution_plan.shared_activation_route,
+                        )
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                     let mut shared_device_buffers = BTreeMap::new();
                     let mut shared_buffers = shared.buffers.into_iter();

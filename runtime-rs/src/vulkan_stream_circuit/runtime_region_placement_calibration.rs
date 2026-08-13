@@ -136,6 +136,8 @@ fn lower_vulkan_runtime_region_placement_calibration(
             physical_execution_plan.decode_boundary_executions = lowered.boundary_executions;
         }
         VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+            physical_execution_plan.prefill_activation_batch_width =
+                Some(lowered.activation_batch_width);
             physical_execution_plan.component_device_pools.prefill =
                 lowered.component_device_pools;
             physical_execution_plan.prefill_execution_cases_by_component =

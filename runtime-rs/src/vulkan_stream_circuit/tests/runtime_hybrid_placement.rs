@@ -2525,8 +2525,28 @@ fn runtime_hybrid_phase_set_keeps_decode_owners_while_optimizing_prefill() {
     );
     assert_eq!(physical_plan.decode_execution_cases_by_component.len(), 3);
     assert_eq!(physical_plan.prefill_execution_cases_by_component.len(), 3);
+    assert_eq!(physical_plan.prefill_activation_batch_width, Some(4));
     assert!(physical_plan.component_device_pools.decode.is_empty());
     assert!(physical_plan.component_device_pools.prefill.is_empty());
+
+    let mut missing_geometry = physical_plan.clone();
+    missing_geometry.prefill_activation_batch_width = None;
+    assert!(
+        missing_geometry
+            .validate(&stable_model)
+            .unwrap_err()
+            .0
+            .contains("geometry and component cases must be declared together")
+    );
+    let mut scalar_geometry = physical_plan;
+    scalar_geometry.prefill_activation_batch_width = Some(1);
+    assert!(
+        scalar_geometry
+            .validate(&stable_model)
+            .unwrap_err()
+            .0
+            .contains("lane capacity must be at least two")
+    );
 }
 
 #[test]

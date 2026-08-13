@@ -76,6 +76,7 @@ fn selected_resource_mount_without_a_catalog_preserves_the_compiler_plan() {
         ResourceResidencyPolicy::DemandRetained,
         None,
         None,
+        &BTreeMap::new(),
     )
     .unwrap();
 
@@ -111,6 +112,7 @@ fn selected_resource_mount_without_selected_work_does_not_require_capacity_evide
         ResourceResidencyPolicy::DemandRetained,
         Some(&VulkanPlacementCalibrationCatalog::default()),
         None,
+        &BTreeMap::new(),
     )
     .unwrap();
 
@@ -158,8 +160,74 @@ fn exhausted_live_capacity_is_a_valid_but_infeasible_mount_state() {
         "gpu0",
         false,
         ResourceResidencyPolicy::DemandRetained,
+        &BTreeMap::new(),
     )
     .unwrap();
 
     assert!(capacities.is_none());
+}
+
+#[test]
+fn selected_resource_capacity_excludes_exact_execution_transients() {
+    let runtime_model = fixture_model_runtime_model();
+    let plan = empty_selected_resource_mount_execution_plan();
+    let residency_plan = empty_selected_resource_mount_residency_plan();
+    let plans = VulkanRuntimeDistributedMountPlans::derive(
+        VulkanDistributedExecutionPlanSet {
+            decode: plan.clone(),
+            decode_batch: plan.clone(),
+            prefill: plan,
+        },
+        &residency_plan,
+        &["gpu0".to_string()],
+        &[],
+        &TensorIndex {
+            schema: "nerve.tensor_index.v1".to_string(),
+            tensors: BTreeMap::new(),
+        },
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+    let device = VulkanRuntimeSelectedResourceMountDevice {
+        logical_device_id: "gpu0".to_string(),
+        physical_device_id: "physical-gpu0".to_string(),
+        execution_identity: VulkanPlacementDeviceExecutionIdentity {
+            physical_device_id: "physical-gpu0".to_string(),
+            api_version: 1,
+            driver_version: 1,
+        },
+        live_safe_capacity_bytes: 1_000,
+        upload_alignment: 1,
+    };
+    let baseline = selected_resource_mount_capacities(
+        &runtime_model,
+        &runtime_model.package.resource_residency,
+        &plans,
+        std::slice::from_ref(&device),
+        "gpu0",
+        "gpu0",
+        false,
+        ResourceResidencyPolicy::DemandRetained,
+        &BTreeMap::new(),
+    )
+    .unwrap()
+    .unwrap();
+    let exact = selected_resource_mount_capacities(
+        &runtime_model,
+        &runtime_model.package.resource_residency,
+        &plans,
+        &[device],
+        "gpu0",
+        "gpu0",
+        false,
+        ResourceResidencyPolicy::DemandRetained,
+        &BTreeMap::from([("gpu0".to_string(), 128)]),
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        exact[0].resident_payload_capacity_bytes,
+        baseline[0].resident_payload_capacity_bytes - 128
+    );
 }

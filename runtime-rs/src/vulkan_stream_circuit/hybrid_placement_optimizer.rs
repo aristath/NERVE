@@ -111,6 +111,31 @@ impl VulkanHybridCandidateResourceCatalog {
         resources.claims.append(&mut claims);
         Ok(())
     }
+
+    pub fn replace_boundary_resource_class_claims(
+        &mut self,
+        boundary_index: usize,
+        execution_case: &VulkanPlacementExecutionCaseIdentity,
+        class: VulkanHybridResourceClass,
+        mut claims: Vec<VulkanHybridResourceClaim>,
+    ) -> Result<(), VulkanHybridPlacementError> {
+        if claims.iter().any(|claim| claim.class != class) {
+            return Err(VulkanHybridPlacementError(format!(
+                "hybrid boundary replacement for {class:?} contains another resource class",
+            )));
+        }
+        let resources = self
+            .boundary_resources_by_case
+            .get_mut(&(boundary_index, execution_case.clone()))
+            .ok_or_else(|| {
+                VulkanHybridPlacementError(format!(
+                    "hybrid resource catalog has no measured boundary candidate {boundary_index}",
+                ))
+            })?;
+        resources.claims.retain(|claim| claim.class != class);
+        resources.claims.append(&mut claims);
+        Ok(())
+    }
 }
 
 fn hybrid_calibration_candidate_resources(

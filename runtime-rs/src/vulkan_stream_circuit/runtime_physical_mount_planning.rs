@@ -16,6 +16,89 @@ pub struct VulkanRuntimePhysicalMountPlan {
     pub shared_host_cache_quota_bytes: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
+    runtime_model: &VulkanResidentRuntimeModel,
+    resource_contract: &CompiledResourceResidencyContract,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
+    baseline_execution_plans: &VulkanDistributedExecutionPlanSet,
+    residency_plan: &VulkanRuntimeResidencyPlan,
+    logical_device_ids: &[String],
+    slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
+    tensor_index: &TensorIndex,
+    devices: &[VulkanRuntimeSelectedResourceMountDevice],
+    input_device_id: &str,
+    output_device_id: &str,
+    prefill_activation_batch_width: Option<usize>,
+    speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
+    catalog: Option<&VulkanPlacementCalibrationCatalog>,
+    telemetry: Option<&VulkanSelectionTelemetrySnapshot>,
+) -> Result<
+    (
+        VulkanRuntimeSelectedResourceMountResolution,
+        VulkanRuntimeHybridExecutionTransientPlan,
+    ),
+    VulkanResidentTokenModelPackageError,
+> {
+    let prepared_plans = slice_plans
+        .iter()
+        .map(|slice| (slice.device_id.as_str(), &slice.prepared_plan))
+        .collect::<Vec<_>>();
+    let mut execution_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
+        runtime_model,
+        slice_plans,
+        &baseline_execution_plans.prefill,
+        prefill_activation_batch_width,
+        resource_contract,
+        residency_policy,
+        speculative_draft_tokens,
+    )?;
+    let mut seen_transients = Vec::new();
+    for _ in 0..VULKAN_SELECTED_RESOURCE_MOUNT_PLACEMENT_MAXIMUM_ITERATIONS {
+        if seen_transients.contains(&execution_transient) {
+            return Err(VulkanResidentTokenModelPackageError::new(
+                "selected-resource placement and execution-transient planning entered a cycle",
+            ));
+        }
+        seen_transients.push(execution_transient.clone());
+        let resolution = resolve_vulkan_runtime_selected_resource_mount(
+            runtime_model,
+            resource_contract,
+            loaded_manifest,
+            baseline_execution_plans.clone(),
+            residency_plan,
+            logical_device_ids,
+            &prepared_plans,
+            tensor_index,
+            devices,
+            input_device_id,
+            output_device_id,
+            speculative_draft_tokens > 0,
+            residency_policy,
+            catalog,
+            telemetry,
+            &execution_transient.device_bytes_by_logical_device,
+        )?;
+        let resolved_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
+            runtime_model,
+            slice_plans,
+            &resolution.plans.execution_plans.prefill,
+            prefill_activation_batch_width,
+            resource_contract,
+            residency_policy,
+            speculative_draft_tokens,
+        )?;
+        if resolved_transient == execution_transient {
+            return Ok((resolution, resolved_transient));
+        }
+        execution_transient = resolved_transient;
+    }
+    Err(VulkanResidentTokenModelPackageError::new(
+        "selected-resource placement and execution-transient planning did not converge",
+    ))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanRuntimePhysicalSelectedResourceSummary {
     maximum_load_wave_bytes_by_logical_device: BTreeMap<String, usize>,
@@ -23,7 +106,7 @@ struct VulkanRuntimePhysicalSelectedResourceSummary {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn plan_vulkan_runtime_physical_mount(
+fn plan_vulkan_runtime_physical_mount(
     manifest_dir: impl AsRef<Path>,
     runtime_model: &VulkanResidentRuntimeModel,
     physical_execution_plan: &VulkanRuntimePhysicalExecutionPlan,
@@ -166,23 +249,33 @@ pub fn plan_vulkan_runtime_physical_mount(
                 .max(std::mem::align_of::<u64>()),
         })
         .collect::<Vec<_>>();
-    let resolution = resolve_vulkan_runtime_selected_resource_mount(
+    let (mut resolution, execution_transient) =
+        resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
         runtime_model,
         &resource_contract,
         &loaded_manifest,
-        execution_plans,
+        &execution_plans,
         &residency_plan,
         &physical_execution_plan.device_ids(runtime_model),
-        &prepared_plans,
+        &slice_plans,
         &tensor_index,
         &mount_devices,
         &input_device_id,
         &output_device_id,
-        speculative_draft_tokens > 0,
+        physical_execution_plan.prefill_activation_batch_width,
+        speculative_draft_tokens,
         resource_residency_policy,
         placement_calibration_catalog,
         None,
     )?;
+    resolution
+        .plans
+        .physical_execution_residency_plan
+        .add_execution_transient_reservation(
+            &execution_transient.device_bytes_by_logical_device,
+            execution_transient.host_bytes,
+        )
+        .map_err(|error| physical_mount_planning_error("execution transient residency", error))?;
     let physical_device_by_logical_device = devices
         .iter()
         .map(|device| {
@@ -218,6 +311,7 @@ pub fn plan_vulkan_runtime_physical_mount(
         &output_device_id,
         speculative_draft_tokens > 0,
         resource_residency_policy,
+        &BTreeMap::new(),
     )?
     .ok_or_else(|| {
         VulkanResidentTokenModelPackageError::new(
