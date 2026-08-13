@@ -125,6 +125,47 @@ fn gpu_residency_gate_contract_rejects_unrepresentable_or_unbounded_work() {
 }
 
 #[test]
+fn gpu_residency_gate_residency_geometry_is_hardware_neutral_and_exact() {
+    let mut config = VulkanGpuResidencyGateConfig {
+        maximum_selection_count: 2,
+        selection_count_per_lane: 2,
+        selection_lane_stride_words: 2,
+        selection_index_shift: 0,
+        selection_index_mask: 0xffff,
+        address_mapping: VulkanGpuResidencyAddressMapping::GroupTable {
+            resource_address_slots: vec![0, 1, 2, 3],
+            resource_address_slot_offsets: vec![0, 2, 4],
+        },
+        owned_resource_indices: None,
+    };
+    let unowned = config.private_device_bytes().unwrap();
+    assert_eq!(unowned.configuration_bytes, 11 * size_of::<u32>());
+    assert_eq!(unowned.resource_group_record_bytes, 4 * size_of::<u32>());
+    assert_eq!(unowned.resource_address_slot_bytes, 4 * size_of::<u32>());
+    assert_eq!(unowned.resolved_address_bytes, 43 * size_of::<u32>());
+    assert_eq!(
+        unowned.total_bytes,
+        unowned.configuration_bytes
+            + unowned.resource_group_record_bytes
+            + unowned.resource_address_slot_bytes
+            + unowned.resolved_address_bytes,
+    );
+
+    config.owned_resource_indices = Some(BTreeSet::from([1]));
+    let owned = config.private_device_bytes().unwrap();
+    assert_eq!(
+        owned.configuration_bytes,
+        unowned.configuration_bytes + size_of::<u32>(),
+    );
+    assert_eq!(owned.total_bytes, unowned.total_bytes + size_of::<u32>());
+
+    let miss_queue = VulkanGpuResidencyMissQueue::device_bytes_for_capacity(4).unwrap();
+    assert_eq!(miss_queue.capacity, 4);
+    assert_eq!(miss_queue.byte_count, 12 * size_of::<u32>());
+    assert!(VulkanGpuResidencyMissQueue::device_bytes_for_capacity(0).is_err());
+}
+
+#[test]
 fn gpu_residency_gate_control_separates_local_and_transaction_restore() {
     let control = vulkan_gpu_residency_gate_push_constants(8, 6, 17, true, false).unwrap();
     assert_eq!(u32::from_le_bytes(control[0..4].try_into().unwrap()), 6);

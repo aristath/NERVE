@@ -67,6 +67,21 @@ pub struct VulkanGpuResidencyGate {
     dispatch: VulkanResidentKernelDispatch,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanGpuResidencyGatePrivateDeviceBytes {
+    pub configuration_bytes: usize,
+    pub resource_group_record_bytes: usize,
+    pub resource_address_slot_bytes: usize,
+    pub resolved_address_bytes: usize,
+    pub total_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VulkanGpuResidencyMissQueueDeviceBytes {
+    pub capacity: usize,
+    pub byte_count: usize,
+}
+
 impl VulkanGpuResidencyGateConfig {
     pub fn validate(
         &self,
@@ -156,6 +171,67 @@ impl VulkanGpuResidencyGateConfig {
             .ok_or_else(|| {
                 VulkanError("GPU residency resolved-address capacity overflowed".to_string())
             })
+    }
+
+    /// Exact device-local allocations owned by one residency gate. Selection,
+    /// address-table, miss-queue, and predicate buffers are caller-owned and
+    /// deliberately excluded because a scalar chain may share them across
+    /// several gates while a distributed shard may not.
+    pub fn private_device_bytes(
+        &self,
+    ) -> Result<VulkanGpuResidencyGatePrivateDeviceBytes, VulkanError> {
+        let (resource_group_words, resource_address_slot_words, _, _) =
+            self.address_mapping.gpu_tables()?;
+        let ownership_word_count = self
+            .owned_resource_indices
+            .as_ref()
+            .map(|_| self.address_mapping.resource_count().div_ceil(u32::BITS as usize))
+            .unwrap_or(0);
+        let configuration_word_count = VULKAN_GPU_RESIDENCY_GATE_CONFIG_HEADER_WORD_COUNT
+            .checked_add(ownership_word_count)
+            .ok_or_else(|| VulkanError("GPU residency configuration capacity overflowed".to_string()))?;
+        let maximum_resolved_address_count = self.maximum_resolved_address_count()?;
+        let resolved_record_word_count = maximum_resolved_address_count
+            .checked_mul(VULKAN_GPU_RESIDENCY_GATE_RESOLVED_RECORD_WORD_COUNT)
+            .ok_or_else(|| {
+                VulkanError("GPU residency resolved record capacity overflowed".to_string())
+            })?;
+        let seen_resource_word_count = self
+            .address_mapping
+            .resource_count()
+            .div_ceil(u32::BITS as usize);
+        let resolved_word_count = VULKAN_GPU_RESIDENCY_GATE_RESOLVED_HEADER_WORD_COUNT
+            .checked_add(resolved_record_word_count)
+            .and_then(|count| count.checked_add(seen_resource_word_count))
+            .and_then(|count| count.checked_add(self.maximum_selection_count))
+            .ok_or_else(|| {
+                VulkanError(
+                    "GPU residency resolved and scratch buffer capacity overflowed".to_string(),
+                )
+            })?;
+        let configuration_bytes = words_byte_count(configuration_word_count)?;
+        let resource_group_record_bytes = words_byte_count(resource_group_words.len())?;
+        let resource_address_slot_bytes = words_byte_count(resource_address_slot_words.len())?;
+        let resolved_address_bytes = words_byte_count(resolved_word_count)?;
+        let total_bytes = [
+            configuration_bytes,
+            resource_group_record_bytes,
+            resource_address_slot_bytes,
+            resolved_address_bytes,
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, bytes| {
+            total.checked_add(bytes).ok_or_else(|| {
+                VulkanError("GPU residency private device bytes overflowed".to_string())
+            })
+        })?;
+        Ok(VulkanGpuResidencyGatePrivateDeviceBytes {
+            configuration_bytes,
+            resource_group_record_bytes,
+            resource_address_slot_bytes,
+            resolved_address_bytes,
+            total_bytes,
+        })
     }
 }
 
@@ -374,6 +450,7 @@ impl VulkanGpuResidencyGate {
             address_table_slot_count,
             missing_queue.capacity(),
         )?;
+        let private_device_bytes = config.private_device_bytes()?;
         if continuation_predicate.byte_capacity() < size_of::<u32>() {
             return Err(VulkanError(format!(
                 "GPU residency continuation predicate has {} bytes; expected at least {}",
@@ -444,18 +521,16 @@ impl VulkanGpuResidencyGate {
         );
         configuration_words.extend(ownership_words);
         let configuration = Arc::new(
-            device.create_resident_buffer(words_byte_count(configuration_words.len())?)?,
+            device.create_resident_buffer(private_device_bytes.configuration_bytes)?,
         );
         configuration.write_bytes(&u32_words_bytes(&configuration_words))?;
 
         let resource_group_records = Arc::new(
-            device.create_resident_buffer(words_byte_count(resource_group_words.len())?)?,
+            device.create_resident_buffer(private_device_bytes.resource_group_record_bytes)?,
         );
         resource_group_records.write_bytes(&u32_words_bytes(&resource_group_words))?;
         let resource_address_slots = Arc::new(
-            device.create_resident_buffer(words_byte_count(
-                resource_address_slot_words.len(),
-            )?)?,
+            device.create_resident_buffer(private_device_bytes.resource_address_slot_bytes)?,
         );
         resource_address_slots.write_bytes(&u32_words_bytes(&resource_address_slot_words))?;
 
@@ -480,8 +555,13 @@ impl VulkanGpuResidencyGate {
                     "GPU residency resolved and scratch buffer capacity overflowed".to_string(),
                 )
             })?;
-        let resolved_addresses =
-            Arc::new(device.create_resident_buffer(words_byte_count(resolved_word_count)?)?);
+        debug_assert_eq!(
+            words_byte_count(resolved_word_count)?,
+            private_device_bytes.resolved_address_bytes,
+        );
+        let resolved_addresses = Arc::new(
+            device.create_resident_buffer(private_device_bytes.resolved_address_bytes)?,
+        );
         resolved_addresses.write_bytes(&vec![0; resolved_addresses.byte_capacity()])?;
 
         let bindings = [
@@ -816,7 +896,9 @@ fn vulkan_gpu_residency_ownership_words(
 }
 
 impl VulkanGpuResidencyMissQueue {
-    pub fn new(device: &VulkanComputeDevice, capacity: usize) -> Result<Self, VulkanError> {
+    pub fn device_bytes_for_capacity(
+        capacity: usize,
+    ) -> Result<VulkanGpuResidencyMissQueueDeviceBytes, VulkanError> {
         if capacity == 0 || capacity > i32::MAX as usize {
             return Err(VulkanError(format!(
                 "GPU residency miss queue capacity {capacity} is invalid"
@@ -833,8 +915,16 @@ impl VulkanGpuResidencyMissQueue {
             .ok_or_else(|| {
                 VulkanError("GPU residency miss queue capacity overflowed".to_string())
             })?;
+        Ok(VulkanGpuResidencyMissQueueDeviceBytes {
+            capacity,
+            byte_count: words_byte_count(word_count)?,
+        })
+    }
+
+    pub fn new(device: &VulkanComputeDevice, capacity: usize) -> Result<Self, VulkanError> {
+        let planned = Self::device_bytes_for_capacity(capacity)?;
         let mut buffer =
-            device.create_host_visible_resident_buffer(words_byte_count(word_count)?)?;
+            device.create_host_visible_resident_buffer(planned.byte_count)?;
         buffer.persistently_map()?;
         let buffer = Arc::new(buffer);
         buffer.write_bytes(&vec![0; buffer.byte_capacity()])?;
