@@ -15,6 +15,10 @@ from nerve.representation_optimizer.providers.output_fp8 import (
     BlockScaledOutputProjectionProvider,
     BlockScaledOutputToolchainResolver,
 )
+from nerve.representation_optimizer.providers.hyper_norm_fusion import (
+    ExactHyperNormFusionProvider,
+    HyperNormFusionToolchainResolver,
+)
 from nerve.representation_optimizer.providers.resident_expansion import (
     ExactResidentExpertExpansionProvider,
     ResidentExpansionToolchainResolver,
@@ -33,6 +37,7 @@ def load_builtin_provider_registry(
             ExactHeadNormCodebookProvider(),
             BlockScaledOutputProjectionProvider(),
             ExactResidentExpertExpansionProvider(),
+            ExactHyperNormFusionProvider(),
         ),
     )
 
@@ -46,6 +51,7 @@ class BuiltinCandidateToolchainResolver:
             EmbeddedParameterProgramToolchainResolver(),
             BlockScaledOutputToolchainResolver(),
             ResidentExpansionToolchainResolver(),
+            HyperNormFusionToolchainResolver(),
         )
 
     def resolve(self, plan: ProviderCandidatePlan):

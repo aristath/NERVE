@@ -129,6 +129,18 @@ the local placement calibration, and the mounted graph.
   physical-plan validation, duplicate/altered/overlapping application
   rejection, and incompatible-baseline coverage. Real-model TP execution is
   still awaiting the explicitly authorized live gate.
+- Hyper-connection/RMS fusion is now a structure-discovered optimizer
+  implementation rather than a lowest-common-denominator compiler decision.
+  On the current DeepSeek package it discovers two independent physical
+  families across all 43 transformer components: attention pre/RMS/prequant
+  and feed-forward post-pre/RMS/prequant. Each family constructs 57 sealed
+  artifacts, replaces exactly one source-anchored region per component, and
+  passes both independent source-reconstruction proofs for all 43 components.
+  The runtime attaches execution-local stream contracts before composition,
+  preserves runtime state-sharing policy for full-component alternatives, and
+  composes disjoint region overlays at their own source anchors. Hardware-
+  neutral provider, mount, malformed-input, cache-identity, and composition
+  tests pass; live performance remains unmeasured under the GPU quarantine.
 - A mounted derived representation now reserves a complete hot selected-expert
   wave per affected selector in addition to its immutable compact source. The
   contract accounts transformed and unchanged atomic-group members, source and
@@ -747,20 +759,14 @@ For every numbered item below:
 
 ### 8. Reduce the remaining non-expert critical path
 
-- Add measured execution-island candidates for the four-way hyper-connection
-  structure. The exact compiled baseline must remain portable across every
-  compatible target. Today the compiler admits fused hyper-connection/RMS
-  execution only when every compile target exposes FP8, subgroup arithmetic,
-  subgroup size 64, and a 1024-wide workgroup; one less-capable target therefore
-  suppresses the candidate on every capable AMD GPU. Move this fusion into a
-  structure-discovered optimizer implementation with an exact capability
-  predicate, source-anchored component-region overlay, independent
-  decode/prefill benchmark, and source-behavior proof. The runtime must be able
-  to compose the fused region with unrelated representation implementations,
-  select it per component on compatible targets, and retain the exact unfused
-  region on other targets in the same mounted model. Evaluate branch parallelism
-  and selective TP only after this local fused transaction is independently
-  measured, while preserving Sinkhorn, reduction, and residual ordering.
+- On the explicitly authorized live gate, independently benchmark and validate
+  the attention and feed-forward hyper/RMS/prequant families in decode and
+  prefill. Prove exact unfused retention on incompatible targets, joint
+  selection of both non-overlapping families on compatible targets, composition
+  with the resident-expert representation, identical product behavior, and
+  exact teardown. Promote only measured component/target combinations that
+  improve the complete stream. Then evaluate branch parallelism and selective
+  TP without changing Sinkhorn, reduction, or residual ordering.
 - Treat attention as its own partition family. Define legal query/head,
   indexer, latent-state, KV/state, output-projection, and reduction contracts
   rather than reusing the FFN partition rules.
