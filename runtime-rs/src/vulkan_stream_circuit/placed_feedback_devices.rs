@@ -58,6 +58,13 @@ impl VulkanResidentInProcessPlacedFeedbackLoopEligibility {
     }
 }
 
+fn resident_feedback_submission_topology_is_replayable(
+    demand_pipeline_is_guarded: bool,
+    has_dynamic_push_constants: bool,
+) -> bool {
+    demand_pipeline_is_guarded && !has_dynamic_push_constants
+}
+
 struct VulkanResidentInProcessPlacedFeedbackLoop {
     feedback_synchronization: Option<Box<VulkanResidentPlacedFeedbackTimelineSynchronization>>,
     output_synchronization: Box<VulkanResidentPlacedOutputTimelineSynchronization>,
@@ -859,7 +866,10 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
             output_synchronization,
             control,
             window_policy: VulkanResidentFeedbackWindowPolicy::new(window_width),
-            replayable: demand_residency.is_none() && !has_dynamic_push_constants,
+            replayable: resident_feedback_submission_topology_is_replayable(
+                demand_pipeline_is_guarded,
+                has_dynamic_push_constants,
+            ),
             scheduler_turn_count_per_tick: activation_schedule.turns.len(),
             completed_stage_count_per_tick,
             demand_residency,

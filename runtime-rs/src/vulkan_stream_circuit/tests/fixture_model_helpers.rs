@@ -186,6 +186,16 @@ fn placed_feedback_window_accepts_bridged_multi_device_execution_graphs() {
         sampler_history_capacity: 4_096,
     };
     assert_eq!(eligible.window_width(), Some(64));
+    assert!(resident_feedback_submission_topology_is_replayable(
+        eligible.demand_dispatches_are_pipeline_guarded,
+        eligible.has_dynamic_push_constants,
+    ));
+    assert!(!resident_feedback_submission_topology_is_replayable(
+        false, false,
+    ));
+    assert!(!resident_feedback_submission_topology_is_replayable(
+        true, true,
+    ));
     assert_eq!(
         VulkanResidentInProcessPlacedFeedbackLoopEligibility {
             window_width: 32,

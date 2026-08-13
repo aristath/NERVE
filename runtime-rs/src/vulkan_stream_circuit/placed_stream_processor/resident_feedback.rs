@@ -364,41 +364,43 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             );
         };
         let attempt = (|| {
-            // Template construction may materialize a previously unseen
-            // demand-chain shape. That construction allocates command
-            // resources and can invoke reclamation, so it must finish before
-            // this feedback window performs its device headroom check.
-            let mut mounted = self.mount_demand_resident_feedback_attempt(
+            let maximum_resolution_count = demand
+                .resolution_bound(&self.device_slices, tick_count)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            // A cache miss may materialize a previously unseen demand-chain
+            // shape. That construction allocates command resources and can
+            // invoke reclamation. The preparation hook runs after either that
+            // construction or a cached timeline rebase, but before submission,
+            // so this is the authoritative execution-headroom boundary.
+            let mut pending = self.submit_resident_feedback_attempt_after_preparation(
                 devices,
                 start_stream_tick,
                 tick_count,
                 stop_token_ids,
+                template_catalog,
+                |terminal_output_value| {
+                    demand
+                        .ensure_execution_headroom(devices)
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                    if self.resident_feedback_timeline_value_is_complete(
+                        devices,
+                        terminal_output_value,
+                    )? {
+                        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                            VulkanError(format!(
+                                "demand feedback terminal timeline value {terminal_output_value} was already complete before its submission",
+                            )),
+                        ));
+                    }
+                    Ok(())
+                },
             )?;
-            let maximum_resolution_count = demand
-                .resolution_bound(&self.device_slices, tick_count)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            mounted.pending.demand_resolution =
-                Some(VulkanResidentDemandFeedbackResolutionState {
-                    maximum_resolution_count,
-                    resolved_resource_count: 0,
-                    resolved_checkpoints: BTreeMap::new(),
-                });
-            demand
-                .ensure_execution_headroom(devices)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            if self.resident_feedback_window_is_complete(devices, &mounted.pending)? {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                    VulkanError(format!(
-                        "demand feedback terminal timeline value {} was already complete before its submission",
-                        mounted.pending.terminal_output_value,
-                    )),
-                ));
-            }
-            mounted
-                .submission_template
-                .submit_with_timeline_value_offset(0)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            Ok(mounted.pending)
+            pending.demand_resolution = Some(VulkanResidentDemandFeedbackResolutionState {
+                maximum_resolution_count,
+                resolved_resource_count: 0,
+                resolved_checkpoints: BTreeMap::new(),
+            });
+            Ok(pending)
         })();
         match attempt {
             Ok(pending) => Ok(pending),
@@ -673,45 +675,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         })
     }
 
-    fn mount_demand_resident_feedback_attempt(
-        &self,
-        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
-        start_stream_tick: u64,
-        tick_count: usize,
-        stop_token_ids: &[u32],
-    ) -> Result<
-        VulkanResidentInProcessPlacedMountedFeedbackAttempt,
-        VulkanResidentInProcessPlacedRuntimeError,
-    > {
-        let feedback_loop = self.arm_resident_feedback_attempt(tick_count, stop_token_ids)?;
-        let (submission_template, output_timeline_values, transport_stats) = self
-            .mount_resident_feedback_submission_template(
-                devices,
-                start_stream_tick,
-                tick_count,
-                feedback_loop.feedback_synchronization.as_deref(),
-                &feedback_loop.output_synchronization,
-                None,
-            )?;
-        let terminal_output_value = output_timeline_values.last().copied().ok_or_else(|| {
-            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                "resident feedback window has no output timeline value".to_string(),
-            ))
-        })?;
-        Ok(VulkanResidentInProcessPlacedMountedFeedbackAttempt {
-            submission_template,
-            pending: VulkanResidentInProcessPlacedPendingFeedbackWindow {
-                start_stream_tick,
-                tick_count,
-                terminal_output_value,
-                template_replayed: false,
-                transport_stats,
-                demand_resolved_checkpoints: Vec::new(),
-                demand_resolution: None,
-            },
-        })
-    }
-
     fn prepare_resident_feedback_initial_control(
         &self,
         input_token_id: u32,
@@ -782,18 +745,44 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         start_stream_tick: u64,
         tick_count: usize,
         stop_token_ids: &[u32],
-        mut template_catalog: Option<&mut VulkanResidentPlacedFeedbackTemplateCatalog>,
+        template_catalog: Option<&mut VulkanResidentPlacedFeedbackTemplateCatalog>,
     ) -> Result<
         VulkanResidentInProcessPlacedPendingFeedbackWindow,
         VulkanResidentInProcessPlacedRuntimeError,
     > {
+        self.submit_resident_feedback_attempt_after_preparation(
+            devices,
+            start_stream_tick,
+            tick_count,
+            stop_token_ids,
+            template_catalog,
+            |_| Ok(()),
+        )
+    }
+
+    fn submit_resident_feedback_attempt_after_preparation<F>(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        start_stream_tick: u64,
+        tick_count: usize,
+        stop_token_ids: &[u32],
+        mut template_catalog: Option<&mut VulkanResidentPlacedFeedbackTemplateCatalog>,
+        prepare_submission: F,
+    ) -> Result<
+        VulkanResidentInProcessPlacedPendingFeedbackWindow,
+        VulkanResidentInProcessPlacedRuntimeError,
+    >
+    where
+        F: FnOnce(u64) -> Result<(), VulkanResidentInProcessPlacedRuntimeError>,
+    {
         let feedback_loop = self.arm_resident_feedback_attempt(tick_count, stop_token_ids)?;
         let template_key = VulkanResidentPlacedFeedbackTemplateKey {
             runtime_execution_identity: self.model.runtime_execution_identity.clone(),
             tick_count,
         };
+        let mut prepare_submission = Some(prepare_submission);
         let mut template_replayed = false;
-        let (output_timeline_values, transport_stats) =
+        let (terminal_output_value, transport_stats) =
             if let Some(replay) = template_catalog
                 .as_deref_mut()
                 .and_then(|catalog| catalog.get(&template_key))
@@ -811,10 +800,21 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     &feedback_loop.output_synchronization,
                     tick_count,
                 )?;
+                let terminal_output_value =
+                    output_timeline_values.last().copied().ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "resident feedback replay has no output timeline value".to_string(),
+                        ))
+                    })?;
+                prepare_submission
+                    .take()
+                    .expect("resident feedback submission preparation runs exactly once")(
+                    terminal_output_value,
+                )?;
                 replay
                     .submit_next(tick_count, &current_timeline_state)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                (output_timeline_values, replay.transport_stats.clone())
+                (terminal_output_value, replay.transport_stats.clone())
             } else {
                 let recorded_timeline_state = self.resident_feedback_replay_timeline_state(
                     feedback_loop.feedback_synchronization.as_deref(),
@@ -829,6 +829,17 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         &feedback_loop.output_synchronization,
                         None,
                     )?;
+                let terminal_output_value =
+                    output_timeline_values.last().copied().ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "resident feedback window has no output timeline value".to_string(),
+                        ))
+                    })?;
+                prepare_submission
+                    .take()
+                    .expect("resident feedback submission preparation runs exactly once")(
+                    terminal_output_value,
+                )?;
                 submission_template
                     .submit_with_timeline_value_offset(0)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -844,13 +855,8 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     );
                 }
-                (output_timeline_values, transport_stats)
+                (terminal_output_value, transport_stats)
             };
-        let terminal_output_value = output_timeline_values.last().copied().ok_or_else(|| {
-            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                "resident feedback window has no output timeline value".to_string(),
-            ))
-        })?;
         Ok(VulkanResidentInProcessPlacedPendingFeedbackWindow {
             start_stream_tick,
             tick_count,
@@ -909,6 +915,17 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         pending: &VulkanResidentInProcessPlacedPendingFeedbackWindow,
     ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+        self.resident_feedback_timeline_value_is_complete(
+            devices,
+            pending.terminal_output_value,
+        )
+    }
+
+    fn resident_feedback_timeline_value_is_complete(
+        &self,
+        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
+        terminal_output_value: u64,
+    ) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
         let feedback_loop = self.resident_feedback_loop.as_ref().ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                 "placed resident feedback loop is not mounted".to_string(),
@@ -918,7 +935,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             .output_synchronization
             .turn_is_complete(
                 self.resident_feedback_output_device(devices)?,
-                pending.terminal_output_value,
+                terminal_output_value,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
     }

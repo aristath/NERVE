@@ -715,13 +715,18 @@ For every numbered item below:
 
 ### 7. Make hybrid execution device-owned
 
-- On the authorized live gate, prove that a resident sparse-expert hit continues
+- Guarded demand-resident feedback now records its complete multi-device
+  submission topology once per execution identity and window width, then
+  rebases its timeline values on fully warm windows. Demand paging no longer
+  forces the host to rebuild the graph on every zero-miss transaction; only a
+  real miss mounts the checkpoint-specific continuation suffix. On the
+  authorized live gate, prove that a resident sparse-expert hit continues
   directly into expert execution without a host predicate read, fence, or
-  terminal wait. A real miss now stops the bounded device transaction and
-  publishes a transaction-unique structural source ID; terminal host recovery
-  indexes only that checkpoint or distributed island instead of scanning every
-  feedback lane, local segment, and distributed gate. Validate the complete
-  miss, replay, subsequent-hit, and teardown cycle on a mounted sparse model.
+  terminal wait. A real miss publishes a transaction-unique structural source
+  ID, and terminal recovery indexes only that checkpoint or distributed island
+  instead of scanning every feedback lane, local segment, and distributed gate.
+  Validate the complete cold record, warm template replay, miss, continuation,
+  subsequent-hit, and teardown cycle on a mounted sparse model.
 - Make cross-device edges, TP fan-out/collection, expert dispatch/reduction,
   and arbitrary ordered visits such as `gpu0 -> gpu1 -> gpu0` part of the
   compiled transaction through persistent activation rings and timeline
