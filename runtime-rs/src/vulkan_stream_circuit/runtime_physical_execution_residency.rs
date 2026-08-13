@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v1";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v2";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
@@ -33,6 +33,8 @@ pub struct VulkanRuntimePhysicalExecutionResidencyPlan {
     pub total_stream_device_local_bytes: usize,
     pub total_stream_shared_host_bytes: usize,
     pub execution_transient_shared_host_bytes_per_stream: usize,
+    pub execution_transient_shared_host_allocations:
+        Vec<VulkanRuntimeSharedHostTransientAllocation>,
     pub shared_stream_control_host_bytes_per_stream: usize,
 }
 
@@ -307,6 +309,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             total_stream_device_local_bytes,
             total_stream_shared_host_bytes,
             execution_transient_shared_host_bytes_per_stream: 0,
+            execution_transient_shared_host_allocations: Vec::new(),
             shared_stream_control_host_bytes_per_stream: 0,
         })
     }
@@ -428,12 +431,27 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
     fn add_execution_transient_reservation(
         &mut self,
         device_bytes_by_logical_device: &BTreeMap<String, usize>,
-        shared_host_bytes: usize,
+        shared_host_allocations: &[VulkanRuntimeSharedHostTransientAllocation],
     ) -> Result<(), VulkanRuntimeResidencyPlanError> {
         // Construct the augmented plan off to the side. A stale logical
         // binding or arithmetic failure must not partially mutate the
         // authoritative admission plan.
         let mut next = self.clone();
+        if next.execution_transient_shared_host_bytes_per_stream != 0
+            || !next
+                .execution_transient_shared_host_allocations
+                .is_empty()
+            || next.device_plans.iter().any(|device| {
+                device
+                    .breakdown
+                    .execution_transient_device_bytes_per_stream
+                    != 0
+            })
+        {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "execution transient reservation was already attached".to_string(),
+            ));
+        }
         for (logical_device_id, byte_count) in device_bytes_by_logical_device {
             let device = next
                 .device_plans
@@ -463,6 +481,49 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 "execution transient total stream residency",
             )?;
         }
+        let admitted_logical_devices = next
+            .device_plans
+            .iter()
+            .map(|device| device.device_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let shared_host_bytes = shared_host_allocations.iter().try_fold(
+            0usize,
+            |total, allocation| {
+                if allocation.owner_device_id.trim().is_empty()
+                    || allocation.concern.trim().is_empty()
+                    || allocation.byte_capacity == 0
+                    || !allocation
+                        .participant_device_ids
+                        .iter()
+                        .any(|device_id| device_id == &allocation.owner_device_id)
+                    || allocation
+                        .participant_device_ids
+                        .iter()
+                        .any(|device_id| device_id.trim().is_empty())
+                    || allocation
+                        .participant_device_ids
+                        .windows(2)
+                        .any(|pair| pair[0] >= pair[1])
+                    || allocation
+                        .participant_device_ids
+                        .iter()
+                        .any(|device_id| !admitted_logical_devices.contains(device_id.as_str()))
+                    || (allocation.mode
+                        == VulkanRuntimeSharedHostTransientAllocationMode::CrossDeviceTimelineStaging
+                        && allocation.participant_device_ids.len() != 2)
+                {
+                    return Err(VulkanRuntimeResidencyPlanError(format!(
+                        "execution transient shared-host allocation {:?} is malformed",
+                        allocation.concern,
+                    )));
+                }
+                checked_residency_add(
+                    total,
+                    allocation.byte_capacity,
+                    "execution transient shared-host allocation ledger",
+                )
+            },
+        )?;
         next.execution_transient_shared_host_bytes_per_stream = checked_residency_add(
             next.execution_transient_shared_host_bytes_per_stream,
             shared_host_bytes,
@@ -473,6 +534,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             shared_host_bytes,
             "execution transient total shared-host residency",
         )?;
+        next.execution_transient_shared_host_allocations = shared_host_allocations.to_vec();
         *self = next;
         Ok(())
     }

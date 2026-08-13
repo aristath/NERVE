@@ -82,6 +82,68 @@ fn shared_stream_control_requirement_bytes(
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
 }
 
+fn execution_transient_shared_host_requirement_bytes<'a, F>(
+    allocations: &[VulkanRuntimeSharedHostTransientAllocation],
+    device_for: &F,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError>
+where
+    F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    execution_transient_shared_host_requirement_bytes_with(allocations, |allocation| {
+        if allocation.mode
+            == VulkanRuntimeSharedHostTransientAllocationMode::CrossDeviceTimelineStaging
+        {
+            let owner = device_for(&allocation.owner_device_id)?;
+            let participants = allocation
+                .participant_device_ids
+                .iter()
+                .map(|device_id| device_for(device_id))
+                .collect::<Result<Vec<_>, _>>()?;
+            let distinct_peers = participants
+                .iter()
+                .copied()
+                .filter(|device| !device.shares_logical_device_with(owner))
+                .collect::<Vec<_>>();
+            if distinct_peers.is_empty()
+                || !owner.supports_shared_host_memory()
+                || !owner.supports_opaque_fd_timeline_semaphores()
+                || distinct_peers.iter().any(|device| {
+                    !device.supports_shared_host_memory()
+                        || !device.supports_opaque_fd_timeline_semaphores()
+                })
+            {
+                return Ok(0);
+            }
+        }
+        shared_host_allocation_requirement_for_logical_devices(
+            &allocation.owner_device_id,
+            &allocation.participant_device_ids,
+            allocation.byte_capacity,
+            device_for,
+        )
+    })
+}
+
+fn execution_transient_shared_host_requirement_bytes_with<F>(
+    allocations: &[VulkanRuntimeSharedHostTransientAllocation],
+    mut requirement_for: F,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError>
+where
+    F: FnMut(
+        &VulkanRuntimeSharedHostTransientAllocation,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    allocations.iter().try_fold(0usize, |total, allocation| {
+        total.checked_add(requirement_for(allocation)?).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(
+                    "execution transient shared-host allocation requirements overflowed",
+                ),
+            )
+        })
+    })
+}
+
 fn reserve_vulkan_runtime_physical_execution_stream_memory<'a, F>(
     package: &VulkanResidentInProcessPlacedModelPackage,
     device_for: &F,
@@ -161,6 +223,9 @@ where
         .total_stream_shared_host_bytes
         .checked_sub(distributed_shared_host_logical_bytes)
         .and_then(|bytes| {
+            bytes.checked_sub(plan.execution_transient_shared_host_bytes_per_stream)
+        })
+        .and_then(|bytes| {
             bytes.checked_sub(plan.shared_stream_control_host_bytes_per_stream)
         })
         .ok_or_else(|| {
@@ -172,9 +237,15 @@ where
         })?;
     let shared_stream_control_requirement =
         shared_stream_control_requirement_bytes(&physical_devices)?;
+    let execution_transient_shared_host_requirement =
+        execution_transient_shared_host_requirement_bytes(
+            &plan.execution_transient_shared_host_allocations,
+            device_for,
+        )?;
     let stream_host_requirement_bytes =
         distributed_shared_host_requirement_bytes(&package.distributed_activation_plan, device_for)?
             .checked_add(non_distributed_shared_host_bytes)
+            .and_then(|bytes| bytes.checked_add(execution_transient_shared_host_requirement))
             .and_then(|bytes| bytes.checked_add(shared_stream_control_requirement))
             .ok_or_else(|| {
         VulkanResidentInProcessPlacedRuntimeError::Package(

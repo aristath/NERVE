@@ -161,6 +161,7 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
                 resource_layout,
                 &identity_by_logical_device,
             )?;
+            let host_bytes = transient.host_bytes();
             for (logical_device_id, byte_count) in transient.device_bytes_by_logical_device {
                 if byte_count == 0 {
                     continue;
@@ -180,14 +181,14 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
                     byte_count,
                 ));
             }
-            if transient.host_bytes > 0 {
+            if host_bytes > 0 {
                 requirements.direct_claims.push(VulkanHybridResourceClaim::exclusive_host(
                     format!(
                         "runtime-execution:{}:prefill-width:{activation_batch_width}:host-staging",
                         runtime_model.execution_scope,
                     ),
                     VulkanHybridResourceClass::ExecutionTransient,
-                    transient.host_bytes,
+                    host_bytes,
                 ));
             }
         }
@@ -282,6 +283,7 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
             &resource_layout,
             &identity_by_logical_device,
         )?;
+        let host_bytes = transient.host_bytes();
         let mut claims = Vec::new();
         for (logical_device_id, byte_count) in transient.device_bytes_by_logical_device {
             if byte_count == 0 {
@@ -304,14 +306,14 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
                 byte_count,
             ));
         }
-        if transient.host_bytes > 0 {
+        if host_bytes > 0 {
             claims.push(VulkanHybridResourceClaim::exclusive_host(
                 format!(
                     "runtime-route:{}:prefill-width:{activation_batch_width}:host",
                     runtime_model.execution_scope,
                 ),
                 VulkanHybridResourceClass::ExecutionTransient,
-                transient.host_bytes,
+                host_bytes,
             ));
         }
         Ok(claims)

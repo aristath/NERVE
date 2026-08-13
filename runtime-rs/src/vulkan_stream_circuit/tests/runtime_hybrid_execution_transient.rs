@@ -1,4 +1,47 @@
 #[test]
+fn runtime_hybrid_shared_host_ledger_extends_without_collapsing_allocations() {
+    let mut normal = VulkanRuntimeHybridExecutionTransientPlan::default();
+    normal
+        .add_shared_host_allocation(
+            VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            "gpu0",
+            ["gpu0".to_string(), "gpu1".to_string()],
+            17,
+            "normal signal",
+        )
+        .unwrap();
+    let mut verification = VulkanRuntimeHybridExecutionTransientPlan::default();
+    verification
+        .add_shared_host_allocation(
+            VulkanRuntimeSharedHostTransientAllocationMode::CrossDeviceTimelineStaging,
+            "gpu1",
+            ["gpu0".to_string(), "gpu1".to_string()],
+            29,
+            "verification edge",
+        )
+        .unwrap();
+
+    normal.extend(verification).unwrap();
+
+    assert_eq!(normal.host_bytes(), 46);
+    assert_eq!(normal.shared_host_allocations.len(), 2);
+    assert_eq!(normal.shared_host_allocations[0].byte_capacity, 17);
+    assert_eq!(normal.shared_host_allocations[1].byte_capacity, 29);
+    let original = normal.clone();
+    let malformed = normal
+        .add_shared_host_allocation(
+            VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            "gpu0",
+            ["gpu1".to_string()],
+            1,
+            "missing owner",
+        )
+        .unwrap_err();
+    assert!(malformed.to_string().contains("owner participant"));
+    assert_eq!(normal, original);
+}
+
+#[test]
 fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
     let package_root = tiny_model_dir();
     let model = fixture_model_runtime_model();
@@ -473,8 +516,33 @@ fn runtime_hybrid_exact_prefill_accounts_cross_device_batch_staging_once() {
         false,
     )
     .unwrap();
-    assert!(one.host_bytes > 0);
-    assert_eq!(four.host_bytes, 4 * one.host_bytes);
+    assert!(one.host_bytes() > 0);
+    assert_eq!(four.host_bytes(), 4 * one.host_bytes());
+    assert!(!one.shared_host_allocations.is_empty());
+    assert_eq!(
+        one.shared_host_allocations
+            .iter()
+            .map(|allocation| allocation.byte_capacity)
+            .sum::<usize>(),
+        one.host_bytes()
+    );
+    assert_eq!(
+        four.shared_host_allocations.len(),
+        one.shared_host_allocations.len()
+    );
+    for (one, four) in one
+        .shared_host_allocations
+        .iter()
+        .zip(&four.shared_host_allocations)
+    {
+        assert_eq!(four.mode, one.mode);
+        assert_eq!(four.owner_device_id, one.owner_device_id);
+        assert_eq!(four.participant_device_ids, one.participant_device_ids);
+        assert_eq!(four.byte_capacity, 4 * one.byte_capacity);
+        assert!(one
+            .participant_device_ids
+            .contains(&one.owner_device_id));
+    }
     assert_eq!(one.device_bytes_by_logical_device.len(), 2);
     assert_eq!(four.device_bytes_by_logical_device.len(), 2);
 }

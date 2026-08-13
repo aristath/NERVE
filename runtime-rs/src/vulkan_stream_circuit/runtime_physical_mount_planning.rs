@@ -175,7 +175,7 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
             .physical_execution_residency_plan
             .add_execution_transient_reservation(
                 &execution_transient.device_bytes_by_logical_device,
-                execution_transient.host_bytes,
+                &execution_transient.shared_host_allocations,
             )
             .map_err(|error| {
                 physical_mount_planning_error("execution transient residency", error)

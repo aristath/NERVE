@@ -1,7 +1,23 @@
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VulkanRuntimeHybridExecutionTransientPlan {
     device_bytes_by_logical_device: BTreeMap<String, usize>,
-    host_bytes: usize,
+    shared_host_allocations: Vec<VulkanRuntimeSharedHostTransientAllocation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VulkanRuntimeSharedHostTransientAllocation {
+    pub mode: VulkanRuntimeSharedHostTransientAllocationMode,
+    pub owner_device_id: String,
+    pub participant_device_ids: Vec<String>,
+    pub byte_capacity: usize,
+    pub concern: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanRuntimeSharedHostTransientAllocationMode {
+    Always,
+    CrossDeviceTimelineStaging,
 }
 
 impl VulkanRuntimeHybridExecutionTransientPlan {
@@ -16,7 +32,16 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
                 "combined component-batch runners",
             )?;
         }
-        self.add_host_bytes(other.host_bytes, "combined component-batch runners")
+        for allocation in other.shared_host_allocations {
+            self.add_shared_host_allocation(
+                allocation.mode,
+                &allocation.owner_device_id,
+                allocation.participant_device_ids,
+                allocation.byte_capacity,
+                &allocation.concern,
+            )?;
+        }
+        Ok(())
     }
 
     fn add_device_bytes(
@@ -37,16 +62,49 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         Ok(())
     }
 
-    fn add_host_bytes(
+    fn host_bytes(&self) -> usize {
+        self.shared_host_allocations
+            .iter()
+            .map(|allocation| allocation.byte_capacity)
+            .sum()
+    }
+
+    fn add_shared_host_allocation(
         &mut self,
+        mode: VulkanRuntimeSharedHostTransientAllocationMode,
+        owner_device_id: &str,
+        participant_device_ids: impl IntoIterator<Item = String>,
         byte_count: usize,
         concern: &str,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
-        self.host_bytes = self.host_bytes.checked_add(byte_count).ok_or_else(|| {
+        let participant_device_ids = participant_device_ids
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if owner_device_id.trim().is_empty()
+            || byte_count == 0
+            || !participant_device_ids
+                .iter()
+                .any(|device_id| device_id == owner_device_id)
+        {
+            return Err(VulkanRuntimeHybridPlacementError(format!(
+                "exact hybrid {concern} shared-host allocation requires a nonempty owner, positive capacity, and an owner participant",
+            )));
+        }
+        self.host_bytes().checked_add(byte_count).ok_or_else(|| {
             VulkanRuntimeHybridPlacementError(format!(
                 "exact hybrid {concern} host transient bytes overflowed",
             ))
         })?;
+        self.shared_host_allocations
+            .push(VulkanRuntimeSharedHostTransientAllocation {
+                mode,
+                owner_device_id: owner_device_id.to_string(),
+                participant_device_ids,
+                byte_capacity: byte_count,
+                concern: concern.to_string(),
+            });
         Ok(())
     }
 }
@@ -265,7 +323,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                 .get(&slice.device_id)
                 .unwrap_or(&no_retained_signal_keys),
         )?;
-        let mut shared_buffer_indices = BTreeSet::new();
+        let mut shared_device_ids_by_buffer = BTreeMap::<usize, BTreeSet<String>>::new();
         for dispatch in execution_plan
             .dispatches
             .iter()
@@ -298,7 +356,10 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                         "exact hybrid distributed prefill has no signal buffer for {key:?}",
                     ))
                 })?;
-                shared_buffer_indices.insert(buffer_index);
+                shared_device_ids_by_buffer
+                    .entry(buffer_index)
+                    .or_default()
+                    .extend(dispatch.shards.iter().map(|shard| shard.device_id.clone()));
             }
         }
         for (buffer_index, buffer) in signal_buffers.into_iter().enumerate() {
@@ -310,11 +371,17 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                         "exact hybrid component-batch signal capacity overflowed".to_string(),
                     )
                 })?;
-            if shared_buffer_indices.contains(&buffer_index)
+            if let Some(shared_device_ids) = shared_device_ids_by_buffer.get(&buffer_index)
                 && execution_plan.shared_activation_route
                     == VulkanSharedResidentBufferRoute::SharedHost
             {
-                plan.add_host_bytes(byte_count, "shared component-batch signal")?;
+                plan.add_shared_host_allocation(
+                    VulkanRuntimeSharedHostTransientAllocationMode::Always,
+                    &slice.device_id,
+                    shared_device_ids.iter().cloned(),
+                    byte_count,
+                    "shared component-batch signal",
+                )?;
             } else {
                 plan.add_device_bytes(
                     &slice.device_id,
@@ -401,7 +468,13 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                 "batch reduction",
             )?,
             VulkanSharedResidentBufferRoute::SharedHost => {
-                plan.add_host_bytes(byte_count, "shared batch reduction")?
+                plan.add_shared_host_allocation(
+                    VulkanRuntimeSharedHostTransientAllocationMode::Always,
+                    &reduction.owner_device_id,
+                    reduction.device_ids.iter().cloned(),
+                    byte_count,
+                    "shared batch reduction",
+                )?
             }
         }
     }
@@ -488,7 +561,10 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
             {
                 continue;
             }
-            plan.add_host_bytes(
+            plan.add_shared_host_allocation(
+                VulkanRuntimeSharedHostTransientAllocationMode::CrossDeviceTimelineStaging,
+                &slice.device_id,
+                [slice.device_id.clone(), endpoint.remote_device_id.clone()],
                 exact_vulkan_component_batch_edge_frame_bytes(
                     &endpoint.connection,
                     endpoint.byte_capacity,

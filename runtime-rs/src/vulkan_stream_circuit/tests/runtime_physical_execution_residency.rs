@@ -135,10 +135,17 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
     )
     .unwrap();
     let baseline = plan.clone();
+    let shared_transient = VulkanRuntimeSharedHostTransientAllocation {
+        mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+        owner_device_id: "owner".to_string(),
+        participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+        byte_capacity: 19,
+        concern: "test allocation".to_string(),
+    };
 
     plan.add_execution_transient_reservation(
         &BTreeMap::from([("owner".to_string(), 33), ("helper".to_string(), 17)]),
-        19,
+        std::slice::from_ref(&shared_transient),
     )
     .unwrap();
 
@@ -159,6 +166,10 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
         baseline.total_stream_device_local_bytes + 50
     );
     assert_eq!(plan.execution_transient_shared_host_bytes_per_stream, 19);
+    assert_eq!(
+        plan.execution_transient_shared_host_allocations,
+        vec![shared_transient]
+    );
     assert_eq!(
         plan.total_stream_shared_host_bytes,
         baseline.total_stream_shared_host_bytes + 19
@@ -182,14 +193,22 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
     );
 
     let accepted = plan.clone();
-    let error = plan
+    let repeated = plan
+        .add_execution_transient_reservation(&BTreeMap::new(), &[])
+        .unwrap_err();
+    assert!(repeated.to_string().contains("already attached"));
+    assert_eq!(plan, accepted);
+
+    let mut invalid_plan = baseline;
+    let invalid_original = invalid_plan.clone();
+    let error = invalid_plan
         .add_execution_transient_reservation(
             &BTreeMap::from([("owner".to_string(), 1), ("absent".to_string(), 1)]),
-            1,
+            &[],
         )
         .unwrap_err();
     assert!(error.to_string().contains("absent logical device"));
-    assert_eq!(plan, accepted);
+    assert_eq!(invalid_plan, invalid_original);
 }
 
 #[test]
@@ -541,6 +560,111 @@ fn stream_control_binding_rejects_incomplete_repeated_or_extra_maps_atomically()
         .unwrap_err();
     assert!(repeated.to_string().contains("bound more than once"));
     assert_eq!(plan, once_bound);
+}
+
+#[test]
+fn execution_transient_shared_host_ledger_rejects_malformed_allocations_atomically() {
+    let base = physical_execution_residency_base_plan(1_000, 100);
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &physical_execution_activation_plan(VulkanSharedResidentBufferRoute::SharedHost),
+    )
+    .unwrap();
+    let original = plan.clone();
+
+    for malformed in [
+        VulkanRuntimeSharedHostTransientAllocation {
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["helper".to_string()],
+            byte_capacity: 19,
+            concern: "missing owner".to_string(),
+        },
+        VulkanRuntimeSharedHostTransientAllocation {
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["owner".to_string(), "owner".to_string()],
+            byte_capacity: 19,
+            concern: "duplicate participant".to_string(),
+        },
+        VulkanRuntimeSharedHostTransientAllocation {
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["owner".to_string()],
+            byte_capacity: 0,
+            concern: "zero capacity".to_string(),
+        },
+        VulkanRuntimeSharedHostTransientAllocation {
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["absent".to_string(), "owner".to_string()],
+            byte_capacity: 19,
+            concern: "unknown participant".to_string(),
+        },
+        VulkanRuntimeSharedHostTransientAllocation {
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::CrossDeviceTimelineStaging,
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["owner".to_string()],
+            byte_capacity: 19,
+            concern: "incomplete boundary".to_string(),
+        },
+    ] {
+        let error = plan
+            .add_execution_transient_reservation(&BTreeMap::new(), &[malformed])
+            .unwrap_err();
+        assert!(error.to_string().contains("is malformed"));
+        assert_eq!(plan, original);
+    }
+}
+
+#[test]
+fn execution_transient_host_requirements_are_queried_and_aligned_per_allocation() {
+    let allocations = vec![
+        VulkanRuntimeSharedHostTransientAllocation {
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+            byte_capacity: 17,
+            concern: "signal".to_string(),
+        },
+        VulkanRuntimeSharedHostTransientAllocation {
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::CrossDeviceTimelineStaging,
+            owner_device_id: "helper".to_string(),
+            participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+            byte_capacity: 29,
+            concern: "edge".to_string(),
+        },
+    ];
+    let mut queried = Vec::new();
+
+    let exact = execution_transient_shared_host_requirement_bytes_with(
+        &allocations,
+        |allocation| {
+            queried.push(allocation.concern.clone());
+            Ok(allocation.byte_capacity.next_multiple_of(64))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(queried, vec!["signal", "edge"]);
+    assert_eq!(exact, 128);
+    assert_ne!(exact, (17usize + 29).next_multiple_of(64));
+
+    let overflow = execution_transient_shared_host_requirement_bytes_with(
+        &allocations,
+        |allocation| {
+            Ok(if allocation.concern == "signal" {
+                usize::MAX
+            } else {
+                1
+            })
+        },
+    )
+    .unwrap_err();
+    assert!(overflow.to_string().contains("requirements overflowed"));
 }
 
 fn empty_physical_execution_parameter_allocations(

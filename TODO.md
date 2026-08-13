@@ -479,10 +479,16 @@ For every numbered item below:
   sequential tests cover split accounting, competing transactions, nested
   isolation, partial commit, rollback, and teardown.
 
-  The remaining resource work is an allocation-level terminal ledger. Replace
-  every residual logical-capacity aggregate with the exact Vulkan requirement
-  for each concrete allocation before acquiring the transaction; include
-  per-allocation shared-host alignment for prefill/verification transients.
+  Prefill and speculative-verification shared-host transients now retain an
+  allocation-level ledger from runner planning through physical residency and
+  terminal admission. Every signal, reduction, and staged boundary records its
+  logical owner, complete participant set, capacity, and concern; malformed or
+  out-of-plan participants fail atomically. Terminal admission queries each
+  concrete Vulkan allocation separately, so memory-type alignment is no longer
+  lost by summing logical capacities first. The remaining resource work is the
+  equivalent allocation-level device-local ledger: replace every residual
+  logical-capacity aggregate with the exact Vulkan requirement for each
+  concrete allocation before acquiring the transaction.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one
