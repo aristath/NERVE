@@ -348,12 +348,9 @@ fn selected_resource_mount_capacities(
             )
             .map_err(|error| selected_resource_mount_error("resource store sizing", error))?;
             fixed_bytes = fixed_bytes
-                .checked_add(store.fixed_device_bytes().map_err(|error| {
-                    selected_resource_mount_error("resource store fixed sizing", error)
+                .checked_add(store.maximum_extra_device_bytes().map_err(|error| {
+                    selected_resource_mount_error("resource store capacity sizing", error)
                 })?)
-                .and_then(|bytes| {
-                    bytes.checked_add(store.maximum_dynamic_allocation_padding_bytes)
-                })
                 .ok_or_else(|| {
                     VulkanResidentTokenModelPackageError::new(
                         "selected-resource store capacity overflowed",

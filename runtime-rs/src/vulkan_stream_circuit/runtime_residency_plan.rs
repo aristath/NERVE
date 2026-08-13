@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_residency_plan.v8";
+    "nerve.vulkan_runtime_residency_plan.v9";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeResidencyPlan {
@@ -383,7 +383,7 @@ fn plan_vulkan_runtime_residency_with_contract(
                 sum_activation_headroom_breakdown(&breakdown)?,
         };
         let initial_resource_store_bytes = if residency_policy == ResourceResidencyPolicy::Eager {
-            resource_store.maximum_extra_device_bytes()?
+            resource_store.maximum_source_extra_device_bytes()?
         } else {
             resource_store.fixed_device_bytes()?
         };

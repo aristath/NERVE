@@ -605,6 +605,20 @@ mod compiled_resource_selector_ownership_tests {
         }
     }
 
+    fn resident_derivation(source_byte_count: usize) -> CompiledResourceResidentDerivation {
+        CompiledResourceResidentDerivation {
+            schema: RESIDENT_DERIVATION_SCHEMA.to_string(),
+            kind: CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+            source_byte_count,
+            resident_byte_count: source_byte_count * 2,
+            required_features: vec![
+                "shader_float8".to_string(),
+                "shader_int8".to_string(),
+                "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
+            ],
+        }
+    }
+
     #[test]
     fn selector_ownership_is_explicit_and_range_checked() {
         let contract = contract();
@@ -656,6 +670,17 @@ mod compiled_resource_selector_ownership_tests {
         assert_eq!(residency.maximum_load_wave_group_count, 2);
         assert_eq!(residency.maximum_load_wave_payload_bytes, 120);
         assert_eq!(residency.maximum_dynamic_allocation_padding_bytes, 12);
+        assert_eq!(residency.maximum_representation_group_payload_bytes, 0);
+        assert_eq!(residency.maximum_representation_load_wave_group_count, 0);
+        assert_eq!(residency.maximum_representation_load_wave_payload_bytes, 0);
+        assert_eq!(residency.retained_representation_cache_group_count, 0);
+        assert_eq!(residency.retained_representation_cache_wave_count, 0);
+        assert_eq!(residency.retained_representation_cache_payload_bytes, 0);
+        assert_eq!(residency.retained_representation_cache_identity, None);
+        assert_eq!(
+            residency.retained_representation_cache_device_bytes().unwrap(),
+            0,
+        );
 
         let error = VulkanCompiledResourceSelectorOwnership::from_resource_indices(
             &contract,
@@ -663,6 +688,209 @@ mod compiled_resource_selector_ownership_tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("outside its 8 resources"));
+    }
+
+    #[test]
+    fn representation_cache_retains_one_complete_selected_wave_per_selector() {
+        let mut contract = contract();
+        for resource in &mut contract.resources {
+            let source_bytes = resource.source_byte_count().unwrap();
+            resource.resident_derivation = Some(resident_derivation(source_bytes));
+        }
+        let mut first = contract.selectors.pop().unwrap();
+        first.id = "experts-a".to_string();
+        first.resource_count = 4;
+        first.encoding.index_mask = 3;
+        first.mapping = CompiledResourceSelectorMapping::GroupTable {
+            atomic_group_ids: (0..4).map(|index| format!("group-{index}")).collect(),
+        };
+        let mut second = first.clone();
+        second.id = "experts-b".to_string();
+        second.component_id = "layer-b".to_string();
+        second.mapping = CompiledResourceSelectorMapping::GroupTable {
+            atomic_group_ids: (4..8).map(|index| format!("group-{index}")).collect(),
+        };
+        contract.selectors = vec![first, second];
+        let layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
+        let ownership = VulkanCompiledResourceSelectorOwnership::all(
+            &contract,
+            &BTreeSet::from(["experts-a".to_string(), "experts-b".to_string()]),
+        )
+        .unwrap();
+
+        let residency = plan_compiled_resource_store_residency_for_ownership(
+            &contract,
+            &layout,
+            &ownership,
+            64,
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(residency.maximum_load_wave_payload_bytes, 120);
+        assert_eq!(residency.maximum_representation_group_payload_bytes, 128);
+        assert_eq!(residency.maximum_representation_load_wave_group_count, 2);
+        assert_eq!(residency.maximum_representation_load_wave_payload_bytes, 240);
+        assert_eq!(
+            residency.maximum_representation_load_wave_allocation_padding_bytes,
+            12,
+        );
+        assert_eq!(residency.retained_representation_cache_group_count, 4);
+        assert_eq!(residency.retained_representation_cache_wave_count, 2);
+        assert_eq!(residency.retained_representation_cache_payload_bytes, 352);
+        assert!(
+            residency
+                .retained_representation_cache_identity
+                .as_deref()
+                .is_some_and(|identity| identity.starts_with("sha256:")),
+        );
+        assert_eq!(
+            residency.retained_representation_cache_allocation_padding_bytes,
+            24,
+        );
+        assert_eq!(residency.transfer_staging_slot_byte_capacity, 256);
+    }
+
+    #[test]
+    fn representation_group_duplicates_unchanged_atomic_members_exactly() {
+        let mut contract = projection_contract();
+        for resource in &mut contract.resources {
+            for range in &mut resource.ranges {
+                range.byte_count = 40;
+            }
+        }
+        contract.resources[0].resident_derivation = Some(resident_derivation(80));
+        let layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
+        let ownership = VulkanCompiledResourceSelectorOwnership::all(
+            &contract,
+            &BTreeSet::from(["experts".to_string()]),
+        )
+        .unwrap();
+
+        let residency = plan_compiled_resource_store_residency_for_ownership(
+            &contract,
+            &layout,
+            &ownership,
+            160,
+            8,
+        )
+        .unwrap();
+
+        assert_eq!(residency.maximum_load_wave_payload_bytes, 160);
+        assert_eq!(residency.maximum_representation_group_payload_bytes, 240);
+        assert_eq!(residency.maximum_representation_load_wave_payload_bytes, 240);
+        assert_eq!(
+            residency.maximum_representation_load_wave_allocation_padding_bytes,
+            21,
+        );
+        assert_eq!(residency.retained_representation_cache_wave_count, 1);
+        assert_eq!(residency.retained_representation_cache_payload_bytes, 240);
+        assert!(residency.retained_representation_cache_identity.is_some());
+        assert_eq!(
+            residency.retained_representation_cache_allocation_padding_bytes,
+            21,
+        );
+        assert_eq!(residency.transfer_staging_slot_byte_capacity, 240);
+    }
+
+    #[test]
+    fn partition_template_representation_cache_uses_member_derivations() {
+        let mut contract = contract();
+        contract.resources.clear();
+        contract.atomic_groups.clear();
+        contract.partition_templates = vec![CompiledPartitionTemplate {
+            id: "partition-template".to_string(),
+            partition_count: 4,
+            lifetime: CompiledResourceLifetime::Dynamic,
+            group_identity_seed: "partition-group".to_string(),
+            member_templates: vec![
+                CompiledPartitionMemberTemplate {
+                    resource_identity_seed: "weight".to_string(),
+                    range_templates: vec![CompiledResourceRangeTemplate {
+                        artifact_path: "weights.bin".to_string(),
+                        base_byte_offset: 0,
+                        stride_bytes: 64,
+                        byte_count: 64,
+                        alignment_bytes: 8,
+                        integrity: CompiledResourceRangeIntegrityTemplate {
+                            algorithm: "sha256_table".to_string(),
+                            digest_table_path: "digests.bin".to_string(),
+                            digest_table_byte_offset: 0,
+                            digest_stride_bytes: 32,
+                            table_sha256: "a".repeat(64),
+                        },
+                    }],
+                    compatibility: CompiledResourceCompatibility {
+                        device_api: "vulkan".to_string(),
+                        storage_class: "storage_buffer".to_string(),
+                        read_only: true,
+                        required_features: Vec::new(),
+                    },
+                    resident_derivation: Some(resident_derivation(64)),
+                },
+                CompiledPartitionMemberTemplate {
+                    resource_identity_seed: "scale".to_string(),
+                    range_templates: vec![CompiledResourceRangeTemplate {
+                        artifact_path: "scales.bin".to_string(),
+                        base_byte_offset: 0,
+                        stride_bytes: 8,
+                        byte_count: 8,
+                        alignment_bytes: 8,
+                        integrity: CompiledResourceRangeIntegrityTemplate {
+                            algorithm: "sha256_table".to_string(),
+                            digest_table_path: "scale-digests.bin".to_string(),
+                            digest_table_byte_offset: 0,
+                            digest_stride_bytes: 32,
+                            table_sha256: "b".repeat(64),
+                        },
+                    }],
+                    compatibility: CompiledResourceCompatibility {
+                        device_api: "vulkan".to_string(),
+                        storage_class: "storage_buffer".to_string(),
+                        read_only: true,
+                        required_features: Vec::new(),
+                    },
+                    resident_derivation: None,
+                },
+            ],
+            dependencies: Vec::new(),
+        }];
+        contract.selectors[0].resource_count = 4;
+        contract.selectors[0].encoding.index_mask = 3;
+        contract.selectors[0].mapping = CompiledResourceSelectorMapping::PartitionTemplate {
+            partition_template_id: "partition-template".to_string(),
+        };
+        let layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
+        let ownership = VulkanCompiledResourceSelectorOwnership::all(
+            &contract,
+            &BTreeSet::from(["experts".to_string()]),
+        )
+        .unwrap();
+
+        let residency = plan_compiled_resource_store_residency_for_ownership(
+            &contract,
+            &layout,
+            &ownership,
+            72,
+            8,
+        )
+        .unwrap();
+
+        assert_eq!(residency.maximum_load_wave_payload_bytes, 144);
+        assert_eq!(residency.maximum_representation_group_payload_bytes, 136);
+        assert_eq!(residency.maximum_representation_load_wave_payload_bytes, 272);
+        assert_eq!(
+            residency.maximum_representation_load_wave_allocation_padding_bytes,
+            42,
+        );
+        assert_eq!(residency.retained_representation_cache_group_count, 2);
+        assert_eq!(residency.retained_representation_cache_wave_count, 1);
+        assert_eq!(residency.retained_representation_cache_payload_bytes, 272);
+        assert!(residency.retained_representation_cache_identity.is_some());
+        assert_eq!(
+            residency.retained_representation_cache_allocation_padding_bytes,
+            42,
+        );
     }
 
     #[test]

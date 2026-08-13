@@ -2070,6 +2070,39 @@ fn runtime_hybrid_exact_cache_distinguishes_paged_and_retained_residency() {
 }
 
 #[test]
+fn runtime_hybrid_exact_cache_reserves_a_component_representation_wave() {
+    let mut model = fixture_model_runtime_model_with_dynamic_partition(1_000, 64);
+    model.package.resource_residency.partition_templates[0].member_templates[0]
+        .resident_derivation = Some(CompiledResourceResidentDerivation {
+        schema: RESIDENT_DERIVATION_SCHEMA.to_string(),
+        kind: CompiledResourceResidentDerivationKind::Mxfp4E2m1ToFp8E4m3,
+        source_byte_count: 64,
+        resident_byte_count: 128,
+        required_features: vec![
+            "shader_float8".to_string(),
+            "shader_int8".to_string(),
+            "shader_mixed_float_dot_product_float8_acc_float32".to_string(),
+        ],
+    });
+
+    let paged = exact_candidate_reservations_for_model(
+        &model,
+        ResourceResidencyPolicy::DemandPaged,
+    );
+    let retained = exact_candidate_reservations_for_model(
+        &model,
+        ResourceResidencyPolicy::DemandRetained,
+    );
+    let paged = &paged.device_bytes[&hybrid_test_device("gpu0")];
+    let retained = &retained.device_bytes[&hybrid_test_device("gpu0")];
+
+    assert_eq!(paged.atomic_load_wave_bytes, 64);
+    assert_eq!(paged.cache_quota_bytes, 64 + 128 + 126);
+    assert_eq!(retained.atomic_load_wave_bytes, 64);
+    assert_eq!(retained.cache_quota_bytes, 64_000 + 128 + 126);
+}
+
+#[test]
 fn runtime_hybrid_jointly_selects_a_faster_compatible_representation() {
     let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let mut alternative = model.clone();

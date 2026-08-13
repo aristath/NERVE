@@ -141,7 +141,9 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             }
             let store_bytes = match base.residency_policy {
                 ResourceResidencyPolicy::Eager => {
-                    device.resource_store.maximum_extra_device_bytes()?
+                    device
+                        .resource_store
+                        .maximum_source_extra_device_bytes()?
                 }
                 ResourceResidencyPolicy::DemandPaged | ResourceResidencyPolicy::DemandRetained => {
                     device.resource_store.fixed_device_bytes()?

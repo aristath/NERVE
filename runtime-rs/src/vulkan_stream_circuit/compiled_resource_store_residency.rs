@@ -14,6 +14,15 @@ pub struct VulkanCompiledResourceStoreResidencyBytes {
     pub maximum_load_wave_group_count: usize,
     pub maximum_load_wave_payload_bytes: usize,
     pub maximum_dynamic_allocation_padding_bytes: usize,
+    pub maximum_representation_group_payload_bytes: usize,
+    pub maximum_representation_load_wave_group_count: usize,
+    pub maximum_representation_load_wave_payload_bytes: usize,
+    pub maximum_representation_load_wave_allocation_padding_bytes: usize,
+    pub retained_representation_cache_group_count: usize,
+    pub retained_representation_cache_wave_count: usize,
+    pub retained_representation_cache_payload_bytes: usize,
+    pub retained_representation_cache_allocation_padding_bytes: usize,
+    pub retained_representation_cache_identity: Option<String>,
 }
 
 impl VulkanCompiledResourceStoreResidencyBytes {
@@ -25,15 +34,159 @@ impl VulkanCompiledResourceStoreResidencyBytes {
         )
     }
 
-    pub fn maximum_extra_device_bytes(
+    pub fn maximum_source_extra_device_bytes(
         &self,
     ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
         checked_residency_add(
             self.fixed_device_bytes()?,
             self.maximum_dynamic_allocation_padding_bytes,
+            "compiled resource store maximum source extra device bytes",
+        )
+    }
+
+    pub fn retained_representation_cache_device_bytes(
+        &self,
+    ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+        checked_residency_add(
+            self.retained_representation_cache_payload_bytes,
+            self.retained_representation_cache_allocation_padding_bytes,
+            "compiled resource store retained representation cache device bytes",
+        )
+    }
+
+    pub fn maximum_extra_device_bytes(
+        &self,
+    ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+        checked_residency_add(
+            self.maximum_source_extra_device_bytes()?,
+            self.retained_representation_cache_device_bytes()?,
             "compiled resource store maximum extra device bytes",
         )
     }
+}
+
+fn compiled_resource_source_payload_capacity(
+    maximum_source_payload_bytes: usize,
+    available_dynamic_device_bytes: usize,
+    store: &VulkanCompiledResourceStoreResidencyBytes,
+) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    let reserved_non_source_payload_bytes = checked_residency_add(
+        store.maximum_dynamic_allocation_padding_bytes,
+        store.retained_representation_cache_device_bytes()?,
+        "compiled resource non-source-payload reservation",
+    )?;
+    Ok(maximum_source_payload_bytes.min(
+        available_dynamic_device_bytes.saturating_sub(reserved_non_source_payload_bytes),
+    ))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CompiledResourceRepresentationGroupResidencyBytes {
+    payload_bytes: usize,
+    resource_count: usize,
+}
+
+fn compiled_resource_representation_group_residency_bytes(
+    contract: &CompiledResourceResidencyContract,
+    index: &CompiledResourceContractIndex,
+    selector: &CompiledResourceSelector,
+    resource_index: usize,
+) -> Result<CompiledResourceRepresentationGroupResidencyBytes, VulkanRuntimeResidencyPlanError> {
+    let (has_derivation, payload_bytes, resource_count) = match &selector.mapping {
+        CompiledResourceSelectorMapping::GroupTable { atomic_group_ids } => {
+            let group_id = atomic_group_ids.get(resource_index).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "compiled selector {:?} omits resource index {resource_index}",
+                    selector.id,
+                ))
+            })?;
+            let group = index.atomic_group(contract, group_id).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "compiled selector {:?} references missing atomic group {group_id:?}",
+                    selector.id,
+                ))
+            })?;
+            let resources = group
+                .resource_ids
+                .iter()
+                .map(|resource_id| {
+                    index.resource(contract, resource_id).ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "compiled atomic group {group_id:?} references missing resource {resource_id:?}",
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let has_derivation = resources
+                .iter()
+                .any(|resource| resource.resident_derivation.is_some());
+            let payload_bytes = resources.iter().try_fold(0usize, |total, resource| {
+                let bytes = resource
+                    .resident_byte_count_for(
+                        CompiledResourceRepresentation::ResidentDerivation,
+                    )
+                    .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+                checked_residency_add(
+                    total,
+                    bytes,
+                    "compiled atomic-group representation bytes",
+                )
+            })?;
+            (has_derivation, payload_bytes, resources.len())
+        }
+        CompiledResourceSelectorMapping::PartitionTemplate {
+            partition_template_id,
+        } => {
+            if resource_index >= selector.resource_count {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "compiled selector {:?} resource index {resource_index} exceeds its {} resources",
+                    selector.id, selector.resource_count,
+                )));
+            }
+            let template = index
+                .partition_template(contract, partition_template_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "compiled selector {:?} references missing partition template {partition_template_id:?}",
+                        selector.id,
+                    ))
+                })?;
+            if resource_index >= template.partition_count {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "compiled selector {:?} resource index {resource_index} exceeds partition template count {}",
+                    selector.id, template.partition_count,
+                )));
+            }
+            let has_derivation = template
+                .member_templates
+                .iter()
+                .any(|member| member.resident_derivation.is_some());
+            let payload_bytes = template.member_templates.iter().try_fold(
+                0usize,
+                |total, member| {
+                    let bytes = member
+                        .resident_byte_count_for(
+                            CompiledResourceRepresentation::ResidentDerivation,
+                        )
+                        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+                    checked_residency_add(
+                        total,
+                        bytes,
+                        "compiled partition representation bytes",
+                    )
+                },
+            )?;
+            (has_derivation, payload_bytes, template.member_templates.len())
+        }
+    };
+    Ok(if has_derivation {
+        CompiledResourceRepresentationGroupResidencyBytes {
+            payload_bytes,
+            resource_count,
+        }
+    } else {
+        CompiledResourceRepresentationGroupResidencyBytes::default()
+    })
 }
 
 fn compiled_resource_stable_slab_payload_bytes(
@@ -160,9 +313,20 @@ fn plan_compiled_resource_store_residency_for_ownership(
     let source_payload_bytes_by_slot = layout
         .source_payload_bytes_by_address_slot_for_ownership(contract, ownership)
         .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+    let contract_index = CompiledResourceContractIndex::new(contract)
+        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     let mut maximum_load_wave_group_count = 0usize;
     let mut maximum_load_wave_payload_bytes = 0usize;
     let mut observed_maximum_group_bytes = 0usize;
+    let mut maximum_representation_group_payload_bytes = 0usize;
+    let mut maximum_representation_load_wave_group_count = 0usize;
+    let mut maximum_representation_load_wave_payload_bytes = 0usize;
+    let mut maximum_representation_load_wave_resource_count = 0usize;
+    let mut retained_representation_cache_group_count = 0usize;
+    let mut retained_representation_cache_wave_count = 0usize;
+    let mut retained_representation_cache_payload_bytes = 0usize;
+    let mut retained_representation_cache_resource_count = 0usize;
+    let mut retained_representation_cache_selector_ids = BTreeSet::new();
     for selector in &selected {
         let selector_layout = layout
             .selectors
@@ -225,6 +389,88 @@ fn plan_compiled_resource_store_residency_for_ownership(
         observed_maximum_group_bytes = observed_maximum_group_bytes.max(
             owned_group_payload_bytes.first().copied().unwrap_or_default(),
         );
+
+        let mut representation_groups = ownership
+            .resources(&selector.id)
+            .into_iter()
+            .flatten()
+            .map(|resource_index| {
+                compiled_resource_representation_group_residency_bytes(
+                    contract,
+                    &contract_index,
+                    selector,
+                    *resource_index,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        representation_groups.sort_unstable_by(|left, right| {
+            right
+                .payload_bytes
+                .cmp(&left.payload_bytes)
+                .then_with(|| right.resource_count.cmp(&left.resource_count))
+        });
+        maximum_representation_group_payload_bytes =
+            maximum_representation_group_payload_bytes.max(
+                representation_groups
+                    .first()
+                    .map(|group| group.payload_bytes)
+                    .unwrap_or_default(),
+            );
+        let selected_representation_groups = representation_groups
+            .iter()
+            .filter(|group| group.payload_bytes > 0)
+            .take(selection_count)
+            .collect::<Vec<_>>();
+        let selector_representation_payload_bytes = selected_representation_groups
+            .iter()
+            .try_fold(0usize, |total, group| {
+                checked_residency_add(
+                    total,
+                    group.payload_bytes,
+                    "compiled resource representation load-wave bytes",
+                )
+            })?;
+        let selector_representation_resource_count = selected_representation_groups
+            .iter()
+            .try_fold(0usize, |total, group| {
+                checked_residency_add(
+                    total,
+                    group.resource_count,
+                    "compiled resource representation load-wave resource count",
+                )
+            })?;
+        maximum_representation_load_wave_group_count =
+            maximum_representation_load_wave_group_count
+                .max(selected_representation_groups.len());
+        maximum_representation_load_wave_payload_bytes =
+            maximum_representation_load_wave_payload_bytes
+                .max(selector_representation_payload_bytes);
+        maximum_representation_load_wave_resource_count =
+            maximum_representation_load_wave_resource_count
+                .max(selector_representation_resource_count);
+        retained_representation_cache_group_count = checked_residency_add(
+            retained_representation_cache_group_count,
+            selected_representation_groups.len(),
+            "compiled resource retained representation group count",
+        )?;
+        retained_representation_cache_payload_bytes = checked_residency_add(
+            retained_representation_cache_payload_bytes,
+            selector_representation_payload_bytes,
+            "compiled resource retained representation payload bytes",
+        )?;
+        retained_representation_cache_resource_count = checked_residency_add(
+            retained_representation_cache_resource_count,
+            selector_representation_resource_count,
+            "compiled resource retained representation resource count",
+        )?;
+        if !selected_representation_groups.is_empty() {
+            retained_representation_cache_wave_count = checked_residency_add(
+                retained_representation_cache_wave_count,
+                1,
+                "compiled resource retained representation wave count",
+            )?;
+            retained_representation_cache_selector_ids.insert(selector.id.clone());
+        }
     }
     if maximum_load_wave_group_count == 0 {
         return Err(VulkanRuntimeResidencyPlanError(
@@ -259,8 +505,9 @@ fn plan_compiled_resource_store_residency_for_ownership(
         parameter_slot_table_device_bytes,
         "compiled resource metadata bytes",
     )?;
-    let transfer_staging_slot_byte_capacity =
-        maximum_load_wave_payload_bytes.max(address_table_device_bytes);
+    let transfer_staging_slot_byte_capacity = maximum_load_wave_payload_bytes
+        .max(maximum_representation_group_payload_bytes)
+        .max(address_table_device_bytes);
     let transfer_staging_device_bytes = checked_residency_mul(
         transfer_staging_slot_byte_capacity,
         VULKAN_COMPILED_RESOURCE_TRANSFER_STAGING_SLOT_COUNT,
@@ -274,6 +521,42 @@ fn plan_compiled_resource_store_residency_for_ownership(
         upload_alignment.saturating_sub(1),
         "compiled resource maximum allocation padding",
     )?;
+    let maximum_representation_load_wave_allocation_padding_bytes = checked_residency_mul(
+        checked_residency_add(
+            maximum_representation_load_wave_resource_count,
+            maximum_representation_load_wave_group_count,
+            "compiled resource representation wave allocation count",
+        )?,
+        upload_alignment.saturating_sub(1),
+        "compiled resource maximum representation load-wave allocation padding",
+    )?;
+    let retained_representation_cache_allocation_padding_bytes = checked_residency_mul(
+        checked_residency_add(
+            retained_representation_cache_resource_count,
+            retained_representation_cache_group_count,
+            "compiled resource retained representation allocation count",
+        )?,
+        upload_alignment.saturating_sub(1),
+        "compiled resource retained representation cache allocation padding",
+    )?;
+    let retained_representation_cache_identity =
+        (!retained_representation_cache_selector_ids.is_empty()).then(|| {
+            let mut digest = Sha256::new();
+            digest.update(b"nerve.compiled_resource_representation_cache.v1");
+            for selector_id in retained_representation_cache_selector_ids {
+                digest.update((selector_id.len() as u128).to_le_bytes());
+                digest.update(selector_id.as_bytes());
+            }
+            for value in [
+                retained_representation_cache_group_count,
+                retained_representation_cache_wave_count,
+                retained_representation_cache_payload_bytes,
+                retained_representation_cache_allocation_padding_bytes,
+            ] {
+                digest.update((value as u128).to_le_bytes());
+            }
+            format!("sha256:{:x}", digest.finalize())
+        });
     Ok(VulkanCompiledResourceStoreResidencyBytes {
         address_table_device_bytes,
         parameter_slot_table_device_bytes,
@@ -284,6 +567,15 @@ fn plan_compiled_resource_store_residency_for_ownership(
         maximum_load_wave_group_count,
         maximum_load_wave_payload_bytes,
         maximum_dynamic_allocation_padding_bytes,
+        maximum_representation_group_payload_bytes,
+        maximum_representation_load_wave_group_count,
+        maximum_representation_load_wave_payload_bytes,
+        maximum_representation_load_wave_allocation_padding_bytes,
+        retained_representation_cache_group_count,
+        retained_representation_cache_wave_count,
+        retained_representation_cache_payload_bytes,
+        retained_representation_cache_allocation_padding_bytes,
+        retained_representation_cache_identity,
     })
 }
 

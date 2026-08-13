@@ -303,6 +303,16 @@ fn physical_execution_residency_defers_eager_selected_payload_to_its_physical_st
     device
         .resource_store
         .maximum_dynamic_allocation_padding_bytes = 50;
+    device
+        .resource_store
+        .retained_representation_cache_payload_bytes = 70;
+    device
+        .resource_store
+        .retained_representation_cache_allocation_padding_bytes = 10;
+    assert_eq!(
+        device.resource_store.maximum_extra_device_bytes().unwrap(),
+        230
+    );
     base.total_current_resident_parameter_bytes = 1_000;
     base.total_maximum_addressable_parameter_bytes = 1_000;
 

@@ -774,9 +774,22 @@ impl VulkanCompiledResourceDeviceStore {
                     "compiled resource allocation capacity overflowed",
                 )
             })?;
-        if source_maximum_allocation_byte_capacity > available_dynamic_device_bytes {
+        let retained_representation_cache_bytes = store_residency
+            .retained_representation_cache_device_bytes()
+            .map_err(|error| {
+                VulkanCompiledResourceDeviceStoreError::new(error.to_string())
+            })?;
+        let maximum_required_allocation_byte_capacity =
+            source_maximum_allocation_byte_capacity
+                .checked_add(retained_representation_cache_bytes)
+                .ok_or_else(|| {
+                    VulkanCompiledResourceDeviceStoreError::new(
+                        "compiled source and representation allocation capacity overflowed",
+                    )
+                })?;
+        if maximum_required_allocation_byte_capacity > available_dynamic_device_bytes {
             return Err(VulkanCompiledResourceDeviceStoreError::new(format!(
-                "compiled resources require up to {source_maximum_allocation_byte_capacity} physical allocation bytes for {maximum_dynamic_payload_bytes} payload bytes, but only {available_dynamic_device_bytes} device bytes are available"
+                "compiled resources require up to {maximum_required_allocation_byte_capacity} physical allocation bytes, including {source_maximum_allocation_byte_capacity} source-allocation bytes and {retained_representation_cache_bytes} retained representation-cache bytes, but only {available_dynamic_device_bytes} device bytes are available"
             )));
         }
         let staging_byte_capacity = store_residency.transfer_staging_slot_byte_capacity;
@@ -824,6 +837,11 @@ impl VulkanCompiledResourceDeviceStore {
         let representation_arena = if representation_group_layouts.is_empty() {
             None
         } else {
+            // Derived experts retain their compact source allocations and are
+            // promoted independently. Exact group-sized slabs make the
+            // compiler's retained-wave reservation physically reproducible
+            // and let pressure reclaim one promoted group without pinning a
+            // heap-scaled source-cache slab.
             Some(
                 VulkanStableResourceArena::new(
                     device,
@@ -831,8 +849,6 @@ impl VulkanCompiledResourceDeviceStore {
                         available_dynamic_device_bytes,
                         upload_alignment,
                     )
-                    .map_err(compiled_device_store_vulkan_error)?
-                    .with_preferred_slab_byte_capacity(preferred_device_slab_byte_capacity)
                     .map_err(compiled_device_store_vulkan_error)?,
                     &representation_group_layouts,
                 )

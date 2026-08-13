@@ -764,29 +764,30 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     })?;
                 let safe_dynamic_bytes =
                     usize::try_from(admission.allocatable_bytes).unwrap_or(usize::MAX);
-                let addressable_slot_count = compiled_resource_layout
-                    .addressable_slot_count_for_ownership(&selector_ownership)
+                let maximum_alignment_padding =
+                    store_residency.maximum_dynamic_allocation_padding_bytes;
+                let retained_representation_cache_bytes = store_residency
+                    .retained_representation_cache_device_bytes()
                     .map_err(|error| {
                         VulkanResidentInProcessPlacedRuntimeError::Package(
                             VulkanResidentTokenModelPackageError::new(error.to_string()),
                         )
                     })?;
-                let maximum_alignment_padding = addressable_slot_count
-                    .checked_mul(upload_alignment.saturating_sub(1))
-                    .ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(
-                                "dynamic resource alignment capacity overflowed",
-                            ),
-                        )
-                    })?;
-                let resident_payload_capacity = maximum_dynamic_bytes
-                    .min(safe_dynamic_bytes.saturating_sub(maximum_alignment_padding));
+                let resident_payload_capacity = compiled_resource_source_payload_capacity(
+                    maximum_dynamic_bytes,
+                    safe_dynamic_bytes,
+                    &store_residency,
+                )
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(error.to_string()),
+                    )
+                })?;
                 if resident_payload_capacity < store_residency.maximum_load_wave_payload_bytes {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
                         VulkanResidentTokenModelPackageError::new(format!(
-                            "stable device-local capacity for physical slices {logical_device_ids:?} admits {resident_payload_capacity} dynamic payload bytes, but one complete selector load wave needs {} bytes",
-                            store_residency.maximum_load_wave_payload_bytes
+                            "stable device-local capacity for physical slices {logical_device_ids:?} admits {resident_payload_capacity} source payload bytes after reserving {retained_representation_cache_bytes} representation-cache bytes, but one complete selector load wave needs {} source bytes",
+                            store_residency.maximum_load_wave_payload_bytes,
                         )),
                     ));
                 }

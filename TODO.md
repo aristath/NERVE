@@ -129,6 +129,18 @@ the local placement calibration, and the mounted graph.
   physical-plan validation, duplicate/altered/overlapping application
   rejection, and incompatible-baseline coverage. Real-model TP execution is
   still awaiting the explicitly authorized live gate.
+- A mounted derived representation now reserves a complete hot selected-expert
+  wave per affected selector in addition to its immutable compact source. The
+  contract accounts transformed and unchanged atomic-group members, source and
+  representation allocation padding, exact group-sized representation slabs,
+  and representation-sized transfer staging. Auto-placement, hybrid route
+  capacity, targeted/calibration mounts, and the physical store consume the
+  same identity-bound quota; alternatives affecting different selector sets
+  add their quotas, while a multi-component alternative cannot multiply the
+  same store allocation. Packages without derivations retain zero additional
+  representation residency. This closes the former path where an optimized
+  candidate could be selected without enough VRAM to reproduce its promoted
+  steady state. Live performance validation remains under the GPU quarantine.
 - The fresh self-contained DeepSeek package is 157 GiB, contains 238 compiled
   shaders, passes its exact behavioral proof, and exposes 6,818 single-device,
   258 whole-expert, and 172 intra-expert tensor-parallel contracts. The 172 TP
@@ -774,8 +786,8 @@ For every numbered item below:
   execution, conversion boundaries, resident footprint, lazy reload traffic,
   transient peak, and current headroom—not an isolated kernel or advertised
   TOPS figure. The current joint candidate graph uses measured complete-region
-  execution and capacity vectors; conversion/lazy-reload costs and
-  representation-dependent steady-state cache quotas must still become direct
+  execution, identity-bound steady-state representation-cache quotas, and
+  capacity vectors; conversion and lazy-reload latency must still become direct
   optimizer resources rather than remaining only compiler-selection metrics.
 - Reuse the mechanism for unseen compatible models; no DeepSeek, Qwen, vendor,
   or device-name branches belong in runtime selection.

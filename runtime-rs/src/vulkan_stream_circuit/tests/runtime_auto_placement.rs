@@ -993,6 +993,54 @@ fn demand_paged_addressable_plan(
 }
 
 #[test]
+fn device_capacity_admission_reserves_retained_representation_cache() {
+    let mut plan = demand_paged_addressable_plan(&[("gpu", 1_000, 100)]);
+    let device = &mut plan.device_plans[0];
+    device.resource_store.maximum_load_wave_payload_bytes = 50;
+    device
+        .resource_store
+        .maximum_dynamic_allocation_padding_bytes = 10;
+    device
+        .resource_store
+        .retained_representation_cache_payload_bytes = 200;
+    device
+        .resource_store
+        .retained_representation_cache_allocation_padding_bytes = 20;
+
+    assert_eq!(
+        compiled_resource_source_payload_capacity(1_000, 500, &device.resource_store).unwrap(),
+        270,
+    );
+    assert_eq!(
+        compiled_resource_source_payload_capacity(1_000, 229, &device.resource_store).unwrap(),
+        0,
+    );
+    assert_eq!(
+        device
+            .resource_store
+            .maximum_source_extra_device_bytes()
+            .unwrap(),
+        110,
+    );
+    assert_eq!(
+        device.resource_store.maximum_extra_device_bytes().unwrap(),
+        330,
+    );
+    assert_eq!(
+        vulkan_runtime_maximum_device_resident_bytes(device).unwrap(),
+        1_330,
+    );
+    assert_eq!(
+        vulkan_runtime_device_capacity_admission_bytes(
+            device,
+            ResourceResidencyPolicy::DemandPaged,
+        )
+        .unwrap(),
+        380,
+    );
+}
+
+#[test]
 fn demand_paged_subset_expands_while_another_device_can_reduce_paging() {
     let candidates = [
         VulkanRuntimePlacementCandidate {

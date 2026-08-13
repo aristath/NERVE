@@ -123,23 +123,25 @@ fn mount_distributed_calibration_selected_resources(
             .admit_device_local_memory(u64::try_from(fixed_device_bytes).unwrap_or(u64::MAX))
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         let safe_dynamic_bytes = usize::try_from(admission.allocatable_bytes).unwrap_or(usize::MAX);
-        let addressable_slot_count = layout
-            .addressable_slot_count_for_ownership(&ownership)
+        let maximum_alignment_padding =
+            store_residency.maximum_dynamic_allocation_padding_bytes;
+        let retained_representation_cache_bytes = store_residency
+            .retained_representation_cache_device_bytes()
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let maximum_alignment_padding = addressable_slot_count
-            .checked_mul(upload_alignment.saturating_sub(1))
-            .ok_or_else(|| {
-                distributed_calibration_error_value(
-                    "distributed selected-resource alignment capacity overflowed",
-                )
-            })?;
         let payload_budget_for_device = remaining_payload_budget
             .checked_sub(remaining_minimum_wave_bytes)
             .expect("minimum wave budget was validated above");
         let device_payload_budget = maximum_payload_bytes_by_device[&device_plan.device_id];
         let resident_payload_capacity = device_plan
             .total_addressable_bytes
-            .min(safe_dynamic_bytes.saturating_sub(maximum_alignment_padding))
+            .min(
+                compiled_resource_source_payload_capacity(
+                    device_plan.total_addressable_bytes,
+                    safe_dynamic_bytes,
+                    &store_residency,
+                )
+                .map_err(|error| distributed_calibration_error_value(error.to_string()))?,
+            )
             .min(payload_budget_for_device);
         let resident_payload_capacity = resident_payload_capacity.min(device_payload_budget);
         if resident_payload_capacity < device_plan.maximum_load_wave_bytes {
@@ -147,6 +149,7 @@ fn mount_distributed_calibration_selected_resources(
         }
         let allocation_capacity = resident_payload_capacity
             .checked_add(maximum_alignment_padding)
+            .and_then(|bytes| bytes.checked_add(retained_representation_cache_bytes))
             .ok_or_else(|| {
                 distributed_calibration_error_value(
                     "distributed selected-resource allocation capacity overflowed",

@@ -622,6 +622,9 @@ pub fn vulkan_runtime_device_capacity_admission_bytes(
         plan.initial_device_resident_bytes,
         plan.resource_store.maximum_load_wave_payload_bytes,
         plan.resource_store.maximum_dynamic_allocation_padding_bytes,
+        plan.resource_store.retained_representation_cache_payload_bytes,
+        plan.resource_store
+            .retained_representation_cache_allocation_padding_bytes,
     ]
     .into_iter()
     .try_fold(0usize, |total, bytes| {

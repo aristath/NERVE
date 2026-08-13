@@ -1266,6 +1266,10 @@ fn exact_vulkan_runtime_hybrid_selected_resource_requirements(
             identity,
             &payload_bytes_by_slot,
             store.maximum_load_wave_payload_bytes,
+            store
+                .retained_representation_cache_device_bytes()
+                .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?,
+            store.retained_representation_cache_identity.as_deref(),
             residency_policy,
             &mut requirements,
         )?;
@@ -1324,16 +1328,7 @@ fn append_exact_vulkan_runtime_hybrid_store_fixed_requirements(
         }
     }
     let planned_fixed = store
-        .fixed_device_bytes()
-        .and_then(|fixed| {
-            fixed
-                .checked_add(store.maximum_dynamic_allocation_padding_bytes)
-                .ok_or_else(|| {
-                    VulkanRuntimeResidencyPlanError(
-                        "exact hybrid selected-resource fixed bytes overflowed".to_string(),
-                    )
-                })
-        })
+        .maximum_source_extra_device_bytes()
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     let emitted_fixed = store
         .address_table_device_bytes
@@ -1359,6 +1354,8 @@ fn append_exact_vulkan_runtime_hybrid_cache_requirements(
     identity: &VulkanPlacementDeviceExecutionIdentity,
     payload_bytes_by_slot: &BTreeMap<usize, usize>,
     maximum_load_wave_bytes: usize,
+    retained_representation_cache_bytes: usize,
+    retained_representation_cache_identity: Option<&str>,
     residency_policy: ResourceResidencyPolicy,
     requirements: &mut VulkanRuntimeHybridExactCandidateResourceRequirements,
 ) -> Result<(), VulkanRuntimeHybridPlacementError> {
@@ -1383,6 +1380,28 @@ fn append_exact_vulkan_runtime_hybrid_cache_requirements(
                 *bytes,
             );
         }
+    }
+    if retained_representation_cache_bytes > 0 {
+        let retained_representation_cache_identity = retained_representation_cache_identity
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(
+                    "retained representation cache has bytes but no exact identity".to_string(),
+                )
+            })?;
+        append_exact_vulkan_runtime_hybrid_shared_bytes(
+            &mut requirements.shared_ranges,
+            format!(
+                "runtime-cache:{}:retained-representations:{retained_representation_cache_identity}",
+                runtime_model.execution_scope,
+            ),
+            identity,
+            VulkanHybridResourceClass::CacheQuota,
+            retained_representation_cache_bytes,
+        );
+    } else if retained_representation_cache_identity.is_some() {
+        return runtime_hybrid_error(
+            "retained representation cache has an identity but no physical bytes",
+        );
     }
     requirements
         .direct_claims
