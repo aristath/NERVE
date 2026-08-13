@@ -15,6 +15,8 @@ from nerve.compiler_target import (
 from nerve.representation_optimizer.automation.device_state import (
     DeviceCapacityPolicy,
     LinuxDrmSysfsDeviceCapacityProbe,
+    RuntimeVulkanDeviceCapacityProbe,
+    VULKAN_MEMORY_SNAPSHOT_SCHEMA,
     declared_capacity_reservation_digest,
 )
 from nerve.representation_optimizer.automation.runtime_target import (
@@ -259,7 +261,7 @@ def test_linux_drm_probe_tolerates_inaccessible_unrelated_proc_metadata(
     assert observation[0]["resident_processes"] == []
 
 
-def test_linux_drm_probe_rejects_missing_exact_driver_telemetry(
+def test_linux_drm_probe_rejects_missing_exact_activity_telemetry(
     tmp_path: Path,
 ) -> None:
     profile = _target(
@@ -281,8 +283,150 @@ def test_linux_drm_probe_rejects_missing_exact_driver_telemetry(
         policy=RUNTIME_DEVICE_CAPACITY_POLICY,
     )
 
-    with pytest.raises(ModelCompileError, match="required device state file"):
+    with pytest.raises(ModelCompileError, match="device activity telemetry"):
         probe.require_capacity((profile,))
+
+
+def test_linux_drm_probe_samples_driver_idle_residency_without_vendor_branch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _target(
+        ("0000:03:00.0",),
+        vendor_id=0x8086,
+        hardware_device_id=0xE211,
+    ).hardware_profiles[0].to_json()
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address="0000:03:00.0",
+        used_vram=64 * 1024 * 1024,
+        busy_percent=0,
+        vendor_id=0x8086,
+    )
+    device = (sysfs / "card0" / "device").resolve()
+    (device / "gpu_busy_percent").unlink()
+    idle = device / "tile0" / "gt0" / "gtidle" / "idle_residency_ms"
+    idle.parent.mkdir(parents=True)
+    idle.write_text("100\n")
+    monotonic_values = iter((1_000_000_000, 1_020_000_000))
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.automation.device_state.time.monotonic_ns",
+        lambda: next(monotonic_values),
+    )
+
+    def advance_idle(_: float) -> None:
+        idle.write_text("115\n")
+
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.automation.device_state.time.sleep",
+        advance_idle,
+    )
+    probe = LinuxDrmSysfsDeviceCapacityProbe(
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+        policy=RUNTIME_DEVICE_CAPACITY_POLICY,
+    )
+
+    observation = probe.require_capacity((profile,))[0]
+    assert observation["busy_percent"] == 25
+    assert observation["activity_source"] == "linux_drm_idle_residency_sample"
+
+
+def test_runtime_vulkan_probe_uses_memory_budget_without_driver_vram_files(
+    tmp_path: Path,
+) -> None:
+    pci_address = "0000:03:00.0"
+    profile = _target(
+        (pci_address,),
+        vendor_id=0x8086,
+        hardware_device_id=0xE211,
+    ).hardware_profiles[0].to_json()
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address=pci_address,
+        used_vram=1,
+        busy_percent=9,
+        total_vram=1_000,
+        vendor_id=0x8086,
+    )
+    device = (sysfs / "card0" / "device").resolve()
+    (device / "mem_info_vram_total").unlink()
+    (device / "mem_info_vram_used").unlink()
+    device_id = _device_id(pci_address)
+    executor = _memory_snapshot_executable(
+        tmp_path / "capacity-executor",
+        _memory_snapshot_payload(
+            device_id=device_id,
+            physical_bytes=1_000,
+            budget_bytes=900,
+            usage_bytes=100,
+        ),
+    )
+    probe = RuntimeVulkanDeviceCapacityProbe(
+        policy=DeviceCapacityPolicy(reservable_free_vram_fraction_ppm=1_000_000),
+        executor_command=(str(executor),),
+        vulkan_driver_files=(_driver(tmp_path),),
+        sysfs_drm_root=sysfs,
+        proc_root=proc,
+    )
+
+    observation = probe.require_capacity((profile,))[0]
+    assert observation["physical_vram_total_bytes"] == 1_000
+    assert observation["vram_total_bytes"] == 900
+    assert observation["vram_used_bytes"] == 100
+    assert observation["vram_free_bytes"] == 800
+    assert observation["capacity_source"] == "vulkan_ext_memory_budget"
+
+
+def test_runtime_vulkan_probe_rejects_unbudgeted_or_inconsistent_evidence(
+    tmp_path: Path,
+) -> None:
+    pci_address = "0000:03:00.0"
+    profile = _target((pci_address,)).hardware_profiles[0].to_json()
+    sysfs, proc = _device_filesystem(
+        tmp_path,
+        pci_address=pci_address,
+        used_vram=1,
+        busy_percent=0,
+    )
+    device_id = _device_id(pci_address)
+    valid = _memory_snapshot_payload(
+        device_id=device_id,
+        physical_bytes=1_000,
+        budget_bytes=900,
+        usage_bytes=100,
+    )
+    unsupported = json.loads(json.dumps(valid))
+    unsupported_device = unsupported["devices"][0]
+    unsupported_device["memory_budget_supported"] = False
+    unsupported_device["budget_bytes"] = None
+    unsupported_device["usage_bytes"] = None
+    unsupported_device["available_bytes"] = None
+    inconsistent = json.loads(json.dumps(valid))
+    inconsistent["devices"][0]["available_bytes"] = 801
+    wrong_pci = json.loads(json.dumps(valid))
+    wrong_pci["devices"][0]["pci_address"] = "0000:07:00.0"
+
+    for index, (payload, diagnostic) in enumerate(
+        (
+            (unsupported, "no exact dynamic memory budget"),
+            (inconsistent, "snapshot is inconsistent"),
+            (wrong_pci, "PCI identity is inconsistent"),
+        )
+    ):
+        executor = _memory_snapshot_executable(
+            tmp_path / f"capacity-executor-{index}",
+            payload,
+        )
+        probe = RuntimeVulkanDeviceCapacityProbe(
+            policy=RUNTIME_DEVICE_CAPACITY_POLICY,
+            executor_command=(str(executor),),
+            vulkan_driver_files=(_driver(tmp_path),),
+            sysfs_drm_root=sysfs,
+            proc_root=proc,
+        )
+        with pytest.raises(ModelCompileError, match=diagnostic):
+            probe.require_capacity((profile,))
 
 
 def test_capacity_probe_rejects_reservation_for_another_device(
@@ -572,7 +716,7 @@ def test_runtime_target_excludes_only_the_compatible_device_missing_telemetry(
     ]
     assert len(prepared.excluded_devices) == 1
     assert prepared.excluded_devices[0]["device_id"] == _device_id(addresses[0])
-    assert "required device state file" in prepared.excluded_devices[0]["reason"]
+    assert "device activity telemetry" in prepared.excluded_devices[0]["reason"]
 
 
 def test_runtime_target_rejects_live_device_with_uncompiled_capabilities(
@@ -847,14 +991,21 @@ def test_runtime_target_records_post_context_capacity(
     observed_policy: list[DeviceCapacityPolicy] = []
 
     def capacity_probe_from_runtime_policy(
-        *, policy: DeviceCapacityPolicy
+        *,
+        policy: DeviceCapacityPolicy,
+        executor_command: tuple[str, ...],
+        vulkan_driver_files: tuple[Path, ...],
+        cancel_requested: object,
     ) -> LinuxDrmSysfsDeviceCapacityProbe:
+        assert executor_command == (str((tmp_path / "component").resolve()),)
+        assert vulkan_driver_files == (_driver(tmp_path),)
+        assert cancel_requested is None
         observed_policy.append(policy)
         return probe
 
     monkeypatch.setattr(
         "nerve.representation_optimizer.automation.runtime_target."
-        "LinuxDrmSysfsDeviceCapacityProbe",
+        "RuntimeVulkanDeviceCapacityProbe",
         capacity_probe_from_runtime_policy,
     )
 
@@ -1275,6 +1426,45 @@ def _driver(tmp_path: Path) -> Path:
             )
         )
     return path
+
+
+def _memory_snapshot_payload(
+    *,
+    device_id: str,
+    physical_bytes: int,
+    budget_bytes: int,
+    usage_bytes: int,
+) -> dict[str, object]:
+    return {
+        "schema": VULKAN_MEMORY_SNAPSHOT_SCHEMA,
+        "devices": [
+            {
+                "physical_device_id": device_id,
+                "device_name": "fixture GPU",
+                "pci_address": "0000:03:00.0",
+                "heap_index": 0,
+                "physical_heap_bytes": physical_bytes,
+                "memory_budget_supported": True,
+                "budget_bytes": budget_bytes,
+                "usage_bytes": usage_bytes,
+                "available_bytes": budget_bytes - usage_bytes,
+            }
+        ],
+    }
+
+
+def _memory_snapshot_executable(path: Path, payload: dict[str, object]) -> Path:
+    encoded = json.dumps(payload, separators=(",", ":"))
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--runtime-vulkan-memory-snapshot" ]; then\n'
+        f"  printf '%s\\n' '{encoded}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    path.chmod(path.stat().st_mode | 0o111)
+    return path.resolve()
 
 
 def _executable(

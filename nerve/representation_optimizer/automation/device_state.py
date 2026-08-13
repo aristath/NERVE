@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
+import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from nerve.compilation import Json, ModelCompileError
 from nerve.representation_optimizer.contracts import device_state_digest
-from nerve.representation_optimizer.automation.target import CapacityLeaseState
+from nerve.representation_optimizer.automation.target import (
+    DEVICE_CAPACITY_OBSERVATION_SCHEMA,
+    CapacityLeaseState,
+)
 
 
 RUNTIME_DEVICE_LOCAL_MEMORY_POLICY_SCHEMA = (
@@ -18,6 +27,7 @@ _PCI_ADDRESS = re.compile(
     r"(?P<device>[0-9a-fA-F]{2})\."
     r"(?P<function>[0-7])$"
 )
+VULKAN_MEMORY_SNAPSHOT_SCHEMA = "nerve.runtime.vulkan_memory_snapshot.v1"
 
 
 @dataclass(frozen=True)
@@ -129,34 +139,40 @@ class DeviceCapacityObservation:
     device_id: str
     pci_address: str
     drm_card: str
+    physical_vram_total_bytes: int
     vram_total_bytes: int
     vram_used_bytes: int
     vram_free_bytes: int
     reservable_vram_bytes: int
     busy_percent: int
+    capacity_source: str
+    activity_source: str
     resident_processes: tuple[Json, ...]
 
     def to_json(self) -> Json:
         return {
+            "schema": DEVICE_CAPACITY_OBSERVATION_SCHEMA,
             "device_id": self.device_id,
             "pci_address": self.pci_address,
             "drm_card": self.drm_card,
+            "physical_vram_total_bytes": self.physical_vram_total_bytes,
             "vram_total_bytes": self.vram_total_bytes,
             "vram_used_bytes": self.vram_used_bytes,
             "vram_free_bytes": self.vram_free_bytes,
             "reservable_vram_bytes": self.reservable_vram_bytes,
             "busy_percent": self.busy_percent,
+            "capacity_source": self.capacity_source,
+            "activity_source": self.activity_source,
             "resident_processes": [dict(item) for item in self.resident_processes],
         }
 
 
-class LinuxDrmSysfsDeviceCapacityProbe:
-    """Measure shareable VRAM through driver-published Linux DRM counters.
+class LinuxDrmDeviceCapacityProbe(ABC):
+    """Combine an exact memory source with Linux DRM activity and attribution.
 
     Selection is capability-driven rather than vendor-driven. A driver is
-    eligible when its DRM device publishes exact total/used VRAM and current
-    activity counters; drivers without that telemetry fail closed instead of
-    receiving an invented capacity.
+    eligible only when both exact dynamic capacity and current activity are
+    measurable; missing telemetry fails closed instead of inventing capacity.
     """
 
     def __init__(
@@ -187,19 +203,18 @@ class LinuxDrmSysfsDeviceCapacityProbe:
         pci_address = _profile_pci_address(profile)
         card = self._drm_card(pci_address)
         device_root = card / "device"
-        total = _read_nonnegative_integer(
-            device_root / "mem_info_vram_total",
-            "total VRAM",
+        physical_total, total, used, capacity_source = self._memory_capacity(
+            profile,
+            device_root,
         )
-        used = _read_nonnegative_integer(
-            device_root / "mem_info_vram_used",
-            "used VRAM",
-        )
-        busy = _read_nonnegative_integer(
-            device_root / "gpu_busy_percent",
-            "GPU busy percentage",
-        )
-        if total <= 0 or used > total or busy > 100:
+        busy, activity_source = _device_activity_percent(device_root)
+        if (
+            physical_total <= 0
+            or total <= 0
+            or total > physical_total
+            or used > total
+            or busy > 100
+        ):
             raise ModelCompileError(
                 f"device {device_id!r} returned invalid residency counters"
             )
@@ -208,6 +223,7 @@ class LinuxDrmSysfsDeviceCapacityProbe:
             device_id=device_id,
             pci_address=pci_address,
             drm_card=card.name,
+            physical_vram_total_bytes=physical_total,
             vram_total_bytes=total,
             vram_used_bytes=used,
             vram_free_bytes=total - used,
@@ -216,8 +232,18 @@ class LinuxDrmSysfsDeviceCapacityProbe:
                 used=used,
             ),
             busy_percent=busy,
+            capacity_source=capacity_source,
+            activity_source=activity_source,
             resident_processes=processes,
         )
+
+    @abstractmethod
+    def _memory_capacity(
+        self,
+        profile: Json,
+        device_root: Path,
+    ) -> tuple[int, int, int, str]:
+        """Return physical total, allocatable budget, usage, and source."""
 
     def require_capacity(
         self,
@@ -487,6 +513,120 @@ class LinuxDrmSysfsDeviceCapacityProbe:
         return tuple(residents[pid] for pid in sorted(residents))
 
 
+class LinuxDrmSysfsDeviceCapacityProbe(LinuxDrmDeviceCapacityProbe):
+    """Read exact capacity from drivers exposing DRM VRAM sysfs counters."""
+
+    def _memory_capacity(
+        self,
+        profile: Json,
+        device_root: Path,
+    ) -> tuple[int, int, int, str]:
+        del profile
+        total = _read_nonnegative_integer(
+            device_root / "mem_info_vram_total",
+            "total VRAM",
+        )
+        used = _read_nonnegative_integer(
+            device_root / "mem_info_vram_used",
+            "used VRAM",
+        )
+        return total, total, used, "linux_drm_sysfs_vram"
+
+
+class RuntimeVulkanDeviceCapacityProbe(LinuxDrmDeviceCapacityProbe):
+    """Use Vulkan's live heap budget while retaining Linux DRM attribution."""
+
+    def __init__(
+        self,
+        *,
+        policy: DeviceCapacityPolicy,
+        executor_command: tuple[str, ...],
+        vulkan_driver_files: tuple[Path, ...],
+        sysfs_drm_root: Path = Path("/sys/class/drm"),
+        proc_root: Path = Path("/proc"),
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> None:
+        super().__init__(
+            policy=policy,
+            sysfs_drm_root=sysfs_drm_root,
+            proc_root=proc_root,
+        )
+        if not executor_command:
+            raise ModelCompileError("Vulkan capacity probe requires an executor")
+        drivers = tuple(path.resolve() for path in vulkan_driver_files)
+        if not drivers or any(not path.is_file() for path in drivers):
+            raise ModelCompileError(
+                "Vulkan capacity probe requires explicit existing driver manifests"
+            )
+        self.executor_command = executor_command
+        self.vulkan_driver_files = drivers
+        self.cancel_requested = cancel_requested
+
+    def _memory_capacity(
+        self,
+        profile: Json,
+        device_root: Path,
+    ) -> tuple[int, int, int, str]:
+        del device_root
+        device_id = _required_text(profile["hardware_identity"], "stable_device_id")
+        invocation = [
+            *self.executor_command,
+            "--runtime-vulkan-memory-snapshot",
+            device_id,
+        ]
+        environment = dict(os.environ)
+        environment["VK_DRIVER_FILES"] = os.pathsep.join(
+            str(path) for path in self.vulkan_driver_files
+        )
+        environment.pop("VK_ICD_FILENAMES", None)
+        try:
+            process = subprocess.Popen(
+                invocation,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+        except OSError as error:
+            raise ModelCompileError(
+                f"could not start Vulkan capacity probe {self.executor_command[0]!r}: "
+                f"{error}"
+            ) from error
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if self.cancel_requested is not None and self.cancel_requested():
+                    process.kill()
+                    process.communicate()
+                    raise ModelCompileError("Vulkan capacity probe was cancelled")
+        if process.returncode != 0:
+            diagnostic = stderr.strip() or stdout.strip()
+            raise ModelCompileError(
+                f"Vulkan capacity probe failed for {device_id!r}"
+                + (f": {diagnostic}" if diagnostic else "")
+            )
+        try:
+            document = json.loads(stdout)
+        except json.JSONDecodeError as error:
+            raise ModelCompileError(
+                f"Vulkan capacity probe returned invalid JSON for {device_id!r}"
+            ) from error
+        snapshot = _validated_vulkan_memory_snapshot(
+            document,
+            device_id,
+            _profile_pci_address(profile),
+        )
+        return (
+            snapshot["physical_heap_bytes"],
+            snapshot["budget_bytes"],
+            snapshot["usage_bytes"],
+            "vulkan_ext_memory_budget",
+        )
+
+
 def declared_capacity_reservation_digest(
     profiles: tuple[Json, ...],
     reserved_capacity_bytes: dict[str, int],
@@ -560,6 +700,110 @@ def _read_nonnegative_integer(path: Path, label: str) -> int:
     if value < 0:
         raise ModelCompileError(f"{label} must not be negative")
     return value
+
+
+def _device_activity_percent(device_root: Path) -> tuple[int, str]:
+    direct = device_root / "gpu_busy_percent"
+    if direct.is_file():
+        return (
+            _read_nonnegative_integer(direct, "GPU busy percentage"),
+            "linux_drm_gpu_busy_percent",
+        )
+    idle_residency = tuple(
+        sorted(device_root.glob("tile*/gt*/gtidle/idle_residency_ms"))
+    )
+    if not idle_residency:
+        raise ModelCompileError(
+            f"required device activity telemetry is unavailable: {device_root}"
+        )
+    before = tuple(
+        _read_nonnegative_integer(path, "GPU idle residency")
+        for path in idle_residency
+    )
+    started_ns = time.monotonic_ns()
+    time.sleep(0.02)
+    elapsed_ns = time.monotonic_ns() - started_ns
+    after = tuple(
+        _read_nonnegative_integer(path, "GPU idle residency")
+        for path in idle_residency
+    )
+    if elapsed_ns <= 0 or any(current < prior for prior, current in zip(before, after)):
+        raise ModelCompileError("device idle-residency activity counters are invalid")
+    busy_percent = 0
+    for prior, current in zip(before, after):
+        idle_ns = min(elapsed_ns, (current - prior) * 1_000_000)
+        current_busy = ((elapsed_ns - idle_ns) * 100 + elapsed_ns // 2) // elapsed_ns
+        busy_percent = max(busy_percent, current_busy)
+    return busy_percent, "linux_drm_idle_residency_sample"
+
+
+def _validated_vulkan_memory_snapshot(
+    document: object,
+    device_id: str,
+    pci_address: str,
+) -> Json:
+    if not isinstance(document, dict) or set(document) != {"schema", "devices"}:
+        raise ModelCompileError("Vulkan capacity snapshot fields are invalid")
+    if document.get("schema") != VULKAN_MEMORY_SNAPSHOT_SCHEMA:
+        raise ModelCompileError("Vulkan capacity snapshot schema is unsupported")
+    devices = document.get("devices")
+    if not isinstance(devices, list) or len(devices) != 1:
+        raise ModelCompileError("Vulkan capacity snapshot must contain one device")
+    snapshot = devices[0]
+    expected = {
+        "physical_device_id",
+        "device_name",
+        "pci_address",
+        "heap_index",
+        "physical_heap_bytes",
+        "memory_budget_supported",
+        "budget_bytes",
+        "usage_bytes",
+        "available_bytes",
+    }
+    if not isinstance(snapshot, dict) or set(snapshot) != expected:
+        raise ModelCompileError("Vulkan device capacity snapshot fields are invalid")
+    if snapshot.get("physical_device_id") != device_id:
+        raise ModelCompileError("Vulkan capacity snapshot returned another device")
+    if not isinstance(snapshot.get("device_name"), str) or not snapshot["device_name"]:
+        raise ModelCompileError("Vulkan capacity snapshot has no device name")
+    raw_pci_address = snapshot.get("pci_address")
+    if (
+        not isinstance(raw_pci_address, str)
+        or normalize_pci_address(raw_pci_address) != pci_address
+    ):
+        raise ModelCompileError("Vulkan capacity snapshot PCI identity is inconsistent")
+    if snapshot.get("memory_budget_supported") is not True:
+        raise ModelCompileError(
+            f"Vulkan device {device_id!r} has no exact dynamic memory budget"
+        )
+    numeric_fields = (
+        "heap_index",
+        "physical_heap_bytes",
+        "budget_bytes",
+        "usage_bytes",
+        "available_bytes",
+    )
+    if any(
+        isinstance(snapshot.get(field), bool)
+        or not isinstance(snapshot.get(field), int)
+        or int(snapshot[field]) < 0
+        for field in numeric_fields
+    ):
+        raise ModelCompileError("Vulkan device capacity snapshot counters are invalid")
+    physical = int(snapshot["physical_heap_bytes"])
+    budget = int(snapshot["budget_bytes"])
+    usage = int(snapshot["usage_bytes"])
+    available = int(snapshot["available_bytes"])
+    if (
+        physical <= 0
+        or budget <= 0
+        or budget > physical
+        or usage > budget
+        or available != budget - usage
+    ):
+        raise ModelCompileError("Vulkan device capacity snapshot is inconsistent")
+    return snapshot
 
 
 def _fdinfo_fields(payload: str) -> dict[str, str]:

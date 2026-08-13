@@ -36,6 +36,8 @@ from nerve.representation_optimizer.validation.protocols import (
     BehavioralValidationAdapter,
 )
 
+DEVICE_CAPACITY_OBSERVATION_SCHEMA = "nerve.optimizer.device_capacity_observation.v2"
+
 
 @dataclass(frozen=True)
 class CandidateToolchain:
@@ -242,6 +244,15 @@ def _require_capacity_released(
     for device_id in sorted(before_by_id):
         prior = before_by_id[device_id]
         current = after_by_id[device_id]
+        if (
+            current["physical_vram_total_bytes"]
+            != prior["physical_vram_total_bytes"]
+        ):
+            failures.append(f"{device_id} changed physical VRAM")
+            continue
+        if current["capacity_source"] != prior["capacity_source"]:
+            failures.append(f"{device_id} changed capacity telemetry source")
+            continue
         if current["vram_total_bytes"] != prior["vram_total_bytes"]:
             failures.append(f"{device_id} changed total VRAM")
             continue
@@ -278,26 +289,85 @@ def _capacity_observations_by_device(
     for observation in observations:
         if not isinstance(observation, dict):
             raise ModelCompileError("capacity lease observation must be an object")
+        expected_fields = {
+            "schema",
+            "device_id",
+            "pci_address",
+            "drm_card",
+            "physical_vram_total_bytes",
+            "vram_total_bytes",
+            "vram_used_bytes",
+            "vram_free_bytes",
+            "reservable_vram_bytes",
+            "busy_percent",
+            "capacity_source",
+            "activity_source",
+            "resident_processes",
+        }
         device_id = observation.get("device_id")
+        physical_total = observation.get("physical_vram_total_bytes")
         total = observation.get("vram_total_bytes")
         used = observation.get("vram_used_bytes")
+        free = observation.get("vram_free_bytes")
+        reservable = observation.get("reservable_vram_bytes")
+        busy = observation.get("busy_percent")
         processes = observation.get("resident_processes")
         if (
-            not isinstance(device_id, str)
+            set(observation) != expected_fields
+            or observation.get("schema") != DEVICE_CAPACITY_OBSERVATION_SCHEMA
+            or not isinstance(device_id, str)
             or not device_id
+            or not isinstance(observation.get("pci_address"), str)
+            or not observation["pci_address"]
+            or not isinstance(observation.get("drm_card"), str)
+            or not observation["drm_card"]
+            or isinstance(physical_total, bool)
+            or not isinstance(physical_total, int)
+            or physical_total <= 0
             or isinstance(total, bool)
             or not isinstance(total, int)
             or total <= 0
+            or total > physical_total
             or isinstance(used, bool)
             or not isinstance(used, int)
             or used < 0
             or used > total
+            or isinstance(free, bool)
+            or not isinstance(free, int)
+            or free != total - used
+            or isinstance(reservable, bool)
+            or not isinstance(reservable, int)
+            or reservable < 0
+            or reservable > free
+            or isinstance(busy, bool)
+            or not isinstance(busy, int)
+            or not 0 <= busy <= 100
+            or not isinstance(observation.get("capacity_source"), str)
+            or not observation["capacity_source"]
+            or not isinstance(observation.get("activity_source"), str)
+            or not observation["activity_source"]
             or not isinstance(processes, list)
             or any(
                 not isinstance(process, dict)
+                or set(process)
+                != {
+                    "pid",
+                    "command",
+                    "vram_bytes",
+                    "gtt_bytes",
+                    "engine_time_ns",
+                }
                 or isinstance(process.get("pid"), bool)
                 or not isinstance(process.get("pid"), int)
                 or process["pid"] < 0
+                or not isinstance(process.get("command"), str)
+                or not process["command"]
+                or any(
+                    isinstance(process.get(field), bool)
+                    or not isinstance(process.get(field), int)
+                    or process[field] < 0
+                    for field in ("vram_bytes", "gtt_bytes", "engine_time_ns")
+                )
                 for process in processes
             )
             or len({process["pid"] for process in processes}) != len(processes)

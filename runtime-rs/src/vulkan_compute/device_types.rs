@@ -591,6 +591,19 @@ pub struct VulkanMemoryHeapInfo {
     pub device_local: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VulkanDeviceLocalMemorySnapshot {
+    pub physical_device_id: String,
+    pub device_name: String,
+    pub pci_address: Option<String>,
+    pub heap_index: u32,
+    pub physical_heap_bytes: u64,
+    pub memory_budget_supported: bool,
+    pub budget_bytes: Option<u64>,
+    pub usage_bytes: Option<u64>,
+    pub available_bytes: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct VulkanGenericPipelineKey {
     spirv_words: Vec<u32>,

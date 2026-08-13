@@ -1464,3 +1464,31 @@ pub(crate) fn with_test_device_local_memory_quiescence<T>(
     };
     operation(&quiescence)
 }
+#[test]
+fn dynamic_memory_snapshot_selects_the_largest_device_local_heap_stably() {
+    let mut memory = vk::PhysicalDeviceMemoryProperties::default();
+    memory.memory_heap_count = 4;
+    memory.memory_heaps[0] = vk::MemoryHeap {
+        size: 64 * 1024,
+        flags: vk::MemoryHeapFlags::empty(),
+    };
+    memory.memory_heaps[1] = vk::MemoryHeap {
+        size: 8 * 1024,
+        flags: vk::MemoryHeapFlags::DEVICE_LOCAL,
+    };
+    memory.memory_heaps[2] = vk::MemoryHeap {
+        size: 16 * 1024,
+        flags: vk::MemoryHeapFlags::DEVICE_LOCAL,
+    };
+    memory.memory_heaps[3] = vk::MemoryHeap {
+        size: 16 * 1024,
+        flags: vk::MemoryHeapFlags::DEVICE_LOCAL,
+    };
+
+    assert_eq!(largest_device_local_memory_heap(&memory), Some((2, 16 * 1024)));
+
+    memory.memory_heaps[1].flags = vk::MemoryHeapFlags::empty();
+    memory.memory_heaps[2].flags = vk::MemoryHeapFlags::empty();
+    memory.memory_heaps[3].flags = vk::MemoryHeapFlags::empty();
+    assert_eq!(largest_device_local_memory_heap(&memory), None);
+}

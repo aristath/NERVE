@@ -837,3 +837,30 @@ fn query_available_device_local_memory_bytes(
         .max()
         .unwrap_or(0)
 }
+
+fn query_device_local_memory_heap_budget(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    heap_index: u32,
+) -> (u64, u64) {
+    let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+    let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+    unsafe {
+        instance.get_physical_device_memory_properties2(physical_device, &mut properties);
+    }
+    let index = heap_index as usize;
+    (budget.heap_budget[index], budget.heap_usage[index])
+}
+
+fn largest_device_local_memory_heap(
+    memory: &vk::PhysicalDeviceMemoryProperties,
+) -> Option<(u32, u64)> {
+    (0..memory.memory_heap_count)
+        .filter_map(|heap_index| {
+            let heap = memory.memory_heaps[heap_index as usize];
+            heap.flags
+                .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+                .then_some((heap_index, heap.size))
+        })
+        .max_by_key(|(heap_index, size)| (*size, std::cmp::Reverse(*heap_index)))
+}

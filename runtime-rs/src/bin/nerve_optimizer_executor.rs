@@ -9,15 +9,17 @@ use std::time::{Duration, Instant};
 use nerve_runtime::{
     RuntimeStagedCandidate, VulkanCompiledResourceLoadStatistics,
     VulkanCompiledResourceRepresentationReport, VulkanComputeDevice, VulkanComputeDeviceCatalog,
-    VulkanResidentBufferPool, VulkanResidentModelPackageManifest, VulkanResidentRuntimeModel,
-    VulkanResidentTargetedExecutionSession, VulkanResidentTargetedModelPackageDeviceSlice,
-    VulkanTargetedComponentExecutionPhase, VulkanTargetedComponentExecutionScope,
+    VulkanDeviceLocalMemorySnapshot, VulkanResidentBufferPool, VulkanResidentModelPackageManifest,
+    VulkanResidentRuntimeModel, VulkanResidentTargetedExecutionSession,
+    VulkanResidentTargetedModelPackageDeviceSlice, VulkanTargetedComponentExecutionPhase,
+    VulkanTargetedComponentExecutionScope,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 const COMMAND_SCHEMA: &str = "nerve.optimizer.executor_command.v5";
 const RESPONSE_SCHEMA: &str = "nerve.optimizer.executor_response.v5";
+const MEMORY_SNAPSHOT_SCHEMA: &str = "nerve.runtime.vulkan_memory_snapshot.v1";
 const UNMOUNTED_LOGICAL_DEVICE_ID: &str = "optimizer:unmounted";
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +111,17 @@ struct ExecutorHost {
 }
 
 fn main() {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--runtime-vulkan-memory-snapshot")
+    {
+        if let Err(error) = print_runtime_vulkan_memory_snapshot(&arguments[1..]) {
+            eprintln!("nerve-optimizer-executor error: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args()
         .skip(1)
         .eq(["--runtime-implementation-fingerprint"])
@@ -131,6 +144,42 @@ fn main() {
         eprintln!("nerve-optimizer-executor error: {error}");
         std::process::exit(1);
     }
+}
+
+fn print_runtime_vulkan_memory_snapshot(
+    physical_device_ids: &[String],
+) -> Result<(), Box<dyn Error>> {
+    if physical_device_ids.is_empty()
+        || physical_device_ids
+            .iter()
+            .any(|device_id| !device_id.starts_with("vulkan-uuid:"))
+    {
+        return Err(invalid_input(
+            "--runtime-vulkan-memory-snapshot requires one or more stable Vulkan device IDs",
+        )
+        .into());
+    }
+    let allowed = physical_device_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if allowed.len() != physical_device_ids.len() {
+        return Err(
+            invalid_input("--runtime-vulkan-memory-snapshot device IDs must be unique").into(),
+        );
+    }
+    let catalog = VulkanComputeDeviceCatalog::discover_allowed_physical_device_ids(&allowed)?;
+    let mut snapshots = catalog.device_local_memory_snapshots()?;
+    snapshots.sort_by(|left, right| left.physical_device_id.cmp(&right.physical_device_id));
+    println!(
+        "{}",
+        serde_json::to_string(&runtime_vulkan_memory_snapshot_payload(snapshots))?
+    );
+    Ok(())
+}
+
+fn runtime_vulkan_memory_snapshot_payload(devices: Vec<VulkanDeviceLocalMemorySnapshot>) -> Value {
+    json!({
+        "schema": MEMORY_SNAPSHOT_SCHEMA,
+        "devices": devices,
+    })
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
@@ -1012,6 +1061,43 @@ mod tests {
         );
         let error = read_command(&mut unknown.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+
+    #[test]
+    fn optimizer_executor_memory_snapshot_is_typed_and_preserves_missing_budget() {
+        let payload = runtime_vulkan_memory_snapshot_payload(vec![
+            VulkanDeviceLocalMemorySnapshot {
+                physical_device_id: "vulkan-uuid:gpu0".to_string(),
+                device_name: "fixture GPU".to_string(),
+                pci_address: Some("0000:03:00.0".to_string()),
+                heap_index: 1,
+                physical_heap_bytes: 32 * 1024 * 1024 * 1024,
+                memory_budget_supported: true,
+                budget_bytes: Some(31 * 1024 * 1024 * 1024),
+                usage_bytes: Some(3 * 1024 * 1024 * 1024),
+                available_bytes: Some(28 * 1024 * 1024 * 1024),
+            },
+            VulkanDeviceLocalMemorySnapshot {
+                physical_device_id: "vulkan-uuid:gpu1".to_string(),
+                device_name: "unbudgeted GPU".to_string(),
+                pci_address: None,
+                heap_index: 0,
+                physical_heap_bytes: 8 * 1024 * 1024 * 1024,
+                memory_budget_supported: false,
+                budget_bytes: None,
+                usage_bytes: None,
+                available_bytes: None,
+            },
+        ]);
+
+        assert_eq!(payload["schema"], MEMORY_SNAPSHOT_SCHEMA);
+        assert_eq!(payload["devices"][0]["heap_index"], 1);
+        assert_eq!(
+            payload["devices"][0]["available_bytes"],
+            28_u64 * 1024 * 1024 * 1024
+        );
+        assert_eq!(payload["devices"][1]["memory_budget_supported"], false);
+        assert_eq!(payload["devices"][1]["budget_bytes"], Value::Null);
     }
 
     #[test]

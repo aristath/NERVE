@@ -116,6 +116,56 @@ impl VulkanComputeDeviceCatalog {
         &self.available_devices
     }
 
+    pub fn device_local_memory_snapshots(
+        &self,
+    ) -> Result<Vec<VulkanDeviceLocalMemorySnapshot>, VulkanError> {
+        self.available_devices
+            .iter()
+            .map(|device| {
+                let physical_device = self.physical_devices[device.physical_device_index];
+                let memory = unsafe {
+                    self.context
+                        .instance
+                        .get_physical_device_memory_properties(physical_device)
+                };
+                let (heap_index, physical_heap_bytes) =
+                    largest_device_local_memory_heap(&memory).ok_or_else(|| {
+                        VulkanError(format!(
+                            "Vulkan device {:?} has no device-local memory heap",
+                            device.physical_device_id
+                        ))
+                    })?;
+                let memory_budget_supported = physical_device_supports_extension(
+                    &self.context.instance,
+                    physical_device,
+                    ash::ext::memory_budget::NAME,
+                )?;
+                let (budget_bytes, usage_bytes, available_bytes) =
+                    if memory_budget_supported {
+                        let (budget, usage) = query_device_local_memory_heap_budget(
+                            &self.context.instance,
+                            physical_device,
+                            heap_index,
+                        );
+                        (Some(budget), Some(usage), Some(budget.saturating_sub(usage)))
+                    } else {
+                        (None, None, None)
+                    };
+                Ok(VulkanDeviceLocalMemorySnapshot {
+                    physical_device_id: device.physical_device_id.clone(),
+                    device_name: device.device_name.clone(),
+                    pci_address: device.pci_address.clone(),
+                    heap_index,
+                    physical_heap_bytes,
+                    memory_budget_supported,
+                    budget_bytes,
+                    usage_bytes,
+                    available_bytes,
+                })
+            })
+            .collect()
+    }
+
     pub fn available_target_capabilities(
         &self,
     ) -> Result<Vec<VulkanComputeTargetCapabilities>, VulkanError> {

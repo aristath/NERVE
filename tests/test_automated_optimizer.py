@@ -1165,22 +1165,94 @@ def test_verified_capacity_lease_preserves_workloads_present_at_acquisition(
             pass
 
 
+def test_verified_capacity_lease_rejects_a_changed_capacity_telemetry_source(
+    tmp_path: Path,
+) -> None:
+    digest = device_state_digest({"fixture_state": "capacity_available"})
+    probe_results = [
+        _capacity_lease_state(digest=digest, used_vram_bytes=100),
+        _capacity_lease_state(
+            digest=digest,
+            used_vram_bytes=100,
+            capacity_source="substituted_capacity",
+        ),
+    ]
+    target, _ = _target(
+        lease=VerifiedCapacityLeaseManager(
+            lock_root=tmp_path / "device-locks",
+            probe_capacity_reservation_state=lambda _target: probe_results.pop(0),
+        )
+    )
+
+    with pytest.raises(ModelCompileError, match="changed capacity telemetry source"):
+        with target.lease_manager.acquire(target):
+            pass
+
+
+def test_capacity_lease_rejects_incomplete_or_inconsistent_observation_evidence() -> None:
+    digest = device_state_digest({"fixture_state": "capacity_available"})
+    valid = _capacity_lease_state(
+        digest=digest,
+        used_vram_bytes=100,
+        resident_pids=(42,),
+    )
+    mutations = []
+    extra = dict(valid.observations[0])
+    extra["surprise"] = True
+    mutations.append(extra)
+    wrong_free = dict(valid.observations[0])
+    wrong_free["vram_free_bytes"] = 899
+    mutations.append(wrong_free)
+    wrong_physical = dict(valid.observations[0])
+    wrong_physical["physical_vram_total_bytes"] = 999
+    mutations.append(wrong_physical)
+    incomplete_process = dict(valid.observations[0])
+    incomplete_process["resident_processes"] = [{"pid": 42}]
+    mutations.append(incomplete_process)
+
+    for observation in mutations:
+        with pytest.raises(ModelCompileError, match="capacity lease observation is invalid"):
+            CapacityLeaseState(
+                reservation_digest=digest,
+                observations=(observation,),
+                release_vram_tolerance_bytes=0,
+                release_settle_timeout_ns=0,
+                release_poll_interval_ns=1,
+            )
+
+
 def _capacity_lease_state(
     *,
     digest: str,
     used_vram_bytes: int,
     resident_pids: tuple[int, ...] = (),
     settle_timeout_ns: int = 0,
+    capacity_source: str = "fixture_capacity",
 ) -> CapacityLeaseState:
     return CapacityLeaseState(
         reservation_digest=digest,
         observations=(
             {
+                "schema": "nerve.optimizer.device_capacity_observation.v2",
                 "device_id": "fixture-device",
+                "pci_address": "0000:03:00.0",
+                "drm_card": "card0",
+                "physical_vram_total_bytes": 1_000,
                 "vram_total_bytes": 1_000,
                 "vram_used_bytes": used_vram_bytes,
+                "vram_free_bytes": 1_000 - used_vram_bytes,
+                "reservable_vram_bytes": 1_000 - used_vram_bytes,
+                "busy_percent": 0,
+                "capacity_source": capacity_source,
+                "activity_source": "fixture_activity",
                 "resident_processes": [
-                    {"pid": pid}
+                    {
+                        "pid": pid,
+                        "command": "fixture",
+                        "vram_bytes": 1,
+                        "gtt_bytes": 0,
+                        "engine_time_ns": 0,
+                    }
                     for pid in resident_pids
                 ],
             },

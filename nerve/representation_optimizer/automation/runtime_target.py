@@ -15,7 +15,8 @@ from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
 from nerve.compiler_target import CompilerTarget, discover_compiler_target
 from nerve.representation_optimizer.automation.device_state import (
     DeviceCapacityPolicy,
-    LinuxDrmSysfsDeviceCapacityProbe,
+    LinuxDrmDeviceCapacityProbe,
+    RuntimeVulkanDeviceCapacityProbe,
     declared_capacity_reservation_digest,
     normalize_pci_address,
 )
@@ -113,7 +114,7 @@ def prepare_runtime_optimization_targets(
     vulkan_driver_files: Iterable[Path] = (),
     speculative_draft_tokens: int = 0,
     residency_policy: str = "demand_retained",
-    capacity_probe: LinuxDrmSysfsDeviceCapacityProbe | None = None,
+    capacity_probe: LinuxDrmDeviceCapacityProbe | None = None,
     live_target: CompilerTarget | None = None,
     policy: RuntimeOptimizationPolicy = RuntimeOptimizationPolicy(),
     lease_root: Path | None = None,
@@ -243,8 +244,11 @@ def prepare_runtime_optimization_targets(
         if requested
         else tuple(live_profiles.values())
     )
-    probe = capacity_probe or LinuxDrmSysfsDeviceCapacityProbe(
+    probe = capacity_probe or RuntimeVulkanDeviceCapacityProbe(
         policy=runtime_capacity_policy,
+        executor_command=component_command,
+        vulkan_driver_files=drivers,
+        cancel_requested=cancel_requested,
     )
     capacity_profiles: list[Json] = []
     selected_records: list[Json] = []
@@ -773,7 +777,7 @@ def _build_target(
     residency_plan: Json,
     available_device_capacity_bytes: dict[str, int],
     reserved_device_capacity_bytes: dict[str, int],
-    capacity_probe: LinuxDrmSysfsDeviceCapacityProbe,
+    capacity_probe: LinuxDrmDeviceCapacityProbe,
     selected_observations: tuple[Json, ...],
     driver_files: tuple[Path, ...],
     component_command: tuple[str, ...],

@@ -383,8 +383,14 @@ part of the NERVE lease and are never unloaded to manufacture an idle device.
 The optimizer does not own a second, independently tuned capacity fraction.
 Every linked runtime executable reports the same versioned device-local memory
 policy, and target preparation fails before device discovery when those reports
-disagree. The runtime's opening-availability partition is therefore the single
-source for both optimizer admission evidence and execution-time enforcement.
+disagree. Target preparation obtains live physical-heap budget and usage from
+the selected runtime through `VK_EXT_memory_budget` without creating a logical
+device or submitting queue work. Static heap size is never substituted when a
+dynamic budget is unavailable. Versioned capacity observations bind that
+snapshot to stable Vulkan and PCI identities, a bounded Linux DRM activity
+measurement, and attributable pre-existing DRM clients. The runtime's
+opening-availability partition is therefore the single source for both
+optimizer admission evidence and execution-time enforcement.
 Normal completion never treats stdin EOF, process exit,
 destructor order, or an expired experiment deadline as accelerator teardown.
 Mount and execution commands are bounded cancellation quanta: cancellation is
