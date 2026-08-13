@@ -69,6 +69,15 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             speculative_draft_tokens,
             residency_policy,
         )?;
+    let parallel_speculative_state_ingestion_transient =
+        exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
+            runtime_model,
+            speculative_decoder_slice_plans,
+            devices,
+            normal_prefill_lane_capacity,
+            speculative_draft_tokens,
+            residency_policy,
+        )?;
     let mut execution_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
         runtime_model,
         slice_plans,
@@ -90,6 +99,13 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
         .map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(
                 "failed to attach parallel speculative processor transients: {error}",
+            ))
+        })?;
+    execution_transient
+        .extend(parallel_speculative_state_ingestion_transient.clone())
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to attach parallel speculative state-ingestion transients: {error}",
             ))
         })?;
     let mut seen_transients = Vec::new();
@@ -139,6 +155,13 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
                     "failed to attach resolved parallel speculative processor transients: {error}",
+                ))
+            })?;
+        resolved_transient
+            .extend(parallel_speculative_state_ingestion_transient.clone())
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to attach resolved parallel speculative state-ingestion transients: {error}",
                 ))
             })?;
         if resolved_transient == execution_transient {

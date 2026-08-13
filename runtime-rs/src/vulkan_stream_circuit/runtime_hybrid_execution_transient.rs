@@ -356,6 +356,109 @@ fn exact_vulkan_runtime_speculative_source_tap_device_id<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn exact_vulkan_runtime_add_speculative_source_tap_staging(
+    transient: &mut VulkanRuntimeHybridExecutionTransientPlan,
+    runtime_model: &VulkanResidentRuntimeModel,
+    decoder: &VulkanResidentSpeculativeDecoderPackageSpec,
+    slice: &VulkanResidentModelPackageDeviceSlicePlan,
+    physical_device_by_logical_device: &BTreeMap<&str, &str>,
+    selected_destination_signal_ids: Option<&BTreeSet<String>>,
+    lane_capacity: usize,
+    concern: &str,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    if lane_capacity == 0 {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "speculative decoder {:?} {concern} source-tap lane capacity is zero",
+            decoder.id,
+        )));
+    }
+    let boundary_plan = VulkanModelBoundaryBufferPlan::from_placed_plan(&slice.placed_plan)
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to plan speculative decoder {:?} {concern} boundary: {error}",
+                decoder.id,
+            ))
+        })?;
+    let destination_physical_device = physical_device_by_logical_device
+        .get(slice.device_id.as_str())
+        .copied()
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} device {:?} has no physical identity",
+                decoder.id, slice.device_id,
+            ))
+        })?;
+    for port in decoder
+        .circuit_graph
+        .boundary
+        .external_inputs
+        .iter()
+        .filter(|port| port.source_tap.is_some())
+        .filter(|port| {
+            selected_destination_signal_ids
+                .is_none_or(|selected| selected.contains(&port.endpoint.port_id))
+        })
+    {
+        let tap = port.source_tap.as_ref().expect("filtered source tap");
+        let source_device_id =
+            exact_vulkan_runtime_speculative_source_tap_device_id(runtime_model, tap)?;
+        let source_physical_device = physical_device_by_logical_device
+            .get(source_device_id)
+            .copied()
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "speculative decoder {:?} source-tap device {source_device_id:?} has no physical identity",
+                    decoder.id,
+                ))
+            })?;
+        if source_physical_device == destination_physical_device {
+            continue;
+        }
+        let frame_byte_capacity = boundary_plan
+            .inputs
+            .iter()
+            .find(|input| input.signal_id == port.id)
+            .and_then(|input| input.byte_capacity)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "speculative decoder {:?} source-tap input {:?} has no fixed boundary capacity among {:?}",
+                    decoder.id,
+                    port.id,
+                    boundary_plan
+                        .inputs
+                        .iter()
+                        .map(|input| (&input.signal_id, input.byte_capacity))
+                        .collect::<Vec<_>>(),
+                ))
+            })?;
+        let byte_capacity = frame_byte_capacity.checked_mul(lane_capacity).ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} {concern} source-tap capacity overflowed",
+                decoder.id,
+            ))
+        })?;
+        for (logical_device_id, staging_side) in [
+            (source_device_id, "source staging"),
+            (slice.device_id.as_str(), "destination staging"),
+        ] {
+            transient
+                .add_device_allocation(
+                    logical_device_id,
+                    byte_capacity,
+                    &format!(
+                        "speculative decoder {} {concern} source tap {} {staging_side}",
+                        decoder.id, port.id,
+                    ),
+                )
+                .map_err(|error| {
+                    VulkanResidentTokenModelPackageError::new(error.to_string())
+                })?;
+        }
+    }
+    Ok(())
+}
+
 fn exact_vulkan_runtime_add_component_batch_allocations(
     transient: &mut VulkanRuntimeHybridExecutionTransientPlan,
     logical_device_id: &str,
@@ -491,78 +594,110 @@ fn exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
             )
             .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
 
-        let boundary_plan = VulkanModelBoundaryBufferPlan::from_placed_plan(&slice.placed_plan)
+        exact_vulkan_runtime_add_speculative_source_tap_staging(
+            &mut transient,
+            runtime_model,
+            decoder,
+            slice,
+            &physical_device_by_logical_device,
+            None,
+            1,
+            "permanent",
+        )?;
+    }
+    Ok(transient)
+}
+
+fn exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
+    runtime_model: &VulkanResidentRuntimeModel,
+    decoder_slice_plans: &BTreeMap<String, VulkanResidentModelPackageDeviceSlicePlan>,
+    devices: &[VulkanRuntimeSelectedResourceMountDevice],
+    normal_prefill_active_width: usize,
+    speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
+) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanResidentTokenModelPackageError> {
+    let mut transient = VulkanRuntimeHybridExecutionTransientPlan::default();
+    if speculative_draft_tokens == 0 {
+        return Ok(transient);
+    }
+    let normal_lane_capacity = causal_component_block_lane_capacity(normal_prefill_active_width)
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to plan parallel speculative normal state ingestion: {error}",
+            ))
+        })?;
+    let verification_lane_capacity = speculative_catch_up_lane_capacity(speculative_draft_tokens)
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to plan parallel speculative verification state ingestion: {error}",
+            ))
+        })?;
+    let physical_device_by_logical_device = devices
+        .iter()
+        .map(|device| {
+            (
+                device.logical_device_id.as_str(),
+                device.physical_device_id.as_str(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for decoder in runtime_model.package.speculative_decoders.iter().filter(|decoder| {
+        matches!(
+            decoder.execution_contract,
+            VulkanResidentSpeculativeExecutionContract::ParallelBlock { .. }
+        )
+    }) {
+        let slice = decoder_slice_plans.get(&decoder.id).ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "parallel speculative decoder {:?} has no prepared state-ingestion slice",
+                decoder.id,
+            ))
+        })?;
+        let scopes = parallel_speculative_execution_scopes(decoder)?;
+        let state_input_signal_ids = scopes.state_input_signal_ids;
+        let execution_scope = VulkanComponentBatchExecutionScope::nodes(
+            scopes.state_ingestion_node_ids_by_component,
+        )
+        .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+        for (lane_class, lane_capacity) in [
+            ("normal prefill", normal_lane_capacity),
+            ("causal verification", verification_lane_capacity),
+        ] {
+            let allocation_plan = VulkanComponentBatchResidentAllocationPlan::for_single_device(
+                &slice.placed_plan,
+                &slice.prepared_plan,
+                &slice.batch_kernels,
+                lane_capacity,
+                VulkanComponentBatchExecutionMode::CausalSequence,
+                &execution_scope,
+                &BTreeSet::new(),
+                false,
+                residency_policy.is_demand_loaded(),
+            )
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
-                    "failed to plan parallel speculative decoder {:?} boundary: {error}",
+                    "failed to plan parallel speculative decoder {:?} {lane_class} state-ingestion runner: {error}",
                     decoder.id,
                 ))
             })?;
-        let destination_physical_device = physical_device_by_logical_device
-            .get(slice.device_id.as_str())
-            .copied()
-            .ok_or_else(|| {
-                VulkanResidentTokenModelPackageError::new(format!(
-                    "parallel speculative decoder {:?} device {:?} has no physical identity",
-                    decoder.id, slice.device_id,
-                ))
-            })?;
-        for port in decoder
-            .circuit_graph
-            .boundary
-            .external_inputs
-            .iter()
-            .filter(|port| port.source_tap.is_some())
-        {
-            let tap = port.source_tap.as_ref().expect("filtered source tap");
-            let source_device_id =
-                exact_vulkan_runtime_speculative_source_tap_device_id(runtime_model, tap)?;
-            let source_physical_device = physical_device_by_logical_device
-                .get(source_device_id)
-                .copied()
-                .ok_or_else(|| {
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "parallel speculative decoder {:?} source-tap device {source_device_id:?} has no physical identity",
-                        decoder.id,
-                    ))
-                })?;
-            if source_physical_device == destination_physical_device {
-                continue;
-            }
-            let byte_capacity = boundary_plan
-                .inputs
-                .iter()
-                .find(|input| input.signal_id == port.id)
-                .and_then(|input| input.byte_capacity)
-                .ok_or_else(|| {
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "parallel speculative decoder {:?} source-tap input {:?} has no fixed boundary capacity among {:?}",
-                        decoder.id,
-                        port.id,
-                        boundary_plan
-                            .inputs
-                            .iter()
-                            .map(|input| (&input.signal_id, input.byte_capacity))
-                            .collect::<Vec<_>>(),
-                    ))
-                })?;
-            for (logical_device_id, concern) in [
-                (source_device_id, "source staging"),
-                (slice.device_id.as_str(), "destination staging"),
-            ] {
-                transient
-                    .add_device_allocation(
-                        logical_device_id,
-                        byte_capacity,
-                        &format!(
-                            "speculative decoder {} source tap {} {concern}",
-                            decoder.id, port.id,
-                        ),
-                    )
-                    .map_err(|error| {
-                        VulkanResidentTokenModelPackageError::new(error.to_string())
-                    })?;
-            }
+            exact_vulkan_runtime_add_component_batch_allocations(
+                &mut transient,
+                &slice.device_id,
+                &decoder.id,
+                &format!("{lane_class} state ingestion"),
+                allocation_plan,
+            )?;
+            exact_vulkan_runtime_add_speculative_source_tap_staging(
+                &mut transient,
+                runtime_model,
+                decoder,
+                slice,
+                &physical_device_by_logical_device,
+                Some(&state_input_signal_ids),
+                lane_capacity,
+                &format!("{lane_class} state ingestion"),
+            )?;
         }
     }
     Ok(transient)

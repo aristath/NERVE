@@ -443,6 +443,124 @@ fn parallel_speculative_processor_transient_fails_closed_on_incomplete_mount_ide
 }
 
 #[test]
+fn parallel_speculative_state_ingestion_accounts_both_cached_lane_classes() {
+    let (model, slices, devices) = fixture_parallel_speculative_runtime_model("source_gpu");
+    let decoder = &model.package.speculative_decoders[0];
+    let slice = &slices[&decoder.id];
+    let scopes = parallel_speculative_execution_scopes(decoder).unwrap();
+    let execution_scope = VulkanComponentBatchExecutionScope::nodes(
+        scopes.state_ingestion_node_ids_by_component,
+    )
+    .unwrap();
+    let normal_lane_capacity = causal_component_block_lane_capacity(3).unwrap();
+    let verification_lane_capacity = speculative_catch_up_lane_capacity(7).unwrap();
+    let component_plan = |lane_capacity, uses_demand_residency| {
+        VulkanComponentBatchResidentAllocationPlan::for_single_device(
+            &slice.placed_plan,
+            &slice.prepared_plan,
+            &slice.batch_kernels,
+            lane_capacity,
+            VulkanComponentBatchExecutionMode::CausalSequence,
+            &execution_scope,
+            &BTreeSet::new(),
+            false,
+            uses_demand_residency,
+        )
+        .unwrap()
+    };
+    let normal = component_plan(normal_lane_capacity, false);
+    let verification = component_plan(verification_lane_capacity, false);
+    let source_frame_bytes = model.package.activation_element_bytes.unwrap() * 16;
+
+    let planned = exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
+        &model,
+        &slices,
+        &devices,
+        3,
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    let staging_bytes = source_frame_bytes * (normal_lane_capacity + verification_lane_capacity);
+    assert_eq!(
+        planned.device_bytes_by_logical_device[&slice.device_id],
+        normal.total_byte_capacity + verification.total_byte_capacity + staging_bytes,
+    );
+    assert_eq!(
+        planned.device_bytes_by_logical_device["source_gpu"],
+        staging_bytes,
+    );
+    assert_eq!(
+        planned.device_allocations.len(),
+        normal.allocations.len() + verification.allocations.len() + 4,
+    );
+
+    let demand = exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
+        &model,
+        &slices,
+        &devices,
+        3,
+        7,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+    assert_eq!(
+        demand.device_allocations.len(),
+        planned.device_allocations.len() + 2,
+        "each demand-resident causal runner needs its own predicate",
+    );
+
+    let mut colocated_devices = devices;
+    colocated_devices
+        .iter_mut()
+        .find(|device| device.logical_device_id == "source_gpu")
+        .unwrap()
+        .physical_device_id = "physical0".to_string();
+    let colocated = exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
+        &model,
+        &slices,
+        &colocated_devices,
+        3,
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    assert!(!colocated
+        .device_bytes_by_logical_device
+        .contains_key("source_gpu"));
+    assert_eq!(
+        colocated.device_bytes_by_logical_device[&slice.device_id],
+        normal.total_byte_capacity + verification.total_byte_capacity,
+    );
+}
+
+#[test]
+fn parallel_speculative_state_ingestion_fails_closed_without_its_slice() {
+    let (model, _, devices) = fixture_parallel_speculative_runtime_model("source_gpu");
+    let disabled = exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
+        &model,
+        &BTreeMap::new(),
+        &[],
+        0,
+        0,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    assert_eq!(disabled, VulkanRuntimeHybridExecutionTransientPlan::default());
+
+    let error = exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
+        &model,
+        &BTreeMap::new(),
+        &devices,
+        4,
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("no prepared state-ingestion slice"));
+}
+
+#[test]
 fn physical_mount_admits_parallel_speculative_processor_allocations() {
     let (model, _, _) = fixture_parallel_speculative_runtime_model("runtime_default");
     let physical = VulkanRuntimePhysicalExecutionPlan::uniform(&model);
@@ -479,6 +597,12 @@ fn physical_mount_admits_parallel_speculative_processor_allocations() {
     assert!(allocations
         .iter()
         .any(|allocation| allocation.concern.contains("output readback")));
+    assert!(allocations
+        .iter()
+        .any(|allocation| allocation.concern.contains("normal prefill state ingestion")));
+    assert!(allocations.iter().any(|allocation| allocation
+        .concern
+        .contains("causal verification state ingestion")));
 }
 
 #[test]

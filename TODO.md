@@ -549,10 +549,16 @@ For every numbered item below:
   derivation with their materialized processors, and their per-allocation
   component-batch ledgers, packed output readback, and cross-physical-device
   source-tap staging are part of terminal admission. Co-located logical devices
-  correctly allocate no ceremonial staging. The temporal and resident-feedback
-  state-ingestion runners plus resident source histories do not yet have
-  workload-free allocation plans; terminal admission must cover those actual
-  allocations before speculative TP can enter the live gate.
+  correctly allocate no ceremonial staging. The two cached temporal
+  state-ingestion lane classes—normal prefill and causal verification—now also
+  contribute their exact node-scoped component-batch allocations, per-runner
+  demand predicates, and cross-physical-device batched source staging. Their
+  active widths and rounded capacities match the target runners they accompany.
+  The resident-feedback state-ingestion runner and its device-local source
+  histories do not yet have a workload-free allocation plan; terminal admission
+  must cover those actual allocations only when the complete resident-feedback
+  topology is mountable, without reserving unused credit for an ineligible
+  feedback loop.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one
