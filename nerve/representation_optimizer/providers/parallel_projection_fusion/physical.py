@@ -93,7 +93,7 @@ def prepare_fused_component_from_documents(
         compiled_circuit=component["circuit"],
         tensor_index=tensor_index,
     )
-    source_ids = set(opportunity.region.source_node_ids)
+    source_ids = set(opportunity.source_node_ids)
     source_kernels = tuple(
         deepcopy(kernel)
         for kernel in execution["kernels"]
@@ -107,18 +107,21 @@ def prepare_fused_component_from_documents(
         str(kernel["node_id"]): int(kernel["execution_index"])
         for kernel in source_kernels
     }
-    replacement_kernels = [
-        deepcopy(kernel)
-        for kernel in source_kernels
-        if kernel["node_id"] == opportunity.region.quantizer_node_id
-    ]
-    if len(replacement_kernels) != 1:
-        raise ModelCompileError(
-            f"component {opportunity.component_id!r} has no unique shared quantizer kernel"
-        )
+    replacement_kernels = []
+    if not opportunity.combines_upstream_producer:
+        replacement_kernels = [
+            deepcopy(kernel)
+            for kernel in source_kernels
+            if kernel["node_id"] == opportunity.region.quantizer_node_id
+        ]
+        if len(replacement_kernels) != 1:
+            raise ModelCompileError(
+                f"component {opportunity.component_id!r} has no unique shared quantizer kernel"
+            )
     shader_artifacts: dict[str, ShaderArtifact] = {}
     for node in transformed.replacement_nodes:
-        if node["id"] == opportunity.region.quantizer_node_id:
+        is_producer = node["id"] == opportunity.region.quantizer_node_id
+        if is_producer and not opportunity.combines_upstream_producer:
             continue
         shader_file = shader_file_for_node(
             transformed.circuit,
@@ -135,9 +138,13 @@ def prepare_fused_component_from_documents(
             dimensions={"hidden_size": opportunity.hidden_size},
         )
         kernel = component_kernel_spec(
-            execution_index=min(
-                source_execution_indices[node_id]
-                for node_id in opportunity.region.linear_node_ids
+            execution_index=(
+                source_execution_indices[opportunity.producer_execution_node_id]
+                if is_producer
+                else min(
+                    source_execution_indices[node_id]
+                    for node_id in opportunity.region.linear_node_ids
+                )
             ),
             node=node,
             circuit=transformed.circuit,

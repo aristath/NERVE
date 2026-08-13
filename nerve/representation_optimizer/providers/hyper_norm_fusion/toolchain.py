@@ -277,6 +277,10 @@ def _opportunity(record: Json) -> HyperNormFusionOpportunity:
             hyper_node_id=str(region["hyper_node_id"]),
             norm_node_id=str(region["norm_node_id"]),
             quantizer_node_id=str(region["quantizer_node_id"]),
+            boundary_scope_ids=tuple(region.get("boundary_scope_ids", ())),
+            boundary_source_contract_digests=tuple(
+                region.get("boundary_source_contract_digests", ())
+            ),
         )
         for region in record["regions"]
     )

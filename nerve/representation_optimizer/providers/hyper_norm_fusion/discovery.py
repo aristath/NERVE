@@ -6,10 +6,13 @@ from dataclasses import dataclass
 from nerve.compilation import Json, ModelCompileError
 from nerve.physical_representations import FP8_E8M0_PREQUANTIZATION_CONTRACT
 from nerve.representation_optimizer.contracts import stable_contract_id
+from nerve.representation_optimizer.providers.adjacent_boundaries import (
+    exact_adjacent_boundary_records,
+    is_adjacent_representation_scope,
+)
 from nerve.representation_optimizer.providers.types import ProviderContext
 
 
-_SEMANTIC_ROLE = "adjacent semantic representation boundary"
 _HYPER_OPS = {"hyper_connection_pre", "hyper_connection_post_pre"}
 _REQUIRED_FEATURES = frozenset(("shader_float8", "shader_int8"))
 
@@ -22,6 +25,8 @@ class HyperNormRegion:
     hyper_node_id: str
     norm_node_id: str
     quantizer_node_id: str
+    boundary_scope_ids: tuple[str, ...] = ()
+    boundary_source_contract_digests: tuple[str, ...] = ()
 
     @property
     def source_node_ids(self) -> tuple[str, str, str]:
@@ -48,12 +53,33 @@ class HyperNormFusionOpportunity:
     performance_signature: str
 
     @property
+    def source_scope_contracts(self) -> tuple[tuple[str, str], ...]:
+        records = []
+        for region in self.regions:
+            records.append((region.scope_id, region.source_contract_digest))
+            records.extend(
+                zip(
+                    region.boundary_scope_ids,
+                    region.boundary_source_contract_digests,
+                    strict=True,
+                )
+            )
+        by_scope: dict[str, str] = {}
+        for scope_id, digest in records:
+            previous = by_scope.setdefault(scope_id, digest)
+            if previous != digest:
+                raise ModelCompileError(
+                    "hyper/RMS alternative contains conflicting source scopes"
+                )
+        return tuple(sorted(by_scope.items()))
+
+    @property
     def scope_ids(self) -> tuple[str, ...]:
-        return tuple(region.scope_id for region in self.regions)
+        return tuple(scope_id for scope_id, _digest in self.source_scope_contracts)
 
     @property
     def source_contract_digests(self) -> tuple[str, ...]:
-        return tuple(region.source_contract_digest for region in self.regions)
+        return tuple(digest for _scope_id, digest in self.source_scope_contracts)
 
 
 @dataclass(frozen=True)
@@ -64,17 +90,13 @@ class DiscoveryResult:
 
 
 def is_hyper_norm_scope(scope: Json, source_contract: Json) -> bool:
-    return (
-        scope.get("kind") == "representation_island"
-        and len(scope.get("members", {}).get("component_ids", [])) == 1
-        and source_contract.get("semantic_role") == _SEMANTIC_ROLE
-    )
+    return is_adjacent_representation_scope(scope, source_contract)
 
 
 def discover_hyper_norm_fusions(
     context: ProviderContext,
 ) -> tuple[HyperNormFusionOpportunity, ...]:
-    key = "hyper_norm_fusion.v1:" + ",".join(context.scope_ids)
+    key = "hyper_norm_fusion.v2:" + ",".join(context.scope_ids)
     return context.memoized(
         key,
         lambda: _discover(context).opportunities,
@@ -82,7 +104,7 @@ def discover_hyper_norm_fusions(
 
 
 def discovery_result(context: ProviderContext) -> DiscoveryResult:
-    key = "hyper_norm_fusion.result.v1:" + ",".join(context.scope_ids)
+    key = "hyper_norm_fusion.result.v2:" + ",".join(context.scope_ids)
     return context.memoized(key, lambda: _discover(context))  # type: ignore[return-value]
 
 
@@ -254,7 +276,9 @@ def _component_opportunities(
         for index, node in enumerate(component["circuit"]["nodes"])
     }
 
-    region_records: list[tuple[HyperNormRegion, Json, tuple[str, ...], Json]] = []
+    region_records: list[
+        tuple[HyperNormRegion, Json, tuple[str, ...], tuple[Json, ...]]
+    ] = []
     hidden_size: int | None = None
     for scope, contract in sorted(
         scoped_contracts,
@@ -313,6 +337,7 @@ def _component_opportunities(
         block_columns = attrs.get("block_columns")
         multiplicity = hyper_attrs.get("multiplicity")
         consumer_node_ids = attrs.get("consumer_node_ids")
+        semantic_consumer_node_ids = attrs.get("semantic_source_node_ids")
         if (
             attrs.get("physical_representation_contract")
             != FP8_E8M0_PREQUANTIZATION_CONTRACT
@@ -332,6 +357,14 @@ def _component_opportunities(
                 not isinstance(consumer_node_id, str) or not consumer_node_id
                 for consumer_node_id in consumer_node_ids
             )
+            or not isinstance(semantic_consumer_node_ids, list)
+            or not semantic_consumer_node_ids
+            or len(semantic_consumer_node_ids)
+            != len(set(semantic_consumer_node_ids))
+            or any(
+                not isinstance(consumer_node_id, str) or not consumer_node_id
+                for consumer_node_id in semantic_consumer_node_ids
+            )
             or len(helper.get("outputs", [])) != 2
             or any(
                 node_id not in kernels
@@ -347,6 +380,27 @@ def _component_opportunities(
             raise ModelCompileError(
                 f"component {component_id!r} hyper/RMS regions disagree on width"
             )
+        boundary_records = exact_adjacent_boundary_records(
+            component_id=component_id,
+            producer_node_id=str(source_norm["id"]),
+            consumer_node_ids=tuple(semantic_consumer_node_ids),
+            scoped_contracts=scoped_contracts,
+            evidence_by_scope=evidence_by_scope,
+            require_all=False,
+        )
+        if boundary_records is None:
+            continue
+        boundary_scopes = tuple(record[0] for record in boundary_records)
+        boundary_contracts = tuple(record[1] for record in boundary_records)
+        region_evidence = tuple(
+            sorted(
+                set(supported_evidence).union(
+                    evidence_id
+                    for _scope, _contract, evidence_ids in boundary_records
+                    for evidence_id in evidence_ids
+                )
+            )
+        )
         region = HyperNormRegion(
             scope_id=scope_id,
             source_contract_digest=str(contract["contract_digest"]),
@@ -354,6 +408,14 @@ def _component_opportunities(
             hyper_node_id=str(hyper["id"]),
             norm_node_id=str(norm["id"]),
             quantizer_node_id=str(helper["id"]),
+            boundary_scope_ids=tuple(
+                str(boundary_scope["scope_id"])
+                for boundary_scope in boundary_scopes
+            ),
+            boundary_source_contract_digests=tuple(
+                str(boundary_contract["contract_digest"])
+                for boundary_contract in boundary_contracts
+            ),
         )
         region_records.append(
             (
@@ -377,8 +439,8 @@ def _component_opportunities(
                         ),
                     },
                 },
-                supported_evidence,
-                contract,
+                region_evidence,
+                (contract, *boundary_contracts),
             )
         )
     if not region_records:
@@ -410,7 +472,13 @@ def _component_opportunities(
                         manifest_ref,
                         tensor_index_ref,
                         circuit_ref,
-                        *contract["exact_reference"]["artifact_refs"],
+                        *(
+                            path
+                            for source_contract in contracts
+                            for path in source_contract["exact_reference"][
+                                "artifact_refs"
+                            ]
+                        ),
                     }
                 )
             ),
@@ -429,7 +497,7 @@ def _component_opportunities(
                 },
             ),
         )
-        for region, performance_record, supported_evidence, contract in region_records
+        for region, performance_record, supported_evidence, contracts in region_records
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,10 @@ from nerve.representation_optimizer.mounting import RuntimeMountPlan
 from nerve.representation_optimizer.providers.builtin import (
     BuiltinCandidateToolchainResolver,
     load_builtin_provider_registry,
+)
+from nerve.representation_optimizer.providers.hyper_norm_fusion.discovery import (
+    HyperNormFusionOpportunity,
+    HyperNormRegion,
 )
 from nerve.representation_optimizer.providers.parallel_projection_fusion.artifacts import (
     PROOF_PATH,
@@ -165,6 +170,71 @@ def _three_way_opportunity(component_id: str) -> ParallelProjectionFusionOpportu
         max_context_activations=base.max_context_activations,
         compiler_device=base.compiler_device,
         performance_signature="performance_class_three_way",
+    )
+
+
+def _combined_opportunity(component_id: str) -> ParallelProjectionFusionOpportunity:
+    projection = _opportunity(component_id)
+    boundary_scope_ids = tuple(
+        stable_contract_id("projection_boundary", component_id, branch)
+        for branch in range(2)
+    )
+    boundary_digests = tuple(
+        contract_digest(
+            {"component_id": component_id, "boundary": branch}
+        )
+        for branch in range(2)
+    )
+    projection_region = ParallelProjectionRegion(
+        scope_ids=projection.region.scope_ids,
+        source_contract_digests=projection.region.source_contract_digests,
+        semantic_source_node_ids=projection.region.semantic_source_node_ids,
+        linear_node_ids=projection.region.linear_node_ids,
+        quantizer_node_id=projection.region.quantizer_node_id,
+        boundary_scope_ids=boundary_scope_ids,
+        boundary_source_contract_digests=boundary_digests,
+    )
+    region = HyperNormRegion(
+        scope_id=stable_contract_id("hyper_scope", component_id),
+        source_contract_digest=contract_digest(
+            {"component_id": component_id, "region": "hyper_norm"}
+        ),
+        semantic_source_node_ids=("hyper_reduce", "operator_norm"),
+        hyper_node_id="hyper_function__hyper_sinkhorn__hyper_reduce",
+        norm_node_id="operator_norm",
+        quantizer_node_id="quantizer_0",
+        boundary_scope_ids=boundary_scope_ids,
+        boundary_source_contract_digests=boundary_digests,
+    )
+    upstream = HyperNormFusionOpportunity(
+        component_id=component_id,
+        regions=(region,),
+        evidence_ids=(stable_contract_id("hyper_evidence", component_id),),
+        source_artifact_refs=projection.source_artifact_refs,
+        manifest_ref=projection.manifest_ref,
+        circuit_ref=projection.circuit_ref,
+        tensor_index_ref=projection.tensor_index_ref,
+        terminal_node_id="narrow_0",
+        hidden_size=projection.hidden_size,
+        max_context_activations=projection.max_context_activations,
+        compiler_device=projection.compiler_device,
+        performance_signature="hyper_performance_class",
+    )
+    return ParallelProjectionFusionOpportunity(
+        component_id=component_id,
+        region=projection_region,
+        evidence_ids=tuple(
+            sorted(set(projection.evidence_ids).union(upstream.evidence_ids))
+        ),
+        source_artifact_refs=projection.source_artifact_refs,
+        manifest_ref=projection.manifest_ref,
+        circuit_ref=projection.circuit_ref,
+        tensor_index_ref=projection.tensor_index_ref,
+        hidden_size=projection.hidden_size,
+        max_context_activations=projection.max_context_activations,
+        compiler_device=projection.compiler_device,
+        performance_signature="combined_performance_class",
+        upstream_hyper_fusion=upstream,
     )
 
 
@@ -364,6 +434,255 @@ def _three_way_projection_circuits():
     return source, compiled
 
 
+def _combined_projection_documents():
+    physical_contract = "bf16_blockwise_fp8_e4m3_e8m0_scale_f32.v1"
+    parameters = {
+        "refs": {
+            "hyper_function": {"tensor": "hyper.function"},
+            "hyper_scale": {"tensor": "hyper.scale"},
+            "hyper_base": {"tensor": "hyper.base"},
+            "operator_norm_weight": {"tensor": "operator_norm.weight"},
+            "wide_weight": {"tensor": "wide.weight"},
+            "wide_scale": {"tensor": "wide.scale"},
+            "narrow_weight": {"tensor": "narrow.weight"},
+            "narrow_scale": {"tensor": "narrow.scale"},
+            "norm_weight": {"tensor": "norm.weight"},
+        }
+    }
+    boundary = {
+        "inputs": [{"id": "input", "source": "x", "shape": [4, 4096]}],
+        "outputs": [
+            {"id": "wide", "source": "wide_normed"},
+            {"id": "narrow", "source": "narrow"},
+            {"id": "hyper_post", "source": "hyper_post"},
+            {"id": "hyper_combination", "source": "hyper_combination"},
+        ],
+    }
+    source = {
+        "schema": "nerve.stream_circuit.v1",
+        "source": {"component_id": "block_alpha"},
+        "boundary": deepcopy(boundary),
+        "state_ports": [],
+        "parameters": deepcopy(parameters),
+        "behavioral_error_contract": {"mode": "source_reference_circuit"},
+        "nodes": [
+            {
+                "id": "hyper_function",
+                "op": "normalized_linear",
+                "inputs": ["x"],
+                "outputs": ["hyper_mixes"],
+                "params": ["hyper_function"],
+                "attrs": {
+                    "normalization": "root_mean_square",
+                    "normalization_epsilon": 1e-6,
+                    "multiplicity": 4,
+                    "output_element_bytes": [4],
+                },
+            },
+            {
+                "id": "hyper_sinkhorn",
+                "op": "hyper_connection_sinkhorn",
+                "inputs": ["hyper_mixes"],
+                "outputs": ["hyper_pre", "hyper_post", "hyper_combination"],
+                "params": ["hyper_scale", "hyper_base"],
+                "attrs": {
+                    "multiplicity": 4,
+                    "sinkhorn_iterations": 20,
+                    "epsilon": 1e-6,
+                    "output_element_bytes": [4, 4, 4],
+                },
+            },
+            {
+                "id": "hyper_reduce",
+                "op": "hyper_connection_reduce",
+                "inputs": ["x", "hyper_pre"],
+                "outputs": ["operator_input"],
+                "attrs": {"multiplicity": 4, "output_element_bytes": [2]},
+            },
+            {
+                "id": "operator_norm",
+                "op": "rms_norm",
+                "inputs": ["operator_input"],
+                "outputs": ["operator_norm_out"],
+                "params": ["operator_norm_weight"],
+                "attrs": {"eps": 1e-6, "weight_offset": 0.0},
+            },
+            {
+                "id": "wide_0",
+                "op": "linear",
+                "inputs": ["operator_norm_out"],
+                "outputs": ["wide"],
+                "params": ["wide_weight", "wide_scale"],
+            },
+            {
+                "id": "wide_consumer",
+                "op": "rms_norm",
+                "inputs": ["wide"],
+                "outputs": ["wide_normed"],
+                "params": ["norm_weight"],
+                "attrs": {"eps": 1e-6, "weight_offset": 0.0},
+            },
+            {
+                "id": "narrow_0",
+                "op": "linear",
+                "inputs": ["operator_norm_out"],
+                "outputs": ["narrow"],
+                "params": ["narrow_weight", "narrow_scale"],
+            },
+        ],
+    }
+    compiled = deepcopy(source)
+    compiled["nodes"] = [
+        {
+            "id": "hyper_function__hyper_sinkhorn__hyper_reduce",
+            "op": "hyper_connection_pre",
+            "inputs": ["x"],
+            "outputs": ["operator_input", "hyper_post", "hyper_combination"],
+            "params": ["hyper_function", "hyper_scale", "hyper_base"],
+            "attrs": {
+                "compiled_from": [
+                    "hyper_function",
+                    "hyper_sinkhorn",
+                    "hyper_reduce",
+                ],
+                "multiplicity": 4,
+                "normalization_epsilon": 1e-6,
+                "sinkhorn_iterations": 20,
+                "epsilon": 1e-6,
+                "intermediate_rounding": "BF16",
+                "output_element_bytes": [2, 4, 4],
+            },
+        },
+        {
+            "id": "operator_norm",
+            "op": "rms_norm",
+            "inputs": ["operator_input"],
+            "outputs": ["operator_norm_out"],
+            "params": ["operator_norm_weight"],
+            "attrs": {
+                "eps": 1e-6,
+                "weight_offset": 0.0,
+                "output_element_bytes": [2],
+            },
+        },
+        {
+            "id": "quantizer_0",
+            "op": "quantize_fp8_e4m3_e8m0",
+            "inputs": ["operator_norm_out"],
+            "outputs": ["x_fp8", "x_scale"],
+            "attrs": {
+                "physical_representation_contract": physical_contract,
+                "consumer_node_ids": ["wide_0", "narrow_0"],
+                "semantic_source_node_ids": ["wide_0", "narrow_0"],
+                "element_count": 4096,
+                "block_columns": 128,
+                "output_element_bytes": [1, 4],
+            },
+        },
+        {
+            "id": "wide_0",
+            "op": "linear",
+            "inputs": ["x_fp8", "x_scale"],
+            "outputs": ["wide"],
+            "params": ["wide_weight", "wide_scale"],
+            "attrs": {
+                "output_element_bytes": [2],
+                "physical_input_contract": physical_contract,
+                "physical_input_provider_id": "quantizer_0",
+                "physical_input_source_node_ids": ["wide_0"],
+                "physical_logical_inputs": ["operator_norm_out"],
+            },
+        },
+        deepcopy(source["nodes"][5]),
+        {
+            "id": "narrow_0",
+            "op": "linear",
+            "inputs": ["x_fp8", "x_scale"],
+            "outputs": ["narrow"],
+            "params": ["narrow_weight", "narrow_scale"],
+            "attrs": {
+                "output_element_bytes": [2],
+                "physical_input_contract": physical_contract,
+                "physical_input_provider_id": "quantizer_0",
+                "physical_input_source_node_ids": ["narrow_0"],
+                "physical_logical_inputs": ["operator_norm_out"],
+            },
+        },
+    ]
+    tensor_index = {
+        "tensors": {
+            "hyper.function": {
+                "dtype": "F32",
+                "shape": [24, 16384],
+                "layout": "row_major",
+            },
+            "hyper.scale": {
+                "dtype": "F32",
+                "shape": [3],
+                "layout": "row_major",
+            },
+            "hyper.base": {
+                "dtype": "F32",
+                "shape": [24],
+                "layout": "row_major",
+            },
+            "operator_norm.weight": {
+                "dtype": "BF16",
+                "shape": [4096],
+                "layout": "row_major",
+            },
+            "wide.weight": {
+                "dtype": "F8_E4M3",
+                "shape": [1024, 4096],
+                "layout": "row_major",
+            },
+            "wide.scale": {
+                "dtype": "F8_E8M0",
+                "shape": [8, 32],
+                "layout": "row_major",
+            },
+            "narrow.weight": {
+                "dtype": "F8_E4M3",
+                "shape": [512, 4096],
+                "layout": "row_major",
+            },
+            "narrow.scale": {
+                "dtype": "F8_E8M0",
+                "shape": [4, 32],
+                "layout": "row_major",
+            },
+            "norm.weight": {
+                "dtype": "BF16",
+                "shape": [1024],
+                "layout": "row_major",
+            },
+        }
+    }
+    manifest = {
+        "tensor_index_path": "tensors.json",
+        "circuit_graph": {
+            "components": [{"component_id": "block_alpha", "circuit": compiled}]
+        },
+        "component_executions": [
+            {
+                "component_id": "block_alpha",
+                "kernels": [
+                    {
+                        "node_id": node["id"],
+                        "execution_index": index,
+                        "op": node["op"],
+                        "shader_path": f"shaders/{node['id']}.spv",
+                        "local_size_x": 1024,
+                        "workgroup_count_x": 1,
+                    }
+                    for index, node in enumerate(compiled["nodes"])
+                ],
+            }
+        ],
+    }
+    return source, compiled, manifest, tensor_index
+
+
 class _MemoryArtifact:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -402,6 +721,30 @@ def _discovery_context(
     )
     if reverse_consumers:
         compiled["nodes"][0]["attrs"]["consumer_node_ids"].reverse()
+    source["parameters"]["refs"]["input_norm_weight"] = {
+        "tensor": "input_norm.weight"
+    }
+    source["nodes"].insert(
+        0,
+        {
+            "id": "input_norm",
+            "op": "rms_norm",
+            "inputs": ["x"],
+            "outputs": ["x_norm"],
+            "params": ["input_norm_weight"],
+            "attrs": {"eps": 1e-6, "weight_offset": 0.0},
+        },
+    )
+    for node in source["nodes"]:
+        if node["id"] in linear_node_ids:
+            node["inputs"] = ["x_norm"]
+    compiled["parameters"] = deepcopy(source["parameters"])
+    compiled["nodes"].insert(0, deepcopy(source["nodes"][0]))
+    helper = next(node for node in compiled["nodes"] if node["id"] == "quantizer_0")
+    helper["inputs"] = ["x_norm"]
+    for node in compiled["nodes"]:
+        if node["id"] in linear_node_ids:
+            node["attrs"]["physical_logical_inputs"] = ["x_norm"]
     manifest = {
         "tensor_index_path": "tensors.json",
         "max_context_activations": 131_072,
@@ -429,7 +772,7 @@ def _discovery_context(
             }
         ],
     }
-    scopes = tuple(
+    operator_scopes = tuple(
         {
             "scope_id": f"scope_{node_id}",
             "kind": "operator",
@@ -441,10 +784,30 @@ def _discovery_context(
         }
         for node_id in linear_node_ids
     )
+    boundary_scopes = tuple(
+        {
+            "scope_id": f"scope_input_norm_to_{node_id}",
+            "kind": "representation_island",
+            "members": {
+                "component_ids": ["block_alpha"],
+                "source_node_ids": [
+                    "block_alpha/input_norm",
+                    f"block_alpha/{node_id}",
+                ],
+            },
+            "extensions": {},
+        }
+        for node_id in linear_node_ids
+    )
+    scopes = (*operator_scopes, *boundary_scopes)
     contracts = tuple(
         {
             "scope_id": scope["scope_id"],
-            "semantic_role": "linear",
+            "semantic_role": (
+                "linear"
+                if scope["kind"] == "operator"
+                else "adjacent semantic representation boundary"
+            ),
             "contract_digest": contract_digest(scope),
             "exact_reference": {
                 "artifact_refs": ["lowered/block_alpha/circuit.json"]
@@ -489,6 +852,48 @@ def _discovery_context(
     )
 
 
+def _boundary_input_discovery_context():
+    context = _discovery_context()
+    source = context.source_artifacts.documents[
+        "lowered/block_alpha/circuit.json"
+    ]
+    source["nodes"] = [
+        node for node in source["nodes"] if node["id"] != "input_norm"
+    ]
+    for node in source["nodes"]:
+        if node["id"] in {"wide_0", "narrow_0"}:
+            node["inputs"] = ["x"]
+    compiled = context.source_artifacts.documents[
+        "vulkan_resident_package.json"
+    ]["circuit_graph"]["components"][0]["circuit"]
+    compiled["nodes"] = [
+        node for node in compiled["nodes"] if node["id"] != "input_norm"
+    ]
+    for node in compiled["nodes"]:
+        if node["id"] == "quantizer_0":
+            node["inputs"] = ["x"]
+        elif node["id"] in {"wide_0", "narrow_0"}:
+            node["attrs"]["physical_logical_inputs"] = ["x"]
+    retained_scope_ids = {
+        scope["scope_id"] for scope in context.scopes if scope["kind"] == "operator"
+    }
+    context.scopes = tuple(
+        scope for scope in context.scopes if scope["scope_id"] in retained_scope_ids
+    )
+    context.source_contracts = tuple(
+        contract
+        for contract in context.source_contracts
+        if contract["scope_id"] in retained_scope_ids
+    )
+    context.evidence = tuple(
+        record
+        for record in context.evidence
+        if record["scope_id"] in retained_scope_ids
+    )
+    context.scope_ids = tuple(scope["scope_id"] for scope in context.scopes)
+    return context
+
+
 def test_discovery_is_structural_and_normalizes_consumer_order() -> None:
     opportunities = discover_parallel_projection_fusions(
         _discovery_context(reverse_consumers=True)
@@ -501,6 +906,74 @@ def test_discovery_is_structural_and_normalizes_consumer_order() -> None:
         "wide_0",
         "narrow_0",
     )
+    assert len(opportunities[0].region.boundary_scope_ids) == 2
+
+
+def test_discovery_keeps_true_component_input_fanout_without_ceremonial_boundary() -> None:
+    opportunities = discover_parallel_projection_fusions(
+        _boundary_input_discovery_context()
+    )
+
+    assert len(opportunities) == 1
+    assert opportunities[0].region.boundary_scope_ids == ()
+
+
+def test_discovery_owns_every_catalogued_upstream_boundary() -> None:
+    context = _discovery_context()
+    missing_scope_id = "scope_input_norm_to_narrow_0"
+    context.scopes = tuple(
+        scope for scope in context.scopes if scope["scope_id"] != missing_scope_id
+    )
+    context.source_contracts = tuple(
+        contract
+        for contract in context.source_contracts
+        if contract["scope_id"] != missing_scope_id
+    )
+    context.evidence = tuple(
+        record
+        for record in context.evidence
+        if record["scope_id"] != missing_scope_id
+    )
+    context.scope_ids = tuple(scope["scope_id"] for scope in context.scopes)
+
+    opportunities = discover_parallel_projection_fusions(context)
+
+    assert len(opportunities) == 1
+    assert opportunities[0].region.boundary_scope_ids == (
+        "scope_input_norm_to_wide_0",
+    )
+
+
+def test_discovery_rejects_ambiguous_catalogued_boundary_ownership() -> None:
+    context = _discovery_context()
+    original = next(
+        scope
+        for scope in context.scopes
+        if scope["scope_id"] == "scope_input_norm_to_wide_0"
+    )
+    duplicate = deepcopy(original)
+    duplicate["scope_id"] = "scope_duplicate_input_norm_to_wide_0"
+    duplicate_contract = {
+        "scope_id": duplicate["scope_id"],
+        "semantic_role": "adjacent semantic representation boundary",
+        "contract_digest": contract_digest(duplicate),
+        "exact_reference": {
+            "artifact_refs": ["lowered/block_alpha/circuit.json"]
+        },
+    }
+    context.scopes = (*context.scopes, duplicate)
+    context.source_contracts = (*context.source_contracts, duplicate_contract)
+    context.evidence = (
+        *context.evidence,
+        {
+            "scope_id": duplicate["scope_id"],
+            "evidence_id": "evidence_duplicate_boundary",
+            "claims": [{"status": "supported"}],
+        },
+    )
+    context.scope_ids = tuple(scope["scope_id"] for scope in context.scopes)
+
+    assert discover_parallel_projection_fusions(context) == ()
 
 
 def test_discovery_admits_a_complete_three_way_fanout() -> None:
@@ -515,6 +988,77 @@ def test_discovery_admits_a_complete_three_way_fanout() -> None:
         "auxiliary_0",
     )
     assert opportunities[0].physical_node_id == "wide_0__narrow_0__auxiliary_0"
+
+
+def test_discovery_joins_an_exact_upstream_producer_without_model_identity(
+    monkeypatch,
+) -> None:
+    context = _discovery_context()
+    combined = _combined_opportunity("block_alpha")
+    boundary_records = [
+        (scope, contract)
+        for scope, contract in zip(
+            context.scopes,
+            context.source_contracts,
+            strict=True,
+        )
+        if scope["kind"] == "representation_island"
+    ]
+    upstream_region = replace(
+        combined.upstream_hyper_fusion.regions[0],
+        boundary_scope_ids=tuple(
+            scope["scope_id"] for scope, _contract in boundary_records
+        ),
+        boundary_source_contract_digests=tuple(
+            contract["contract_digest"] for _scope, contract in boundary_records
+        ),
+    )
+    upstream = replace(
+        combined.upstream_hyper_fusion,
+        regions=(upstream_region,),
+    )
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.providers.parallel_projection_fusion."
+        "discovery.discover_hyper_norm_fusions",
+        lambda _context: (upstream,),
+    )
+
+    opportunities = discover_parallel_projection_fusions(context)
+
+    assert len(opportunities) == 2
+    ordinary = next(
+        opportunity
+        for opportunity in opportunities
+        if not opportunity.combines_upstream_producer
+    )
+    joined = next(
+        opportunity
+        for opportunity in opportunities
+        if opportunity.combines_upstream_producer
+    )
+    assert ordinary.region == joined.region
+    assert joined.upstream_hyper_fusion == upstream
+    assert len(ordinary.scope_ids) == 4
+    assert len(joined.scope_ids) == 5
+    assert set(ordinary.region.boundary_scope_ids) <= set(
+        joined.upstream_hyper_fusion.scope_ids
+    )
+    assert joined.performance_signature != ordinary.performance_signature
+
+
+def test_discovery_rejects_an_ambiguous_upstream_producer(monkeypatch) -> None:
+    combined = _combined_opportunity("block_alpha")
+    monkeypatch.setattr(
+        "nerve.representation_optimizer.providers.parallel_projection_fusion."
+        "discovery.discover_hyper_norm_fusions",
+        lambda _context: (
+            combined.upstream_hyper_fusion,
+            combined.upstream_hyper_fusion,
+        ),
+    )
+
+    with pytest.raises(ModelCompileError, match="ambiguous upstream fusion"):
+        discover_parallel_projection_fusions(_discovery_context())
 
 
 def test_discovery_rejects_a_branch_without_the_shared_physical_contract() -> None:
@@ -750,68 +1294,129 @@ def test_three_way_physical_lowering_preserves_every_independent_branch() -> Non
     ] == [2, 4, 8, 16]
 
 
+def test_combined_upstream_and_projection_island_is_one_exact_overlay() -> None:
+    source, _compiled, manifest, tensor_index = _combined_projection_documents()
+    opportunity = _combined_opportunity("block_alpha")
+
+    prepared = prepare_fused_component_from_documents(
+        opportunity=opportunity,
+        manifest=manifest,
+        tensor_index=tensor_index,
+        source_circuit=source,
+    )
+
+    assert [node["id"] for node in prepared.transformed.source_nodes] == [
+        "hyper_function__hyper_sinkhorn__hyper_reduce",
+        "operator_norm",
+        "quantizer_0",
+        "wide_0",
+        "narrow_0",
+    ]
+    producer, projections = prepared.transformed.replacement_nodes
+    assert producer["id"] == "quantizer_0"
+    assert producer["op"] == "hyper_connection_pre_rms_norm"
+    assert projections["op"] == "parallel_linear_2way"
+    assert projections["outputs"] == ["wide", "narrow"]
+    assert producer["attrs"]["physical_output_representations"][0][
+        "consumer_node_ids"
+    ] == [projections["id"]]
+    rewrites = {
+        record["candidate_node"]: record["proof_contract"]
+        for record in prepared.transformed.proof["rewrites"]
+    }
+    assert rewrites[producer["id"]] == (
+        "hyper_connection_pre_rms_norm_exact_bf16.v1"
+    )
+    assert rewrites[projections["id"]] == "parallel_linear_exact_bf16.v1"
+    assert [kernel["node_id"] for kernel in prepared.replacement_kernels] == [
+        producer["id"],
+        projections["id"],
+    ]
+    assert all(
+        kernel["shader_path"].startswith("kernels/parallel_projection/")
+        for kernel in prepared.replacement_kernels
+    )
+    assert all(
+        [
+            implementation["lane_tile_width"]
+            for implementation in kernel["batch_implementations"]
+        ]
+        == [2, 4, 8, 16]
+        for kernel in prepared.replacement_kernels
+    )
+
+
+@pytest.mark.parametrize("combined", (False, True), ids=("projection", "combined"))
 def test_constructed_candidate_proof_reconstructs_artifacts_and_rejects_tampering(
     tmp_path,
     monkeypatch,
+    combined,
 ) -> None:
-    source, compiled = _noncontiguous_projection_circuits()
-    manifest = {
-        "tensor_index_path": "tensors.json",
-        "circuit_graph": {
-            "components": [{"component_id": "block_alpha", "circuit": compiled}]
-        },
-        "component_executions": [
-            {
-                "component_id": "block_alpha",
-                "kernels": [
-                    {
-                        "node_id": node_id,
-                        "execution_index": index,
-                        "op": next(
-                            node["op"]
-                            for node in compiled["nodes"]
-                            if node["id"] == node_id
-                        ),
-                        "shader_path": f"shaders/{node_id}.spv",
-                        "local_size_x": 1024,
-                        "workgroup_count_x": 1,
-                    }
-                    for index, node_id in enumerate(
-                        ("quantizer_0", "wide_0", "narrow_0")
-                    )
-                ],
-            }
-        ],
-    }
-    tensor_index = {
-        "tensors": {
-            "wide.weight": {
-                "dtype": "F8_E4M3",
-                "shape": [128, 4096],
-                "layout": "row_major",
+    if combined:
+        source, compiled, manifest, tensor_index = _combined_projection_documents()
+        opportunity = _combined_opportunity("block_alpha")
+    else:
+        source, compiled = _noncontiguous_projection_circuits()
+        manifest = {
+            "tensor_index_path": "tensors.json",
+            "circuit_graph": {
+                "components": [
+                    {"component_id": "block_alpha", "circuit": compiled}
+                ]
             },
-            "wide.scale": {
-                "dtype": "F8_E8M0",
-                "shape": [1, 32],
-                "layout": "row_major",
-            },
-            "narrow.weight": {
-                "dtype": "F8_E4M3",
-                "shape": [256, 4096],
-                "layout": "row_major",
-            },
-            "narrow.scale": {
-                "dtype": "F8_E8M0",
-                "shape": [2, 32],
-                "layout": "row_major",
-            },
-            "norm.weight": {
-                "dtype": "BF16",
-                "shape": [128],
-                "layout": "row_major",
-            },
+            "component_executions": [
+                {
+                    "component_id": "block_alpha",
+                    "kernels": [
+                        {
+                            "node_id": node_id,
+                            "execution_index": index,
+                            "op": next(
+                                node["op"]
+                                for node in compiled["nodes"]
+                                if node["id"] == node_id
+                            ),
+                            "shader_path": f"shaders/{node_id}.spv",
+                            "local_size_x": 1024,
+                            "workgroup_count_x": 1,
+                        }
+                        for index, node_id in enumerate(
+                            ("quantizer_0", "wide_0", "narrow_0")
+                        )
+                    ],
+                }
+            ],
         }
-    }
+        tensor_index = {
+            "tensors": {
+                "wide.weight": {
+                    "dtype": "F8_E4M3",
+                    "shape": [128, 4096],
+                    "layout": "row_major",
+                },
+                "wide.scale": {
+                    "dtype": "F8_E8M0",
+                    "shape": [1, 32],
+                    "layout": "row_major",
+                },
+                "narrow.weight": {
+                    "dtype": "F8_E4M3",
+                    "shape": [256, 4096],
+                    "layout": "row_major",
+                },
+                "narrow.scale": {
+                    "dtype": "F8_E8M0",
+                    "shape": [2, 32],
+                    "layout": "row_major",
+                },
+                "norm.weight": {
+                    "dtype": "BF16",
+                    "shape": [128],
+                    "layout": "row_major",
+                },
+            }
+        }
+        opportunity = _opportunity("block_alpha")
     package = tmp_path / "package"
     (package / "lowered" / "block_alpha").mkdir(parents=True)
     (package / "vulkan_resident_package.json").write_text(json.dumps(manifest))
@@ -819,7 +1424,6 @@ def test_constructed_candidate_proof_reconstructs_artifacts_and_rejects_tamperin
     (package / "lowered" / "block_alpha" / "circuit.json").write_text(
         json.dumps(source)
     )
-    opportunity = _opportunity("block_alpha")
     context = _Context(
         hardware_profile={"capability_class": "capability_fixture"},
         qualification_regime=QualificationRegime(),
@@ -943,10 +1547,12 @@ def test_provider_builds_one_model_independent_candidate_for_equivalent_componen
         {
             "component_id": "block_alpha",
             "physical_node_id": "wide_0__narrow_0",
+            "combines_upstream_producer": False,
         },
         {
             "component_id": "block_beta",
             "physical_node_id": "wide_0__narrow_0",
+            "combines_upstream_producer": False,
         },
     ]
     assert "model" not in candidate["target_predicate"]
@@ -997,6 +1603,55 @@ def test_provider_builds_one_model_independent_candidate_for_equivalent_componen
     assert any(
         check["product_performance"] is True for check in validation.checks
     )
+
+
+def test_provider_exposes_combined_producer_as_one_nonoverlapping_candidate(
+    monkeypatch,
+) -> None:
+    opportunity = _combined_opportunity("block_alpha")
+    provider, context, candidates = _products(monkeypatch, (opportunity,))
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["representation"]["kind"] == (
+        "exact_capability_scoped_upstream_parallel_projection_fusion"
+    )
+    assert candidate["representation"]["topology"]["component_region_ids"] == [
+        {
+            "component_id": "block_alpha",
+            "physical_node_id": "wide_0__narrow_0",
+            "combines_upstream_producer": True,
+        }
+    ]
+    assert len(candidate["scope_ids"]) == 5
+    assert candidate["behavioral_contract"]["proof_obligations"][-1] == (
+        "combined_upstream_producer_preserves_hyper_norm_and_prequant_order"
+    )
+    representation = provider.emit_representation_ir(context, candidate)
+    operation = representation["nodes"][0]["operation"]
+    assert operation == "exact_upstream_hyper_norm_parallel_projection_island"
+    estimate = provider.estimate_static_cost(
+        context,
+        candidate,
+        representation,
+        provider.lower_for_target(context, candidate, representation),
+    )
+    assert estimate.steady_state_work["source_dispatch_count"] == 5
+    assert estimate.steady_state_work["candidate_dispatch_count"] == 2
+
+
+def test_combined_candidate_is_the_exact_union_of_conflicting_partial_rewrites() -> None:
+    combined = _combined_opportunity("block_alpha")
+    projection = replace(combined, upstream_hyper_fusion=None)
+    upstream = combined.upstream_hyper_fusion
+    assert upstream is not None
+
+    shared = set(projection.scope_ids).intersection(upstream.scope_ids)
+    assert shared == set(projection.region.boundary_scope_ids)
+    assert set(combined.scope_ids) == set(projection.scope_ids).union(
+        upstream.scope_ids
+    )
+    assert len(combined.scope_ids) == len(set(combined.scope_ids))
 
 
 def test_provider_does_not_share_measurements_across_physical_classes(

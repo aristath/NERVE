@@ -14,6 +14,7 @@ from nerve.representation_optimizer.providers.parallel_projection_fusion.artifac
     component_overlay_path,
 )
 from nerve.representation_optimizer.providers.parallel_projection_fusion.contracts import (
+    COMBINED_UPSTREAM_FUSION_OBLIGATION,
     COMPONENT_FIXTURE_SCHEMA,
     EXACT_FUSION_OBLIGATIONS,
     HETEROGENEOUS_COMPOSITE_ISLAND_DESCRIPTOR_ID,
@@ -37,6 +38,9 @@ from nerve.representation_optimizer.providers.parallel_projection_fusion.workloa
     parallel_projection_benchmark_workloads,
     parallel_projection_validation_requirements,
 )
+from nerve.representation_optimizer.providers.hyper_norm_fusion.discovery import (
+    is_hyper_norm_scope,
+)
 from nerve.representation_optimizer.providers.types import (
     EvidenceAssessment,
     MatchAssessment,
@@ -54,7 +58,10 @@ class ExactParallelProjectionFusionProvider:
     descriptor_id = HETEROGENEOUS_COMPOSITE_ISLAND_DESCRIPTOR_ID
 
     def may_optimize_scope(self, scope: Json, source_contract: Json) -> bool:
-        return is_parallel_projection_scope(scope, source_contract)
+        return is_parallel_projection_scope(
+            scope,
+            source_contract,
+        ) or is_hyper_norm_scope(scope, source_contract)
 
     def required_analyzer_ids(
         self,
@@ -66,7 +73,7 @@ class ExactParallelProjectionFusionProvider:
 
     def match_semantics(self, context: ProviderContext) -> MatchAssessment:
         matched = any(
-            is_parallel_projection_scope(scope, contract)
+            self.may_optimize_scope(scope, contract)
             for scope, contract in zip(
                 context.scopes,
                 context.source_contracts,
@@ -76,9 +83,9 @@ class ExactParallelProjectionFusionProvider:
         return MatchAssessment(
             matched=matched,
             reasons=(
-                "linear operators may share one exact physical input representation"
+                "linear operators and their exact upstream representation islands may form one physical transaction"
                 if matched
-                else "no exact linear operator scope is present",
+                else "no exact projection or upstream representation scope is present",
             ),
         )
 
@@ -116,8 +123,18 @@ class ExactParallelProjectionFusionProvider:
                     }
                 ),
                 "region_count": len(result.opportunities),
+                "projection_region_count": sum(
+                    not opportunity.combines_upstream_producer
+                    for opportunity in result.opportunities
+                ),
+                "combined_upstream_region_count": sum(
+                    opportunity.combines_upstream_producer
+                    for opportunity in result.opportunities
+                ),
                 "source_execution": "one_shared_prequantizer_then_independent_linears",
-                "candidate_execution": "one_shared_prequantizer_then_parallel_linear",
+                "candidate_execution": (
+                    "one_exact_optional_upstream_fusion_then_parallel_linear"
+                ),
                 "selection_boundary": "component_region",
             },
             reasons=(
@@ -178,7 +195,11 @@ class ExactParallelProjectionFusionProvider:
                     if evidence_id in accepted
                 ],
                 "representation": {
-                    "kind": "exact_capability_scoped_parallel_projection_fusion",
+                    "kind": (
+                        "exact_capability_scoped_upstream_parallel_projection_fusion"
+                        if representative.combines_upstream_producer
+                        else "exact_capability_scoped_parallel_projection_fusion"
+                    ),
                     "signal_formats": [{"name": "source_bf16_and_fp8_signals"}],
                     "parameter_format": {"kind": "source_parameters_unchanged"},
                     "state_format": {"kind": "source_state_unchanged"},
@@ -188,6 +209,9 @@ class ExactParallelProjectionFusionProvider:
                             {
                                 "component_id": opportunity.component_id,
                                 "physical_node_id": opportunity.physical_node_id,
+                                "combines_upstream_producer": (
+                                    opportunity.combines_upstream_producer
+                                ),
                             }
                             for opportunity in opportunities
                         ],
@@ -200,7 +224,14 @@ class ExactParallelProjectionFusionProvider:
                 "target_predicate": _target_predicate(context, representative),
                 "behavioral_contract": {
                     "mode": "exact",
-                    "proof_obligations": list(EXACT_FUSION_OBLIGATIONS),
+                    "proof_obligations": [
+                        *EXACT_FUSION_OBLIGATIONS,
+                        *(
+                            (COMBINED_UPSTREAM_FUSION_OBLIGATION,)
+                            if representative.combines_upstream_producer
+                            else ()
+                        ),
+                    ],
                     "error_contract": None,
                 },
                 "artifact_declarations": [
@@ -281,7 +312,7 @@ class ExactParallelProjectionFusionProvider:
         del representation_ir, target_lowering
         opportunities = _candidate_opportunities(context, candidate)
         source_dispatch_count = sum(
-            1 + len(item.region.linear_node_ids) for item in opportunities
+            len(item.source_node_ids) for item in opportunities
         )
         candidate_dispatch_count = 2 * len(opportunities)
         return StaticEstimate(
@@ -465,10 +496,27 @@ def _candidate_opportunities(
     candidate: Json,
 ) -> tuple[ParallelProjectionFusionOpportunity, ...]:
     requested = set(candidate["scope_ids"])
+    topology = candidate["representation"]["topology"]
+    performance_signature = topology["performance_equivalence_class"]
+    requested_regions = {
+        (
+            str(record["component_id"]),
+            str(record["physical_node_id"]),
+            bool(record["combines_upstream_producer"]),
+        )
+        for record in topology["component_region_ids"]
+    }
     matches = tuple(
         opportunity
         for opportunity in discover_parallel_projection_fusions(context)
         if set(opportunity.scope_ids).issubset(requested)
+        and opportunity.performance_signature == performance_signature
+        and (
+            opportunity.component_id,
+            opportunity.physical_node_id,
+            opportunity.combines_upstream_producer,
+        )
+        in requested_regions
     )
     covered = {
         scope_id for opportunity in matches for scope_id in opportunity.scope_ids
@@ -507,6 +555,9 @@ def _candidate_opportunities(
             {
                 "component_id": opportunity.component_id,
                 "physical_node_id": opportunity.physical_node_id,
+                "combines_upstream_producer": (
+                    opportunity.combines_upstream_producer
+                ),
             }
             for opportunity in matches
         ],
@@ -578,7 +629,63 @@ def _lowered_component(opportunity: ParallelProjectionFusionOpportunity) -> Json
             ),
             "linear_node_ids": list(opportunity.region.linear_node_ids),
             "quantizer_node_id": opportunity.region.quantizer_node_id,
+            "boundary_scope_ids": list(
+                opportunity.region.boundary_scope_ids
+            ),
+            "boundary_source_contract_digests": list(
+                opportunity.region.boundary_source_contract_digests
+            ),
         },
+        "upstream_hyper_fusion": (
+            None
+            if opportunity.upstream_hyper_fusion is None
+            else {
+                "component_id": opportunity.upstream_hyper_fusion.component_id,
+                "regions": [
+                    {
+                        "scope_id": region.scope_id,
+                        "source_contract_digest": region.source_contract_digest,
+                        "semantic_source_node_ids": list(
+                            region.semantic_source_node_ids
+                        ),
+                        "hyper_node_id": region.hyper_node_id,
+                        "norm_node_id": region.norm_node_id,
+                        "quantizer_node_id": region.quantizer_node_id,
+                        "boundary_scope_ids": list(
+                            region.boundary_scope_ids
+                        ),
+                        "boundary_source_contract_digests": list(
+                            region.boundary_source_contract_digests
+                        ),
+                    }
+                    for region in opportunity.upstream_hyper_fusion.regions
+                ],
+                "evidence_ids": list(
+                    opportunity.upstream_hyper_fusion.evidence_ids
+                ),
+                "source_artifact_refs": list(
+                    opportunity.upstream_hyper_fusion.source_artifact_refs
+                ),
+                "manifest_ref": opportunity.upstream_hyper_fusion.manifest_ref,
+                "circuit_ref": opportunity.upstream_hyper_fusion.circuit_ref,
+                "tensor_index_ref": (
+                    opportunity.upstream_hyper_fusion.tensor_index_ref
+                ),
+                "terminal_node_id": (
+                    opportunity.upstream_hyper_fusion.terminal_node_id
+                ),
+                "hidden_size": opportunity.upstream_hyper_fusion.hidden_size,
+                "max_context_activations": (
+                    opportunity.upstream_hyper_fusion.max_context_activations
+                ),
+                "compiler_device": deepcopy(
+                    opportunity.upstream_hyper_fusion.compiler_device
+                ),
+                "performance_signature": (
+                    opportunity.upstream_hyper_fusion.performance_signature
+                ),
+            }
+        ),
         "overlay_path": component_overlay_path(
             opportunity.component_id,
             opportunity.physical_node_id,

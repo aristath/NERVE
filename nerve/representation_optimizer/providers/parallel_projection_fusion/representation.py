@@ -117,7 +117,11 @@ def parallel_projection_representation_graph(
             {
                 "id": node_id,
                 "kind": "operator",
-                "operation": "exact_shared_input_parallel_projection_island",
+                "operation": (
+                    "exact_upstream_hyper_norm_parallel_projection_island"
+                    if opportunity.combines_upstream_producer
+                    else "exact_shared_input_parallel_projection_island"
+                ),
                 "inputs": [
                     {
                         "id": "input",
@@ -139,7 +143,7 @@ def parallel_projection_representation_graph(
                     "status": "estimated",
                     "metrics": {
                         "source_dispatches": float(
-                            1 + len(opportunity.region.linear_node_ids)
+                            len(opportunity.source_node_ids)
                         ),
                         "candidate_dispatches": 2.0,
                     },

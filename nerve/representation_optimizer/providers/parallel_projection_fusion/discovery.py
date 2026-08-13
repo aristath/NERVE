@@ -6,6 +6,14 @@ from dataclasses import dataclass
 from nerve.compilation import Json, ModelCompileError
 from nerve.physical_representations import FP8_E8M0_PREQUANTIZATION_CONTRACT
 from nerve.representation_optimizer.contracts import stable_contract_id
+from nerve.representation_optimizer.providers.hyper_norm_fusion.discovery import (
+    HyperNormFusionOpportunity,
+    discover_hyper_norm_fusions,
+)
+from nerve.representation_optimizer.providers.adjacent_boundaries import (
+    exact_adjacent_boundary_records,
+    is_adjacent_representation_scope,
+)
 from nerve.representation_optimizer.providers.types import ProviderContext
 
 
@@ -19,6 +27,8 @@ class ParallelProjectionRegion:
     semantic_source_node_ids: tuple[str, ...]
     linear_node_ids: tuple[str, ...]
     quantizer_node_id: str
+    boundary_scope_ids: tuple[str, ...] = ()
+    boundary_source_contract_digests: tuple[str, ...] = ()
 
     @property
     def fused_node_id(self) -> str:
@@ -42,18 +52,82 @@ class ParallelProjectionFusionOpportunity:
     max_context_activations: int
     compiler_device: Json
     performance_signature: str
+    upstream_hyper_fusion: HyperNormFusionOpportunity | None = None
+
+    @property
+    def source_scope_contracts(self) -> tuple[tuple[str, str], ...]:
+        records = list(
+            zip(
+                self.region.scope_ids,
+                self.region.source_contract_digests,
+                strict=True,
+            )
+        )
+        records.extend(
+            zip(
+                self.region.boundary_scope_ids,
+                self.region.boundary_source_contract_digests,
+                strict=True,
+            )
+        )
+        if self.upstream_hyper_fusion is not None:
+            records.extend(
+                zip(
+                    self.upstream_hyper_fusion.scope_ids,
+                    self.upstream_hyper_fusion.source_contract_digests,
+                    strict=True,
+                )
+            )
+        by_scope: dict[str, str] = {}
+        for scope_id, digest in records:
+            previous = by_scope.setdefault(scope_id, digest)
+            if previous != digest:
+                raise ModelCompileError(
+                    "parallel projection alternative contains conflicting source scopes"
+                )
+        return tuple(sorted(by_scope.items()))
 
     @property
     def scope_ids(self) -> tuple[str, ...]:
-        return self.region.scope_ids
+        return tuple(scope_id for scope_id, _digest in self.source_scope_contracts)
 
     @property
     def source_contract_digests(self) -> tuple[str, ...]:
-        return self.region.source_contract_digests
+        return tuple(digest for _scope_id, digest in self.source_scope_contracts)
 
     @property
     def physical_node_id(self) -> str:
         return self.region.fused_node_id
+
+    @property
+    def combines_upstream_producer(self) -> bool:
+        return self.upstream_hyper_fusion is not None
+
+    @property
+    def source_node_ids(self) -> tuple[str, ...]:
+        node_ids = list(self.region.source_node_ids)
+        if self.upstream_hyper_fusion is not None:
+            node_ids.extend(
+                node_id
+                for region in self.upstream_hyper_fusion.regions
+                for node_id in region.source_node_ids
+            )
+        return tuple(dict.fromkeys(node_ids))
+
+    @property
+    def producer_execution_node_id(self) -> str:
+        if self.upstream_hyper_fusion is None:
+            return self.region.quantizer_node_id
+        matches = [
+            region.hyper_node_id
+            for region in self.upstream_hyper_fusion.regions
+            if region.quantizer_node_id == self.region.quantizer_node_id
+        ]
+        if len(matches) != 1:
+            raise ModelCompileError(
+                "combined projection alternative has no unique upstream producer"
+            )
+        return matches[0]
 
 
 @dataclass(frozen=True)
@@ -78,7 +152,7 @@ def is_parallel_projection_scope(scope: Json, source_contract: Json) -> bool:
 def discover_parallel_projection_fusions(
     context: ProviderContext,
 ) -> tuple[ParallelProjectionFusionOpportunity, ...]:
-    key = "parallel_projection_fusion.v1:" + ",".join(context.scope_ids)
+    key = "parallel_projection_fusion.v3:" + ",".join(context.scope_ids)
     return context.memoized(
         key,
         lambda: _discover(context).opportunities,
@@ -86,7 +160,7 @@ def discover_parallel_projection_fusions(
 
 
 def discovery_result(context: ProviderContext) -> DiscoveryResult:
-    key = "parallel_projection_fusion.result.v1:" + ",".join(context.scope_ids)
+    key = "parallel_projection_fusion.result.v3:" + ",".join(context.scope_ids)
     return context.memoized(key, lambda: _discover(context))  # type: ignore[return-value]
 
 
@@ -117,6 +191,15 @@ def _discover(context: ProviderContext) -> DiscoveryResult:
     if not eligible:
         return DiscoveryResult((), ("no exact linear operator scopes",))
 
+    boundary_scopes = [
+        (scope, contracts[str(scope["scope_id"])])
+        for scope in context.scopes
+        if is_adjacent_representation_scope(
+            scope,
+            contracts[str(scope["scope_id"])],
+        )
+    ]
+
     evidence_by_scope = {
         str(scope["scope_id"]): tuple(
             sorted(
@@ -129,7 +212,7 @@ def _discover(context: ProviderContext) -> DiscoveryResult:
                 )
             )
         )
-        for scope, _contract in eligible
+        for scope, _contract in (*eligible, *boundary_scopes)
     }
     resolver = context.source_artifacts
     manifest_ref = "vulkan_resident_package.json"
@@ -152,6 +235,10 @@ def _discover(context: ProviderContext) -> DiscoveryResult:
     for scope, contract in eligible:
         component_id = str(scope["members"]["component_ids"][0])
         by_component.setdefault(component_id, []).append((scope, contract))
+    boundaries_by_component: dict[str, list[tuple[Json, Json]]] = {}
+    for scope, contract in boundary_scopes:
+        component_id = str(scope["members"]["component_ids"][0])
+        boundaries_by_component.setdefault(component_id, []).append((scope, contract))
 
     opportunities = []
     rejected = []
@@ -162,6 +249,9 @@ def _discover(context: ProviderContext) -> DiscoveryResult:
                 _component_opportunities(
                     component_id=component_id,
                     scoped_contracts=tuple(by_component[component_id]),
+                    boundary_scoped_contracts=tuple(
+                        boundaries_by_component.get(component_id, ())
+                    ),
                     evidence_by_scope=evidence_by_scope,
                     resolver=resolver,
                     manifest=manifest,
@@ -178,23 +268,36 @@ def _discover(context: ProviderContext) -> DiscoveryResult:
             rejected.append(
                 f"component {component_id!r} has malformed projection metadata: {error}"
             )
-    evidence_ids = tuple(
-        sorted(
-            {
-                evidence_id
-                for opportunity in opportunities
-                for evidence_id in opportunity.evidence_ids
-            }
-        )
-    )
     if opportunities:
-        return DiscoveryResult(
+        combined = _combined_upstream_opportunities(
+            context,
             tuple(opportunities),
+        )
+        all_opportunities = tuple(
+            sorted(
+                (*opportunities, *combined),
+                key=lambda item: (
+                    item.component_id,
+                    item.physical_node_id,
+                    item.combines_upstream_producer,
+                ),
+            )
+        )
+        return DiscoveryResult(
+            all_opportunities,
             (
-                f"discovered {len(opportunities)} capability-scoped exact "
-                "shared-input projection alternatives",
+                f"discovered {len(opportunities)} exact shared-input projection "
+                f"regions and {len(combined)} combined upstream-producer alternatives",
             ),
-            evidence_ids,
+            tuple(
+                sorted(
+                    {
+                        evidence_id
+                        for opportunity in all_opportunities
+                        for evidence_id in opportunity.evidence_ids
+                    }
+                )
+            ),
         )
     return DiscoveryResult(
         (),
@@ -202,10 +305,78 @@ def _discover(context: ProviderContext) -> DiscoveryResult:
     )
 
 
+def _combined_upstream_opportunities(
+    context: ProviderContext,
+    projections: tuple[ParallelProjectionFusionOpportunity, ...],
+) -> tuple[ParallelProjectionFusionOpportunity, ...]:
+    hyper_opportunities = discover_hyper_norm_fusions(context)
+    by_anchor: dict[tuple[str, str], list[HyperNormFusionOpportunity]] = {}
+    for opportunity in hyper_opportunities:
+        for region in opportunity.regions:
+            by_anchor.setdefault(
+                (opportunity.component_id, region.quantizer_node_id),
+                [],
+            ).append(opportunity)
+    combined = []
+    for projection in projections:
+        matches = by_anchor.get(
+            (projection.component_id, projection.region.quantizer_node_id),
+            [],
+        )
+        if not matches:
+            continue
+        if len(matches) != 1:
+            raise ModelCompileError(
+                "shared-input projection has an ambiguous upstream fusion anchor"
+            )
+        upstream = matches[0]
+        if (
+            upstream.hidden_size != projection.hidden_size
+            or upstream.max_context_activations
+            != projection.max_context_activations
+            or upstream.compiler_device != projection.compiler_device
+        ):
+            raise ModelCompileError(
+                "shared-input projection and upstream producer disagree on their target contract"
+            )
+        combined.append(
+            ParallelProjectionFusionOpportunity(
+                component_id=projection.component_id,
+                region=projection.region,
+                evidence_ids=tuple(
+                    sorted(
+                        set(projection.evidence_ids).union(upstream.evidence_ids)
+                    )
+                ),
+                source_artifact_refs=tuple(
+                    sorted(
+                        set(projection.source_artifact_refs).union(
+                            upstream.source_artifact_refs
+                        )
+                    )
+                ),
+                manifest_ref=projection.manifest_ref,
+                circuit_ref=projection.circuit_ref,
+                tensor_index_ref=projection.tensor_index_ref,
+                hidden_size=projection.hidden_size,
+                max_context_activations=projection.max_context_activations,
+                compiler_device=projection.compiler_device,
+                performance_signature=stable_contract_id(
+                    "hyper_parallel_projection_performance_class",
+                    upstream.performance_signature,
+                    projection.performance_signature,
+                ),
+                upstream_hyper_fusion=upstream,
+            )
+        )
+    return tuple(combined)
+
+
 def _component_opportunities(
     *,
     component_id: str,
     scoped_contracts: tuple[tuple[Json, Json], ...],
+    boundary_scoped_contracts: tuple[tuple[Json, Json], ...],
     evidence_by_scope: dict[str, tuple[str, ...]],
     resolver,
     manifest: Json,
@@ -270,6 +441,20 @@ def _component_opportunities(
         str(node["id"]): index
         for index, node in enumerate(component["circuit"]["nodes"])
     }
+    source_producers_by_output: dict[str, list[str]] = {}
+    for source_node in source_nodes.values():
+        for output in source_node.get("outputs", []):
+            if isinstance(output, str):
+                source_producers_by_output.setdefault(output, []).append(
+                    str(source_node["id"])
+                )
+    boundary_input_sources = {
+        str(record["source"])
+        for record in source_circuit.get("boundary", {}).get("inputs", [])
+        if isinstance(record, dict)
+        and isinstance(record.get("source"), str)
+        and record["source"]
+    }
     max_context_activations = _positive_integer(
         manifest.get("max_context_activations"),
         "compiled package max_context_activations",
@@ -307,6 +492,33 @@ def _component_opportunities(
             or any(node_id not in kernels for node_id in (helper["id"], *consumers))
         ):
             continue
+        semantic_inputs = {
+            tuple(source_nodes[node_id].get("inputs", []))
+            for node_id in semantic_ids
+        }
+        if len(semantic_inputs) != 1:
+            continue
+        logical_inputs = next(iter(semantic_inputs))
+        if len(logical_inputs) != 1 or not isinstance(logical_inputs[0], str):
+            continue
+        producer_matches = source_producers_by_output.get(logical_inputs[0], [])
+        if len(producer_matches) > 1:
+            continue
+        if producer_matches:
+            boundary_records = exact_adjacent_boundary_records(
+                component_id=component_id,
+                producer_node_id=producer_matches[0],
+                consumer_node_ids=semantic_ids,
+                scoped_contracts=boundary_scoped_contracts,
+                evidence_by_scope=evidence_by_scope,
+                require_all=False,
+            )
+            if boundary_records is None:
+                continue
+        elif logical_inputs[0] in boundary_input_sources:
+            boundary_records = ()
+        else:
+            continue
         scoped = [scope_by_node[node_id] for node_id in semantic_ids]
         if any(not evidence_by_scope[str(scope["scope_id"])] for scope, _ in scoped):
             continue
@@ -330,7 +542,11 @@ def _component_opportunities(
                     evidence_id
                     for scope, _contract in scoped
                     for evidence_id in evidence_by_scope[str(scope["scope_id"])]
-                }
+                }.union(
+                    evidence_id
+                    for _scope, _contract, boundary_evidence in boundary_records
+                    for evidence_id in boundary_evidence
+                )
             )
         )
         region = ParallelProjectionRegion(
@@ -339,6 +555,14 @@ def _component_opportunities(
             semantic_source_node_ids=semantic_ids,
             linear_node_ids=linear_ids,
             quantizer_node_id=str(helper["id"]),
+            boundary_scope_ids=tuple(
+                str(boundary_scope["scope_id"])
+                for boundary_scope, _contract, _evidence in boundary_records
+            ),
+            boundary_source_contract_digests=tuple(
+                str(boundary_contract["contract_digest"])
+                for _scope, boundary_contract, _evidence in boundary_records
+            ),
         )
         source_refs = {
             manifest_ref,
@@ -347,6 +571,11 @@ def _component_opportunities(
             *(
                 path
                 for _scope, contract in scoped
+                for path in contract["exact_reference"]["artifact_refs"]
+            ),
+            *(
+                path
+                for _scope, contract, _evidence in boundary_records
                 for path in contract["exact_reference"]["artifact_refs"]
             ),
         }

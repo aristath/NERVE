@@ -14,9 +14,9 @@ from nerve.representation_optimizer.providers.parallel_projection_fusion.artifac
     PROOF_PATH,
 )
 from nerve.representation_optimizer.providers.parallel_projection_fusion.contracts import (
-    EXACT_FUSION_OBLIGATIONS,
     PROOF_SCHEMA,
     PROOF_VERIFIER_ID,
+    SUPPORTED_FUSION_OBLIGATIONS,
     TARGET_LOWERING_SCHEMA,
 )
 from nerve.representation_optimizer.providers.parallel_projection_fusion.physical import (
@@ -52,7 +52,7 @@ class ExactParallelProjectionFusionProofVerifier:
         facts: Json = {}
         artifacts = []
         try:
-            if request.obligation not in EXACT_FUSION_OBLIGATIONS:
+            if request.obligation not in SUPPORTED_FUSION_OBLIGATIONS:
                 raise ModelCompileError(
                     f"unsupported parallel projection proof obligation {request.obligation!r}"
                 )

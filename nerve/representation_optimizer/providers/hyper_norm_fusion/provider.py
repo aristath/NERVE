@@ -550,6 +550,10 @@ def _lowered_component(opportunity: HyperNormFusionOpportunity) -> Json:
                 "hyper_node_id": region.hyper_node_id,
                 "norm_node_id": region.norm_node_id,
                 "quantizer_node_id": region.quantizer_node_id,
+                "boundary_scope_ids": list(region.boundary_scope_ids),
+                "boundary_source_contract_digests": list(
+                    region.boundary_source_contract_digests
+                ),
             }
             for region in opportunity.regions
         ],

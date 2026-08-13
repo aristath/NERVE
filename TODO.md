@@ -173,14 +173,25 @@ the local placement calibration, and the mounted graph.
   physical island. Discovery depends on graph and physical representation
   contracts rather than model or node names. On the current DeepSeek package it
   finds 64 regions in two exact performance families: 43 attention input/KV
-  pairs and 21 compressed-attention query/indexer pairs. The corresponding
-  candidates own 86 and 42 operator scopes. A fresh 21-region real-package
-  construction emitted scalar plus causal-batch SPIR-V and sealed overlays;
-  deterministic reconstruction proved both the source-region and per-branch
-  arithmetic obligations, while a modified overlay was rejected. Sequential
-  provider and shared optimizer regressions pass. Both alternatives remain
-  unselected until the authorized component and product measurements prove a
-  complete-stream win.
+  pairs and 21 compressed-attention query/indexer pairs. Every alternative now
+  owns every catalogued inter-module producer/consumer boundary it rewrites;
+  internal semantic-module edges do not acquire ceremonial scopes. The plain
+  candidates therefore own 172 and 63 exact scopes respectively.
+- The 43 attention input/KV regions also expose one combined source-anchored
+  hyper/RMS/prequant-plus-projection alternative. It replaces the five source
+  dispatches with two exact scalar and causal-batch kernels, preserves both the
+  hyper/RMS/prequant and per-branch projection rewrite contracts, and owns the
+  deduplicated union of 215 scopes. Hyper-only and projection-only alternatives
+  share exactly their 86 rewritten boundary scopes, so selection rejects the
+  incompatible pair while retaining hyper-only, projection-only, combined, and
+  source choices. The current real package discovers 64 plain plus 43 combined
+  regions and constructs three unique physical candidate families. A staged
+  combined candidate passes all three deterministic reconstruction obligations
+  and rejects a modified overlay. The 149-test optimizer/selection/mount suite,
+  127 compiler/physical-contract tests, and 133 automation/staging/promotion/
+  validation tests pass sequentially. These alternatives remain unselected
+  until the authorized component and product measurements prove a complete-
+  stream win.
 - A mounted derived representation now reserves a complete hot selected-expert
   wave per affected selector in addition to its immutable compact source. The
   contract accounts transformed and unchanged atomic-group members, source and
@@ -845,20 +856,12 @@ For every numbered item below:
   reasoning merely to make generation state reusable, copy full state
   capacity, or introduce hot-path host polling.
 - On the authorized live gate, measure the two exact shared-input projection
-  families in decode and prefill, compare every output binding and complete
-  product behavior with the source, and retain each family only where the
-  complete stream wins. The 21 compressed-attention regions are disjoint from
-  the current hyper/RMS alternatives and can be selected independently.
-- Build one combined source-anchored attention-input island for the 43 regions
-  where the shared quantizer is already owned by the hyper/RMS/prequant
-  alternative. Do not permit overlapping overlays or choose between two
-  individually useful rewrites merely because they share the same producer.
-  The combined candidate must fuse the exact hyper/RMS/prequant producer and
-  its parallel query/KV projections, preserve every branch's arithmetic order,
-  expose scalar and causal-batch contracts, and be selected only by measured
-  complete-region and product performance. Continue re-evaluating surrounding
-  dense consumers so local outputs need not be unnecessarily published or
-  converted.
+  families and the combined hyper/RMS/prequant-plus-projection family in decode
+  and prefill. Compare every output binding and complete product behavior with
+  the source, and retain each family only where the complete stream wins. The
+  21 compressed-attention regions remain independently selectable. Continue
+  re-evaluating surrounding dense consumers so local outputs need not be
+  unnecessarily published or converted.
 
 ### 9. Make temporal prefill a true multi-token transaction
 

@@ -35,6 +35,10 @@ from nerve.representation_optimizer.providers.parallel_projection_fusion.discove
     ParallelProjectionFusionOpportunity,
     ParallelProjectionRegion,
 )
+from nerve.representation_optimizer.providers.hyper_norm_fusion.discovery import (
+    HyperNormFusionOpportunity,
+    HyperNormRegion,
+)
 from nerve.representation_optimizer.providers.parallel_projection_fusion.physical import (
     PreparedFusedComponent,
     prepare_fused_component_from_documents,
@@ -231,7 +235,11 @@ def finalize_fused_kernel(
     artifact_payloads: dict[str, bytes],
 ) -> Json:
     kernel = deepcopy(source_kernel)
-    if kernel["node_id"] == component.transformed.replacement_nodes[0]["id"]:
+    producer = component.transformed.replacement_nodes[0]
+    if (
+        kernel["node_id"] == producer["id"]
+        and producer.get("op") == "quantize_fp8_e4m3_e8m0"
+    ):
         return kernel
     for implementation in kernel.get("batch_implementations", []):
         paths = {
@@ -290,7 +298,58 @@ def _opportunity(record: Json) -> ParallelProjectionFusionOpportunity:
         ),
         linear_node_ids=tuple(raw_region["linear_node_ids"]),  # type: ignore[arg-type]
         quantizer_node_id=str(raw_region["quantizer_node_id"]),
+        boundary_scope_ids=tuple(raw_region.get("boundary_scope_ids", ())),
+        boundary_source_contract_digests=tuple(
+            raw_region.get("boundary_source_contract_digests", ())
+        ),
     )
+    upstream_record = record.get("upstream_hyper_fusion")
+    upstream = None
+    if upstream_record is not None:
+        if not isinstance(upstream_record, dict):
+            raise ModelCompileError(
+                "parallel projection lowering has malformed upstream fusion metadata"
+            )
+        upstream = HyperNormFusionOpportunity(
+            component_id=str(upstream_record["component_id"]),
+            regions=tuple(
+                HyperNormRegion(
+                    scope_id=str(region["scope_id"]),
+                    source_contract_digest=str(
+                        region["source_contract_digest"]
+                    ),
+                    semantic_source_node_ids=tuple(  # type: ignore[arg-type]
+                        region["semantic_source_node_ids"]
+                    ),
+                    hyper_node_id=str(region["hyper_node_id"]),
+                    norm_node_id=str(region["norm_node_id"]),
+                    quantizer_node_id=str(region["quantizer_node_id"]),
+                    boundary_scope_ids=tuple(
+                        region.get("boundary_scope_ids", ())
+                    ),
+                    boundary_source_contract_digests=tuple(
+                        region.get("boundary_source_contract_digests", ())
+                    ),
+                )
+                for region in upstream_record["regions"]
+            ),
+            evidence_ids=tuple(upstream_record["evidence_ids"]),
+            source_artifact_refs=tuple(
+                upstream_record["source_artifact_refs"]
+            ),
+            manifest_ref=str(upstream_record["manifest_ref"]),
+            circuit_ref=str(upstream_record["circuit_ref"]),
+            tensor_index_ref=str(upstream_record["tensor_index_ref"]),
+            terminal_node_id=str(upstream_record["terminal_node_id"]),
+            hidden_size=int(upstream_record["hidden_size"]),
+            max_context_activations=int(
+                upstream_record["max_context_activations"]
+            ),
+            compiler_device=deepcopy(upstream_record["compiler_device"]),
+            performance_signature=str(
+                upstream_record["performance_signature"]
+            ),
+        )
     return ParallelProjectionFusionOpportunity(
         component_id=str(record["component_id"]),
         region=region,
@@ -303,6 +362,7 @@ def _opportunity(record: Json) -> ParallelProjectionFusionOpportunity:
         max_context_activations=int(record["max_context_activations"]),
         compiler_device=deepcopy(record["compiler_device"]),
         performance_signature=str(record["performance_signature"]),
+        upstream_hyper_fusion=upstream,
     )
 
 
