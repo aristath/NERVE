@@ -98,6 +98,92 @@ fn physical_mount_plan_uses_requested_context_without_opening_vulkan() {
 }
 
 #[test]
+fn physical_mount_plan_sizes_feedback_control_from_the_exact_dispatch_set() {
+    let model = fixture_model_runtime_model();
+    let package_root = tiny_model_dir();
+    let physical = VulkanRuntimePhysicalExecutionPlan::uniform(&model);
+    let [logical_device_id] = physical.device_ids(&model).try_into().unwrap();
+    let device = physical_mount_test_device(&logical_device_id);
+    let mounted = plan_vulkan_runtime_physical_mount(
+        &package_root,
+        &model,
+        &physical,
+        None,
+        16,
+        0,
+        ResourceResidencyPolicy::Eager,
+        &[device],
+        usize::MAX,
+    )
+    .unwrap()
+    .unwrap();
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let resource_contract = instantiate_runtime_resource_contract(&model).unwrap();
+    let slice = VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning(
+        &package_root,
+        &model,
+        &resource_contract,
+        &tensor_index,
+        &logical_device_id,
+        16,
+    )
+    .unwrap();
+    let decode = VulkanDistributedExecutionPlan {
+        device_ids: vec![logical_device_id],
+        storage_buffer_offset_alignment: 1,
+        dispatches: Vec::new(),
+        execution_islands: Vec::new(),
+        shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+        shared_input_byte_capacity: 1,
+        shared_output_byte_capacity: 1,
+        distributed_parameter_byte_count: 0,
+    };
+    let store = VulkanDistributedSelectedResourceStorePlan {
+        devices: Vec::new(),
+        tensor_sharded_residency_cohorts: Vec::new(),
+        device_count: 0,
+        selector_count: 0,
+        selector_placement_count: 0,
+        unique_atomic_group_count: 0,
+        total_addressable_bytes: 0,
+    };
+    let expected = plan_vulkan_runtime_feedback_control_residency(
+        &model,
+        &resource_contract,
+        &[slice.clone()],
+        &decode,
+        &store,
+        &[VulkanRuntimeSelectedResourceMountDevice {
+            logical_device_id: decode.device_ids[0].clone(),
+            physical_device_id: "gpu0".to_string(),
+            execution_identity: physical_mount_test_device(&decode.device_ids[0]).identity,
+            live_safe_capacity_bytes: usize::MAX,
+            upload_alignment: 8,
+        }],
+        &decode.device_ids[0],
+        &decode.device_ids[0],
+        false,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+
+    assert_eq!(
+        expected.local_model_dispatch_count,
+        slice.prepared_plan.dispatches.len()
+    );
+    assert_eq!(expected.local_residency_gate_dispatch_count, 0);
+    assert_eq!(expected.distributed_model_dispatch_count, 0);
+    assert_eq!(expected.distributed_residency_gate_dispatch_count, 0);
+    assert_eq!(
+        mounted
+            .physical_execution_residency_plan
+            .feedback_control_resident_byte_capacity()
+            .unwrap(),
+        expected.byte_capacity,
+    );
+}
+
+#[test]
 fn physical_mount_plan_rejects_missing_and_duplicate_device_records() {
     let model = fixture_model_runtime_model();
     let physical = VulkanRuntimePhysicalExecutionPlan::uniform(&model);

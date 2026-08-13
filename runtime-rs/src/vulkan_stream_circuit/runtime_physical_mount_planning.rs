@@ -172,6 +172,25 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
                 catalog,
                 telemetry,
             )?;
+        let feedback_control = plan_vulkan_runtime_feedback_control_residency(
+            runtime_model,
+            resource_contract,
+            slice_plans,
+            &resolution.plans.execution_plans.decode,
+            &resolution.plans.selected_resource_store_plan,
+            devices,
+            input_device_id,
+            output_device_id,
+            speculative_draft_tokens > 0,
+            residency_policy,
+        )?;
+        resolution
+            .plans
+            .physical_execution_residency_plan
+            .resize_feedback_control_residency(feedback_control.byte_capacity)
+            .map_err(|error| {
+                physical_mount_planning_error("exact feedback-control residency", error)
+            })?;
         resolution
             .plans
             .physical_execution_residency_plan

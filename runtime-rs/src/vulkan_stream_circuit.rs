@@ -221,6 +221,7 @@ include!("vulkan_stream_circuit/physical_residency_checkpoint.rs");
 include!("vulkan_stream_circuit/residency_backpressure_scheduler.rs");
 include!("vulkan_stream_circuit/runtime_residency_plan.rs");
 include!("vulkan_stream_circuit/runtime_physical_execution_residency.rs");
+include!("vulkan_stream_circuit/runtime_feedback_control_residency.rs");
 include!("vulkan_stream_circuit/runtime_auto_placement.rs");
 include!("vulkan_stream_circuit/runtime_placement_calibration.rs");
 include!("vulkan_stream_circuit/placement_equivalence.rs");

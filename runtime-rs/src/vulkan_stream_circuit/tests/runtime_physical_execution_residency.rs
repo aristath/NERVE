@@ -1360,6 +1360,48 @@ fn feedback_control_binding_uses_one_device_allocation_when_colocated() {
 }
 
 #[test]
+fn feedback_control_resizing_updates_the_exact_owner_and_total_atomically() {
+    let (mut base, _) = physical_execution_edge_base_plan();
+    add_feedback_control_residency(&mut base, 12_345);
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &empty_physical_execution_activation_plan(),
+    )
+    .unwrap();
+    let previous_total = plan.total_stream_device_local_bytes;
+    let previous_owner = plan
+        .device_plans
+        .iter()
+        .find(|device| device.device_id == "owner")
+        .unwrap()
+        .stream_device_local_bytes;
+
+    plan.resize_feedback_control_residency(4_321).unwrap();
+
+    assert_eq!(plan.feedback_control_resident_byte_capacity().unwrap(), 4_321);
+    assert_eq!(
+        plan.total_stream_device_local_bytes,
+        previous_total - 12_345 + 4_321
+    );
+    assert_eq!(
+        plan.device_plans
+            .iter()
+            .find(|device| device.device_id == "owner")
+            .unwrap()
+            .stream_device_local_bytes,
+        previous_owner - 12_345 + 4_321
+    );
+
+    let resized = plan.clone();
+    let error = plan.resize_feedback_control_residency(0).unwrap_err();
+    assert!(error.to_string().contains("positive capacity"));
+    assert_eq!(plan, resized);
+}
+
+#[test]
 fn feedback_control_binding_moves_exactly_one_allocation_to_shared_host() {
     let (mut base, _) = physical_execution_edge_base_plan();
     add_feedback_control_residency(&mut base, 12_345);

@@ -839,11 +839,21 @@ impl VulkanResidentSamplerRunner {
         kernels: &[VulkanResidentSamplerKernelArtifact],
         spec: &VulkanResidentSamplerSpec,
     ) -> usize {
-        let sampling = kernels
-            .iter()
-            .filter(|kernel| {
+        Self::feedback_dispatch_count_for_kernel_roles(
+            kernels.iter().map(|kernel| kernel.role.as_str()),
+            spec,
+        )
+    }
+
+    fn feedback_dispatch_count_for_kernel_roles<'a>(
+        kernel_roles: impl IntoIterator<Item = &'a str>,
+        spec: &VulkanResidentSamplerSpec,
+    ) -> usize {
+        let sampling = kernel_roles
+            .into_iter()
+            .filter(|role| {
                 sampler_kernel_role_matches(
-                    kernel.role.as_str(),
+                    role,
                     spec.runtime_parameterized,
                     spec.method.as_str(),
                 )

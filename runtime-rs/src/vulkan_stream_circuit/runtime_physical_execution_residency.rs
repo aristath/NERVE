@@ -463,6 +463,127 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
         })
     }
 
+    fn resize_feedback_control_residency(
+        &mut self,
+        exact_byte_capacity: usize,
+    ) -> Result<(), VulkanRuntimeResidencyPlanError> {
+        if exact_byte_capacity == 0 || self.feedback_control_memory_domain_bound {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "feedback-control resizing requires a positive capacity before memory-domain binding"
+                    .to_string(),
+            ));
+        }
+        let matches = self
+            .device_plans
+            .iter()
+            .enumerate()
+            .flat_map(|(device_index, device)| {
+                device
+                    .resident_stream_device_allocations
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(allocation_index, allocation)| {
+                        matches!(
+                            &allocation.kind,
+                            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                                class: VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
+                                buffer_id,
+                                ..
+                            } if buffer_id == "control"
+                        )
+                        .then_some((device_index, allocation_index))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let [(device_index, allocation_index)] = matches.as_slice() else {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "feedback-control resizing found {} control allocations, expected one",
+                matches.len(),
+            )));
+        };
+        let previous = self.device_plans[*device_index].resident_stream_device_allocations
+            [*allocation_index]
+            .byte_capacity;
+        if previous == exact_byte_capacity {
+            return Ok(());
+        }
+        let next_owner_stream_bytes = self.device_plans[*device_index]
+            .breakdown
+            .owner_stream_device_bytes
+            .checked_sub(previous)
+            .and_then(|bytes| bytes.checked_add(exact_byte_capacity))
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "feedback-control owner residency resizing overflowed".to_string(),
+                )
+            })?;
+        let next_stream_bytes = self.device_plans[*device_index]
+            .stream_device_local_bytes
+            .checked_sub(previous)
+            .and_then(|bytes| bytes.checked_add(exact_byte_capacity))
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "feedback-control stream residency resizing overflowed".to_string(),
+                )
+            })?;
+        let next_total_stream_bytes = self
+            .total_stream_device_local_bytes
+            .checked_sub(previous)
+            .and_then(|bytes| bytes.checked_add(exact_byte_capacity))
+            .ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(
+                    "feedback-control total residency resizing overflowed".to_string(),
+                )
+            })?;
+        let device = &mut self.device_plans[*device_index];
+        device.resident_stream_device_allocations[*allocation_index].byte_capacity =
+            exact_byte_capacity;
+        device.breakdown.owner_stream_device_bytes = next_owner_stream_bytes;
+        device.stream_device_local_bytes = next_stream_bytes;
+        self.total_stream_device_local_bytes = next_total_stream_bytes;
+        Ok(())
+    }
+
+    fn feedback_control_resident_byte_capacity(
+        &self,
+    ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+        let device_capacities = self.device_plans.iter().flat_map(|device| {
+            device
+                .resident_stream_device_allocations
+                .iter()
+                .filter_map(|allocation| {
+                    matches!(
+                        &allocation.kind,
+                        VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                            class: VulkanRuntimeResidentBufferClass::FeedbackWorkspace,
+                            buffer_id,
+                            ..
+                        } if buffer_id == "control"
+                    )
+                    .then_some(allocation.byte_capacity)
+                })
+        });
+        let host_capacities = self.resident_shared_host_allocations.iter().filter_map(
+            |allocation| {
+                matches!(
+                    allocation.kind,
+                    VulkanRuntimeSharedHostResidentAllocationKind::FeedbackControl { .. }
+                )
+                .then_some(allocation.byte_capacity)
+            },
+        );
+        let capacities = device_capacities
+            .chain(host_capacities)
+            .collect::<Vec<_>>();
+        let [capacity] = capacities.as_slice() else {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "physical residency contains {} feedback-control allocations, expected one",
+                capacities.len(),
+            )));
+        };
+        Ok(*capacity)
+    }
+
     fn bind_graph_edge_memory_domains(
         &mut self,
         edge_plans: &[VulkanPlacedEdgeIoPlan],

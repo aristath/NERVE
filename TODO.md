@@ -520,11 +520,15 @@ For every numbered item below:
   control allocation stays device-local for one physical target and moves to
   one shared-host allocation for a multi-target stream. Parallel-only
   speculative decoders no longer reserve an autoregressive target-frame
-  history they never allocate. The feedback-control dispatch-table capacity is
-  still planned from a conservative class upper bound rather than the exact
-  final local, distributed, and residency-gate dispatch set. Speculative-decoder
-  state, activation, sampler, and auxiliary allocations also still enter
-  terminal admission as class aggregates.
+  history they never allocate. Feedback-control capacity now comes from the
+  exact final decode transaction: local dispatches exclude distributed
+  replacements, local and per-shard residency gates are counted from their
+  actual store ownership and policy, distributed island dispatches are counted
+  per participant, and the input, output, and selected sampler dispatches are
+  explicit. The materialized loader independently reconstructs the registered
+  dispatch count and fails if its allocation differs from the workload-free
+  plan. Speculative-decoder state, activation, sampler, and auxiliary
+  allocations still enter terminal admission as class aggregates.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

@@ -153,17 +153,10 @@ impl VulkanResidentFeedbackControlPlane {
             .ok_or_else(|| {
                 VulkanError("resident feedback control mask size overflowed".to_string())
             })?;
-        let dispatch_word_count = dispatch_capacity
-            .checked_mul(VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT / size_of::<u32>())
-            .ok_or_else(|| {
-                VulkanError("resident feedback indirect table size overflowed".to_string())
-            })?;
-        let byte_capacity = dispatch_word_offset
-            .checked_add(dispatch_word_count)
-            .and_then(|words| words.checked_mul(size_of::<u32>()))
-            .ok_or_else(|| {
-                VulkanError("resident feedback control buffer size overflowed".to_string())
-            })?;
+        let byte_capacity = resident_feedback_control_byte_capacity(
+            vocabulary_size,
+            dispatch_capacity,
+        )?;
         let resolved_devices = device_ids
             .iter()
             .map(|device_id| {
@@ -495,6 +488,34 @@ impl VulkanResidentFeedbackControlPlane {
                 VulkanError("resident feedback control host buffer disappeared".to_string())
             })
     }
+}
+
+fn resident_feedback_control_byte_capacity(
+    vocabulary_size: usize,
+    dispatch_capacity: usize,
+) -> Result<usize, VulkanError> {
+    if vocabulary_size == 0 || dispatch_capacity == 0 {
+        return Err(VulkanError(
+            "resident feedback control sizing requires a nonzero vocabulary and at least one dispatch"
+                .to_string(),
+        ));
+    }
+    let stop_mask_word_count = vocabulary_size.div_ceil(u32::BITS as usize);
+    let fixed_word_count = VULKAN_FEEDBACK_CONTROL_HEADER_WORD_COUNT
+        .checked_add(stop_mask_word_count)
+        .ok_or_else(|| {
+            VulkanError("resident feedback control mask size overflowed".to_string())
+        })?;
+    fixed_word_count
+        .checked_mul(size_of::<u32>())
+        .and_then(|fixed_bytes| {
+            dispatch_capacity
+                .checked_mul(VULKAN_RESIDENT_INDIRECT_DISPATCH_BYTE_COUNT)
+                .and_then(|dispatch_bytes| fixed_bytes.checked_add(dispatch_bytes))
+        })
+        .ok_or_else(|| {
+            VulkanError("resident feedback control buffer size overflowed".to_string())
+        })
 }
 
 impl VulkanResidentFeedbackCancellationHandle {

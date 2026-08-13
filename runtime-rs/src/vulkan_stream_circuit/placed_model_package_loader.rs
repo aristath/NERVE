@@ -1535,6 +1535,28 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 ))
             })?;
         let vocabulary_size = self.sampler_spec.logits_byte_capacity / size_of::<f32>();
+        let planned_feedback_control_bytes = self
+            .physical_execution_residency_plan
+            .feedback_control_resident_byte_capacity()
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed exact feedback-control residency validation: {error}",
+                    )),
+                )
+            })?;
+        let mounted_feedback_control_bytes = resident_feedback_control_byte_capacity(
+            vocabulary_size,
+            feedback_dispatch_capacity,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        if planned_feedback_control_bytes != mounted_feedback_control_bytes {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "planned feedback control needs {planned_feedback_control_bytes} bytes but the exact mounted dispatch set needs {mounted_feedback_control_bytes} bytes",
+                )),
+            ));
+        }
         let mut feedback_control = VulkanResidentFeedbackControlPlane::new(
             &self.device_ids,
             &self.output_device_id,
