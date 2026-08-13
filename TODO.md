@@ -502,11 +502,18 @@ For every numbered item below:
   selection telemetry. Resident graph edges now preserve the mount's actual
   allocation topology as well: local and outgoing fan-out from one produced
   port shares one ledger entry, incoming storage remains distinct, and a
-  boundary-input passthrough adds no second allocation. The remaining edge work
-  is to rebind those identities to the selected cross-device produced-port
-  route and its physical memory domain. Sampler, feedback, and
-  speculative-decoder allocations also still enter terminal admission as class
-  aggregates.
+  boundary-input passthrough adds no second allocation. Those identities are
+  now rebound to the exact selected physical route before terminal admission.
+  An external-device-local produced port owns one exportable allocation on its
+  physical source; a staged port owns one device-local allocation per physical
+  participant plus one shared-host allocation; and colocated logical endpoints
+  collapse to the source allocation. Deferred distributed-edge participants are
+  included without charging a provisional activation allocation, conflicting or
+  missing routes fail atomically, and planning and mounting use the same pure
+  physical-route resolver. Terminal admission queries every external and staged
+  allocation separately at its exact Vulkan requirement rather than rounding a
+  logical aggregate. Sampler, feedback, and speculative-decoder allocations
+  still enter terminal admission as class aggregates.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

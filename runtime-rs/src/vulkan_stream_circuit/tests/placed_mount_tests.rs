@@ -285,6 +285,66 @@ fn selected_boundary_route_must_match_mounted_edge_identity_and_fanout() {
 }
 
 #[test]
+fn produced_port_resident_route_resolution_is_exact_and_physical() {
+    let outgoing = outgoing_fanout_endpoint(0, 5, "gpu1", "draft_01");
+    let groups = group_placed_edge_pairs_by_produced_port(vec![(
+        outgoing.clone(),
+        incoming_fanout_endpoint(&outgoing),
+    )])
+    .unwrap();
+    let group = &groups[0];
+
+    assert_eq!(
+        resolve_vulkan_produced_port_resident_route(
+            group,
+            Some(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal),
+            None,
+            2,
+        )
+        .unwrap(),
+        Some(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal),
+    );
+    assert_eq!(
+        resolve_vulkan_produced_port_resident_route(
+            group,
+            None,
+            Some(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging),
+            2,
+        )
+        .unwrap(),
+        Some(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging),
+    );
+    assert_eq!(
+        resolve_vulkan_produced_port_resident_route(group, None, None, 1).unwrap(),
+        None,
+    );
+
+    let conflict = resolve_vulkan_produced_port_resident_route(
+        group,
+        Some(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal),
+        Some(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging),
+        2,
+    )
+    .unwrap_err();
+    assert!(conflict.0.contains("incompatible selected and distributed"));
+
+    let colocated_selected = resolve_vulkan_produced_port_resident_route(
+        group,
+        Some(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal),
+        None,
+        1,
+    )
+    .unwrap_err();
+    assert!(colocated_selected.0.contains("has no physical peer"));
+
+    let missing = resolve_vulkan_produced_port_resident_route(group, None, None, 2).unwrap_err();
+    assert!(missing.0.contains("without an exact mounted route"));
+
+    let empty = resolve_vulkan_produced_port_resident_route(group, None, None, 0).unwrap_err();
+    assert!(empty.0.contains("has no physical participant"));
+}
+
+#[test]
 fn placed_edge_allocation_aliases_mixed_local_and_remote_fanout() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let buffers = mixed_fanout_edge_plan().allocate_buffers(&device).unwrap();

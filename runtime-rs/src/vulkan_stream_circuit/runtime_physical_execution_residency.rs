@@ -1,5 +1,21 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v5";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v6";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VulkanRuntimeExternalDeviceLocalResidentAllocation {
+    pub owner_device_id: String,
+    pub participant_device_ids: Vec<String>,
+    pub byte_capacity: usize,
+    pub concern: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VulkanRuntimeSharedHostResidentAllocation {
+    pub owner_device_id: String,
+    pub participant_device_ids: Vec<String>,
+    pub byte_capacity: usize,
+    pub concern: String,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
@@ -8,10 +24,13 @@ pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
     pub independently_admitted_resource_store_bytes: usize,
     pub owner_stream_device_bytes: usize,
     pub owner_stream_control_device_bytes_per_stream: usize,
+    pub owner_edge_buffer_bytes_per_stream: usize,
     pub distributed_parameter_bytes: usize,
     pub distributed_shared_activation_device_bytes_per_stream: usize,
     pub distributed_private_activation_device_bytes_per_stream: usize,
     pub distributed_shared_host_bytes_per_stream: usize,
+    pub external_edge_device_bytes_per_stream: usize,
+    pub staged_edge_shared_host_bytes_per_stream: usize,
     pub execution_transient_device_bytes_per_stream: usize,
 }
 
@@ -23,6 +42,8 @@ pub struct VulkanRuntimePhysicalExecutionDeviceResidencyPlan {
     pub stream_device_local_bytes: usize,
     pub stream_shared_host_bytes: usize,
     pub resident_stream_device_allocations: Vec<VulkanRuntimeResidentStreamAllocation>,
+    pub external_device_local_resident_allocations:
+        Vec<VulkanRuntimeExternalDeviceLocalResidentAllocation>,
     pub execution_transient_device_allocations:
         Vec<VulkanRuntimeDeviceLocalTransientAllocation>,
 }
@@ -38,7 +59,9 @@ pub struct VulkanRuntimePhysicalExecutionResidencyPlan {
     pub execution_transient_shared_host_bytes_per_stream: usize,
     pub execution_transient_shared_host_allocations:
         Vec<VulkanRuntimeSharedHostTransientAllocation>,
+    pub resident_shared_host_allocations: Vec<VulkanRuntimeSharedHostResidentAllocation>,
     pub shared_stream_control_host_bytes_per_stream: usize,
+    pub graph_edge_memory_domains_bound: bool,
 }
 
 impl VulkanRuntimePhysicalExecutionResidencyPlan {
@@ -146,6 +169,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             breakdown.owner_stream_device_bytes = owner_stream_device_bytes;
             breakdown.owner_stream_control_device_bytes_per_stream =
                 device.breakdown.stream_control_bytes;
+            breakdown.owner_edge_buffer_bytes_per_stream = device.breakdown.edge_buffer_bytes;
             validate_resident_stream_allocation_ledger(device)?;
             *resident_stream_device_allocations
                 .get_mut(&device.device_id)
@@ -276,6 +300,13 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
         }
 
         for allocation in &activations.allocations {
+            // Graph-edge storage is deliberately deferred until the complete
+            // produced-port fan-out and selected physical boundary route are
+            // known. Charging the generic distributed activation here would
+            // duplicate the buffer materialized by create_placed_device_links.
+            if matches!(allocation.storage, VulkanDistributedActivationStorage::Edge { .. }) {
+                continue;
+            }
             ensure_physical_residency_activation_devices(
                 &allowed,
                 &allocation.owner_device_id,
@@ -387,6 +418,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 stream_device_local_bytes,
                 stream_shared_host_bytes,
                 resident_stream_device_allocations,
+                external_device_local_resident_allocations: Vec::new(),
                 execution_transient_device_allocations: Vec::new(),
             });
         }
@@ -399,8 +431,464 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             total_stream_shared_host_bytes,
             execution_transient_shared_host_bytes_per_stream: 0,
             execution_transient_shared_host_allocations: Vec::new(),
+            resident_shared_host_allocations: Vec::new(),
             shared_stream_control_host_bytes_per_stream: 0,
+            graph_edge_memory_domains_bound: false,
         })
+    }
+
+    fn bind_graph_edge_memory_domains(
+        &mut self,
+        edge_plans: &[VulkanPlacedEdgeIoPlan],
+        activations: &VulkanDistributedActivationBufferPlan,
+        selected_boundary_routes: &BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
+        physical_device_by_logical_device: &BTreeMap<String, String>,
+    ) -> Result<(), VulkanRuntimeResidencyPlanError> {
+        if self.graph_edge_memory_domains_bound {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "graph-edge memory domains were already bound".to_string(),
+            ));
+        }
+        let mut next = self.clone();
+        let planned_devices = next
+            .device_plans
+            .iter()
+            .map(|device| device.device_id.as_str())
+            .collect::<BTreeSet<_>>();
+        if physical_device_by_logical_device.len() != planned_devices.len()
+            || planned_devices.iter().any(|device_id| {
+                !physical_device_by_logical_device.contains_key(*device_id)
+            })
+        {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "graph-edge memory-domain binding is incomplete or contains extra logical devices"
+                    .to_string(),
+            ));
+        }
+        let groups = group_placed_edge_pairs_by_produced_port(
+            pair_placed_edge_endpoints(edge_plans).map_err(residency_display_error)?,
+        )
+        .map_err(residency_display_error)?;
+        let mut removals = BTreeSet::<(String, VulkanRuntimeResidentStreamAllocationKind)>::new();
+        let mut additions = BTreeMap::<String, Vec<VulkanRuntimeResidentStreamAllocation>>::new();
+        let mut external_additions = BTreeMap::<
+            String,
+            Vec<VulkanRuntimeExternalDeviceLocalResidentAllocation>,
+        >::new();
+        let mut shared_host_additions = Vec::<VulkanRuntimeSharedHostResidentAllocation>::new();
+
+        for group in groups {
+            let matching_local_edges = edge_plans
+                .iter()
+                .find(|plan| plan.device_id == group.source_device_id)
+                .into_iter()
+                .flat_map(|plan| &plan.local_edges)
+                .filter(|edge| {
+                    edge.source_component_id == group.source_component_id
+                        && edge.source_port_id == group.source_port_id
+                })
+                .map(|edge| edge.edge_index)
+                .collect::<BTreeSet<_>>();
+            let produced_edge_indices = matching_local_edges
+                .iter()
+                .copied()
+                .chain(
+                    group
+                        .edges
+                        .iter()
+                        .map(|(outgoing, _)| outgoing.edge_index),
+                )
+                .collect::<BTreeSet<_>>();
+            let produced_edge_indices_vec = produced_edge_indices.iter().copied().collect::<Vec<_>>();
+            let source_plan = next
+                .device_plans
+                .iter()
+                .find(|device| device.device_id == group.source_device_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "graph-edge produced port {}.{} references absent source device {:?}",
+                        group.source_component_id, group.source_port_id, group.source_device_id,
+                    ))
+                })?;
+            let produced_matches = source_plan
+                .resident_stream_device_allocations
+                .iter()
+                .filter(|allocation| {
+                    matches!(
+                        &allocation.kind,
+                        VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort {
+                            component_id,
+                            port_id,
+                            edge_indices,
+                        } if component_id == &group.source_component_id
+                            && port_id == &group.source_port_id
+                            && edge_indices == &produced_edge_indices_vec
+                    )
+                })
+                .collect::<Vec<_>>();
+            let [produced_allocation] = produced_matches.as_slice() else {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "graph-edge produced port {}.{} resolves {} resident allocations, expected one",
+                    group.source_component_id,
+                    group.source_port_id,
+                    produced_matches.len(),
+                )));
+            };
+            if produced_allocation.byte_capacity != group.byte_capacity {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "graph-edge produced port {}.{} has {} resident bytes but its route requires {}",
+                    group.source_component_id,
+                    group.source_port_id,
+                    produced_allocation.byte_capacity,
+                    group.byte_capacity,
+                )));
+            }
+
+            let mut participant_device_ids = BTreeSet::from([group.source_device_id.clone()]);
+            participant_device_ids.extend(
+                group
+                    .edges
+                    .iter()
+                    .map(|(_, incoming)| incoming.local_device_id.clone()),
+            );
+            let mut has_distributed_edge = false;
+            for allocation in &activations.allocations {
+                if matches!(
+                    allocation.storage,
+                    VulkanDistributedActivationStorage::Edge { edge_index, .. }
+                        if produced_edge_indices.contains(&edge_index)
+                ) {
+                    if allocation.owner_device_id != group.source_device_id
+                        || allocation.byte_capacity != group.byte_capacity
+                    {
+                        return Err(VulkanRuntimeResidencyPlanError(format!(
+                            "distributed graph-edge allocation disagrees with produced port {}.{}",
+                            group.source_component_id, group.source_port_id,
+                        )));
+                    }
+                    has_distributed_edge = true;
+                    participant_device_ids.extend(allocation.device_ids.iter().cloned());
+                }
+            }
+            let mut logical_devices_by_physical =
+                BTreeMap::<String, BTreeSet<String>>::new();
+            for device_id in &participant_device_ids {
+                let physical_device_id = physical_device_by_logical_device
+                    .get(device_id)
+                    .ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "graph-edge produced port {}.{} has no physical binding for {device_id:?}",
+                            group.source_component_id, group.source_port_id,
+                        ))
+                    })?;
+                logical_devices_by_physical
+                    .entry(physical_device_id.clone())
+                    .or_default()
+                    .insert(device_id.clone());
+            }
+            let source_physical_device_id = physical_device_by_logical_device
+                .get(&group.source_device_id)
+                .expect("source graph-edge device was validated above");
+            let mut representative_device_ids = logical_devices_by_physical
+                .iter()
+                .map(|(physical_device_id, logical_device_ids)| {
+                    if physical_device_id == source_physical_device_id {
+                        group.source_device_id.clone()
+                    } else {
+                        logical_device_ids
+                            .first()
+                            .expect("physical graph-edge participant set is nonempty")
+                            .clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            representative_device_ids.sort();
+            let selected_route = required_vulkan_boundary_route_for_edge_group(
+                &group,
+                selected_boundary_routes,
+            )
+            .map_err(residency_display_error)?;
+            let distributed_route = has_distributed_edge.then_some(match activations.route {
+                VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
+                    VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+                }
+                VulkanSharedResidentBufferRoute::SharedHost => {
+                    VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+                }
+            });
+            let route = resolve_vulkan_produced_port_resident_route(
+                &group,
+                selected_route,
+                distributed_route,
+                logical_devices_by_physical.len(),
+            )
+            .map_err(residency_display_error)?;
+
+            let mut incoming_by_physical = BTreeMap::<
+                String,
+                Vec<(String, VulkanRuntimeResidentStreamAllocationKind)>,
+            >::new();
+            for (_, incoming) in &group.edges {
+                let destination_plan = next
+                    .device_plans
+                    .iter()
+                    .find(|device| device.device_id == incoming.local_device_id)
+                    .ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "graph-edge {} references absent destination {:?}",
+                            incoming.edge_index, incoming.local_device_id,
+                        ))
+                    })?;
+                let kind = VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming {
+                    edge_index: incoming.edge_index,
+                };
+                let matches = destination_plan
+                    .resident_stream_device_allocations
+                    .iter()
+                    .filter(|allocation| allocation.kind == kind)
+                    .collect::<Vec<_>>();
+                let [incoming_allocation] = matches.as_slice() else {
+                    return Err(VulkanRuntimeResidencyPlanError(format!(
+                        "graph-edge {} resolves {} incoming resident allocations, expected one",
+                        incoming.edge_index,
+                        matches.len(),
+                    )));
+                };
+                if incoming_allocation.byte_capacity != group.byte_capacity {
+                    return Err(VulkanRuntimeResidencyPlanError(format!(
+                        "graph-edge {} incoming residency has {} bytes but its produced port requires {}",
+                        incoming.edge_index,
+                        incoming_allocation.byte_capacity,
+                        group.byte_capacity,
+                    )));
+                }
+                let physical_device_id = physical_device_by_logical_device
+                    .get(&incoming.local_device_id)
+                    .expect("incoming graph-edge device was validated above");
+                incoming_by_physical
+                    .entry(physical_device_id.clone())
+                    .or_default()
+                    .push((incoming.local_device_id.clone(), kind));
+            }
+
+            let produced_kind = produced_allocation.kind.clone();
+            match route {
+                None => {
+                    for entries in incoming_by_physical.values() {
+                        removals.extend(entries.iter().cloned());
+                    }
+                }
+                Some(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal) => {
+                    removals.insert((group.source_device_id.clone(), produced_kind));
+                    for entries in incoming_by_physical.values() {
+                        removals.extend(entries.iter().cloned());
+                    }
+                    external_additions
+                        .entry(group.source_device_id.clone())
+                        .or_default()
+                        .push(VulkanRuntimeExternalDeviceLocalResidentAllocation {
+                            owner_device_id: group.source_device_id.clone(),
+                            participant_device_ids: representative_device_ids,
+                            byte_capacity: group.byte_capacity,
+                            concern: format!(
+                                "edge produced port {}.{} for {:?}",
+                                group.source_component_id,
+                                group.source_port_id,
+                                produced_edge_indices_vec,
+                            ),
+                        });
+                }
+                Some(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging) => {
+                    for (physical_device_id, logical_device_ids) in
+                        &logical_devices_by_physical
+                    {
+                        if physical_device_id == source_physical_device_id {
+                            if let Some(entries) = incoming_by_physical.get(physical_device_id) {
+                                removals.extend(entries.iter().cloned());
+                            }
+                            continue;
+                        }
+                        let representative = logical_device_ids
+                            .first()
+                            .expect("physical graph-edge participant set is nonempty");
+                        let mut retained = false;
+                        if let Some(entries) = incoming_by_physical.get(physical_device_id) {
+                            for (device_id, kind) in entries {
+                                if !retained && device_id == representative {
+                                    retained = true;
+                                } else {
+                                    removals.insert((device_id.clone(), kind.clone()));
+                                }
+                            }
+                        }
+                        if !retained {
+                            additions.entry(representative.clone()).or_default().push(
+                                VulkanRuntimeResidentStreamAllocation {
+                                    kind: VulkanRuntimeResidentStreamAllocationKind::EdgeStagingReplica {
+                                        component_id: group.source_component_id.clone(),
+                                        port_id: group.source_port_id.clone(),
+                                        edge_indices: produced_edge_indices_vec.clone(),
+                                    },
+                                    byte_capacity: group.byte_capacity,
+                                },
+                            );
+                        }
+                    }
+                    shared_host_additions.push(VulkanRuntimeSharedHostResidentAllocation {
+                        owner_device_id: group.source_device_id.clone(),
+                        participant_device_ids: representative_device_ids,
+                        byte_capacity: group.byte_capacity,
+                        concern: format!(
+                            "edge staging {}.{} for {:?}",
+                            group.source_component_id,
+                            group.source_port_id,
+                            produced_edge_indices_vec,
+                        ),
+                    });
+                }
+                Some(route) => {
+                    return Err(VulkanRuntimeResidencyPlanError(format!(
+                        "graph-edge produced port {}.{} selects unsupported resident route {route:?}",
+                        group.source_component_id, group.source_port_id,
+                    )));
+                }
+            }
+        }
+
+        for device in &mut next.device_plans {
+            let mut removed_bytes = 0usize;
+            let mut retained = Vec::with_capacity(device.resident_stream_device_allocations.len());
+            for allocation in std::mem::take(&mut device.resident_stream_device_allocations) {
+                if removals.remove(&(device.device_id.clone(), allocation.kind.clone())) {
+                    removed_bytes = checked_residency_add(
+                        removed_bytes,
+                        allocation.byte_capacity,
+                        "removed logical graph-edge residency",
+                    )?;
+                } else {
+                    retained.push(allocation);
+                }
+            }
+            let new_allocations = additions.remove(&device.device_id).unwrap_or_default();
+            let added_bytes = new_allocations.iter().try_fold(0usize, |total, allocation| {
+                checked_residency_add(
+                    total,
+                    allocation.byte_capacity,
+                    "added staged graph-edge residency",
+                )
+            })?;
+            retained.extend(new_allocations);
+            device.resident_stream_device_allocations = retained;
+            device.breakdown.owner_stream_device_bytes = device
+                .breakdown
+                .owner_stream_device_bytes
+                .checked_sub(removed_bytes)
+                .and_then(|bytes| bytes.checked_add(added_bytes))
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "graph-edge device residency adjustment overflowed on {:?}",
+                        device.device_id,
+                    ))
+                })?;
+            device.stream_device_local_bytes = device
+                .stream_device_local_bytes
+                .checked_sub(removed_bytes)
+                .and_then(|bytes| bytes.checked_add(added_bytes))
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "graph-edge stream residency adjustment overflowed on {:?}",
+                        device.device_id,
+                    ))
+                })?;
+            device.breakdown.owner_edge_buffer_bytes_per_stream = device
+                .breakdown
+                .owner_edge_buffer_bytes_per_stream
+                .checked_sub(removed_bytes)
+                .and_then(|bytes| bytes.checked_add(added_bytes))
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "graph-edge breakdown adjustment overflowed on {:?}",
+                        device.device_id,
+                    ))
+                })?;
+
+            let external_allocations = external_additions
+                .remove(&device.device_id)
+                .unwrap_or_default();
+            let external_bytes = external_allocations.iter().try_fold(
+                0usize,
+                |total, allocation| {
+                    checked_residency_add(
+                        total,
+                        allocation.byte_capacity,
+                        "external graph-edge residency",
+                    )
+                },
+            )?;
+            device.breakdown.external_edge_device_bytes_per_stream = external_bytes;
+            device.breakdown.owner_stream_device_bytes = checked_residency_add(
+                device.breakdown.owner_stream_device_bytes,
+                external_bytes,
+                "external graph-edge owner residency",
+            )?;
+            device.breakdown.owner_edge_buffer_bytes_per_stream = checked_residency_add(
+                device.breakdown.owner_edge_buffer_bytes_per_stream,
+                external_bytes,
+                "external graph-edge breakdown",
+            )?;
+            device.stream_device_local_bytes = checked_residency_add(
+                device.stream_device_local_bytes,
+                external_bytes,
+                "external graph-edge stream residency",
+            )?;
+            device.external_device_local_resident_allocations = external_allocations;
+        }
+        if !removals.is_empty() || !additions.is_empty() || !external_additions.is_empty() {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "graph-edge residency binding left unmatched device allocations".to_string(),
+            ));
+        }
+        for allocation in &shared_host_additions {
+            let owner = next
+                .device_plans
+                .iter_mut()
+                .find(|device| device.device_id == allocation.owner_device_id)
+                .expect("graph-edge shared-host owner was validated above");
+            owner.breakdown.staged_edge_shared_host_bytes_per_stream = checked_residency_add(
+                owner.breakdown.staged_edge_shared_host_bytes_per_stream,
+                allocation.byte_capacity,
+                "staged graph-edge shared-host breakdown",
+            )?;
+            owner.stream_shared_host_bytes = checked_residency_add(
+                owner.stream_shared_host_bytes,
+                allocation.byte_capacity,
+                "staged graph-edge shared-host residency",
+            )?;
+        }
+        next.resident_shared_host_allocations = shared_host_additions;
+        next.total_stream_device_local_bytes = next.device_plans.iter().try_fold(
+            0usize,
+            |total, device| {
+                checked_residency_add(
+                    total,
+                    device.stream_device_local_bytes,
+                    "bound graph-edge total device residency",
+                )
+            },
+        )?;
+        next.total_stream_shared_host_bytes = next.device_plans.iter().try_fold(
+            0usize,
+            |total, device| {
+                checked_residency_add(
+                    total,
+                    device.stream_shared_host_bytes,
+                    "bound graph-edge total shared-host residency",
+                )
+            },
+        )?;
+        next.graph_edge_memory_domains_bound = true;
+        *self = next;
+        Ok(())
     }
 
     fn bind_stream_control_memory_domain(
@@ -683,7 +1171,8 @@ fn validate_resident_stream_allocation_ledger(
                 (&mut boundary_buffer_bytes, "resident boundary buffer")
             }
             VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort { .. }
-            | VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming { .. } => {
+            | VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming { .. }
+            | VulkanRuntimeResidentStreamAllocationKind::EdgeStagingReplica { .. } => {
                 (&mut edge_buffer_bytes, "resident edge buffer")
             }
         };

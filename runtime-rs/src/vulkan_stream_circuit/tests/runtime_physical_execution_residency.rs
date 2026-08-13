@@ -799,6 +799,90 @@ fn resident_stream_device_requirements_are_queried_and_aligned_per_allocation() 
 }
 
 #[test]
+fn external_resident_device_requirements_are_queried_per_physical_allocation() {
+    let allocations = vec![
+        VulkanRuntimeExternalDeviceLocalResidentAllocation {
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+            byte_capacity: 17,
+            concern: "first edge".to_string(),
+        },
+        VulkanRuntimeExternalDeviceLocalResidentAllocation {
+            owner_device_id: "helper".to_string(),
+            participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+            byte_capacity: 29,
+            concern: "second edge".to_string(),
+        },
+    ];
+    let mut queried = Vec::new();
+
+    let exact = external_device_local_resident_requirement_bytes_with(
+        &allocations,
+        |allocation| {
+            queried.push(allocation.concern.clone());
+            Ok(allocation.byte_capacity.next_multiple_of(64))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(queried, vec!["first edge", "second edge"]);
+    assert_eq!(exact, 128);
+    assert_ne!(exact, (17usize + 29).next_multiple_of(64));
+
+    let overflow = external_device_local_resident_requirement_bytes_with(
+        &allocations,
+        |allocation| {
+            Ok(if allocation.concern == "first edge" {
+                usize::MAX
+            } else {
+                1
+            })
+        },
+    )
+    .unwrap_err();
+    assert!(overflow.to_string().contains("requirements overflowed"));
+}
+
+#[test]
+fn resident_shared_host_requirements_are_queried_per_physical_allocation() {
+    let allocations = vec![
+        VulkanRuntimeSharedHostResidentAllocation {
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+            byte_capacity: 17,
+            concern: "first staging edge".to_string(),
+        },
+        VulkanRuntimeSharedHostResidentAllocation {
+            owner_device_id: "helper".to_string(),
+            participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+            byte_capacity: 29,
+            concern: "second staging edge".to_string(),
+        },
+    ];
+    let mut queried = Vec::new();
+
+    let exact = resident_shared_host_requirement_bytes_with(&allocations, |allocation| {
+        queried.push(allocation.concern.clone());
+        Ok(allocation.byte_capacity.next_multiple_of(64))
+    })
+    .unwrap();
+
+    assert_eq!(queried, vec!["first staging edge", "second staging edge"]);
+    assert_eq!(exact, 128);
+    assert_ne!(exact, (17usize + 29).next_multiple_of(64));
+
+    let overflow = resident_shared_host_requirement_bytes_with(&allocations, |allocation| {
+        Ok(if allocation.concern == "first staging edge" {
+            usize::MAX
+        } else {
+            1
+        })
+    })
+    .unwrap_err();
+    assert!(overflow.to_string().contains("requirements overflowed"));
+}
+
+#[test]
 fn physical_execution_residency_rejects_malformed_resident_ledgers_and_overrides() {
     let parameters = empty_physical_execution_parameter_allocations();
     let exclusions = empty_physical_execution_parameter_exclusions();
@@ -912,6 +996,327 @@ fn physical_execution_residency_replaces_boundary_storage_by_exact_identity() {
     }
 }
 
+#[test]
+fn graph_edge_binding_charges_external_device_local_storage_once() {
+    let (base, edge_plans) = physical_execution_edge_base_plan();
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &empty_physical_execution_activation_plan(),
+    )
+    .unwrap();
+    let original_total = plan.total_stream_device_local_bytes;
+
+    plan.bind_graph_edge_memory_domains(
+        &edge_plans,
+        &empty_physical_execution_activation_plan(),
+        &BTreeMap::from([(
+            5,
+            physical_execution_edge_route(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal),
+        )]),
+        &BTreeMap::from([
+            ("owner".to_string(), "physical-a".to_string()),
+            ("helper".to_string(), "physical-b".to_string()),
+        ]),
+    )
+    .unwrap();
+
+    let owner = plan
+        .device_plans
+        .iter()
+        .find(|device| device.device_id == "owner")
+        .unwrap();
+    let helper = plan
+        .device_plans
+        .iter()
+        .find(|device| device.device_id == "helper")
+        .unwrap();
+    assert!(plan.graph_edge_memory_domains_bound);
+    assert_eq!(owner.external_device_local_resident_allocations.len(), 1);
+    assert_eq!(owner.breakdown.external_edge_device_bytes_per_stream, 8_192);
+    assert_eq!(helper.stream_device_local_bytes, 0);
+    assert_eq!(plan.total_stream_device_local_bytes, original_total - 8_192);
+    assert_eq!(plan.total_stream_shared_host_bytes, 0);
+}
+
+#[test]
+fn graph_edge_binding_charges_staging_per_physical_device_and_host_once() {
+    let (base, edge_plans) = physical_execution_edge_base_plan();
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &empty_physical_execution_activation_plan(),
+    )
+    .unwrap();
+    let original_total = plan.total_stream_device_local_bytes;
+
+    plan.bind_graph_edge_memory_domains(
+        &edge_plans,
+        &empty_physical_execution_activation_plan(),
+        &BTreeMap::from([(
+            5,
+            physical_execution_edge_route(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging),
+        )]),
+        &BTreeMap::from([
+            ("owner".to_string(), "physical-a".to_string()),
+            ("helper".to_string(), "physical-b".to_string()),
+        ]),
+    )
+    .unwrap();
+
+    assert_eq!(plan.total_stream_device_local_bytes, original_total);
+    assert_eq!(plan.total_stream_shared_host_bytes, 8_192);
+    assert_eq!(plan.resident_shared_host_allocations.len(), 1);
+    assert_eq!(
+        plan.device_plans
+            .iter()
+            .map(|device| device.breakdown.owner_edge_buffer_bytes_per_stream)
+            .sum::<usize>(),
+        2 * 8_192
+    );
+}
+
+#[test]
+fn graph_edge_binding_collapses_colocated_logical_endpoints() {
+    let (base, edge_plans) = physical_execution_edge_base_plan();
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &empty_physical_execution_activation_plan(),
+    )
+    .unwrap();
+    let original_total = plan.total_stream_device_local_bytes;
+
+    plan.bind_graph_edge_memory_domains(
+        &edge_plans,
+        &empty_physical_execution_activation_plan(),
+        &BTreeMap::new(),
+        &BTreeMap::from([
+            ("owner".to_string(), "same-physical".to_string()),
+            ("helper".to_string(), "same-physical".to_string()),
+        ]),
+    )
+    .unwrap();
+
+    assert_eq!(plan.total_stream_device_local_bytes, original_total - 8_192);
+    assert_eq!(plan.total_stream_shared_host_bytes, 0);
+    assert!(plan
+        .device_plans
+        .iter()
+        .all(|device| device.external_device_local_resident_allocations.is_empty()));
+}
+
+#[test]
+fn graph_edge_binding_rejects_missing_and_repeated_routes_atomically() {
+    let (base, edge_plans) = physical_execution_edge_base_plan();
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &empty_physical_execution_activation_plan(),
+    )
+    .unwrap();
+    let original = plan.clone();
+    let physical = BTreeMap::from([
+        ("owner".to_string(), "physical-a".to_string()),
+        ("helper".to_string(), "physical-b".to_string()),
+    ]);
+
+    let missing = plan
+        .bind_graph_edge_memory_domains(
+            &edge_plans,
+            &empty_physical_execution_activation_plan(),
+            &BTreeMap::new(),
+            &physical,
+        )
+        .unwrap_err();
+    assert!(missing.to_string().contains("without an exact mounted route"));
+    assert_eq!(plan, original);
+
+    plan.bind_graph_edge_memory_domains(
+        &edge_plans,
+        &empty_physical_execution_activation_plan(),
+        &BTreeMap::from([(
+            5,
+            physical_execution_edge_route(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal),
+        )]),
+        &physical,
+    )
+    .unwrap();
+    let once_bound = plan.clone();
+    let repeated = plan
+        .bind_graph_edge_memory_domains(
+            &edge_plans,
+            &empty_physical_execution_activation_plan(),
+            &BTreeMap::from([(
+                5,
+                physical_execution_edge_route(
+                    VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
+                ),
+            )]),
+            &physical,
+        )
+        .unwrap_err();
+    assert!(repeated.to_string().contains("already bound"));
+    assert_eq!(plan, once_bound);
+}
+
+#[test]
+fn graph_edge_binding_includes_distributed_only_staging_participants() {
+    let (mut base, edge_plans) = physical_execution_edge_base_plan();
+    let mut shard = base.device_plans[1].clone();
+    shard.device_id = "shard".to_string();
+    shard.working_set = VulkanRuntimeWorkingSetBytes::default();
+    shard.breakdown = VulkanRuntimeDeviceResidencyBreakdown::default();
+    shard.resident_stream_device_allocations.clear();
+    shard.initial_device_resident_bytes = 0;
+    base.device_plans.push(shard);
+    let activations = VulkanDistributedActivationBufferPlan {
+        allocations: vec![VulkanDistributedActivationBufferAllocation {
+            storage: VulkanDistributedActivationStorage::Edge {
+                edge_index: 5,
+                owner_device_id: "owner".to_string(),
+            },
+            owner_device_id: "owner".to_string(),
+            component_id: "input_adapter".to_string(),
+            slot: 5,
+            byte_capacity: 8_192,
+            signal_ids: vec!["shared_context".to_string()],
+            device_ids: vec![
+                "helper".to_string(),
+                "owner".to_string(),
+                "shard".to_string(),
+            ],
+            input_use_count: 1,
+            output_use_count: 1,
+        }],
+        reduction_allocations: Vec::new(),
+        private_intermediate_allocations: Vec::new(),
+        allocation_count: 1,
+        import_count: 2,
+        reference_count: 2,
+        total_shared_byte_capacity: 8_192,
+        total_private_byte_capacity: 0,
+        route: VulkanSharedResidentBufferRoute::SharedHost,
+    };
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &[
+            "owner".to_string(),
+            "helper".to_string(),
+            "shard".to_string(),
+        ],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &activations,
+    )
+    .unwrap();
+    let original_total = plan.total_stream_device_local_bytes;
+
+    plan.bind_graph_edge_memory_domains(
+        &edge_plans,
+        &activations,
+        &BTreeMap::from([(
+            5,
+            physical_execution_edge_route(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging),
+        )]),
+        &BTreeMap::from([
+            ("owner".to_string(), "physical-a".to_string()),
+            ("helper".to_string(), "physical-b".to_string()),
+            ("shard".to_string(), "physical-c".to_string()),
+        ]),
+    )
+    .unwrap();
+
+    let shard = plan
+        .device_plans
+        .iter()
+        .find(|device| device.device_id == "shard")
+        .unwrap();
+    assert_eq!(shard.stream_device_local_bytes, 8_192);
+    assert!(shard.resident_stream_device_allocations.iter().any(|allocation| {
+        matches!(
+            &allocation.kind,
+            VulkanRuntimeResidentStreamAllocationKind::EdgeStagingReplica { .. }
+        )
+    }));
+    assert_eq!(plan.total_stream_device_local_bytes, original_total + 8_192);
+    assert_eq!(plan.total_stream_shared_host_bytes, 8_192);
+    assert_eq!(
+        plan.resident_shared_host_allocations[0]
+            .participant_device_ids
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn graph_edge_binding_rejects_conflicting_distributed_route_atomically() {
+    let (base, edge_plans) = physical_execution_edge_base_plan();
+    let activations = VulkanDistributedActivationBufferPlan {
+        allocations: vec![VulkanDistributedActivationBufferAllocation {
+            storage: VulkanDistributedActivationStorage::Edge {
+                edge_index: 5,
+                owner_device_id: "owner".to_string(),
+            },
+            owner_device_id: "owner".to_string(),
+            component_id: "input_adapter".to_string(),
+            slot: 5,
+            byte_capacity: 8_192,
+            signal_ids: vec!["shared_context".to_string()],
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            input_use_count: 1,
+            output_use_count: 1,
+        }],
+        reduction_allocations: Vec::new(),
+        private_intermediate_allocations: Vec::new(),
+        allocation_count: 1,
+        import_count: 1,
+        reference_count: 1,
+        total_shared_byte_capacity: 8_192,
+        total_private_byte_capacity: 0,
+        route: VulkanSharedResidentBufferRoute::SharedHost,
+    };
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &activations,
+    )
+    .unwrap();
+    let original = plan.clone();
+
+    let error = plan
+        .bind_graph_edge_memory_domains(
+            &edge_plans,
+            &activations,
+            &BTreeMap::from([(
+                5,
+                physical_execution_edge_route(
+                    VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
+                ),
+            )]),
+            &BTreeMap::from([
+                ("owner".to_string(), "physical-a".to_string()),
+                ("helper".to_string(), "physical-b".to_string()),
+            ]),
+        )
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("incompatible selected and distributed routes"));
+    assert_eq!(plan, original);
+}
+
 fn empty_physical_execution_parameter_allocations(
 ) -> VulkanDistributedParameterAllocationPlan {
     VulkanDistributedParameterAllocationPlan {
@@ -930,6 +1335,109 @@ fn empty_physical_execution_parameter_exclusions() -> VulkanDistributedParameter
         excluded_full_allocation_count: 0,
         excluded_full_byte_capacity: 0,
     }
+}
+
+fn empty_physical_execution_activation_plan() -> VulkanDistributedActivationBufferPlan {
+    VulkanDistributedActivationBufferPlan {
+        allocations: Vec::new(),
+        reduction_allocations: Vec::new(),
+        private_intermediate_allocations: Vec::new(),
+        allocation_count: 0,
+        import_count: 0,
+        reference_count: 0,
+        total_shared_byte_capacity: 0,
+        total_private_byte_capacity: 0,
+        route: VulkanSharedResidentBufferRoute::ExternalDeviceLocal,
+    }
+}
+
+fn physical_execution_edge_route(
+    route: VulkanPlacedEdgeTransferRoute,
+) -> VulkanRuntimeMountedBoundaryRoute {
+    VulkanRuntimeMountedBoundaryRoute {
+        edge_index: 5,
+        source_device_id: "owner".to_string(),
+        destination_device_id: "helper".to_string(),
+        frame_byte_count: 8_192,
+        route,
+    }
+}
+
+fn physical_execution_edge_base_plan() -> (VulkanRuntimeResidencyPlan, Vec<VulkanPlacedEdgeIoPlan>) {
+    let mut outgoing = outgoing_fanout_endpoint(0, 5, "helper", "consumer");
+    outgoing.local_device_id = "owner".to_string();
+    outgoing.remote_device_id = "helper".to_string();
+    outgoing.transport = EdgeTransport::CrossDevice {
+        from_device_id: "owner".to_string(),
+        to_device_id: "helper".to_string(),
+    };
+    let incoming = incoming_fanout_endpoint(&outgoing);
+    let owner_edge_plan = VulkanPlacedEdgeIoPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "owner".to_string(),
+        signal_element_bytes: Some(2),
+        local_edges: Vec::new(),
+        endpoints: vec![outgoing],
+        local_edge_count: 0,
+        incoming_endpoint_count: 0,
+        outgoing_endpoint_count: 1,
+        total_buffer_count: 1,
+        total_endpoint_count: 1,
+        total_byte_capacity: Some(8_192),
+        unresolved_byte_edges: Vec::new(),
+    };
+    let helper_edge_plan = VulkanPlacedEdgeIoPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "helper".to_string(),
+        signal_element_bytes: Some(2),
+        local_edges: Vec::new(),
+        endpoints: vec![incoming],
+        local_edge_count: 0,
+        incoming_endpoint_count: 1,
+        outgoing_endpoint_count: 0,
+        total_buffer_count: 1,
+        total_endpoint_count: 1,
+        total_byte_capacity: Some(8_192),
+        unresolved_byte_edges: Vec::new(),
+    };
+
+    let mut base = physical_execution_residency_base_plan(1_000 + 8_192, 100);
+    let owner = &mut base.device_plans[0];
+    owner.working_set.activation_headroom_bytes += 8_192;
+    owner.breakdown.edge_buffer_bytes = 8_192;
+    owner
+        .resident_stream_device_allocations
+        .push(VulkanRuntimeResidentStreamAllocation {
+            kind: VulkanRuntimeResidentStreamAllocationKind::EdgeProducedPort {
+                component_id: "input_adapter".to_string(),
+                port_id: "shared_context".to_string(),
+                edge_indices: vec![5],
+            },
+            byte_capacity: 8_192,
+        });
+    let mut helper = owner.clone();
+    helper.device_id = "helper".to_string();
+    helper.parameter_residency = VulkanRuntimeParameterResidencyBytes::default();
+    helper.resource_store = VulkanCompiledResourceStoreResidencyBytes::default();
+    helper.working_set = VulkanRuntimeWorkingSetBytes {
+        transient_state_bytes: 0,
+        activation_headroom_bytes: 8_192,
+    };
+    helper.breakdown = VulkanRuntimeDeviceResidencyBreakdown {
+        edge_buffer_bytes: 8_192,
+        ..VulkanRuntimeDeviceResidencyBreakdown::default()
+    };
+    helper.resident_stream_device_allocations = vec![VulkanRuntimeResidentStreamAllocation {
+        kind: VulkanRuntimeResidentStreamAllocationKind::EdgeIncoming { edge_index: 5 },
+        byte_capacity: 8_192,
+    }];
+    helper.initial_device_resident_bytes = 8_192;
+    base.device_plans.push(helper);
+    base.total_initial_device_resident_bytes += 8_192;
+    (
+        base,
+        vec![owner_edge_plan, helper_edge_plan],
+    )
 }
 
 fn add_helper_stream_control_device(base: &mut VulkanRuntimeResidencyPlan) {

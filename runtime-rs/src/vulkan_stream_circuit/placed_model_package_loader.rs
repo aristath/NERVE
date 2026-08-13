@@ -362,6 +362,21 @@ impl VulkanResidentInProcessPlacedModelPackage {
         }
         let host_safe_capacity_bytes = vulkan_safe_host_available_bytes()
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
+        let edge_plans = device_slice_plans
+            .iter()
+            .map(|slice| {
+                VulkanPlacedEdgeIoPlan::from_placed_resident_plan(
+                    &slice.placed_plan.placed_resident_plan,
+                )
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "failed to plan exact graph-edge residency: {error}",
+                        )),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let Some(transient_resolution) =
             try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
             &runtime_model,
@@ -371,6 +386,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &residency_plan,
             &device_ids,
             &device_slice_plans,
+            &edge_plans,
+            &mounted_boundary_routes,
             &tensor_index,
             &selected_resource_mount_devices,
             &input_device_id,

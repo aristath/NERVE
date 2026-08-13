@@ -114,6 +114,8 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
     residency_plan: &VulkanRuntimeResidencyPlan,
     logical_device_ids: &[String],
     slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
+    edge_plans: &[VulkanPlacedEdgeIoPlan],
+    selected_boundary_routes: &BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
     tensor_index: &TensorIndex,
     devices: &[VulkanRuntimeSelectedResourceMountDevice],
     input_device_id: &str,
@@ -179,6 +181,19 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
             )
             .map_err(|error| {
                 physical_mount_planning_error("execution transient residency", error)
+            })?;
+        let activation_plan = resolution.plans.activation_plan.clone();
+        resolution
+            .plans
+            .physical_execution_residency_plan
+            .bind_graph_edge_memory_domains(
+                edge_plans,
+                &activation_plan,
+                selected_boundary_routes,
+                &physical_device_by_logical_device,
+            )
+            .map_err(|error| {
+                physical_mount_planning_error("graph-edge memory-domain binding", error)
             })?;
         resolution
             .plans
@@ -283,6 +298,18 @@ fn plan_vulkan_runtime_physical_mount(
         .map(|slice| (slice.device_id.as_str(), &slice.prepared_plan))
         .collect::<Vec<_>>();
     let loaded_manifest = resident_package_loaded_kernel_manifest_for_slice_plans(&slice_plans)?;
+    let edge_plans = slice_plans
+        .iter()
+        .map(|slice| {
+            VulkanPlacedEdgeIoPlan::from_placed_resident_plan(
+                &slice.placed_plan.placed_resident_plan,
+            )
+            .map_err(|error| physical_mount_planning_error("graph-edge planning", error))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mounted_boundary_routes = physical_execution_plan
+        .mounted_boundary_routes()
+        .map_err(|error| physical_mount_planning_error("physical boundary routing", error))?;
     let artifact_manifest = VulkanPhysicalKernelArtifactManifest::new(
         loaded_manifest
             .physical_artifacts
@@ -361,6 +388,8 @@ fn plan_vulkan_runtime_physical_mount(
         &residency_plan,
         &physical_execution_plan.device_ids(runtime_model),
         &slice_plans,
+        &edge_plans,
+        &mounted_boundary_routes,
         &tensor_index,
         &mount_devices,
         &input_device_id,

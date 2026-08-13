@@ -186,6 +186,7 @@ include!("vulkan_stream_circuit/parallel_speculative_state_ingestion.rs");
 include!("vulkan_stream_circuit/parallel_speculative_feedback_state.rs");
 include!("vulkan_stream_circuit/targeted_component_mount.rs");
 include!("vulkan_stream_circuit/targeted_component_execution.rs");
+include!("vulkan_stream_circuit/placed_edge_routing.rs");
 include!("vulkan_stream_circuit/placed_feedback_devices.rs");
 include!("vulkan_stream_circuit/runtime_physical_execution_plan.rs");
 include!("vulkan_stream_circuit/runtime_execution_identity.rs");

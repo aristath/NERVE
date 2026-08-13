@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_residency_plan.v5";
+    "nerve.vulkan_runtime_residency_plan.v6";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeResidencyPlan {
@@ -94,6 +94,11 @@ pub enum VulkanRuntimeResidentStreamAllocationKind {
     },
     EdgeIncoming {
         edge_index: usize,
+    },
+    EdgeStagingReplica {
+        component_id: String,
+        port_id: String,
+        edge_indices: Vec<usize>,
     },
 }
 
