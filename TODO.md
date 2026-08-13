@@ -160,12 +160,16 @@ the local placement calibration, and the mounted graph.
   while reducing the measurement surface from 720 instance cases to 96
   structural cases. It exposes 48 decode and 48 width-four causal-prefill
   cases, 64 whole-expert and 64 intra-expert TP candidates across both phases,
-  32 representative distributed contracts, 112 directed boundary cases, and
-  4,416 selected-resource load-wave cases. The 43 transformer occurrences per
-  target and phase collapse into four exact structural cohorts; input and
-  output adapters retain their scalar-lane causal fallback. This dry plan opens
-  no compute device and submits no GPU work. It is authoritative preflight
-  evidence, not live TP execution or performance evidence.
+  32 representative distributed contracts, and 112 directed boundary cases.
+  The former 4,416-case standalone load-wave pass was removed because no
+  production placement decision consumed it. Exact singleton load-wave
+  evidence remains inseparably paired with every selected-resource execution
+  class, while maximum atomic load admission is derived from the compiled
+  residency contract. The 43 transformer occurrences per target and phase
+  collapse into four exact structural cohorts; input and output adapters retain
+  their scalar-lane causal fallback. This dry plan opens no compute device and
+  submits no GPU work. It is authoritative preflight evidence, not live TP
+  execution or performance evidence.
 - The calibration suite now produces canonical serialized and predicted
   mixed-hybrid region evidence from bounded, complete mounted transactions.
   It measures compute, synchronization, transfers, collectives, output, state,
@@ -684,7 +688,9 @@ For every numbered item below:
   identities, rejects incomplete causal-scan widths, discovers exact hybrid
   cohorts from the catalog rather than a decode-only surrogate signature, and
   produces complete DeepSeek width-four component, distributed, boundary, and
-  load-wave cases. Mounted equivalence and performance remain to be proven.
+  selected-resource execution cases. Each selected-resource case retains its
+  exact singleton load evidence. Mounted equivalence and performance remain to
+  be proven.
 - Execute prompt blocks through the same resident gates, execution islands,
   transfers, attention updates, and terminal completion without a host loop per
   token.

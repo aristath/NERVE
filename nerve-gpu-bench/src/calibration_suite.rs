@@ -17,13 +17,12 @@ use crate::calibration_device_state::discover_calibration_hardware_profiles;
 use crate::calibration_package::CalibrationPackage;
 use crate::calibration_package::CalibrationRuntimeConfig;
 use crate::calibration_suite_plan::{expand_target_orders, plan_calibration_suite};
-use crate::load_wave_calibration::measure_load_wave_candidate_for_runtime_model;
 use crate::output::write_atomic;
 use crate::package_calibration::measure_package_candidates_for_runtime_model;
 use crate::region_calibration::measure_region_candidates_for_runtime_model;
 use crate::selected_resource_calibration::measure_selected_resource_classes_for_runtime_model;
 
-pub const CALIBRATION_SUITE_DRY_PLAN_SCHEMA: &str = "nerve.calibration_suite_dry_plan.v1";
+pub const CALIBRATION_SUITE_DRY_PLAN_SCHEMA: &str = "nerve.calibration_suite_dry_plan.v2";
 
 struct PreparedCalibrationSuite {
     package: CalibrationPackage,
@@ -54,7 +53,6 @@ struct CalibrationSuiteDryPlanReport {
     distributed_contract_count: usize,
     candidate_strategy_counts: BTreeMap<String, usize>,
     boundary_case_count: usize,
-    selected_resource_load_wave_case_count: usize,
     representation_variant_count: usize,
     runtime_variant_equivalence_class_count: usize,
     adaptive_expansion: &'static str,
@@ -100,16 +98,6 @@ struct SelectedComponentCalibrationCase {
 }
 
 #[derive(Clone, Debug)]
-struct SelectedLoadWaveCalibrationCase {
-    phase: crate::cli::PackageCalibrationPhase,
-    owner_target_id: String,
-    runtime_variant_index: usize,
-    component_id: String,
-    selector_id: String,
-    resource_indices: Vec<usize>,
-}
-
-#[derive(Clone, Debug)]
 struct SelectedRegionCalibrationCase {
     phase: crate::cli::PackageCalibrationPhase,
     owner_target_id: String,
@@ -143,7 +131,6 @@ pub fn run_calibration_suite(
         )
     })?;
     let component_cases = selected_component_calibration_cases(&plans);
-    let load_wave_cases = selected_load_wave_calibration_cases(&plans);
     let region_cases = selected_region_calibration_cases(&runtime_models, &plans)?;
     let boundary_frame_byte_counts = runtime_models
         .values()
@@ -258,24 +245,11 @@ pub fn run_calibration_suite(
         catalog.merge(&measured.catalog)?;
     }
 
-    for case in &load_wave_cases {
-        let measured = measure_load_wave_candidate_for_runtime_model(
-            &package,
-            &runtime_models[&case.owner_target_id][case.runtime_variant_index],
-            &case.component_id,
-            &case.selector_id,
-            case.phase,
-            &case.resource_indices,
-            &case.owner_target_id,
-        )?;
-        catalog.merge(&measured.catalog)?;
-    }
-
     catalog.validate()?;
     let payload = catalog.to_json_bytes()?;
     write_atomic(output, &payload)?;
     println!(
-        "calibrated package suite: package={}, targets={}, component_cases={}, measured_component_candidates={}, unavailable_component_candidates={}, selected_resource_cases={}, measured_selected_resource_cases={}, unavailable_selected_resource_cases={}, boundary_cases={}, region_plans={}, measured_regions={}, unavailable_regions={}, load_wave_cases={}, references={}, observations={}, selected_resource_classes={}, region_executions={}, output={}",
+        "calibrated package suite: package={}, targets={}, component_cases={}, measured_component_candidates={}, unavailable_component_candidates={}, selected_resource_cases={}, measured_selected_resource_cases={}, unavailable_selected_resource_cases={}, boundary_cases={}, region_plans={}, measured_regions={}, unavailable_regions={}, references={}, observations={}, selected_resource_classes={}, region_executions={}, output={}",
         package.source_path().display(),
         target_ids.len(),
         component_cases.len(),
@@ -288,7 +262,6 @@ pub fn run_calibration_suite(
         planned_region_cases,
         measured_region_cases,
         unavailable_region_cases,
-        load_wave_cases.len(),
         catalog.reference_count(),
         catalog.observation_count(),
         catalog.selected_resource_execution_class_count(),
@@ -383,7 +356,6 @@ pub fn dry_plan_calibration_suite(
     let mut package_id = None;
     let mut reference_plan = None;
     let mut component_cases = Vec::new();
-    let mut selected_resource_load_wave_case_count = 0usize;
     let mut representation_variant_count = 0usize;
     for group in &capability_groups {
         let representative = group
@@ -427,30 +399,12 @@ pub fn dry_plan_calibration_suite(
         package_id.get_or_insert_with(|| runtime_models[0].package.package_id.clone());
         let runtime_models = BTreeMap::from([(representative.clone(), runtime_models)]);
         let local_cases = calibration_suite_dry_plan_component_cases(&runtime_models, &plans)?;
-        let local_load_wave_case_count = selected_load_wave_calibration_cases(&plans).len();
         for owner_target_id in group {
             component_cases.extend(local_cases.iter().cloned().map(|mut case| {
                 case.owner_target_id = owner_target_id.clone();
                 case
             }));
         }
-        selected_resource_load_wave_case_count = selected_resource_load_wave_case_count
-            .checked_add(
-                local_load_wave_case_count
-                    .checked_mul(group.len())
-                    .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "calibration dry plan load-wave count overflowed",
-                        )
-                    })?,
-            )
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "calibration dry plan load-wave count overflowed",
-                )
-            })?;
         representation_variant_count = representation_variant_count
             .checked_add(variant_count.checked_mul(group.len()).ok_or_else(|| {
                 io::Error::new(
@@ -481,7 +435,6 @@ pub fn dry_plan_calibration_suite(
             )
         })?,
         component_cases,
-        selected_resource_load_wave_case_count,
         representation_variant_count,
         capability_groups.len(),
     )?;
@@ -520,7 +473,6 @@ fn calibration_suite_dry_plan_report(
         requested_prefill_widths,
         reference_plan.clone(),
         component_cases,
-        selected_load_wave_calibration_cases(&prepared.plans).len(),
         prepared.runtime_models.values().map(Vec::len).sum(),
         prepared.runtime_models.len(),
     )?)
@@ -626,7 +578,6 @@ fn finalize_calibration_suite_dry_plan_report(
     requested_prefill_widths: &[usize],
     reference_plan: crate::calibration_suite_plan::CalibrationSuitePlan,
     component_cases: Vec<CalibrationSuiteDryPlanComponentCase>,
-    selected_resource_load_wave_case_count: usize,
     representation_variant_count: usize,
     runtime_variant_equivalence_class_count: usize,
 ) -> Result<CalibrationSuiteDryPlanReport, io::Error> {
@@ -685,7 +636,6 @@ fn finalize_calibration_suite_dry_plan_report(
         distributed_contract_count: all_contract_ids.len(),
         candidate_strategy_counts,
         boundary_case_count: reference_plan.boundary_cases.len(),
-        selected_resource_load_wave_case_count,
         representation_variant_count,
         runtime_variant_equivalence_class_count,
         adaptive_expansion: "measurement_driven_after_singletons_and_directed_pairs",
@@ -721,33 +671,6 @@ fn selected_component_calibration_cases(
                     owner_target_id: owner_target_id.clone(),
                     runtime_variant_index: *runtime_variant_index,
                     target: case.target.clone(),
-                });
-        }
-    }
-    selected.into_values().collect()
-}
-
-fn selected_load_wave_calibration_cases(
-    plans: &BTreeMap<(String, usize), crate::calibration_suite_plan::CalibrationSuitePlan>,
-) -> Vec<SelectedLoadWaveCalibrationCase> {
-    let mut selected = BTreeMap::new();
-    for ((owner_target_id, runtime_variant_index), plan) in plans {
-        for case in &plan.load_wave_cases {
-            selected
-                .entry((
-                    phase_key(case.phase),
-                    owner_target_id.clone(),
-                    case.component_id.clone(),
-                    case.selector_id.clone(),
-                    case.resource_indices.clone(),
-                ))
-                .or_insert_with(|| SelectedLoadWaveCalibrationCase {
-                    phase: case.phase,
-                    owner_target_id: owner_target_id.clone(),
-                    runtime_variant_index: *runtime_variant_index,
-                    component_id: case.component_id.clone(),
-                    selector_id: case.selector_id.clone(),
-                    resource_indices: case.resource_indices.clone(),
                 });
         }
     }
@@ -1032,6 +955,12 @@ mod tests {
         let encoded = serde_json::to_value(&report).unwrap();
         assert_eq!(encoded["executes_workloads"], false);
         assert_eq!(encoded["opens_compute_devices"], false);
+        assert!(
+            encoded
+                .get("selected_resource_load_wave_case_count")
+                .is_none(),
+            "the suite must not schedule the redundant standalone load-wave pass",
+        );
     }
 
     #[test]

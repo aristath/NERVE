@@ -153,7 +153,7 @@ cargo run --release --manifest-path nerve-gpu-bench/Cargo.toml -- \
 
 The dry plan resolves hardware-specific representation variants, exact
 compiler contracts, distributed candidate strategies, target orders, boundary
-cases, and selected-resource load-wave cases. Its JSON states
+cases, and selected-resource execution classes. Its JSON states
 `executes_workloads: false` and `opens_compute_devices: false`, and reports any
 explicitly requested prefill widths that the complete compiled graph cannot
 calibrate. Omitting `--output` prints the dry plan to stdout. A non-dry suite
@@ -185,12 +185,16 @@ component signature in decode and each requested prefill width. It measures all
 single targets and directed pairs first, then expands non-dominated ordered
 groups while retaining alternatives with different owners, outputs, participant
 sets, or memory tradeoffs. It also measures every directed graph-boundary pair
-and representative compiler-declared lazy-load wave on every selected target.
-Each candidate uses one warmup and one timed call, validates canonical output
-and state, and proves reservation restoration before it can enter the catalog.
-The final catalog is validated and written atomically only after the entire
-sequential suite succeeds; a failure leaves any previously published catalog
-untouched.
+and every exact selected-resource execution class. Each selected-resource
+execution is inseparably paired with the singleton lazy-load wave for that same
+resource, target, phase, and physical contract before it can enter the catalog.
+The suite does not run an additional unconsumed multi-resource load-wave pass;
+the lower-level `calibrate-load-wave` command remains available for explicit
+investigation. Each candidate uses one warmup and one timed call, validates
+canonical output and state, and proves reservation restoration before it can
+enter the catalog. The final catalog is validated and written atomically only
+after the entire sequential suite succeeds; a failure leaves any previously
+published catalog untouched.
 
 The lower-level commands remain useful for investigating one exact case.
 Create component evidence with an explicit ordered candidate (the first target
