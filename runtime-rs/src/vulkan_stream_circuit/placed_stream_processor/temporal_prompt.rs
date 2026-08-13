@@ -434,9 +434,20 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
             ));
         }
         if mounted_capacity.is_some() {
-            self.temporal_block_executions
+            let removed = self
+                .temporal_block_executions
                 .borrow_mut()
                 .remove(&capture_causal_state_snapshots);
+            if let Some(runner) = removed {
+                if let Some(source) = runner.speculative_target_output.as_ref().map(|output| {
+                    &output.projection.norm.normalized_frames_buffer
+                }) {
+                    for decoder in &self.speculative_decoders {
+                        decoder.invalidate_catch_up_source_binding(source);
+                    }
+                }
+                drop(runner);
+            }
         }
         let pipeline = self.linear_pipeline_device_indices()?;
         let mut prepared_physical_devices = BTreeSet::new();

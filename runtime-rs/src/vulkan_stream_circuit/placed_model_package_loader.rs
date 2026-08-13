@@ -1224,6 +1224,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             input_device_id,
             output_device_id,
             dynamic_state_capacity_activations: capacity,
+            speculative_draft_tokens,
             normal_prefill_lane_capacity,
             device_count: device_ids.len(),
             device_ids,

@@ -33,6 +33,18 @@ pub struct VulkanResidentInProcessPlacedStreamProcessor {
         RefCell<BTreeMap<bool, VulkanResidentPlacedTemporalBlockRunner>>,
 }
 
+impl Drop for VulkanResidentInProcessPlacedStreamProcessor {
+    fn drop(&mut self) {
+        for decoder in &mut self.speculative_decoders {
+            if let VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) =
+                &mut decoder.execution
+            {
+                processor.catch_up_batch.get_mut().take();
+            }
+        }
+    }
+}
+
 impl VulkanResidentInProcessPlacedStreamProcessor {
     fn resident_state_snapshot_digest(
         &self,
@@ -375,8 +387,8 @@ struct VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
     update_pending_hidden_copies: [VulkanResidentBufferCopy; 2],
     pending_target_hiddens: [VulkanResidentBuffer; 2],
     active_pending_target_hidden: Cell<usize>,
-    catch_up_batches:
-        RefCell<BTreeMap<(usize, usize, usize), VulkanResidentSpeculativeCatchUpBatch>>,
+    catch_up_lane_capacity: usize,
+    catch_up_batch: RefCell<Option<VulkanResidentSpeculativeCatchUpBatch>>,
     catch_up_controls: VulkanResidentBuffer,
     catch_up_controls_initial_copy: VulkanResidentBufferCopy,
     state_transaction: VulkanResidentStateTransactionBank,

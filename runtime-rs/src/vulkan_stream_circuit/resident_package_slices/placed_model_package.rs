@@ -6,6 +6,7 @@ pub struct VulkanResidentInProcessPlacedModelPackage {
     pub input_device_id: String,
     pub output_device_id: String,
     pub dynamic_state_capacity_activations: usize,
+    speculative_draft_tokens: usize,
     /// The exact normal-prompt runner width selected and admitted by the
     /// physical mount. Calibrated plans require their measured width; local
     /// fallback chooses the widest compiled width that fits live capacity.

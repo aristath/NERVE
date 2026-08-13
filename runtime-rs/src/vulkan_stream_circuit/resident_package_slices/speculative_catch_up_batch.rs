@@ -1,7 +1,45 @@
 struct VulkanResidentSpeculativeCatchUpBatch {
     execution_graph: VulkanResidentPlacedComponentBatchRunner,
     input_embedding: VulkanResidentBatchedInputEmbeddingRunner,
+    source_binding: Option<VulkanResidentSpeculativeCatchUpSourceBinding>,
+}
+
+struct VulkanResidentSpeculativeCatchUpSourceBinding {
+    identity: VulkanResidentSpeculativeCatchUpSourceIdentity,
     hidden_copy_batches: [Vec<VulkanResidentBufferCopyBatch>; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VulkanResidentSpeculativeCatchUpSourceIdentity {
+    device_handle: u64,
+    buffer_handle: u64,
+    frame_byte_capacity: usize,
+}
+
+impl VulkanResidentSpeculativeCatchUpSourceIdentity {
+    fn new(source: &VulkanResidentBuffer, frame_byte_capacity: usize) -> Self {
+        let (device_handle, buffer_handle) = source.command_binding_identity();
+        Self {
+            device_handle,
+            buffer_handle,
+            frame_byte_capacity,
+        }
+    }
+
+    fn binds_buffer(self, source: &VulkanResidentBuffer) -> bool {
+        self.binds_command_identity(source.command_binding_identity())
+    }
+
+    fn binds_command_identity(self, (device_handle, buffer_handle): (u64, u64)) -> bool {
+        self.device_handle == device_handle && self.buffer_handle == buffer_handle
+    }
+}
+
+fn speculative_catch_up_lane_capacity(speculative_draft_tokens: usize) -> Result<usize, VulkanError> {
+    let target_tick_count = speculative_draft_tokens.checked_add(1).ok_or_else(|| {
+        VulkanError("speculative catch-up target width overflowed".to_string())
+    })?;
+    causal_component_block_lane_capacity(target_tick_count)
 }
 
 fn speculative_catch_up_preceding_target_bytes(
@@ -23,28 +61,48 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
         normalized_target_frames: &VulkanResidentBuffer,
         frame_byte_capacity: usize,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
-        let lane_capacity = causal_component_block_lane_capacity(input_token_ids.len())
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let source_identity = normalized_target_frames as *const VulkanResidentBuffer as usize;
-        let key = (lane_capacity, source_identity, frame_byte_capacity);
-        if !self.catch_up_batches.borrow().contains_key(&key) {
-            let batch = self.create_catch_up_batch(
-                device,
-                lane_capacity,
-                normalized_target_frames,
-                frame_byte_capacity,
-            )?;
-            self.catch_up_batches.borrow_mut().insert(key, batch);
+        if input_token_ids.len() > self.catch_up_lane_capacity {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "speculative catch-up batch capacity {} cannot execute {} target ticks",
+                    self.catch_up_lane_capacity,
+                    input_token_ids.len(),
+                )),
+            ));
         }
-
-        let batches = self.catch_up_batches.borrow();
-        let batch = batches
-            .get(&key)
+        if self.catch_up_batch.borrow().is_none() {
+            let batch = self.create_catch_up_batch(device, self.catch_up_lane_capacity)?;
+            *self.catch_up_batch.borrow_mut() = Some(batch);
+        }
+        let source_identity = VulkanResidentSpeculativeCatchUpSourceIdentity::new(
+            normalized_target_frames,
+            frame_byte_capacity,
+        );
+        let mut batch_guard = self.catch_up_batch.borrow_mut();
+        let batch = batch_guard
+            .as_mut()
             .expect("speculative catch-up batch was inserted");
+        if batch
+            .source_binding
+            .as_ref()
+            .is_none_or(|binding| binding.identity != source_identity)
+        {
+            batch.source_binding = Some(self.create_catch_up_source_binding(
+                device,
+                batch,
+                normalized_target_frames,
+                source_identity,
+            )?);
+        }
+        let source_binding = batch
+            .source_binding
+            .as_ref()
+            .expect("speculative catch-up source binding was inserted");
         let active_pending_index = self.active_pending_target_hidden_index();
         device
             .submit_resident_buffer_copy_batch(
-                &batch.hidden_copy_batches[active_pending_index][input_token_ids.len() - 1],
+                &source_binding.hidden_copy_batches[active_pending_index]
+                    [input_token_ids.len() - 1],
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         batch
@@ -70,8 +128,6 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
         &self,
         device: &VulkanComputeDevice,
         lane_capacity: usize,
-        normalized_target_frames: &VulkanResidentBuffer,
-        frame_byte_capacity: usize,
     ) -> Result<VulkanResidentSpeculativeCatchUpBatch, VulkanResidentInProcessPlacedRuntimeError>
     {
         let execution_graph = VulkanResidentPlacedComponentBatchRunner::new_single_device(
@@ -95,26 +151,42 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
             self.input_embedding_batch_control,
             &self.input_embedding_spec,
         )?;
-        let hidden_signal = execution_graph.slice(0)?.signal_buffer(
+        Ok(VulkanResidentSpeculativeCatchUpBatch {
+            execution_graph,
+            input_embedding,
+            source_binding: None,
+        })
+    }
+
+    fn create_catch_up_source_binding(
+        &self,
+        device: &VulkanComputeDevice,
+        batch: &VulkanResidentSpeculativeCatchUpBatch,
+        normalized_target_frames: &VulkanResidentBuffer,
+        identity: VulkanResidentSpeculativeCatchUpSourceIdentity,
+    ) -> Result<VulkanResidentSpeculativeCatchUpSourceBinding, VulkanResidentInProcessPlacedRuntimeError>
+    {
+        let hidden_signal = batch.execution_graph.slice(0)?.signal_buffer(
             &VulkanComponentBatchSignalKey::ModelInput(
                 self.hidden_input_signal_id.clone(),
             ),
         )?;
-        if hidden_signal.frame_byte_capacity != frame_byte_capacity {
+        if hidden_signal.frame_byte_capacity != identity.frame_byte_capacity {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                 VulkanError(format!(
-                    "speculative catch-up batch hidden frame has {} bytes, expected {frame_byte_capacity}",
+                    "speculative catch-up batch hidden frame has {} bytes, expected {}",
                     hidden_signal.frame_byte_capacity,
+                    identity.frame_byte_capacity,
                 )),
             ));
         }
         let build_hidden_copy_batches = |active_pending_index: usize| {
-            (1..=lane_capacity)
+            (1..=batch.execution_graph.lane_capacity)
                 .map(|batch_width| {
                     let inactive_pending_index = active_pending_index ^ 1;
                     let preceding_target_bytes = speculative_catch_up_preceding_target_bytes(
                         batch_width,
-                        frame_byte_capacity,
+                        identity.frame_byte_capacity,
                     )
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                     let mut copies = vec![VulkanResidentBufferRangeCopy::new(
@@ -122,7 +194,7 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
                         &hidden_signal.buffer,
                         0,
                         0,
-                        frame_byte_capacity,
+                        identity.frame_byte_capacity,
                     )
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?];
                     if preceding_target_bytes > 0 {
@@ -131,7 +203,7 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
                                 normalized_target_frames,
                                 &hidden_signal.buffer,
                                 0,
-                                frame_byte_capacity,
+                                identity.frame_byte_capacity,
                                 preceding_target_bytes,
                             )
                             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
@@ -143,7 +215,7 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
                             &self.pending_target_hiddens[inactive_pending_index],
                             preceding_target_bytes,
                             0,
-                            frame_byte_capacity,
+                            identity.frame_byte_capacity,
                         )
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     );
@@ -157,10 +229,24 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
             build_hidden_copy_batches(0)?,
             build_hidden_copy_batches(1)?,
         ];
-        Ok(VulkanResidentSpeculativeCatchUpBatch {
-            execution_graph,
-            input_embedding,
+        Ok(VulkanResidentSpeculativeCatchUpSourceBinding {
+            identity,
             hidden_copy_batches,
         })
+    }
+
+    fn invalidate_catch_up_source_binding(&self, source: &VulkanResidentBuffer) -> bool {
+        let mut batch = self.catch_up_batch.borrow_mut();
+        let Some(batch) = batch.as_mut() else {
+            return false;
+        };
+        let should_invalidate = batch
+            .source_binding
+            .as_ref()
+            .is_some_and(|binding| binding.identity.binds_buffer(source));
+        if should_invalidate {
+            batch.source_binding = None;
+        }
+        should_invalidate
     }
 }

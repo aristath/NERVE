@@ -532,13 +532,13 @@ For every numbered item below:
   auxiliary buffer now retains both its decoder scope and allocation identity.
   This exposed and fixed two undercounts: draft selection telemetry was absent,
   and autoregressive execution reserves two alternating pending target-hidden
-  buffers rather than one. The autoregressive catch-up cache currently keys
-  retained copy command buffers by a borrowed source-buffer address without
-  retaining that source's ownership; replacing a causal verification runner can
-  therefore destroy a source while an executable command buffer still refers to
-  it. Replace that address cache with an explicitly owned or invalidated source
-  lifetime and test runner replacement before live execution. The lazily cached
-  autoregressive catch-up batch runners and the permanently mounted
+  buffers rather than one. Autoregressive catch-up now retains one canonical
+  runner at the configured target-window lane class instead of one heavy bank
+  per observed width and source. Its copy-command binding uses the stable Vulkan
+  device/buffer identity, is rebuilt when the source or frame geometry changes,
+  is explicitly invalidated before a temporal source runner is replaced, and is
+  dropped before the stream's source buffers during teardown. The lazily mounted
+  autoregressive catch-up batch runner and the permanently mounted
   parallel-block proposal, committed-context, state-ingestion, history, and
   readback buffers do not yet
   have workload-free allocation plans; terminal admission must cover those

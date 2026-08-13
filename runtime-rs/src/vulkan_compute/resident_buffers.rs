@@ -1,4 +1,8 @@
 impl VulkanResidentBuffer {
+    pub(crate) fn command_binding_identity(&self) -> (u64, u64) {
+        (self.device.handle().as_raw(), self.buffer.as_raw())
+    }
+
     pub fn persistently_map(&mut self) -> Result<(), VulkanError> {
         if self.persistent_mapping.is_some() {
             return Ok(());

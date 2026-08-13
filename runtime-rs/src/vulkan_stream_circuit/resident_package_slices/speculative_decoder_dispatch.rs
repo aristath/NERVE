@@ -21,6 +21,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     VulkanResidentAutoregressiveSpeculativeDecoderProcessor::from_model(
                         device,
                         model,
+                        target_model.speculative_draft_tokens,
                         target_hidden,
                         target_output_parameters,
                         sampler_kernels,
@@ -187,6 +188,15 @@ impl VulkanResidentSpeculativeDecoderProcessor {
             self.execution,
             VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_)
         )
+    }
+
+    fn invalidate_catch_up_source_binding(&self, source: &VulkanResidentBuffer) -> bool {
+        match &self.execution {
+            VulkanResidentSpeculativeDecoderExecutionProcessor::Autoregressive(processor) => {
+                processor.invalidate_catch_up_source_binding(source)
+            }
+            VulkanResidentSpeculativeDecoderExecutionProcessor::ParallelBlock(_) => false,
+        }
     }
 
     fn capture_baseline(&self) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
