@@ -61,6 +61,14 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             speculative_draft_tokens,
             residency_policy,
         )?;
+    let parallel_speculative_processor_transient =
+        exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
+            runtime_model,
+            speculative_decoder_slice_plans,
+            devices,
+            speculative_draft_tokens,
+            residency_policy,
+        )?;
     let mut execution_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
         runtime_model,
         slice_plans,
@@ -75,6 +83,13 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
         .map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(
                 "failed to attach speculative catch-up transients: {error}",
+            ))
+        })?;
+    execution_transient
+        .extend(parallel_speculative_processor_transient.clone())
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to attach parallel speculative processor transients: {error}",
             ))
         })?;
     let mut seen_transients = Vec::new();
@@ -117,6 +132,13 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
                     "failed to attach resolved speculative catch-up transients: {error}",
+                ))
+            })?;
+        resolved_transient
+            .extend(parallel_speculative_processor_transient.clone())
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to attach resolved parallel speculative processor transients: {error}",
                 ))
             })?;
         if resolved_transient == execution_transient {

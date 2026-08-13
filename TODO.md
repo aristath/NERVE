@@ -544,11 +544,15 @@ For every numbered item below:
   autoregressive catch-up stays on the serial path and therefore reserves no
   unused batch bank. Exact hybrid prefill planning also separates the active
   calibrated width from the power-of-two runner allocation capacity, so an
-  odd-width selection cannot under-reserve its buffers. The permanently mounted
-  parallel-block proposal, committed-context, state-ingestion, history, and
-  readback buffers do not yet have workload-free allocation plans; terminal
-  admission must cover those actual allocations before speculative TP can enter
-  the live gate.
+  odd-width selection cannot under-reserve its buffers. Parallel speculative
+  proposal and committed-context runners now share one structural scope
+  derivation with their materialized processors, and their per-allocation
+  component-batch ledgers, packed output readback, and cross-physical-device
+  source-tap staging are part of terminal admission. Co-located logical devices
+  correctly allocate no ceremonial staging. The temporal and resident-feedback
+  state-ingestion runners plus resident source histories do not yet have
+  workload-free allocation plans; terminal admission must cover those actual
+  allocations before speculative TP can enter the live gate.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

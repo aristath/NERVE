@@ -165,6 +165,322 @@ fn speculative_catch_up_transient_is_absent_for_demand_residency_and_fails_close
     assert!(error.to_string().contains("no prepared catch-up slice"));
 }
 
+fn fixture_parallel_speculative_runtime_model(
+    source_device_id: &str,
+) -> (
+    VulkanResidentRuntimeModel,
+    BTreeMap<String, VulkanResidentModelPackageDeviceSlicePlan>,
+    Vec<VulkanRuntimeSelectedResourceMountDevice>,
+) {
+    let package_root = tiny_model_dir();
+    let mut model = fixture_model_runtime_model();
+    let decoder_device_id = model.placement.default_device_id.clone();
+    let mut decoder = parallel_speculative_decoder_with_default("parallel_draft", 7);
+    decoder.circuit_graph = model.package.circuit_graph.clone();
+    let layer_component = model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let layer_execution = model.package.component_executions[0].clone();
+    let draft_component = |component_id: &str, runtime_role| {
+        let mut component = layer_component.clone();
+        component.component_id = component_id.to_string();
+        component.runtime_role = runtime_role;
+        component.circuit.source.component_id = component_id.to_string();
+        component.circuit.runtime_role = runtime_role;
+        component
+    };
+    let mut input_component =
+        draft_component("draft_input", CircuitRuntimeRole::DraftInputAdapter);
+    let mut anchor_port = input_component.circuit.boundary.inputs[0].clone();
+    anchor_port.id = "anchor_frame".to_string();
+    anchor_port.component_port = Some("anchor".to_string());
+    input_component.circuit.boundary.inputs.push(anchor_port);
+    decoder.circuit_graph.components = vec![
+        input_component,
+        draft_component("draft_processor", CircuitRuntimeRole::DraftProcessor),
+        draft_component(
+            "draft_output",
+            CircuitRuntimeRole::DraftOutputTransducer,
+        ),
+    ];
+    decoder.component_executions = ["draft_input", "draft_processor", "draft_output"]
+        .into_iter()
+        .map(|component_id| {
+            let mut execution = layer_execution.clone();
+            execution.component_id = component_id.to_string();
+            execution
+        })
+        .collect();
+    decoder.circuit_graph.edges = vec![
+        crate::stream_circuit::StreamCircuitGraphEdge {
+            id: "committed_context".to_string(),
+            source: crate::stream_circuit::StreamCircuitEdgeEndpoint {
+                component_id: "draft_input".to_string(),
+                port_id: "output_frame".to_string(),
+            },
+            destination: crate::stream_circuit::StreamCircuitEdgeEndpoint {
+                component_id: "draft_processor".to_string(),
+                port_id: "input_frame".to_string(),
+            },
+            connection: StreamCircuitConnection::SharedContext {
+                state_update: "committed_target_only".to_string(),
+            },
+        },
+        crate::stream_circuit::StreamCircuitGraphEdge {
+            id: "proposal_output".to_string(),
+            source: crate::stream_circuit::StreamCircuitEdgeEndpoint {
+                component_id: "draft_processor".to_string(),
+                port_id: "output_frame".to_string(),
+            },
+            destination: crate::stream_circuit::StreamCircuitEdgeEndpoint {
+                component_id: "draft_output".to_string(),
+                port_id: "input_frame".to_string(),
+            },
+            connection: StreamCircuitConnection::Forward,
+        },
+    ];
+    decoder.circuit_graph.boundary = crate::stream_circuit::StreamCircuitGraphBoundary {
+        external_inputs: vec![
+            crate::stream_circuit::StreamCircuitGraphBoundaryPort {
+                id: "input_frame".to_string(),
+                endpoint: crate::stream_circuit::StreamCircuitEdgeEndpoint {
+                    component_id: "draft_input".to_string(),
+                    port_id: "input_frame".to_string(),
+                },
+                source_tap: Some(StreamCircuitGraphSourceTap {
+                    component_id: "layer_00".to_string(),
+                    port_id: "output_frame".to_string(),
+                    instance_selection:
+                        StreamCircuitGraphSourceTapInstanceSelection::LastInExecutionOrder,
+                }),
+            },
+            crate::stream_circuit::StreamCircuitGraphBoundaryPort {
+                id: "anchor_frame".to_string(),
+                endpoint: crate::stream_circuit::StreamCircuitEdgeEndpoint {
+                    component_id: "draft_input".to_string(),
+                    port_id: "anchor_frame".to_string(),
+                },
+                source_tap: None,
+            },
+        ],
+        public_outputs: vec![crate::stream_circuit::StreamCircuitGraphBoundaryPort {
+            id: "draft_output".to_string(),
+            endpoint: crate::stream_circuit::StreamCircuitEdgeEndpoint {
+                component_id: "draft_output".to_string(),
+                port_id: "output_frame".to_string(),
+            },
+            source_tap: None,
+        }],
+    };
+    model
+        .runtime_graph
+        .instances
+        .iter_mut()
+        .find(|instance| instance.source_component_id == "layer_00")
+        .expect("fixture layer instance exists")
+        .device_id = source_device_id.to_string();
+    model.package.speculative_decoders.push(decoder.clone());
+
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let draft_runtime_model =
+        speculative_decoder_runtime_model(&model, &decoder, &decoder_device_id);
+    let draft_contract = instantiate_runtime_resource_contract(&draft_runtime_model).unwrap();
+    let slice = VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning(
+        &package_root,
+        &draft_runtime_model,
+        &draft_contract,
+        &tensor_index,
+        &decoder_device_id,
+        64,
+    )
+    .unwrap();
+    let devices = [
+        (decoder_device_id.clone(), "physical0".to_string()),
+        (source_device_id.to_string(), "physical1".to_string()),
+    ]
+    .into_iter()
+    .collect::<BTreeMap<_, _>>()
+    .into_iter()
+    .map(
+        |(logical_device_id, physical_device_id)| VulkanRuntimeSelectedResourceMountDevice {
+            execution_identity: hybrid_test_device(&physical_device_id),
+            logical_device_id,
+            physical_device_id,
+            live_safe_capacity_bytes: usize::MAX,
+            upload_alignment: 8,
+        },
+    )
+    .collect::<Vec<_>>();
+    (
+        model,
+        BTreeMap::from([("parallel_draft".to_string(), slice)]),
+        devices,
+    )
+}
+
+#[test]
+fn parallel_speculative_processor_transient_matches_mounted_permanent_allocations() {
+    let (model, slices, devices) = fixture_parallel_speculative_runtime_model("source_gpu");
+    let decoder = &model.package.speculative_decoders[0];
+    let slice = &slices[&decoder.id];
+    let scopes = parallel_speculative_execution_scopes(decoder).unwrap();
+    let proposal = VulkanComponentBatchResidentAllocationPlan::for_single_device(
+        &slice.placed_plan,
+        &slice.prepared_plan,
+        &slice.batch_kernels,
+        7,
+        VulkanComponentBatchExecutionMode::ParallelBlock,
+        &VulkanComponentBatchExecutionScope::nodes(scopes.proposal_node_ids_by_component)
+            .unwrap(),
+        &BTreeSet::new(),
+        false,
+        false,
+    )
+    .unwrap();
+    let committed = VulkanComponentBatchResidentAllocationPlan::for_single_device(
+        &slice.placed_plan,
+        &slice.prepared_plan,
+        &slice.batch_kernels,
+        1,
+        VulkanComponentBatchExecutionMode::ParallelBlock,
+        &VulkanComponentBatchExecutionScope::nodes(scopes.state_node_ids_by_component).unwrap(),
+        &BTreeSet::new(),
+        false,
+        false,
+    )
+    .unwrap();
+
+    let planned = exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
+        &model,
+        &slices,
+        &devices,
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    let readback_bytes = 7 * (size_of::<u32>() + size_of::<f32>());
+    let source_tap_bytes = model.package.activation_element_bytes.unwrap() * 16;
+    assert_eq!(
+        planned.device_bytes_by_logical_device[&slice.device_id],
+        proposal.total_byte_capacity
+            + committed.total_byte_capacity
+            + readback_bytes
+            + source_tap_bytes,
+    );
+    assert_eq!(
+        planned.device_bytes_by_logical_device["source_gpu"],
+        source_tap_bytes,
+    );
+    assert_eq!(
+        planned.device_allocations.len(),
+        proposal.allocations.len() + committed.allocations.len() + 3,
+    );
+
+    let (same_model, same_slices, mut same_devices) =
+        fixture_parallel_speculative_runtime_model("source_gpu");
+    same_devices
+        .iter_mut()
+        .find(|device| device.logical_device_id == "source_gpu")
+        .unwrap()
+        .physical_device_id = "physical0".to_string();
+    let same = exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
+        &same_model,
+        &same_slices,
+        &same_devices,
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    assert!(!same
+        .device_bytes_by_logical_device
+        .contains_key("source_gpu"));
+    assert_eq!(
+        same.device_bytes_by_logical_device[&slice.device_id],
+        proposal.total_byte_capacity + committed.total_byte_capacity + readback_bytes,
+    );
+}
+
+#[test]
+fn parallel_speculative_processor_transient_fails_closed_on_incomplete_mount_identity() {
+    let (model, slices, devices) = fixture_parallel_speculative_runtime_model("source_gpu");
+    let disabled = exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
+        &model,
+        &BTreeMap::new(),
+        &[],
+        0,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    assert_eq!(disabled, VulkanRuntimeHybridExecutionTransientPlan::default());
+
+    let missing_slice = exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
+        &model,
+        &BTreeMap::new(),
+        &devices,
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap_err();
+    assert!(missing_slice.to_string().contains("has no prepared slice"));
+
+    let missing_source = exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
+        &model,
+        &slices,
+        &devices
+            .into_iter()
+            .filter(|device| device.logical_device_id != "source_gpu")
+            .collect::<Vec<_>>(),
+        7,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap_err();
+    assert!(missing_source.to_string().contains("has no physical identity"));
+}
+
+#[test]
+fn physical_mount_admits_parallel_speculative_processor_allocations() {
+    let (model, _, _) = fixture_parallel_speculative_runtime_model("runtime_default");
+    let physical = VulkanRuntimePhysicalExecutionPlan::uniform(&model);
+    let devices = physical
+        .device_ids(&model)
+        .into_iter()
+        .map(|logical_device_id| physical_mount_test_device(&logical_device_id))
+        .collect::<Vec<_>>();
+    let planned = plan_vulkan_runtime_physical_mount(
+        tiny_model_dir(),
+        &model,
+        &physical,
+        None,
+        64,
+        7,
+        ResourceResidencyPolicy::Eager,
+        &devices,
+        usize::MAX,
+    )
+    .unwrap()
+    .unwrap();
+    let allocations = planned
+        .physical_execution_residency_plan
+        .device_plans
+        .iter()
+        .flat_map(|device| &device.execution_transient_device_allocations)
+        .collect::<Vec<_>>();
+    assert!(allocations
+        .iter()
+        .any(|allocation| allocation.concern.contains("proposal")));
+    assert!(allocations
+        .iter()
+        .any(|allocation| allocation.concern.contains("committed context")));
+    assert!(allocations
+        .iter()
+        .any(|allocation| allocation.concern.contains("output readback")));
+}
+
 #[test]
 fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
     let package_root = tiny_model_dir();
