@@ -386,7 +386,13 @@ For every numbered item below:
   gate. Per-island exact resource claims must still move ahead of the ordered
   solve so exact infeasibility can prune partial routes safely rather than
   relying on potentially exponential terminal enumeration, and so the future
-  general-DAG solver can reuse the same authoritative claims.
+  general-DAG solver can reuse the same authoritative claims. The resource
+  algebra now canonicalizes local full allocations and arbitrary overlapping
+  distributed fragments into shared physical byte-range blocks, with exact
+  target identity and deterministic claim IDs. The remaining work is to derive
+  those ranges plus mutable state, cache quota, load-wave, and transient claims
+  from each lowered candidate island and replace calibration aggregates before
+  search.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
   durations. Model compute and transfer queues, dependency edges, collectives,
   independent expert branches, resource contention, and legal overlap.
