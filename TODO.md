@@ -165,6 +165,22 @@ the local placement calibration, and the mounted graph.
   independent overlay and per-head arithmetic proofs. Sequential shader,
   provider, mounting, target, source-artifact, and composition regressions
   pass. Live equivalence and performance remain part of the authorized gate.
+- Shared-input dense projections now have their own structure-discovered exact
+  optimizer alternative. It recognizes a complete two- or three-consumer
+  native-FP8 prequantization fan-out, preserves the shared quantizer and every
+  branch's parameter, dot-product, reduction, output, and state contract, and
+  replaces only the independent linear dispatches with one parallel-linear
+  physical island. Discovery depends on graph and physical representation
+  contracts rather than model or node names. On the current DeepSeek package it
+  finds 64 regions in two exact performance families: 43 attention input/KV
+  pairs and 21 compressed-attention query/indexer pairs. The corresponding
+  candidates own 86 and 42 operator scopes. A fresh 21-region real-package
+  construction emitted scalar plus causal-batch SPIR-V and sealed overlays;
+  deterministic reconstruction proved both the source-region and per-branch
+  arithmetic obligations, while a modified overlay was rejected. Sequential
+  provider and shared optimizer regressions pass. Both alternatives remain
+  unselected until the authorized component and product measurements prove a
+  complete-stream win.
 - A mounted derived representation now reserves a complete hot selected-expert
   wave per affected selector in addition to its immutable compact source. The
   contract accounts transformed and unchanged atomic-group members, source and
@@ -828,8 +844,21 @@ For every numbered item below:
   without changing the canonical token/state digest. Do not retain private
   reasoning merely to make generation state reusable, copy full state
   capacity, or introduce hot-path host polling.
-- Re-evaluate dense projections inside the surrounding island so local outputs
-  can feed their next consumer without unnecessary publication or conversion.
+- On the authorized live gate, measure the two exact shared-input projection
+  families in decode and prefill, compare every output binding and complete
+  product behavior with the source, and retain each family only where the
+  complete stream wins. The 21 compressed-attention regions are disjoint from
+  the current hyper/RMS alternatives and can be selected independently.
+- Build one combined source-anchored attention-input island for the 43 regions
+  where the shared quantizer is already owned by the hyper/RMS/prequant
+  alternative. Do not permit overlapping overlays or choose between two
+  individually useful rewrites merely because they share the same producer.
+  The combined candidate must fuse the exact hyper/RMS/prequant producer and
+  its parallel query/KV projections, preserve every branch's arithmetic order,
+  expose scalar and causal-batch contracts, and be selected only by measured
+  complete-region and product performance. Continue re-evaluating surrounding
+  dense consumers so local outputs need not be unnecessarily published or
+  converted.
 
 ### 9. Make temporal prefill a true multi-token transaction
 

@@ -23,6 +23,10 @@ from nerve.representation_optimizer.providers.hyper_norm_fusion import (
     ExactHyperNormFusionProvider,
     HyperNormFusionToolchainResolver,
 )
+from nerve.representation_optimizer.providers.parallel_projection_fusion import (
+    ExactParallelProjectionFusionProvider,
+    ParallelProjectionFusionToolchainResolver,
+)
 from nerve.representation_optimizer.providers.resident_expansion import (
     ExactResidentExpertExpansionProvider,
     ResidentExpansionToolchainResolver,
@@ -42,6 +46,7 @@ def load_builtin_provider_registry(
             BlockScaledOutputProjectionProvider(),
             ExactResidentExpertExpansionProvider(),
             ExactHyperNormFusionProvider(),
+            ExactParallelProjectionFusionProvider(),
             ExactAttentionHeadGroupingProvider(),
         ),
     )
@@ -57,6 +62,7 @@ class BuiltinCandidateToolchainResolver:
             BlockScaledOutputToolchainResolver(),
             ResidentExpansionToolchainResolver(),
             HyperNormFusionToolchainResolver(),
+            ParallelProjectionFusionToolchainResolver(),
             AttentionHeadGroupingToolchainResolver(),
         )
 
