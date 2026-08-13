@@ -1362,6 +1362,144 @@ fn runtime_hybrid_physical_resolution_carries_measured_tp_into_normal_execution(
 }
 
 #[test]
+fn runtime_hybrid_exact_candidate_parameters_prune_before_terminal_mount() {
+    let model = fixture_model_runtime_model();
+    let catalog = hybrid_test_catalog(&model);
+    let package_root = tiny_model_dir();
+    let bindings = BTreeMap::from([
+        ("gpu0".to_string(), "gpu0".to_string()),
+        ("gpu1".to_string(), "gpu1".to_string()),
+    ]);
+    let planning_devices = [
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu0".to_string(),
+            identity: hybrid_test_device("gpu0"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu1".to_string(),
+            identity: hybrid_test_device("gpu1"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+    ];
+    let planner = VulkanRuntimeHybridExactCandidateResourcePlanner {
+        package_root: &package_root,
+        logical_device_id_by_physical_device: &bindings,
+        planning_devices: &planning_devices,
+        context_capacity_activations: 64,
+    };
+    let candidates = runtime_hybrid_candidate_graph(
+        &model,
+        &catalog,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        None,
+        VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+        Some(&planner),
+    )
+    .unwrap();
+    assert_eq!(
+        candidates.authoritative_resource_classes,
+        BTreeSet::from([VulkanHybridResourceClass::Permanent])
+    );
+
+    let select_first = |capacity: &VulkanPlacementCapacityEnvelope| {
+        visit_vulkan_hybrid_ordered_graph_routes_by_duration(
+            &catalog,
+            candidates.component_ids.len(),
+            &candidates.region_candidates,
+            &candidates.boundary_candidates,
+            &candidates.resource_catalog,
+            &candidates.authoritative_resource_classes,
+            capacity,
+            |route| Ok(Some(route.clone())),
+        )
+        .unwrap()
+    };
+    let accepted = select_first(&VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([(
+            hybrid_test_device("gpu0"),
+            usize::MAX,
+        )]),
+        host_available_bytes: usize::MAX,
+    })
+    .expect("unbounded exact parameter capacity must retain the route");
+    let exact_parameter_bytes = accepted.authoritative_resource_reservations.device_bytes
+        [&hybrid_test_device("gpu0")]
+        .permanent_bytes;
+    assert!(exact_parameter_bytes > 100);
+    assert!(
+        select_first(&VulkanPlacementCapacityEnvelope {
+            available_bytes_by_device: BTreeMap::from([(
+                hybrid_test_device("gpu0"),
+                exact_parameter_bytes - 1,
+            )]),
+            host_available_bytes: usize::MAX,
+        })
+        .is_none(),
+        "sampled ten-byte calibration residency must not admit an oversized real component",
+    );
+    assert!(
+        select_first(&VulkanPlacementCapacityEnvelope {
+            available_bytes_by_device: BTreeMap::from([(
+                hybrid_test_device("gpu0"),
+                exact_parameter_bytes,
+            )]),
+            host_available_bytes: usize::MAX,
+        })
+        .is_some(),
+        "sampled transient memory is not exact enough to prune before terminal mount",
+    );
+}
+
+#[test]
+fn runtime_hybrid_exact_candidate_parameters_require_complete_physical_bindings() {
+    let model = fixture_model_runtime_model();
+    let catalog = hybrid_test_catalog(&model);
+    let package_root = tiny_model_dir();
+    let bindings = BTreeMap::from([("gpu0".to_string(), "gpu0".to_string())]);
+    let planning_devices = [
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu0".to_string(),
+            identity: hybrid_test_device("gpu0"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu1".to_string(),
+            identity: hybrid_test_device("gpu1"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+    ];
+    let planner = VulkanRuntimeHybridExactCandidateResourcePlanner {
+        package_root: &package_root,
+        logical_device_id_by_physical_device: &bindings,
+        planning_devices: &planning_devices,
+        context_capacity_activations: 64,
+    };
+
+    let error = match runtime_hybrid_candidate_graph(
+        &model,
+        &catalog,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        None,
+        VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+        Some(&planner),
+    ) {
+        Ok(_) => panic!("incomplete physical bindings must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .0
+            .contains("planning device \"gpu1\" is not bound to logical device \"gpu1\"")
+    );
+}
+
+#[test]
 fn runtime_hybrid_jointly_selects_a_faster_compatible_representation() {
     let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let mut alternative = model.clone();
@@ -1483,6 +1621,7 @@ fn runtime_hybrid_route_visitor_reaches_a_sampled_dominated_representation() {
         &catalog,
         &capacity,
         VulkanTargetedComponentExecutionPhase::Decode,
+        None,
         |placement| {
             let candidate_id = placement
                 .ordered_placement
@@ -1973,6 +2112,7 @@ fn runtime_hybrid_prefill_route_visitor_reaches_a_sampled_dominated_alternative(
         &capacity,
         phase,
         Some(&required_owners),
+        None,
         |placement| {
             let uses_slow_artifact = route_uses_slow_artifact(&placement);
             visited_slow_artifact.push(uses_slow_artifact);

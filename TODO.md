@@ -383,24 +383,31 @@ For every numbered item below:
   data made that route look resource-dominated; exact sequential tests cover
   both representation/decode and prefill route discovery. Normal mount repeats
   the same centralized derivations and remains the final race-safe admission
-  gate. Per-island exact resource claims must still move ahead of the ordered
-  solve so exact infeasibility can prune partial routes safely rather than
-  relying on potentially exponential terminal enumeration, and so the future
-  general-DAG solver can reuse the same authoritative claims. The resource
-  algebra now canonicalizes local full allocations and arbitrary overlapping
-  distributed fragments into shared physical byte-range blocks, with exact
-  target identity and deterministic claim IDs. Workload-free physical mounting
-  now reconstructs fixed parameter claims from local prepared descriptors,
-  exact replayed TP fragments, non-dispatch transducer parameters, every mounted
-  phase, and compiled resource identities so tied or aliased tensors share one
-  allocation. Compiler-generated physical layouts instead retain their own
-  immutable storage-range identity, so they cannot be incorrectly deduplicated
-  against their canonical source tensor. The local full-route total is checked
-  against physical residency, and a four-participant TP test checks the exact
-  fragment total on every target. The remaining work is to move this derivation
-  from accepted complete routes to each candidate island, add mutable state,
-  cache quota, load-wave, and transient claims, and replace calibration
-  aggregates before search.
+  gate. Exact immutable parameter claims now move ahead of the ordered solve:
+  every eligible local, TP, and measured-region candidate is replayed
+  workload-free against its concrete compiled descriptors and physical shards
+  before route search. Historical calibration candidates for currently
+  ineligible devices are excluded before replay, while inconsistent
+  selected-device bindings fail closed. Raw local full allocations and
+  arbitrary overlapping distributed fragments are canonicalized together
+  across the complete candidate graph, including representation alternatives,
+  into shared physical byte-range blocks with exact target identity and
+  deterministic claim IDs. This lets exact parameter infeasibility prune
+  partial routes without double-charging aliases or full/fragment overlap.
+  Sampled calibration transients remain advisory and cannot reject a route
+  before terminal mount. Workload-free physical mounting independently
+  reconstructs the same fixed claims from local prepared descriptors, exact
+  replayed TP fragments, non-dispatch transducer parameters, every mounted
+  phase, and compiled resource identities. Compiler-generated physical layouts
+  retain their own immutable storage-range identity, so they cannot be
+  incorrectly deduplicated against their canonical source tensor. Exact
+  sequential tests cover insufficient parameter capacity, unchanged
+  non-parameter classes, malformed bindings, ineligible historical candidates,
+  representation/decode and prefill discovery, joint mount, local full-route
+  totals, and four-participant TP fragment totals. The remaining resource work
+  is to derive mutable state, cache quota, atomic load-wave, and
+  execution-transient claims per candidate before search and replace their
+  calibration aggregates without making sampled evidence authoritative.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
   durations. Model compute and transfer queues, dependency edges, collectives,
   independent expert branches, resource contention, and legal overlap.

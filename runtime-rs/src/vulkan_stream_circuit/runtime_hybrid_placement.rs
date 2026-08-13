@@ -56,6 +56,9 @@ struct VulkanRuntimeHybridCandidateGraph {
         BTreeMap<VulkanPlacementExecutionCaseIdentity, VulkanPlacementRegionExecutionCalibration>,
     representation_selections_by_candidate_id:
         BTreeMap<String, Vec<crate::RuntimeSelectedImplementation>>,
+    exact_parameter_requirements_by_candidate_id:
+        BTreeMap<String, Vec<VulkanHybridSharedRangeRequirement>>,
+    authoritative_resource_classes: BTreeSet<VulkanHybridResourceClass>,
 }
 
 struct VulkanRuntimeHybridMountPlanningContext<'a> {
@@ -158,6 +161,7 @@ fn runtime_hybrid_representation_placement_candidates(
         catalog,
         phase,
         None,
+        None,
     )?;
     let plans = plan_vulkan_hybrid_ordered_graph_candidates_with_resources(
         catalog,
@@ -187,6 +191,7 @@ fn visit_runtime_hybrid_representation_placements_by_duration<T, F>(
     catalog: &VulkanPlacementCalibrationCatalog,
     eligible_capacity: &VulkanPlacementCapacityEnvelope,
     phase: VulkanTargetedComponentExecutionPhase,
+    exact_parameter_planner: Option<&VulkanRuntimeHybridExactCandidateResourcePlanner<'_>>,
     mut visitor: F,
 ) -> Result<Option<T>, VulkanRuntimeHybridPlacementError>
 where
@@ -201,6 +206,7 @@ where
         catalog,
         phase,
         None,
+        exact_parameter_planner,
     )?;
     visit_vulkan_hybrid_ordered_graph_routes_by_duration(
         catalog,
@@ -208,6 +214,7 @@ where
         &candidates.region_candidates,
         &candidates.boundary_candidates,
         &candidates.resource_catalog,
+        &candidates.authoritative_resource_classes,
         eligible_capacity,
         |route| {
             let placement = runtime_hybrid_representation_placement_from_plan(
@@ -565,6 +572,14 @@ fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
             );
         }
     }
+    let exact_parameter_planner = physical_mount_planning.as_ref().map(|planning| {
+        VulkanRuntimeHybridExactCandidateResourcePlanner {
+            package_root,
+            logical_device_id_by_physical_device,
+            planning_devices: planning.devices,
+            context_capacity_activations,
+        }
+    });
     visit_runtime_hybrid_representation_placements_by_duration(
         runtime_model,
         &applications,
@@ -572,6 +587,7 @@ fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
         catalog,
         capacity,
         VulkanTargetedComponentExecutionPhase::Decode,
+        exact_parameter_planner.as_ref(),
         |decode| {
             let mut selected = decode.selected_implementations;
             selected.extend(endpoint_selections.iter().cloned());
@@ -603,6 +619,7 @@ fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
                         activation_batch_width,
                     },
                     Some(&decode_owner_by_component),
+                    exact_parameter_planner.as_ref(),
                     |prefill| {
                         try_resolve_vulkan_runtime_hybrid_phase_set_mount(
                             package_root,
@@ -780,6 +797,7 @@ fn try_plan_vulkan_runtime_hybrid_ordered_graph_with_owners_and_filter(
         phase,
         required_owner_by_component,
         component_strategy_filter,
+        None,
     )?;
     let plan = try_plan_vulkan_hybrid_ordered_graph_with_resources(
         catalog,
@@ -799,6 +817,7 @@ fn visit_vulkan_runtime_hybrid_ordered_graph_with_owners_by_duration<T, F>(
     eligible_capacity: &VulkanPlacementCapacityEnvelope,
     phase: VulkanTargetedComponentExecutionPhase,
     required_owner_by_component: Option<&BTreeMap<String, String>>,
+    exact_parameter_planner: Option<&VulkanRuntimeHybridExactCandidateResourcePlanner<'_>>,
     mut visitor: F,
 ) -> Result<Option<T>, VulkanRuntimeHybridPlacementError>
 where
@@ -812,6 +831,7 @@ where
         phase,
         required_owner_by_component,
         VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+        exact_parameter_planner,
     )?;
     visit_vulkan_hybrid_ordered_graph_routes_by_duration(
         catalog,
@@ -819,6 +839,7 @@ where
         &candidates.region_candidates,
         &candidates.boundary_candidates,
         &candidates.resource_catalog,
+        &candidates.authoritative_resource_classes,
         eligible_capacity,
         |route| {
             visitor(runtime_hybrid_ordered_placement_from_plan(
@@ -866,7 +887,11 @@ fn runtime_hybrid_candidate_graph(
     phase: VulkanTargetedComponentExecutionPhase,
     required_owner_by_component: Option<&BTreeMap<String, String>>,
     component_strategy_filter: VulkanRuntimeHybridComponentStrategyFilter,
+    exact_parameter_planner: Option<&VulkanRuntimeHybridExactCandidateResourcePlanner<'_>>,
 ) -> Result<VulkanRuntimeHybridCandidateGraph, VulkanRuntimeHybridPlacementError> {
+    if let Some(planner) = exact_parameter_planner {
+        planner.validate_bindings()?;
+    }
     let execution_phase = runtime_hybrid_execution_phase(phase)?;
     let component_ids = runtime_model
         .circuit_graph
@@ -1101,12 +1126,60 @@ fn runtime_hybrid_candidate_graph(
         }
     }
 
-    let resource_catalog = VulkanHybridCandidateResourceCatalog::from_calibration(
+    if let Some(planner) = exact_parameter_planner {
+        region_candidates.retain(|candidate| {
+            planner.execution_case_is_eligible(&candidate.execution_case)
+        });
+    }
+
+    let mut resource_catalog = VulkanHybridCandidateResourceCatalog::from_calibration(
         catalog,
         &region_candidates,
         &boundary_candidates,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let mut exact_parameter_requirements_by_candidate_id = BTreeMap::new();
+    if let Some(planner) = exact_parameter_planner {
+        let tensor_index = runtime_model
+            .load_runtime_tensor_index(planner.package_root)
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let resource_contract = instantiate_runtime_resource_contract(runtime_model)
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        for candidate in &region_candidates {
+            let components = component_ids
+                .get(candidate.component_start..candidate.component_end)
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(
+                        "exact hybrid parameter candidate has an invalid component range"
+                            .to_string(),
+                    )
+                })?;
+            let requirements = planner.parameter_requirements(
+                runtime_model,
+                phase,
+                components,
+                &candidate.execution_case,
+                region_executions_by_case.get(&candidate.execution_case),
+                &tensor_index,
+                &resource_contract,
+            )?;
+            exact_parameter_requirements_by_candidate_id
+                .insert(candidate.candidate_id.clone(), requirements);
+        }
+        let exact_resources = canonical_vulkan_hybrid_shared_range_resources(
+            &exact_parameter_requirements_by_candidate_id,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        for (candidate_id, resources) in exact_resources {
+            resource_catalog
+                .replace_region_resource_class_claims(
+                    &candidate_id,
+                    VulkanHybridResourceClass::Permanent,
+                    resources.claims,
+                )
+                .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        }
+    }
     Ok(VulkanRuntimeHybridCandidateGraph {
         component_ids,
         execution_phase,
@@ -1116,6 +1189,11 @@ fn runtime_hybrid_candidate_graph(
         resource_catalog,
         region_executions_by_case,
         representation_selections_by_candidate_id: BTreeMap::new(),
+        exact_parameter_requirements_by_candidate_id,
+        authoritative_resource_classes: exact_parameter_planner
+            .is_some()
+            .then(|| BTreeSet::from([VulkanHybridResourceClass::Permanent]))
+            .unwrap_or_default(),
     })
 }
 
@@ -1126,6 +1204,7 @@ fn runtime_hybrid_representation_candidate_graph(
     catalog: &VulkanPlacementCalibrationCatalog,
     phase: VulkanTargetedComponentExecutionPhase,
     required_owner_by_component: Option<&BTreeMap<String, String>>,
+    exact_parameter_planner: Option<&VulkanRuntimeHybridExactCandidateResourcePlanner<'_>>,
 ) -> Result<VulkanRuntimeHybridCandidateGraph, VulkanRuntimeHybridPlacementError> {
     let mut combined = runtime_hybrid_candidate_graph(
         runtime_model,
@@ -1133,6 +1212,7 @@ fn runtime_hybrid_representation_candidate_graph(
         phase,
         required_owner_by_component,
         VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+        exact_parameter_planner,
     )?;
     let component_index_by_id = combined
         .component_ids
@@ -1215,6 +1295,7 @@ fn runtime_hybrid_representation_candidate_graph(
             phase,
             required_owner_by_component,
             VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+            exact_parameter_planner,
         )?;
         if alternative.component_ids != combined.component_ids {
             return runtime_hybrid_error(
@@ -1229,6 +1310,11 @@ fn runtime_hybrid_representation_candidate_graph(
                     && candidate.component_end == component_end
             })
         {
+            let alternative_candidate_id = candidate.candidate_id.clone();
+            let exact_parameter_requirements = alternative
+                .exact_parameter_requirements_by_candidate_id
+                .get(&alternative_candidate_id)
+                .cloned();
             candidate.candidate_id = format!(
                 "representation:{application_index}:{}",
                 candidate.candidate_id,
@@ -1253,6 +1339,11 @@ fn runtime_hybrid_representation_candidate_graph(
                     }
                     _ => {}
                 }
+            }
+            if let Some(requirements) = exact_parameter_requirements {
+                combined
+                    .exact_parameter_requirements_by_candidate_id
+                    .insert(candidate.candidate_id.clone(), requirements);
             }
             combined.region_candidates.push(candidate);
         }
@@ -1289,6 +1380,28 @@ fn runtime_hybrid_representation_candidate_graph(
         &combined.boundary_candidates,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let retained_candidate_ids = combined
+        .region_candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.as_str())
+        .collect::<BTreeSet<_>>();
+    combined
+        .exact_parameter_requirements_by_candidate_id
+        .retain(|candidate_id, _| retained_candidate_ids.contains(candidate_id.as_str()));
+    let exact_resources = canonical_vulkan_hybrid_shared_range_resources(
+        &combined.exact_parameter_requirements_by_candidate_id,
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    for (candidate_id, resources) in exact_resources {
+        combined
+            .resource_catalog
+            .replace_region_resource_class_claims(
+                &candidate_id,
+                VulkanHybridResourceClass::Permanent,
+                resources.claims,
+            )
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    }
     Ok(combined)
 }
 
@@ -1303,6 +1416,7 @@ pub fn vulkan_runtime_hybrid_phase_is_calibrated(
         phase,
         None,
         VulkanRuntimeHybridComponentStrategyFilter::AnyMeasured,
+        None,
     )?;
     Ok(runtime_hybrid_candidate_graph_has_complete_route(
         &candidates,

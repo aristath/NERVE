@@ -37,42 +37,49 @@ pub fn vulkan_runtime_hybrid_parameter_resources_by_component(
         tensor_index,
         identity_by_logical_device,
         |prepared, parameter_id, actual_tensor| {
-            let prepared_tensor = prepared
-                .descriptors
-                .iter()
-                .find_map(|descriptor| match &descriptor.resource {
-                    VulkanDescriptorResourceAddress::PermanentParameter {
-                        param_id,
-                        tensor,
-                        ..
-                    } if param_id == parameter_id => Some(tensor.as_str()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    VulkanHybridResourceError(format!(
-                        "exact hybrid prepared parameter {}.{parameter_id} has no descriptor",
-                        prepared.component_id,
-                    ))
-                })?;
-            if actual_tensor == prepared_tensor {
-                exact_vulkan_hybrid_fixed_resource_identity(
-                    resource_contract,
-                    &runtime_model.execution_scope,
-                    &prepared.component_id,
-                    Some(&prepared.node_id),
-                    parameter_id,
-                )
-            } else {
-                vulkan_hybrid_physical_tensor_resource_identity(tensor_index, actual_tensor)
-            }
+            exact_vulkan_hybrid_parameter_resource_identity_for_tensor(
+                runtime_model,
+                resource_contract,
+                tensor_index,
+                prepared,
+                parameter_id,
+                actual_tensor,
+            )
         },
     )?;
 
-    // Transducers and other host-orchestrated components may retain parameters
-    // without owning a Vulkan dispatch. Add only graph parameters absent from
-    // the prepared descriptor set; dispatch-backed parameters were already
-    // resolved above and may have been physically replaced by exact shards.
+    append_vulkan_hybrid_graph_parameter_requirements(
+        runtime_model,
+        tensor_index,
+        resource_contract,
+        identity_by_logical_device,
+        None,
+        &prepared_parameter_tensors,
+        &mut requirements_by_component,
+    )?;
+    canonical_vulkan_hybrid_shared_range_resources(&requirements_by_component)
+}
+
+/// Adds parameters retained by transducers and other host-orchestrated graph
+/// components which do not own a Vulkan descriptor, without duplicating any
+/// dispatch-backed tensor that may have been replaced by exact physical shards.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_vulkan_hybrid_graph_parameter_requirements(
+    runtime_model: &VulkanResidentRuntimeModel,
+    tensor_index: &TensorIndex,
+    resource_contract: &CompiledResourceResidencyContract,
+    identity_by_logical_device: &BTreeMap<String, VulkanPlacementDeviceExecutionIdentity>,
+    component_ids: Option<&BTreeSet<String>>,
+    prepared_parameter_tensors: &BTreeSet<(String, String)>,
+    requirements_by_component: &mut BTreeMap<
+        String,
+        Vec<VulkanHybridSharedRangeRequirement>,
+    >,
+) -> Result<(), VulkanHybridResourceError> {
     for component in &runtime_model.circuit_graph.components {
+        if component_ids.is_some_and(|ids| !ids.contains(&component.component_id)) {
+            continue;
+        }
         let logical_device_id = runtime_model
             .placement
             .device_for_component(&component.component_id);
@@ -118,7 +125,43 @@ pub fn vulkan_runtime_hybrid_parameter_resources_by_component(
                 ));
         }
     }
-    canonical_vulkan_hybrid_shared_range_resources(&requirements_by_component)
+    Ok(())
+}
+
+fn exact_vulkan_hybrid_parameter_resource_identity_for_tensor(
+    runtime_model: &VulkanResidentRuntimeModel,
+    resource_contract: &CompiledResourceResidencyContract,
+    tensor_index: &TensorIndex,
+    prepared: &VulkanPreparedDispatch,
+    parameter_id: &str,
+    actual_tensor: &str,
+) -> Result<String, VulkanHybridResourceError> {
+    let prepared_tensor = prepared
+        .descriptors
+        .iter()
+        .find_map(|descriptor| match &descriptor.resource {
+            VulkanDescriptorResourceAddress::PermanentParameter {
+                param_id, tensor, ..
+            } if param_id == parameter_id => Some(tensor.as_str()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            VulkanHybridResourceError(format!(
+                "exact hybrid prepared parameter {}.{parameter_id} has no descriptor",
+                prepared.component_id,
+            ))
+        })?;
+    if actual_tensor == prepared_tensor {
+        exact_vulkan_hybrid_fixed_resource_identity(
+            resource_contract,
+            &runtime_model.execution_scope,
+            &prepared.component_id,
+            Some(&prepared.node_id),
+            parameter_id,
+        )
+    } else {
+        vulkan_hybrid_physical_tensor_resource_identity(tensor_index, actual_tensor)
+    }
 }
 
 pub(crate) fn vulkan_hybrid_dispatch_parameter_requirements_by_component<F>(
@@ -167,11 +210,21 @@ where
             }
         }
     }
-    if prepared_by_identity.is_empty() || execution_plans.all().is_empty() {
-        return Err(VulkanHybridResourceError(
-            "exact hybrid parameter planning requires prepared dispatches and physical phase plans"
-                .to_string(),
-        ));
+    if prepared_by_identity.is_empty() {
+        if execution_plans
+            .all()
+            .iter()
+            .any(|plan| !plan.dispatches.is_empty())
+        {
+            return Err(VulkanHybridResourceError(
+                "exact hybrid parameter planning has physical dispatches without prepared descriptors"
+                    .to_string(),
+            ));
+        }
+        return Ok(VulkanHybridDispatchParameterRequirements {
+            requirements_by_component: BTreeMap::new(),
+            prepared_parameter_tensors,
+        });
     }
 
     let mut requirements_by_component =

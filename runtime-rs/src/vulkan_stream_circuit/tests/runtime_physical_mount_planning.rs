@@ -150,6 +150,41 @@ fn physical_parameter_identity_distinguishes_compiled_layout_storage() {
 }
 
 #[test]
+fn graph_parameter_requirements_include_non_dispatch_transducer_parameters() {
+    let model = fixture_model_runtime_model();
+    let package_root = tiny_model_dir();
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let resource_contract = instantiate_runtime_resource_contract(&model).unwrap();
+    let logical_device_id = model
+        .placement
+        .device_for_component("input_transducer")
+        .to_string();
+    let device = physical_mount_test_device(&logical_device_id);
+    let identities = BTreeMap::from([(logical_device_id, device.identity.clone())]);
+    let mut requirements = BTreeMap::new();
+
+    append_vulkan_hybrid_graph_parameter_requirements(
+        &model,
+        &tensor_index,
+        &resource_contract,
+        &identities,
+        Some(&BTreeSet::from(["input_transducer".to_string()])),
+        &BTreeSet::new(),
+        &mut requirements,
+    )
+    .unwrap();
+
+    assert_eq!(requirements.len(), 1);
+    let transducer = &requirements["input_transducer"];
+    assert!(!transducer.is_empty());
+    assert!(transducer.iter().all(|requirement| {
+        requirement.class == VulkanHybridResourceClass::Permanent
+            && requirement.target == VulkanHybridResourceTarget::Device(device.identity.clone())
+            && requirement.byte_count > 0
+    }));
+}
+
+#[test]
 fn physical_mount_plan_reports_full_context_capacity_infeasibility_without_allocating() {
     let model = fixture_model_runtime_model();
     let physical = VulkanRuntimePhysicalExecutionPlan::uniform(&model);

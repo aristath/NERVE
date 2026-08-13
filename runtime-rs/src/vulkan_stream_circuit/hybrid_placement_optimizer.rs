@@ -87,6 +87,30 @@ impl VulkanHybridCandidateResourceCatalog {
         *resources = VulkanHybridCandidateResources::new(claims);
         Ok(())
     }
+
+    pub fn replace_region_resource_class_claims(
+        &mut self,
+        candidate_id: &str,
+        class: VulkanHybridResourceClass,
+        mut claims: Vec<VulkanHybridResourceClaim>,
+    ) -> Result<(), VulkanHybridPlacementError> {
+        if claims.iter().any(|claim| claim.class != class) {
+            return Err(VulkanHybridPlacementError(format!(
+                "hybrid replacement for {class:?} contains another resource class",
+            )));
+        }
+        let resources = self
+            .region_resources_by_candidate_id
+            .get_mut(candidate_id)
+            .ok_or_else(|| {
+                VulkanHybridPlacementError(format!(
+                    "hybrid resource catalog has no measured region candidate {candidate_id:?}",
+                ))
+            })?;
+        resources.claims.retain(|claim| claim.class != class);
+        resources.claims.append(&mut claims);
+        Ok(())
+    }
 }
 
 fn hybrid_calibration_candidate_resources(
@@ -176,6 +200,7 @@ pub struct VulkanHybridPlacementRoute {
     pub steps: Vec<VulkanHybridScheduledStep>,
     pub predicted_duration_ns_per_activation: u128,
     pub calibration_resource_reservations: VulkanHybridResourceReservations,
+    pub authoritative_resource_reservations: VulkanHybridResourceReservations,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,6 +249,7 @@ struct VulkanHybridRouteSearchState {
     steps: Vec<VulkanHybridScheduledStep>,
     predicted_duration_ns_per_activation: u128,
     calibration_resource_reservations: VulkanHybridResourceReservations,
+    authoritative_resource_reservations: VulkanHybridResourceReservations,
 }
 
 /// Selects exact measured physical islands for a canonical ordered graph.
@@ -449,6 +475,7 @@ pub fn visit_vulkan_hybrid_ordered_graph_routes_by_duration<T, F>(
     region_candidates: &[VulkanHybridRegionCandidate],
     boundary_candidates: &[VulkanHybridBoundaryCandidate],
     resources: &VulkanHybridCandidateResourceCatalog,
+    authoritative_resource_classes: &BTreeSet<VulkanHybridResourceClass>,
     eligible_capacity: &VulkanPlacementCapacityEnvelope,
     mut visitor: F,
 ) -> Result<Option<T>, VulkanHybridPlacementError>
@@ -494,6 +521,7 @@ where
             steps: Vec::new(),
             predicted_duration_ns_per_activation: 0,
             calibration_resource_reservations: VulkanHybridResourceReservations::default(),
+            authoritative_resource_reservations: VulkanHybridResourceReservations::default(),
         },
     );
     let mut insertion_ordinal = 0u64;
@@ -504,6 +532,7 @@ where
                 steps: state.steps,
                 predicted_duration_ns_per_activation: state.predicted_duration_ns_per_activation,
                 calibration_resource_reservations: state.calibration_resource_reservations,
+                authoritative_resource_reservations: state.authoritative_resource_reservations,
             };
             if let Some(result) = visitor(&route)? {
                 return Ok(Some(result));
@@ -537,6 +566,18 @@ where
                 }
                 let mut next = state.clone();
                 if let Some(boundary) = boundary {
+                    let Some(authoritative_resource_reservations) = next
+                        .authoritative_resource_reservations
+                        .reserve_classes(
+                            boundary.resources,
+                            authoritative_resource_classes,
+                            eligible_capacity,
+                        )
+                        .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
+                    else {
+                        continue;
+                    };
+                    next.authoritative_resource_reservations = authoritative_resource_reservations;
                     next.calibration_resource_reservations = next
                         .calibration_resource_reservations
                         .reserve(boundary.resources, &unbounded_capacity)
@@ -560,6 +601,18 @@ where
                         execution_case: boundary.observation.execution_case.clone(),
                     });
                 }
+                let Some(authoritative_resource_reservations) = next
+                    .authoritative_resource_reservations
+                    .reserve_classes(
+                        candidate.resources,
+                        authoritative_resource_classes,
+                        eligible_capacity,
+                    )
+                    .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
+                else {
+                    continue;
+                };
+                next.authoritative_resource_reservations = authoritative_resource_reservations;
                 next.calibration_resource_reservations = next
                     .calibration_resource_reservations
                     .reserve(candidate.resources, &unbounded_capacity)
@@ -1313,6 +1366,7 @@ mod hybrid_placement_optimizer_tests {
             &candidates,
             &boundaries,
             &resources,
+            &BTreeSet::new(),
             &placement_capacity,
             |route| Ok(Some(route.clone())),
         )
@@ -1954,6 +2008,7 @@ mod hybrid_placement_optimizer_tests {
             &candidates,
             &[],
             &resources,
+            &BTreeSet::new(),
             &capacity,
             |route| {
                 let ids = selected_step_region_ids(&route.steps)
@@ -2031,6 +2086,7 @@ mod hybrid_placement_optimizer_tests {
             &candidates,
             &[],
             &resources,
+            &BTreeSet::new(),
             &capacity(2, 100, 100),
             |route| {
                 visited.push(selected_step_region_ids(&route.steps)[0].to_string());
@@ -2188,6 +2244,79 @@ mod hybrid_placement_optimizer_tests {
             .unwrap()
             .is_none(),
             "an atomic load wave must fit within the admitted cache quota"
+        );
+    }
+
+    #[test]
+    fn exact_resource_class_replacement_preserves_other_classes_and_rejects_mixed_input() {
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let mut observation = region_observation(
+            region_behavior("component"),
+            VulkanPlacementExecutionStrategy::SingleDevice,
+            &[("gpu0", 10)],
+            "gpu0",
+            "gpu0",
+            "gpu0",
+            5,
+            1,
+        );
+        observation
+            .transient_peak_bytes_by_physical_device
+            .insert("gpu0".to_string(), 7);
+        let execution_case = record(&mut catalog, observation);
+        let candidates = [VulkanHybridRegionCandidate {
+            candidate_id: "component".to_string(),
+            component_start: 0,
+            component_end: 1,
+            semantic_contract_id: "component".to_string(),
+            execution_case,
+        }];
+        let mut resources =
+            VulkanHybridCandidateResourceCatalog::from_calibration(&catalog, &candidates, &[])
+                .unwrap();
+        let gpu0 = device("gpu0", 2);
+        resources
+            .replace_region_resource_class_claims(
+                "component",
+                VulkanHybridResourceClass::Permanent,
+                vec![VulkanHybridResourceClaim::device(
+                    "exact:parameter",
+                    gpu0.clone(),
+                    VulkanHybridResourceClass::Permanent,
+                    42,
+                )],
+            )
+            .unwrap();
+
+        let claims = &resources.region_resources_by_candidate_id["component"].claims;
+        assert!(claims.iter().any(|claim| {
+            claim.class == VulkanHybridResourceClass::Permanent && claim.byte_count == 42
+        }));
+        assert!(claims.iter().any(|claim| {
+            claim.class == VulkanHybridResourceClass::ExecutionTransient && claim.byte_count == 7
+        }));
+        assert!(!claims.iter().any(|claim| {
+            claim.class == VulkanHybridResourceClass::Permanent && claim.byte_count == 10
+        }));
+
+        let before = claims.clone();
+        let error = resources
+            .replace_region_resource_class_claims(
+                "component",
+                VulkanHybridResourceClass::Permanent,
+                vec![VulkanHybridResourceClaim::device(
+                    "wrong:class",
+                    gpu0,
+                    VulkanHybridResourceClass::MutableState,
+                    1,
+                )],
+            )
+            .unwrap_err();
+        assert!(error.0.contains("contains another resource class"));
+        assert_eq!(
+            resources.region_resources_by_candidate_id["component"].claims,
+            before,
+            "rejected replacement must leave the catalog unchanged",
         );
     }
 }

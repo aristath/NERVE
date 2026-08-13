@@ -114,8 +114,9 @@ use crate::vulkan_distributed::{
     VulkanSelectedResourceReconfigurationPlan, allocate_distributed_shared_buffer,
     create_distributed_reduction_runner_for_buffers, distributed_residency_replay_schedule,
     distributed_shard_push_constants, physical_execution_island_kind,
-    record_vulkan_physical_execution_island_submission, resolved_physical_execution_islands,
-    selected_resource_activation, selected_resource_placements_fit_phase_participants,
+    record_vulkan_physical_execution_island_submission, replay_exact_execution_cases_to_phase,
+    resolved_physical_execution_islands, selected_resource_activation,
+    selected_resource_placements_fit_phase_participants,
     selected_resource_placements_from_execution_plan, try_plan_selected_resource_placement,
     try_plan_warm_selected_resource_reconfiguration,
     validate_selected_resource_execution_ownership_replacement,
@@ -225,6 +226,7 @@ include!("vulkan_stream_circuit/package_placement_catalog.rs");
 include!("vulkan_stream_circuit/hybrid_placement_resources.rs");
 include!("vulkan_stream_circuit/runtime_hybrid_parameter_resources.rs");
 include!("vulkan_stream_circuit/hybrid_placement_optimizer.rs");
+include!("vulkan_stream_circuit/runtime_hybrid_candidate_resources.rs");
 include!("vulkan_stream_circuit/runtime_hybrid_placement.rs");
 include!("vulkan_stream_circuit/runtime_distributed_selected_resource_planning.rs");
 include!("vulkan_stream_circuit/runtime_selected_resource_mount_planning.rs");

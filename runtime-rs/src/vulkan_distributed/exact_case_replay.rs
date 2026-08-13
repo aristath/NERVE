@@ -1,7 +1,6 @@
 use crate::vulkan_stream_circuit::{
     VulkanPlacementDeviceExecutionIdentity, VulkanPlacementExecutionCaseIdentity,
-    VulkanPlacementExecutionStrategy,
-    vulkan_distributed_execution_artifact_digest,
+    VulkanPlacementExecutionStrategy, vulkan_distributed_execution_artifact_digest,
     vulkan_distributed_execution_equivalence, vulkan_distributed_execution_graph_digest,
     vulkan_distributed_execution_operations,
 };
@@ -44,7 +43,7 @@ impl VulkanDistributedExecutionPlanSet {
     }
 }
 
-fn replay_exact_execution_cases_to_phase(
+pub(crate) fn replay_exact_execution_cases_to_phase(
     execution_plan: &mut VulkanDistributedExecutionPlan,
     cases: &BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
     phase: ExecutionPhase,
@@ -62,17 +61,16 @@ fn replay_exact_execution_cases_to_phase(
         execution_plan.shared_activation_route,
         phase,
     )?;
-    let dispatch_indices_by_component = execution_plan
-        .dispatches
-        .iter()
-        .enumerate()
-        .fold(BTreeMap::<String, Vec<usize>>::new(), |mut by_component, (index, dispatch)| {
+    let dispatch_indices_by_component = execution_plan.dispatches.iter().enumerate().fold(
+        BTreeMap::<String, Vec<usize>>::new(),
+        |mut by_component, (index, dispatch)| {
             by_component
                 .entry(dispatch.component_id.clone())
                 .or_default()
                 .push(index);
             by_component
-        });
+        },
+    );
 
     for (component_id, case) in cases {
         if case.behavior.runtime_implementation_fingerprint
@@ -170,7 +168,10 @@ fn replay_exact_distributed_component_case(
             ));
         }
     }
-    let runtime_contract_ids = runtime_contracts.keys().map(|id| (*id).to_string()).collect::<Vec<_>>();
+    let runtime_contract_ids = runtime_contracts
+        .keys()
+        .map(|id| (*id).to_string())
+        .collect::<Vec<_>>();
     let runtime_implementation_digests = runtime_contracts
         .values()
         .map(|digest| (*digest).to_string())
@@ -184,9 +185,9 @@ fn replay_exact_distributed_component_case(
     }
     let runtime_strategy = vulkan_distributed_placement_strategy(
         case.devices.len(),
-        dispatch_indices.iter().map(|dispatch_index| {
-            execution_plan.dispatches[*dispatch_index].execution_strategy
-        }),
+        dispatch_indices
+            .iter()
+            .map(|dispatch_index| execution_plan.dispatches[*dispatch_index].execution_strategy),
     )?;
     if runtime_strategy != case.strategy {
         return exact_case_error(format!(
@@ -237,9 +238,9 @@ fn replay_exact_distributed_component_case(
         .filter(|island| {
             island.component_id == component_id
                 && island
-                .dispatches
-                .iter()
-                .any(|dispatch| dispatch_ids.contains(&dispatch.dispatch_index))
+                    .dispatches
+                    .iter()
+                    .any(|dispatch| dispatch_ids.contains(&dispatch.dispatch_index))
         })
         .collect::<Vec<_>>();
     let first_island = component_islands.first().ok_or_else(|| {
@@ -326,16 +327,17 @@ fn replay_exact_distributed_component_case(
             let runtime_identity = device_execution_identity_by_logical_device
                 .get(&runtime_shard.device_id)
                 .expect("every runtime participant was resolved above");
-            let parameter_bytes = runtime_shard.parameters.iter().try_fold(
-                0usize,
-                |total, parameter| {
-                    total.checked_add(parameter.byte_count).ok_or_else(|| {
-                        VulkanDistributedPlanError(
-                            "exact replay parameter byte count overflowed".to_string(),
-                        )
-                    })
-                },
-            )?;
+            let parameter_bytes =
+                runtime_shard
+                    .parameters
+                    .iter()
+                    .try_fold(0usize, |total, parameter| {
+                        total.checked_add(parameter.byte_count).ok_or_else(|| {
+                            VulkanDistributedPlanError(
+                                "exact replay parameter byte count overflowed".to_string(),
+                            )
+                        })
+                    })?;
             if exact_shard.physical_device_id != runtime_identity.physical_device_id
                 || exact_shard.distribution != distribution
                 || exact_shard.logical_start != runtime_shard.row_start
@@ -374,10 +376,7 @@ fn replay_exact_distributed_component_case(
                     exact_shard
                         .selected_resource_indices_by_partition
                         .get(&partition_ordinal)
-                        .map(|indices| (
-                        partition.selector_id.clone(),
-                        indices.clone(),
-                    ))
+                        .map(|indices| (partition.selector_id.clone(), indices.clone()))
                 })
                 .collect();
             consumed_exact_shards += 1;
@@ -543,7 +542,10 @@ fn exact_runtime_selected_resource_fragments(
     selected_resource_partitions: &[VulkanDistributedSelectedResourcePartitionPlan],
     shard: &VulkanDistributedDispatchShard,
 ) -> Result<
-    BTreeMap<usize, Vec<crate::vulkan_stream_circuit::VulkanPlacementSelectedResourceFragmentIdentity>>,
+    BTreeMap<
+        usize,
+        Vec<crate::vulkan_stream_circuit::VulkanPlacementSelectedResourceFragmentIdentity>,
+    >,
     VulkanDistributedPlanError,
 > {
     let known_selectors = selected_resource_partitions
@@ -680,15 +682,14 @@ fn exact_case_error<T>(message: impl Into<String>) -> Result<T, VulkanDistribute
 #[cfg(test)]
 mod exact_case_replay_tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::vulkan_stream_circuit::{
-        VulkanPlacementBehaviorIdentity, VulkanPlacementDeviceExecutionIdentity,
-        VulkanPlacementDispatchGeometry, VulkanPlacementEquivalenceIdentity,
-        VulkanPlacementEquivalenceKind,
-        VulkanPhysicalKernelArtifact, VulkanPlacementOperationGeometry,
-        VulkanPlacementScalarFormat, VulkanPlacementShapeClass, VulkanPlacementShardIdentity,
-        VulkanPlacementTransportIdentity,
+        VulkanPhysicalKernelArtifact, VulkanPlacementBehaviorIdentity,
+        VulkanPlacementDeviceExecutionIdentity, VulkanPlacementDispatchGeometry,
+        VulkanPlacementEquivalenceIdentity, VulkanPlacementEquivalenceKind,
+        VulkanPlacementOperationGeometry, VulkanPlacementScalarFormat, VulkanPlacementShapeClass,
+        VulkanPlacementShardIdentity, VulkanPlacementTransportIdentity,
     };
+    use std::path::PathBuf;
 
     fn activation(binding: usize, signal_id: &str) -> VulkanDistributedActivationSlot {
         VulkanDistributedActivationSlot {
@@ -725,7 +726,9 @@ mod exact_case_replay_tests {
         }
     }
 
-    fn plan_with_dispatch(dispatch: VulkanDistributedDispatchPlan) -> VulkanDistributedExecutionPlan {
+    fn plan_with_dispatch(
+        dispatch: VulkanDistributedDispatchPlan,
+    ) -> VulkanDistributedExecutionPlan {
         let mut plan = VulkanDistributedExecutionPlan {
             device_ids: vec!["helper".to_string(), "owner".to_string()],
             storage_buffer_offset_alignment: 4,
@@ -799,7 +802,11 @@ mod exact_case_replay_tests {
         execution_case
     }
 
-    fn shard(device_id: &str, row_start: usize, resources: &[usize]) -> VulkanDistributedDispatchShard {
+    fn shard(
+        device_id: &str,
+        row_start: usize,
+        resources: &[usize],
+    ) -> VulkanDistributedDispatchShard {
         VulkanDistributedDispatchShard {
             device_id: device_id.to_string(),
             selected_resource_indices: BTreeMap::from([(
@@ -853,10 +860,7 @@ mod exact_case_replay_tests {
                 parameters_per_resource: 2,
                 parameter_partitions: Vec::new(),
                 selection_count_per_activation: 2,
-                resource_operation_class_ids: vec![
-                    format!("sha256:{}", "a".repeat(64));
-                    4
-                ],
+                resource_operation_class_ids: vec![format!("sha256:{}", "a".repeat(64)); 4],
                 atomic_group_ids: (0..4).map(|index| format!("expert-{index}")).collect(),
                 atomic_group_byte_counts: vec![8; 4],
                 atomic_group_resource_ids: (0..4)
@@ -886,22 +890,30 @@ mod exact_case_replay_tests {
         }
     }
 
-    fn exact_case(owner_resources: &[usize], helper_resources: &[usize]) -> VulkanPlacementExecutionCaseIdentity {
+    fn exact_case(
+        owner_resources: &[usize],
+        helper_resources: &[usize],
+    ) -> VulkanPlacementExecutionCaseIdentity {
         let device = |physical_device_id: &str| VulkanPlacementDeviceExecutionIdentity {
             physical_device_id: physical_device_id.to_string(),
             api_version: 1,
             driver_version: 2,
         };
-        let exact_shard = |participant_ordinal, physical_device_id: &str, row_start, resources: &[usize]| VulkanPlacementShardIdentity {
-            dispatch_ordinal: 0,
-            participant_ordinal,
-            physical_device_id: physical_device_id.to_string(),
-            distribution: "expert_range".to_string(),
-            logical_start: row_start,
-            logical_count: 2,
-            selected_resource_indices_by_partition: BTreeMap::from([(0, resources.to_vec())]),
-            selected_resource_fragments_by_partition: BTreeMap::new(),
-            parameter_bytes: 0,
+        let exact_shard = |participant_ordinal,
+                           physical_device_id: &str,
+                           row_start,
+                           resources: &[usize]| {
+            VulkanPlacementShardIdentity {
+                dispatch_ordinal: 0,
+                participant_ordinal,
+                physical_device_id: physical_device_id.to_string(),
+                distribution: "expert_range".to_string(),
+                logical_start: row_start,
+                logical_count: 2,
+                selected_resource_indices_by_partition: BTreeMap::from([(0, resources.to_vec())]),
+                selected_resource_fragments_by_partition: BTreeMap::new(),
+                parameter_bytes: 0,
+            }
         };
         let execution_case = VulkanPlacementExecutionCaseIdentity {
             behavior: VulkanPlacementBehaviorIdentity {
@@ -1045,12 +1057,9 @@ mod exact_case_replay_tests {
 
         let mut different_topology = plan;
         different_topology.dispatches[0].input_byte_capacity += 2;
-        let different_digest = vulkan_distributed_execution_graph_digest(
-            "signature",
-            &different_topology,
-            &[0],
-        )
-        .unwrap();
+        let different_digest =
+            vulkan_distributed_execution_graph_digest("signature", &different_topology, &[0])
+                .unwrap();
 
         assert_eq!(first, relabeled_digest);
         assert_ne!(first, different_digest);
@@ -1063,8 +1072,7 @@ mod exact_case_replay_tests {
         unrelated.dispatch_index = 8;
         unrelated.component_id = "unrelated".to_string();
         unrelated.node_id = "unrelated-down".to_string();
-        unrelated.equivalence.output =
-            VulkanDistributedEquivalenceKind::AbsoluteRelativeTolerance;
+        unrelated.equivalence.output = VulkanDistributedEquivalenceKind::AbsoluteRelativeTolerance;
         unrelated.equivalence.absolute_tolerance_bits = Some(0.01f64.to_bits());
         unrelated.equivalence.relative_tolerance_bits = Some(0.01f64.to_bits());
         plan.dispatches.push(unrelated);
@@ -1107,7 +1115,10 @@ mod exact_case_replay_tests {
             .unwrap();
 
         assert_eq!(plans.decode.execution_islands.len(), 1);
-        assert_eq!(plans.decode.execution_islands[0].dispatch_indices(), vec![7]);
+        assert_eq!(
+            plans.decode.execution_islands[0].dispatch_indices(),
+            vec![7]
+        );
         assert_eq!(
             plans.decode.dispatches[0]
                 .shards
@@ -1159,11 +1170,8 @@ mod exact_case_replay_tests {
         let mut stale_manifest = loaded_manifest();
         stale_manifest.physical_artifacts[0].words[3] ^= 1;
 
-        let error = replay_tensor_parallel_case(
-            tensor_parallel_exact_case(),
-            &stale_manifest,
-        )
-        .unwrap_err();
+        let error =
+            replay_tensor_parallel_case(tensor_parallel_exact_case(), &stale_manifest).unwrap_err();
 
         assert!(error.0.contains("different executable artifacts"));
     }
@@ -1199,15 +1207,18 @@ mod exact_case_replay_tests {
 
         let error = replay_tensor_parallel_case(stale, &loaded_manifest()).unwrap_err();
 
-        assert!(error.0.contains("different physical endpoints or activation shape"));
+        assert!(
+            error
+                .0
+                .contains("different physical endpoints or activation shape")
+        );
     }
 
     #[test]
     fn exact_plan_set_replay_rejects_stale_owner_and_endpoint() {
         let mut stale_owner = tensor_parallel_exact_case();
         stale_owner.owner_physical_device_id = "physical-helper".to_string();
-        let owner_error =
-            replay_tensor_parallel_case(stale_owner, &loaded_manifest()).unwrap_err();
+        let owner_error = replay_tensor_parallel_case(stale_owner, &loaded_manifest()).unwrap_err();
         assert!(owner_error.0.contains("different physical owner"));
 
         let mut stale_endpoint = tensor_parallel_exact_case();
@@ -1379,7 +1390,11 @@ mod exact_case_replay_tests {
             &loaded_manifest(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("different physical devices or drivers"));
+        assert!(
+            error
+                .to_string()
+                .contains("different physical devices or drivers")
+        );
     }
 
     #[test]
@@ -1424,7 +1439,11 @@ mod exact_case_replay_tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("different physical execution contracts"));
+        assert!(
+            error
+                .to_string()
+                .contains("different physical execution contracts")
+        );
     }
 
     #[test]
@@ -1469,43 +1488,49 @@ mod exact_case_replay_tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("different physical execution strategy"));
+        assert!(
+            error
+                .to_string()
+                .contains("different physical execution strategy")
+        );
     }
 
     #[test]
     fn exact_fragment_coverage_requires_every_resource_and_no_gaps() {
         let mut dispatch = dispatch();
-        dispatch.execution_strategy = nerve_execution_contracts::ExecutionStrategy::TensorParallelExpert;
-        dispatch.selected_resource_partitions[0].parameter_partitions = vec![
-            VulkanDistributedSelectedResourceParameterPartitionPlan {
+        dispatch.execution_strategy =
+            nerve_execution_contracts::ExecutionStrategy::TensorParallelExpert;
+        dispatch.selected_resource_partitions[0].parameter_partitions =
+            vec![VulkanDistributedSelectedResourceParameterPartitionPlan {
                 parameter_slot: 0,
                 dimension: 0,
                 kind: nerve_execution_contracts::ParameterPartitionKind::Contiguous,
                 alignment_elements: 1,
                 logical_elements_per_index: 1,
-            },
-        ];
+            }];
         dispatch.output_rows = 4;
         for shard in &mut dispatch.shards {
             shard.selected_resource_indices.clear();
             shard.selected_resource_fragments = BTreeMap::from([(
                 "selector".to_string(),
                 (0..4)
-                    .map(|resource_index| VulkanDistributedSelectedResourceFragmentPlan {
-                        resource_index,
-                        atomic_group_id: format!("expert-{resource_index}"),
-                        logical_start: shard.row_start,
-                        logical_count: shard.row_count,
-                        parameters: vec![
-                            VulkanDistributedSelectedResourceParameterFragmentPlan {
-                                parameter_slot: 0,
-                                resource_id: format!("resource-{resource_index}-0"),
-                                resource_byte_count: 4,
-                                byte_offset: shard.row_start,
-                                byte_count: shard.row_count,
-                            },
-                        ],
-                    })
+                    .map(
+                        |resource_index| VulkanDistributedSelectedResourceFragmentPlan {
+                            resource_index,
+                            atomic_group_id: format!("expert-{resource_index}"),
+                            logical_start: shard.row_start,
+                            logical_count: shard.row_count,
+                            parameters: vec![
+                                VulkanDistributedSelectedResourceParameterFragmentPlan {
+                                    parameter_slot: 0,
+                                    resource_id: format!("resource-{resource_index}-0"),
+                                    resource_byte_count: 4,
+                                    byte_offset: shard.row_start,
+                                    byte_count: shard.row_count,
+                                },
+                            ],
+                        },
+                    )
                     .collect(),
             )]);
         }
