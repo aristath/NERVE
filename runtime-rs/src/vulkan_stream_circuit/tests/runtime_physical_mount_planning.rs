@@ -39,7 +39,7 @@ fn physical_mount_plan_uses_requested_context_without_opening_vulkan() {
         64,
         0,
         ResourceResidencyPolicy::Eager,
-        &[device],
+        &[device.clone()],
         usize::MAX,
     )
     .unwrap();
@@ -54,6 +54,36 @@ fn physical_mount_plan_uses_requested_context_without_opening_vulkan() {
     );
     assert!(short.selected_resource_placements.is_empty());
     assert!(long.selected_resource_placements.is_empty());
+
+    let parameter_capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([(device.identity.clone(), usize::MAX)]),
+        host_available_bytes: usize::MAX,
+    };
+    let parameter_reservations = short
+        .exact_parameter_resources_by_component
+        .values()
+        .try_fold(
+            VulkanHybridResourceReservations::default(),
+            |reservations, resources| {
+                reservations
+                    .reserve(resources, &parameter_capacity)
+                    .map(|reservation| {
+                        reservation.expect("unbounded exact parameter capacity must admit")
+                    })
+            },
+        )
+        .unwrap();
+    let physical = &short.physical_execution_residency_plan.device_plans[0].breakdown;
+    let exact_parameter_bytes = physical
+        .owner_parameter_bytes_before_distributed_replacement
+        .checked_sub(physical.excluded_owner_parameter_bytes)
+        .unwrap()
+        .checked_add(physical.distributed_parameter_bytes)
+        .unwrap();
+    assert_eq!(
+        parameter_reservations.device_bytes[&device.identity].permanent_bytes,
+        exact_parameter_bytes
+    );
 }
 
 #[test]

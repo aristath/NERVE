@@ -389,10 +389,15 @@ For every numbered item below:
   general-DAG solver can reuse the same authoritative claims. The resource
   algebra now canonicalizes local full allocations and arbitrary overlapping
   distributed fragments into shared physical byte-range blocks, with exact
-  target identity and deterministic claim IDs. The remaining work is to derive
-  those ranges plus mutable state, cache quota, load-wave, and transient claims
-  from each lowered candidate island and replace calibration aggregates before
-  search.
+  target identity and deterministic claim IDs. Workload-free physical mounting
+  now reconstructs fixed parameter claims from local prepared descriptors,
+  exact replayed TP fragments, non-dispatch transducer parameters, every mounted
+  phase, and compiled resource identities so tied or aliased tensors share one
+  allocation. Its local full-route total is checked against physical residency,
+  and a four-participant TP test checks the exact fragment total on every
+  target. The remaining work is to move this derivation from accepted complete
+  routes to each candidate island, add mutable state, cache quota, load-wave,
+  and transient claims, and replace calibration aggregates before search.
 - Optimize **scheduled critical-path time**, not a simple sum of operation
   durations. Model compute and transfer queues, dependency edges, collectives,
   independent expert branches, resource contention, and legal overlap.

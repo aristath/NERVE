@@ -9,6 +9,7 @@ pub struct VulkanRuntimePhysicalPlanningDevice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VulkanRuntimePhysicalMountPlan {
     pub physical_execution_residency_plan: VulkanRuntimePhysicalExecutionResidencyPlan,
+    pub exact_parameter_resources_by_component: BTreeMap<String, VulkanHybridCandidateResources>,
     pub selected_resource_placements: Vec<VulkanSelectedResourcePlacementPlan>,
     pub selected_resource_cache_quota_bytes_by_logical_device: BTreeMap<String, usize>,
     pub maximum_load_wave_bytes_by_logical_device: BTreeMap<String, usize>,
@@ -138,6 +139,16 @@ pub fn plan_vulkan_runtime_physical_mount(
             &loaded_manifest,
         )
         .map_err(|error| physical_mount_planning_error("exact execution replay", error))?;
+    let exact_parameter_resources_by_component =
+        vulkan_runtime_hybrid_parameter_resources_by_component(
+            runtime_model,
+            &prepared_plans,
+            &execution_plans,
+            &tensor_index,
+            &resource_contract,
+            &identity_by_logical_device,
+        )
+        .map_err(|error| physical_mount_planning_error("exact parameter resources", error))?;
 
     let contract_alignment =
         compiled_resource_contract_minimum_upload_alignment(&resource_contract)
@@ -229,6 +240,7 @@ pub fn plan_vulkan_runtime_physical_mount(
     );
     Ok(Some(VulkanRuntimePhysicalMountPlan {
         physical_execution_residency_plan: resolution.plans.physical_execution_residency_plan,
+        exact_parameter_resources_by_component,
         selected_resource_placements: resolution.placements,
         selected_resource_cache_quota_bytes_by_logical_device,
         maximum_load_wave_bytes_by_logical_device: selected_resource_summary

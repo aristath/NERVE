@@ -27,8 +27,10 @@ mod tests {
         CompiledResourceSelectionEncoding, CompiledResourceSelector,
         CompiledResourceSelectorMapping, ResourceResidencyPolicy, VulkanKernelDescriptorUsage,
         VulkanKernelScalarBinding, VulkanKernelScalarSource, VulkanPhysicalKernelArtifact,
-        VulkanResolvedDescriptorBinding, VulkanReusableKernelArtifact,
+        VulkanPlacementDeviceExecutionIdentity, VulkanResolvedDescriptorBinding,
+        VulkanReusableKernelArtifact, canonical_vulkan_hybrid_shared_range_resources,
         physical_execution_artifact_id,
+        vulkan_hybrid_dispatch_parameter_requirements_by_component,
     };
 
     #[test]
@@ -724,6 +726,80 @@ mod tests {
             VulkanDistributedParameterAllocationPlan::from_execution_plan(&sampled, &tensor_index,)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn hybrid_parameter_claims_preserve_exact_tensor_parallel_fragments_across_phases() {
+        let prepared = fixture_prepared_plan();
+        let plan = fixture_plan("row_major");
+        let plans = VulkanDistributedExecutionPlanSet {
+            decode: plan.clone(),
+            decode_batch: plan.clone(),
+            prefill: plan,
+        };
+        let identities = ["owner", "helper-a", "helper-b", "helper-c"]
+            .into_iter()
+            .map(|logical| {
+                (
+                    logical.to_string(),
+                    VulkanPlacementDeviceExecutionIdentity {
+                        physical_device_id: format!("physical-{logical}"),
+                        api_version: 1,
+                        driver_version: 2,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let requirements = vulkan_hybrid_dispatch_parameter_requirements_by_component(
+            &[("owner", &prepared)],
+            &plans,
+            &fixture_tensor_index("row_major"),
+            &identities,
+            |_dispatch, parameter_id| Ok(format!("resource:{parameter_id}")),
+        )
+        .unwrap();
+        let resources = canonical_vulkan_hybrid_shared_range_resources(
+            &requirements.requirements_by_component,
+        )
+        .unwrap();
+        let mut claims_by_id = BTreeMap::new();
+        for claim in resources.values().flat_map(|resources| &resources.claims) {
+            if let Some(existing) = claims_by_id.insert(claim.claim_id.clone(), claim.clone()) {
+                assert_eq!(existing, *claim);
+            }
+        }
+        let actual_by_physical_device = claims_by_id.values().fold(
+            BTreeMap::<String, usize>::new(),
+            |mut totals, claim| {
+                let crate::vulkan_stream_circuit::VulkanHybridResourceTarget::Device(device) =
+                    &claim.target
+                else {
+                    panic!("parameter claims must remain device-local");
+                };
+                *totals
+                    .entry(device.physical_device_id.clone())
+                    .or_default() += claim.byte_count;
+                totals
+            },
+        );
+        let allocations =
+            VulkanDistributedParameterAllocationPlan::from_execution_plan_set(
+                &plans,
+                &fixture_tensor_index("row_major"),
+            )
+            .unwrap();
+        let expected_by_physical_device = allocations.allocations.iter().fold(
+            BTreeMap::<String, usize>::new(),
+            |mut totals, allocation| {
+                let physical = &identities[&allocation.device_id].physical_device_id;
+                *totals.entry(physical.clone()).or_default() += allocation.byte_count;
+                totals
+            },
+        );
+
+        assert_eq!(actual_by_physical_device, expected_by_physical_device);
+        assert!(actual_by_physical_device["physical-owner"] > 0);
+        assert!(actual_by_physical_device["physical-helper-a"] > 0);
     }
 
     #[test]
