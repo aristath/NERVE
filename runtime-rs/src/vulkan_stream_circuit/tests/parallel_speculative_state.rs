@@ -207,6 +207,71 @@ fn parallel_state_ingestion_rejects_a_signal_without_a_state_sink() {
 }
 
 #[test]
+fn parallel_feedback_allocation_plan_preserves_every_runner_and_history_allocation() {
+    let plan = VulkanParallelSpeculativeFeedbackAllocationPlan::from_decoder_allocations([(
+        "draft".to_string(),
+        "gpu0".to_string(),
+        vec![
+            VulkanComponentBatchResidentAllocation {
+                kind: VulkanComponentBatchResidentAllocationKind::RuntimeTokenIds,
+                byte_capacity: 32,
+                host_visible: true,
+            },
+            VulkanComponentBatchResidentAllocation {
+                kind: VulkanComponentBatchResidentAllocationKind::CausalStateSnapshotDummy,
+                byte_capacity: 4,
+                host_visible: false,
+            },
+        ],
+        vec![("context".to_string(), 128), ("hidden".to_string(), 256)],
+    )])
+    .unwrap();
+
+    assert_eq!(plan.device_allocations.len(), 4);
+    assert_eq!(plan.logical_bytes_by_device().unwrap()["gpu0"], 420);
+    assert_eq!(
+        plan.device_allocations
+            .iter()
+            .map(|allocation| allocation.concern.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "speculative decoder draft resident feedback state ingestion RuntimeTokenIds",
+            "speculative decoder draft resident feedback state ingestion CausalStateSnapshotDummy",
+            "speculative decoder draft resident feedback source history context",
+            "speculative decoder draft resident feedback source history hidden",
+        ],
+    );
+}
+
+#[test]
+fn parallel_feedback_allocation_plan_rejects_malformed_or_mismatched_residency() {
+    let empty = VulkanParallelSpeculativeFeedbackAllocationPlan::from_decoders(&[], 8).unwrap();
+    assert!(empty.device_allocations.is_empty());
+
+    let zero_lane = VulkanParallelSpeculativeFeedbackAllocationPlan::from_decoders(&[], 0)
+        .unwrap_err();
+    assert!(zero_lane.to_string().contains("zero lane capacity"));
+
+    let malformed = VulkanParallelSpeculativeFeedbackAllocationPlan::from_decoder_allocations([(
+        "draft".to_string(),
+        "gpu0".to_string(),
+        Vec::new(),
+        vec![(String::new(), 1)],
+    )])
+    .unwrap_err();
+    assert!(malformed.to_string().contains("identity and positive capacity"));
+
+    let expected = BTreeMap::from([("gpu0".to_string(), 128)]);
+    assert!(validate_parallel_speculative_feedback_allocation_totals(&expected, &expected).is_ok());
+    let actual = BTreeMap::from([("gpu0".to_string(), 127)]);
+    let mismatch =
+        validate_parallel_speculative_feedback_allocation_totals(&expected, &actual).unwrap_err();
+    assert!(mismatch.to_string().contains("do not match admitted totals"));
+    assert!(mismatch.to_string().contains("127"));
+    assert!(mismatch.to_string().contains("128"));
+}
+
+#[test]
 fn node_scoped_component_batch_execution_rejects_missing_dispatches() {
     let scope = VulkanComponentBatchExecutionScope::nodes(BTreeMap::from([(
         "draft_processor".to_string(),

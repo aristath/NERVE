@@ -554,11 +554,16 @@ For every numbered item below:
   contribute their exact node-scoped component-batch allocations, per-runner
   demand predicates, and cross-physical-device batched source staging. Their
   active widths and rounded capacities match the target runners they accompany.
-  The resident-feedback state-ingestion runner and its device-local source
-  histories do not yet have a workload-free allocation plan; terminal admission
-  must cover those actual allocations only when the complete resident-feedback
-  topology is mountable, without reserving unused credit for an ineligible
-  feedback loop.
+  Resident-feedback state ingestion is now conditionally admitted only after
+  the mounted topology has passed the authoritative replayability gate. One
+  atomic per-stream reservation covers every node-scoped causal runner
+  allocation and each device-local source history at the mounted feedback
+  window capacity; the allocation plan is built before allocation, the buffers
+  consume only that scoped reservation, and materialization independently
+  reconstructs and compares per-device totals. An ineligible feedback loop or a
+  stream with no parallel decoder reserves nothing. The remaining completion
+  work is the exact consumed-credit proof across the complete local, staged,
+  speculative, and TP stream shapes plus the explicitly authorized live gate.
   The stream-control allocation now follows its actual physical memory domain:
   logical slices aliased to one physical device retain one device-local charge,
   while a multi-device stream replaces every imported-device charge with one

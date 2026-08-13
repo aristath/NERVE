@@ -1972,10 +1972,10 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .transpose()
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?
             .flatten();
-        let parallel_speculative_feedback_state = resident_feedback_loop
+        let parallel_speculative_feedback_memory_admission = resident_feedback_loop
             .as_ref()
             .map(|feedback_loop| {
-                VulkanResidentParallelSpeculativeFeedbackState::new_if_needed(
+                reserve_parallel_speculative_feedback_state_memory(
                     &speculative_decoders,
                     feedback_loop.window_policy.maximum_tick_count,
                     &device_for,
@@ -1983,6 +1983,31 @@ impl VulkanResidentInProcessPlacedModelPackage {
             })
             .transpose()?
             .flatten();
+        let parallel_speculative_feedback_state = if let Some(feedback_loop) = &resident_feedback_loop
+        {
+            let expected = VulkanParallelSpeculativeFeedbackAllocationPlan::from_decoders(
+                &speculative_decoders,
+                feedback_loop.window_policy.maximum_tick_count,
+            )?
+            .logical_bytes_by_device()?;
+            let _feedback_memory_scope = parallel_speculative_feedback_memory_admission
+                .as_ref()
+                .map(|admission| admission.enter());
+            let state = VulkanResidentParallelSpeculativeFeedbackState::new_if_needed(
+                &speculative_decoders,
+                feedback_loop.window_policy.maximum_tick_count,
+                &device_for,
+            )?;
+            let actual = state
+                .as_ref()
+                .map(VulkanResidentParallelSpeculativeFeedbackState::logical_allocation_bytes_by_device)
+                .transpose()?
+                .unwrap_or_default();
+            validate_parallel_speculative_feedback_allocation_totals(&expected, &actual)?;
+            state
+        } else {
+            None
+        };
         let execution_quantum_calibrators = devices
             .iter()
             .map(|slice| {
@@ -1994,6 +2019,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
             .collect();
         Ok(VulkanResidentInProcessPlacedStreamProcessor {
             stream_memory_admission,
+            _parallel_speculative_feedback_memory_admission:
+                parallel_speculative_feedback_memory_admission,
             model: self.clone(),
             distributed_dispatch_runners,
             distributed_dynamic_resource_buffers,

@@ -1,5 +1,6 @@
 pub struct VulkanResidentInProcessPlacedStreamProcessor {
     stream_memory_admission: Arc<VulkanMemoryAdmission>,
+    _parallel_speculative_feedback_memory_admission: Option<Arc<VulkanMemoryAdmission>>,
     distributed_dispatch_runners: VulkanDistributedDispatchRunners,
     distributed_dynamic_resource_buffers:
         BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
