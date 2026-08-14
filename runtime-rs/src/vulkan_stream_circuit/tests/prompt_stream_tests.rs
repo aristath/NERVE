@@ -394,6 +394,7 @@ fn explicit_internal_component_sharding_matches_canonical_execution() {
         .unwrap();
     let canonical_run = canonical.submit_input_event(input.clone()).unwrap();
     drop(canonical);
+    reset_vulkan_resident_execution_counters();
 
     let mut sharded =
         VulkanResidentInProcessPlacedPromptStream::from_runtime_model_for_bound_devices(
@@ -416,6 +417,7 @@ fn explicit_internal_component_sharding_matches_canonical_execution() {
             .is_empty()
     );
     let sharded_run = sharded.submit_input_event(input).unwrap();
+    let counters = vulkan_resident_execution_counters();
 
     assert_eq!(
         sharded_run.generated_token_ids,
@@ -429,6 +431,24 @@ fn explicit_internal_component_sharding_matches_canonical_execution() {
         sharded_run.session_run.run.output_source_stream_ticks,
         canonical_run.session_run.run.output_source_stream_ticks
     );
+    assert!(
+        counters
+            .distributed
+            .decode
+            .tensor_parallel_island_submissions
+            + counters
+                .distributed
+                .prefill
+                .tensor_parallel_island_submissions
+            > 0,
+        "matching tokens do not prove TP unless a mounted TP island reached Vulkan submission"
+    );
+    assert!(
+        counters.distributed.decode.shard_submissions
+            + counters.distributed.prefill.shard_submissions
+            >= 2
+    );
+    reset_vulkan_resident_execution_counters();
 }
 
 #[test]

@@ -1463,10 +1463,19 @@ impl VulkanDistributedDispatchRunners {
             }
         }
 
-        record_vulkan_physical_execution_island_submission(
-            self.execution_phase,
-            &dispatch.planned,
-        );
+        if let Some(submission_batch) = submission_batch {
+            defer_vulkan_physical_execution_island_submission(
+                self.execution_phase,
+                &dispatch.planned,
+                submission_batch,
+            )
+            .map_err(VulkanDistributedDispatchRunnerError::from)?;
+        } else {
+            record_vulkan_physical_execution_island_submission(
+                self.execution_phase,
+                &dispatch.planned,
+            );
+        }
         Ok(VulkanDistributedDispatchRun {
             owner_device_id: owner_device_id.to_string(),
             dispatch_index,

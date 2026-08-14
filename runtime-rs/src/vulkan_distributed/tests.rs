@@ -3764,6 +3764,37 @@ mod tests {
     }
 
     #[test]
+    fn physical_execution_observation_does_not_count_a_deferred_plan_as_submitted() {
+        let island = fixture_plan("row_major").execution_islands.remove(0);
+        let batch = VulkanResidentQueueSubmissionBatch::new();
+        crate::vulkan_compute::reset_vulkan_resident_execution_counters();
+
+        defer_vulkan_physical_execution_island_submission(
+            VulkanResidentDistributedExecutionPhase::Decode,
+            &island,
+            &batch,
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::vulkan_compute::vulkan_resident_execution_counters().distributed,
+            crate::vulkan_compute::VulkanResidentDistributedExecutionCounters::default()
+        );
+        assert!(
+            batch
+                .mount()
+                .err()
+                .expect("an unsubmitted observation must not mount")
+                .to_string()
+                .contains("no queue submissions")
+        );
+        assert_eq!(
+            crate::vulkan_compute::vulkan_resident_execution_counters().distributed,
+            crate::vulkan_compute::VulkanResidentDistributedExecutionCounters::default()
+        );
+    }
+
+    #[test]
     fn residency_replay_schedules_only_faulting_shards_and_affected_helpers() {
         let devices = ["owner", "helper-a", "helper-b"]
             .map(str::to_string)

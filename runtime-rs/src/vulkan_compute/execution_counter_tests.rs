@@ -96,6 +96,52 @@ fn distributed_submission_counters_preserve_phase_strategy_and_shards() {
 }
 
 #[test]
+fn deferred_distributed_observation_requires_submitted_queue_work() {
+    reset_vulkan_resident_execution_counters();
+    let batch = VulkanResidentQueueSubmissionBatch::new();
+    batch
+        .defer_distributed_execution_observation(
+            VulkanResidentDistributedExecutionPhase::Decode,
+            VulkanResidentDistributedExecutionKind::TensorParallel,
+            2,
+        )
+        .unwrap();
+
+    assert_eq!(
+        vulkan_resident_execution_counters().distributed,
+        VulkanResidentDistributedExecutionCounters::default(),
+        "enqueuing evidence is not a Vulkan submission"
+    );
+    let error = batch
+        .mount()
+        .err()
+        .expect("an observation without queue work must not mount");
+    assert_eq!(
+        error,
+        VulkanError("distributed execution observations have no queue submissions".to_string())
+    );
+    assert_eq!(
+        vulkan_resident_execution_counters().distributed,
+        VulkanResidentDistributedExecutionCounters::default()
+    );
+}
+
+#[test]
+fn deferred_distributed_observation_rejects_zero_shards() {
+    let batch = VulkanResidentQueueSubmissionBatch::new();
+    assert_eq!(
+        batch.defer_distributed_execution_observation(
+            VulkanResidentDistributedExecutionPhase::Prefill,
+            VulkanResidentDistributedExecutionKind::Hybrid,
+            0,
+        ),
+        Err(VulkanError(
+            "distributed execution observation has no submitted shards".to_string()
+        ))
+    );
+}
+
+#[test]
 fn execution_counter_accumulation_sums_totals_and_preserves_maxima() {
     let mut total = VulkanResidentExecutionCounters::default();
     total.saturating_accumulate(VulkanResidentExecutionCounters {

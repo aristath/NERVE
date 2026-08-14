@@ -867,9 +867,13 @@ For every numbered item below:
   for every recorded, replayed, and demand-resumed window. Counts accumulate
   through cold-miss continuations, impossible zero/inverted evidence fails
   before publication, and normal chat plus validation traces expose the total
-  and maximum host submits per bounded window. Hardware-neutral schema and
-  adversarial tests are complete; the authorized live gate must show the
-  observed bound across DeepSeek TP windows and the Qwen controls.
+  and maximum host submits per bounded window. Distributed strategy counters
+  now commit only after direct queue submission or after every queue submission
+  in a resident template succeeds; merely enqueueing or mounting a TP island
+  cannot manufacture execution evidence, and failed/empty batches publish
+  none. Hardware-neutral schema and adversarial tests are complete; the
+  authorized live gate must show the observed bound and post-submit TP counters
+  across DeepSeek TP windows and the Qwen controls.
 - Preserve bounded watchdog and failure handling outside the hot path. A failed
   worker is quarantined at the last causal checkpoint without corrupting other
   devices, streams, or the UI.

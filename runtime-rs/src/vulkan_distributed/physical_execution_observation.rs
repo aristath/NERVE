@@ -11,6 +11,21 @@ pub(crate) enum VulkanPhysicalExecutionIslandKind {
     Hybrid,
 }
 
+impl VulkanPhysicalExecutionIslandKind {
+    fn resident_execution_kind(self) -> VulkanResidentDistributedExecutionKind {
+        match self {
+            Self::TensorParallel => VulkanResidentDistributedExecutionKind::TensorParallel,
+            Self::WholeExpertParallel => {
+                VulkanResidentDistributedExecutionKind::WholeExpertParallel
+            }
+            Self::IntraExpertTensorParallel => {
+                VulkanResidentDistributedExecutionKind::IntraExpertTensorParallel
+            }
+            Self::Hybrid => VulkanResidentDistributedExecutionKind::Hybrid,
+        }
+    }
+}
+
 pub(crate) fn physical_execution_island_kind(
     island: &VulkanPhysicalExecutionIslandPlan,
 ) -> Option<VulkanPhysicalExecutionIslandKind> {
@@ -42,24 +57,31 @@ pub(crate) fn record_vulkan_physical_execution_island_submission(
     phase: VulkanResidentDistributedExecutionPhase,
     island: &VulkanPhysicalExecutionIslandPlan,
 ) {
-    let kind = match physical_execution_island_kind(island) {
-        Some(VulkanPhysicalExecutionIslandKind::TensorParallel) => {
-            VulkanResidentDistributedExecutionKind::TensorParallel
-        }
-        Some(VulkanPhysicalExecutionIslandKind::WholeExpertParallel) => {
-            VulkanResidentDistributedExecutionKind::WholeExpertParallel
-        }
-        Some(VulkanPhysicalExecutionIslandKind::IntraExpertTensorParallel) => {
-            VulkanResidentDistributedExecutionKind::IntraExpertTensorParallel
-        }
-        Some(VulkanPhysicalExecutionIslandKind::Hybrid) => {
-            VulkanResidentDistributedExecutionKind::Hybrid
-        }
-        None => return,
+    let Some(kind) = physical_execution_island_kind(island)
+        .map(VulkanPhysicalExecutionIslandKind::resident_execution_kind)
+    else {
+        return;
     };
     record_vulkan_resident_distributed_execution_submission(
         phase,
         kind,
         island.leader().shards.len(),
     );
+}
+
+pub(crate) fn defer_vulkan_physical_execution_island_submission(
+    phase: VulkanResidentDistributedExecutionPhase,
+    island: &VulkanPhysicalExecutionIslandPlan,
+    submission_batch: &VulkanResidentQueueSubmissionBatch<'_>,
+) -> Result<(), VulkanError> {
+    let Some(kind) = physical_execution_island_kind(island)
+        .map(VulkanPhysicalExecutionIslandKind::resident_execution_kind)
+    else {
+        return Ok(());
+    };
+    submission_batch.defer_distributed_execution_observation(
+        phase,
+        kind,
+        island.leader().shards.len(),
+    )
 }

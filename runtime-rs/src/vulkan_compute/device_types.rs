@@ -787,6 +787,8 @@ impl<'a> VulkanTimelineSemaphorePoint<'a> {
 /// complete graph cannot accidentally become one watchdog-visible GPU job.
 pub struct VulkanResidentQueueSubmissionBatch<'a> {
     groups: RefCell<Vec<VulkanResidentQueueSubmissionGroup<'a>>>,
+    distributed_execution_observations:
+        RefCell<Vec<VulkanResidentDistributedExecutionObservation>>,
     quantum_budget: Option<RuntimeExecutionQuantumBudget>,
 }
 
@@ -797,6 +799,41 @@ pub struct VulkanResidentQueueSubmissionBatch<'a> {
 pub struct VulkanResidentQueueSubmissionTemplate {
     groups: Vec<VulkanResidentQueueSubmissionTemplateGroup>,
     submission_count: usize,
+    distributed_execution_observations: Vec<VulkanResidentDistributedExecutionObservation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VulkanResidentDistributedExecutionObservation {
+    phase: VulkanResidentDistributedExecutionPhase,
+    kind: VulkanResidentDistributedExecutionKind,
+    shard_count: usize,
+}
+
+impl VulkanResidentDistributedExecutionObservation {
+    fn new(
+        phase: VulkanResidentDistributedExecutionPhase,
+        kind: VulkanResidentDistributedExecutionKind,
+        shard_count: usize,
+    ) -> Result<Self, VulkanError> {
+        if shard_count == 0 {
+            return Err(VulkanError(
+                "distributed execution observation has no submitted shards".to_string(),
+            ));
+        }
+        Ok(Self {
+            phase,
+            kind,
+            shard_count,
+        })
+    }
+
+    fn record(self) {
+        record_vulkan_resident_distributed_execution_submission(
+            self.phase,
+            self.kind,
+            self.shard_count,
+        );
+    }
 }
 
 struct VulkanResidentQueueSubmissionGroup<'a> {
@@ -879,6 +916,7 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
     pub fn new() -> Self {
         Self {
             groups: RefCell::new(Vec::new()),
+            distributed_execution_observations: RefCell::new(Vec::new()),
             quantum_budget: None,
         }
     }
@@ -886,8 +924,25 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
     pub fn new_bounded(quantum_budget: RuntimeExecutionQuantumBudget) -> Self {
         Self {
             groups: RefCell::new(Vec::new()),
+            distributed_execution_observations: RefCell::new(Vec::new()),
             quantum_budget: Some(quantum_budget),
         }
+    }
+
+    pub(crate) fn defer_distributed_execution_observation(
+        &self,
+        phase: VulkanResidentDistributedExecutionPhase,
+        kind: VulkanResidentDistributedExecutionKind,
+        shard_count: usize,
+    ) -> Result<(), VulkanError> {
+        self.distributed_execution_observations
+            .borrow_mut()
+            .push(VulkanResidentDistributedExecutionObservation::new(
+                phase,
+                kind,
+                shard_count,
+            )?);
+        Ok(())
     }
 
     pub fn enqueue_recorded_sequence(
@@ -1101,6 +1156,8 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         calibrator: Option<(&RuntimeExecutionQuantumCalibrator, &str)>,
     ) -> Result<VulkanResidentQueueSubmissionTemplate, VulkanError> {
         let quantum_budget = self.quantum_budget;
+        let distributed_execution_observations =
+            self.distributed_execution_observations.into_inner();
         let mut groups = self.groups.into_inner();
         if quantum_budget.is_some() || calibrator.is_some() {
             for group in &mut groups {
@@ -1144,6 +1201,11 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
                 VulkanError("resident queue submission count overflowed".to_string())
             })
         })?;
+        if submission_count == 0 && !distributed_execution_observations.is_empty() {
+            return Err(VulkanError(
+                "distributed execution observations have no queue submissions".to_string(),
+            ));
+        }
         let groups = groups
             .into_iter()
             .map(|group| {
@@ -1172,11 +1234,18 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         Ok(VulkanResidentQueueSubmissionTemplate {
             groups,
             submission_count,
+            distributed_execution_observations,
         })
     }
 }
 
 impl VulkanResidentQueueSubmissionTemplate {
+    fn record_distributed_execution_observations(&self) {
+        for observation in &self.distributed_execution_observations {
+            observation.record();
+        }
+    }
+
     pub fn submission_count(&self) -> usize {
         self.submission_count
     }
@@ -1219,6 +1288,7 @@ impl VulkanResidentQueueSubmissionTemplate {
                 )?;
             }
         }
+        self.record_distributed_execution_observations();
         Ok(self.submission_count)
     }
 
@@ -1246,6 +1316,7 @@ impl VulkanResidentQueueSubmissionTemplate {
                 )?;
             }
         }
+        self.record_distributed_execution_observations();
         Ok(self.submission_count)
     }
 
@@ -1315,6 +1386,7 @@ impl VulkanResidentQueueSubmissionTemplate {
                 });
             }
         }
+        self.record_distributed_execution_observations();
         Ok(measurements)
     }
 }

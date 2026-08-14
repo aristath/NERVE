@@ -1757,10 +1757,22 @@ mod tests {
                 true,
             )
             .unwrap();
+        batch
+            .defer_distributed_execution_observation(
+                VulkanResidentDistributedExecutionPhase::Decode,
+                VulkanResidentDistributedExecutionKind::TensorParallel,
+                2,
+            )
+            .unwrap();
+        reset_vulkan_resident_execution_counters();
         let template = batch.mount().unwrap();
         assert_eq!(template.submission_count(), 3);
         assert_eq!(template.host_queue_submit_count(), 2);
-        reset_vulkan_resident_execution_counters();
+        assert_eq!(
+            vulkan_resident_execution_counters().distributed,
+            VulkanResidentDistributedExecutionCounters::default(),
+            "mounting a template is not a Vulkan submission"
+        );
 
         template.submit_with_timeline_value_offset(0).unwrap();
         worker
@@ -1780,6 +1792,16 @@ mod tests {
         assert_eq!(counters.resident_queue_batch_commands, 3);
         assert_eq!(counters.resident_sequence_queue_submits, 0);
         assert_eq!(counters.resident_sequence_completion_waits, 1);
+        assert_eq!(counters.distributed.decode.island_submissions, 1);
+        assert_eq!(counters.distributed.decode.shard_submissions, 2);
+        assert_eq!(
+            counters
+                .distributed
+                .decode
+                .tensor_parallel_island_submissions,
+            1
+        );
+        reset_vulkan_resident_execution_counters();
     }
 
     #[test]
