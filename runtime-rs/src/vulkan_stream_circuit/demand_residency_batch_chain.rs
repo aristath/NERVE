@@ -118,6 +118,7 @@ impl VulkanDemandResidencyBatchSegment {
         dispatch_spans: &[VulkanComponentBatchDispatchSpan],
         signal_buffers: &[VulkanComponentBatchSignalBuffer],
         signal_buffer_indices: &BTreeMap<VulkanComponentBatchSignalKey, usize>,
+        distributed_owned_checkpoint_ids: &BTreeSet<String>,
         step_start: usize,
         step_end: usize,
         lane_capacity: usize,
@@ -141,6 +142,9 @@ impl VulkanDemandResidencyBatchSegment {
             .collect::<BTreeMap<_, _>>();
         let mut gate_specs = Vec::new();
         for checkpoint in &schedule.checkpoints {
+            if distributed_owned_checkpoint_ids.contains(&checkpoint.id) {
+                continue;
+            }
             let Some(selection_span) =
                 spans_by_dispatch.get(&checkpoint.selection_dispatch_index)
             else {

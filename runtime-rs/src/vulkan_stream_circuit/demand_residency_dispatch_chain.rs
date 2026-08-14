@@ -296,6 +296,7 @@ impl VulkanDemandResidencySegment {
         mounted: &VulkanMountedPlacedStreamCircuit,
         mounted_bound_plan: &VulkanMountedPlacedBoundDispatchPlan,
         schedule: &VulkanPhysicalResidencySchedule,
+        distributed_owned_checkpoint_ids: &BTreeSet<String>,
         dispatches: &[VulkanMountedPlacedResidentComponentDispatch],
         context: VulkanDemandResidencyExecutionContext,
         pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
@@ -313,6 +314,7 @@ impl VulkanDemandResidencySegment {
         let checkpoints = schedule
             .checkpoints
             .iter()
+            .filter(|checkpoint| !distributed_owned_checkpoint_ids.contains(&checkpoint.id))
             .filter(|checkpoint| dispatch_indices.contains(&checkpoint.selection_dispatch_index))
             .collect::<Vec<_>>();
         if checkpoints.is_empty() {

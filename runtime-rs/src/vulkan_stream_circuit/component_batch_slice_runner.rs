@@ -1126,6 +1126,18 @@ impl VulkanResidentComponentBatchSliceRunner {
             &distributed_group_leaders,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let physical_execution_islands = distributed_execution_plan
+            .execution_islands
+            .iter()
+            .filter(|group| group.owner_device_id == slice.device_id)
+            .map(VulkanPhysicalExecutionIslandPlan::dispatch_indices)
+            .collect::<Vec<_>>();
+        let distributed_owned_checkpoint_ids =
+            distributed_owned_physical_residency_checkpoint_ids(
+                slice.package_slice.physical_residency_schedule(),
+                &physical_execution_islands,
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let demand_residency = match &slice.demand_residency_context {
             Some(context) => {
                 let mut segments = BTreeMap::new();
@@ -1152,6 +1164,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                             &dispatch_spans,
                             &signal_buffers,
                             &signal_buffer_indices,
+                            &distributed_owned_checkpoint_ids,
                             *step_start,
                             *step_end,
                             lane_capacity,

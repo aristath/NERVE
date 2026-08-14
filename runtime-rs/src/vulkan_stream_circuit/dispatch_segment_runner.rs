@@ -22,6 +22,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
         stages: &[VulkanMountedPlacedStreamTickStage],
         physical_residency_schedule: Option<&VulkanPhysicalResidencySchedule>,
+        distributed_owned_checkpoint_ids: &BTreeSet<String>,
         demand_context: Option<&VulkanDemandResidencyExecutionContext>,
         demand_pipeline_predicate: Option<Arc<VulkanResidentBuffer>>,
     ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
@@ -91,6 +92,7 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
                 mounted,
                 mounted_bound_plan,
                 schedule,
+                distributed_owned_checkpoint_ids,
                 &dispatches,
                 context.clone(),
                 demand_pipeline_predicate,

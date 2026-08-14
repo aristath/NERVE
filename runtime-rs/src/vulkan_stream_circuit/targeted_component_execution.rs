@@ -1541,6 +1541,7 @@ impl VulkanTargetedDecodeExecution {
                 mounted,
                 mounted_bound_plan,
                 physical_residency_schedule,
+                &BTreeSet::new(),
                 &resident_dispatches,
                 context,
                 None,

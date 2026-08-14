@@ -362,3 +362,57 @@ fn physical_residency_coverage_rejects_missing_or_duplicate_device_ownership() {
         .contains("more than one device slice")
     );
 }
+
+#[test]
+fn distributed_checkpoint_ownership_requires_one_atomic_selected_computation_island() {
+    let schedule = VulkanPhysicalResidencySchedule {
+        execution_scope: "decode".to_string(),
+        checkpoints: vec![VulkanPhysicalResidencyCheckpoint {
+            id: "checkpoint".to_string(),
+            execution_scope: "decode".to_string(),
+            component_id: "component".to_string(),
+            selector_ids: vec!["selector".to_string()],
+            selection_dispatch_index: 10,
+            selected_computation_dispatch_indices: vec![11, 12],
+            selected_result_continuation_dispatch_index: Some(13),
+        }],
+    };
+
+    assert!(
+        distributed_owned_physical_residency_checkpoint_ids(&schedule, &[])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        distributed_owned_physical_residency_checkpoint_ids(&schedule, &[vec![11, 12, 13]])
+            .unwrap(),
+        BTreeSet::from(["checkpoint".to_string()])
+    );
+    assert!(
+        distributed_owned_physical_residency_checkpoint_ids(&schedule, &[vec![11]])
+            .unwrap_err()
+            .0
+            .contains("between local and distributed")
+    );
+    assert!(
+        distributed_owned_physical_residency_checkpoint_ids(
+            &schedule,
+            &[vec![11], vec![12]],
+        )
+        .unwrap_err()
+        .0
+        .contains("across physical execution islands")
+    );
+    assert!(
+        distributed_owned_physical_residency_checkpoint_ids(&schedule, &[vec![10, 11, 12]])
+            .unwrap_err()
+            .0
+            .contains("not an atomic physical execution boundary")
+    );
+    assert!(
+        distributed_owned_physical_residency_checkpoint_ids(&schedule, &[vec![13]])
+            .unwrap_err()
+            .0
+            .contains("without its selected computation")
+    );
+}

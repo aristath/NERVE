@@ -268,6 +268,93 @@ impl VulkanPhysicalResidencySchedule {
     }
 }
 
+fn distributed_owned_physical_residency_checkpoint_ids(
+    schedule: &VulkanPhysicalResidencySchedule,
+    physical_execution_islands: &[Vec<usize>],
+) -> Result<BTreeSet<String>, VulkanError> {
+    let island_by_dispatch = physical_execution_islands
+        .iter()
+        .enumerate()
+        .flat_map(|(island_index, dispatches)| {
+            dispatches
+                .iter()
+                .copied()
+                .map(move |dispatch_index| (dispatch_index, island_index))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if island_by_dispatch.len()
+        != physical_execution_islands
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+    {
+        return Err(VulkanError(
+            "physical execution islands overlap a logical dispatch".to_string(),
+        ));
+    }
+    let mut distributed_owned = BTreeSet::new();
+    for checkpoint in &schedule.checkpoints {
+        let selected_islands = checkpoint
+            .selected_computation_dispatch_indices
+            .iter()
+            .filter_map(|dispatch_index| island_by_dispatch.get(dispatch_index).copied())
+            .collect::<BTreeSet<_>>();
+        if selected_islands.is_empty() {
+            if island_by_dispatch.contains_key(&checkpoint.selection_dispatch_index)
+                || checkpoint
+                    .selected_result_continuation_dispatch_index
+                    .is_some_and(|dispatch_index| island_by_dispatch.contains_key(&dispatch_index))
+            {
+                return Err(VulkanError(format!(
+                    "residency checkpoint {:?} distributes its selector or continuation without its selected computation",
+                    checkpoint.id
+                )));
+            }
+            continue;
+        }
+        if checkpoint
+            .selected_computation_dispatch_indices
+            .iter()
+            .any(|dispatch_index| !island_by_dispatch.contains_key(dispatch_index))
+        {
+            return Err(VulkanError(format!(
+                "residency checkpoint {:?} splits selected computation between local and distributed execution",
+                checkpoint.id
+            )));
+        }
+        let selected_island_indices = selected_islands.into_iter().collect::<Vec<_>>();
+        let [island_index] = selected_island_indices.as_slice() else {
+            return Err(VulkanError(format!(
+                "residency checkpoint {:?} splits selected computation across physical execution islands",
+                checkpoint.id
+            )));
+        };
+        let island_index = *island_index;
+        let island = &physical_execution_islands[island_index];
+        if island.first().copied()
+            != checkpoint
+                .selected_computation_dispatch_indices
+                .first()
+                .copied()
+            || island_by_dispatch.contains_key(&checkpoint.selection_dispatch_index)
+            || checkpoint
+                .selected_result_continuation_dispatch_index
+                .is_some_and(|dispatch_index| {
+                    island_by_dispatch
+                        .get(&dispatch_index)
+                        .is_some_and(|continuation_island| *continuation_island != island_index)
+                })
+        {
+            return Err(VulkanError(format!(
+                "residency checkpoint {:?} is not an atomic physical execution boundary",
+                checkpoint.id
+            )));
+        }
+        distributed_owned.insert(checkpoint.id.clone());
+    }
+    Ok(distributed_owned)
+}
+
 fn validate_physical_residency_schedule_coverage<'a>(
     contract: &CompiledResourceResidencyContract,
     execution_scope: &str,

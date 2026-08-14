@@ -189,6 +189,16 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
             .flatten()
             .copied()
             .collect::<BTreeSet<_>>();
+        let distributed_owned_checkpoint_ids = physical_residency_schedule
+            .map(|schedule| {
+                distributed_owned_physical_residency_checkpoint_ids(
+                    schedule,
+                    physical_execution_islands,
+                )
+            })
+            .transpose()
+            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?
+            .unwrap_or_default();
         let distributed_dispatch_stages =
             distributed_dispatch_stages(&tick_plan, &distributed_dispatch_indices)?;
         let physical_execution_islands = physical_execution_island_stage_groups(
@@ -217,6 +227,7 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
                     loaded_manifest,
                     &tick_plan.stages[start..end],
                     physical_residency_schedule,
+                    &distributed_owned_checkpoint_ids,
                     demand_context,
                     demand_pipeline_predicate.clone(),
                 )?,
