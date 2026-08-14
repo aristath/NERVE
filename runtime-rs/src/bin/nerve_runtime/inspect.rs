@@ -321,6 +321,8 @@ fn inspect_graph(
     manifest_dir: &Path,
     manifest: VulkanResidentModelPackageManifest,
 ) -> Result<(), Box<dyn Error>> {
+    let compute_devices = inspect_compute_devices(args)?;
+    let mut physical_execution_device_ids = Vec::new();
     let explicit_physical_execution = if args.component_shard_devices.is_empty() {
         None
     } else {
@@ -335,6 +337,13 @@ fn inspect_graph(
                 runtime_model.with_component_shard_devices(component_id, device_ids.clone())?;
         }
         let plan = explicit_runtime_physical_execution_plan(args, &runtime_model)?;
+        physical_execution_device_ids = plan.device_ids(&runtime_model);
+        let physical_bindings = runtime_physical_device_bindings_in(
+            args,
+            &physical_execution_device_ids,
+            &compute_devices,
+        )?;
+        validate_explicit_distributed_physical_bindings(args, &physical_bindings)?;
         (!args.component_physical_strategies.is_empty()).then(|| {
             RuntimeExplicitPhysicalExecutionReport {
                 decode_contract_ids_by_component: plan.decode_contract_ids_by_component,
@@ -353,8 +362,10 @@ fn inspect_graph(
     )?;
     let effective_graph = source_graph.instantiate_runtime_graph(&runtime_graph)?;
     let placement = effective_graph.placement_plan(&runtime_graph.placement_spec())?;
-    let placement_device_ids = placement_device_ids(&placement.components);
-    let compute_devices = inspect_compute_devices(args)?;
+    let mut placement_device_ids = placement_device_ids(&placement.components);
+    placement_device_ids.extend(physical_execution_device_ids);
+    placement_device_ids.sort();
+    placement_device_ids.dedup();
     let instance_count = runtime_graph.instances.len();
     let edge_count = placement.edges.len();
     let payload = RuntimeGraphInspectionReport {

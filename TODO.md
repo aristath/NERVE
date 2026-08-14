@@ -231,11 +231,15 @@ the local placement calibration, and the mounted graph.
   or ambiguous families before model allocation. The normal `python -m nerve`
   frontend now transports repeated strategy assignments losslessly; legality
   remains owned and adversarially tested by the Rust runtime so frontends do
-  not duplicate or constrain the execution-strategy vocabulary. Workload-free inspection of
-  DeepSeek `layer_00` resolves exact gate/up plus down pairs for all three
-  intra-expert TP phase/shape paths, and separately resolves all three
-  whole-expert paths. This closes the manual-selection ambiguity but remains
-  preflight evidence, not a real-model TP token.
+  not duplicate or constrain the execution-strategy vocabulary. Workload-free
+  inspection now includes every internal shard participant in the physical
+  binding report and rejects an explicit distributed strategy when two logical
+  participants silently resolve to the same physical device. With two distinct
+  stable AMD device bindings, DeepSeek `layer_00` resolves exact gate/up plus
+  down pairs for all three intra-expert TP phase/shape paths, and separately
+  resolves all three whole-expert paths. This closes the manual-selection and
+  ceremonial-sharding ambiguity but remains preflight evidence, not a
+  real-model TP token.
 - Calibration now separates a component-instance-independent compiled
   transaction signature from the exact component contracts used at replay.
   Repeated layers with identical implementation digests, artifacts, operation

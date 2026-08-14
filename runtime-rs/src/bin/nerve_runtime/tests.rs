@@ -31,7 +31,8 @@ mod tests {
         resolve_speculative_draft_tokens, runtime_chat_repl_control, runtime_critical_path_lines,
         runtime_device_bindings_report, runtime_distributed_execution_phase_counter_lines,
         runtime_physical_device_bindings_in, runtime_uses_explicit_placement, submit_chat_turn,
-        usage, validate_explicit_logical_device_bindings,
+        usage, validate_explicit_distributed_physical_bindings,
+        validate_explicit_logical_device_bindings,
     };
 
     fn formatter(template_source: &str) -> RuntimeChatFormatter {
@@ -759,6 +760,83 @@ mod tests {
         assert_eq!(split.get("device_a"), Some(&2));
         assert_eq!(split.get("device_b"), Some(&3));
         assert_eq!(split.values().collect::<BTreeSet<_>>().len(), 2);
+    }
+
+    #[test]
+    fn explicit_distributed_execution_rejects_colocated_logical_participants() {
+        let mut args = Args::default();
+        args.component_shard_devices.insert(
+            "layer_07".to_string(),
+            vec!["gpu0".to_string(), "gpu1".to_string()],
+        );
+        args.component_physical_strategies.insert(
+            "layer_07".to_string(),
+            nerve_runtime::execution_contracts::ExecutionStrategy::TensorParallelExpert,
+        );
+
+        let error = validate_explicit_distributed_physical_bindings(
+            &args,
+            &BTreeMap::from([("gpu0".to_string(), 2), ("gpu1".to_string(), 2)]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("one distinct physical device"));
+    }
+
+    #[test]
+    fn explicit_distributed_execution_accepts_distinct_physical_participants() {
+        let mut args = Args::default();
+        args.component_shard_devices.insert(
+            "layer_07".to_string(),
+            vec!["gpu0".to_string(), "gpu1".to_string()],
+        );
+        args.component_physical_strategies.insert(
+            "layer_07".to_string(),
+            nerve_runtime::execution_contracts::ExecutionStrategy::TensorParallelExpert,
+        );
+
+        validate_explicit_distributed_physical_bindings(
+            &args,
+            &BTreeMap::from([("gpu0".to_string(), 2), ("gpu1".to_string(), 3)]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn explicit_distributed_execution_rejects_a_missing_physical_participant() {
+        let mut args = Args::default();
+        args.component_shard_devices.insert(
+            "layer_07".to_string(),
+            vec!["gpu0".to_string(), "gpu1".to_string()],
+        );
+        args.component_physical_strategies.insert(
+            "layer_07".to_string(),
+            nerve_runtime::execution_contracts::ExecutionStrategy::TensorParallelExpert,
+        );
+
+        let error = validate_explicit_distributed_physical_bindings(
+            &args,
+            &BTreeMap::from([("gpu0".to_string(), 2)]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no physical binding"));
+        assert!(error.to_string().contains("gpu1"));
+    }
+
+    #[test]
+    fn ordinary_colocated_logical_placement_remains_valid_without_distributed_strategy() {
+        let mut args = Args::default();
+        args.component_shard_devices.insert(
+            "layer_07".to_string(),
+            vec!["gpu0".to_string(), "gpu1".to_string()],
+        );
+
+        validate_explicit_distributed_physical_bindings(
+            &args,
+            &BTreeMap::from([("gpu0".to_string(), 2), ("gpu1".to_string(), 2)]),
+        )
+        .unwrap();
     }
 
     #[test]

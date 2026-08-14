@@ -621,6 +621,7 @@ fn runtime_bound_vulkan_devices(
     let available_profiles = device_catalog.available_hardware_profiles()?;
     let requested_bindings =
         runtime_physical_device_bindings_in(args, logical_device_ids, available_devices)?;
+    validate_explicit_distributed_physical_bindings(args, &requested_bindings)?;
     let mut devices = BTreeMap::new();
     let mut physical_devices: BTreeMap<usize, Rc<VulkanComputeDevice>> = BTreeMap::new();
     let mut physical_device_indices = BTreeMap::new();
@@ -676,6 +677,50 @@ fn runtime_bound_vulkan_devices(
         physical_device_ids,
         available_devices: available_devices.to_vec(),
     })
+}
+
+fn validate_explicit_distributed_physical_bindings(
+    args: &Args,
+    physical_device_index_by_logical_device: &BTreeMap<String, usize>,
+) -> Result<(), io::Error> {
+    for component_id in args.component_physical_strategies.keys() {
+        let logical_devices = args
+            .component_shard_devices
+            .get(component_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "explicit distributed component {component_id:?} has no shard pool"
+                    ),
+                )
+            })?;
+        let physical_devices = logical_devices
+            .iter()
+            .map(|logical_device_id| {
+                physical_device_index_by_logical_device
+                    .get(logical_device_id)
+                    .copied()
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "explicit distributed component {component_id:?} has no physical binding for logical participant {logical_device_id:?}"
+                            ),
+                        )
+                    })
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if physical_devices.len() != logical_devices.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "explicit distributed component {component_id:?} requires one distinct physical device per logical participant; logical participants {logical_devices:?} resolve to physical device indices {physical_devices:?}"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_explicit_logical_device_bindings(
