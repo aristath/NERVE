@@ -31,7 +31,8 @@ mod tests {
         resolve_runtime_context_size, resolve_runtime_vulkan_physical_device_ref_in,
         resolve_speculative_draft_tokens, runtime_chat_repl_control, runtime_critical_path_lines,
         runtime_device_bindings_report, runtime_distributed_execution_phase_counter_lines,
-        runtime_physical_device_bindings_in, runtime_uses_explicit_placement, submit_chat_turn,
+        runtime_model, runtime_physical_device_bindings_in, runtime_uses_explicit_placement,
+        submit_chat_turn,
         usage, validate_explicit_distributed_physical_bindings,
         validate_explicit_logical_device_bindings,
         RuntimeWorkloadFreePhysicalCapacityObservation,
@@ -121,6 +122,35 @@ mod tests {
             .node_devices
             .insert("block_0".to_string(), "gpu1".to_string());
         assert!(runtime_uses_explicit_placement(&custom));
+    }
+
+    #[test]
+    fn shard_only_chat_defers_owner_validation_until_automatic_placement() {
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixtures/tiny_model/vulkan_resident_package.json");
+        let baseline = runtime_model(&Args::default(), &package).unwrap();
+        let component_id = baseline
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.runtime_role.is_signal_processor())
+            .unwrap()
+            .component_id
+            .clone();
+        let mut args = Args {
+            chat: true,
+            ..Args::default()
+        };
+        args.component_shard_devices.insert(
+            component_id,
+            vec![
+                "vulkan-uuid:00000000070000000000000000000000".to_string(),
+                "vulkan-uuid:000000000d0000000000000000000000".to_string(),
+            ],
+        );
+
+        let mounted = runtime_model(&args, &package).unwrap();
+        assert!(mounted.placement.component_shard_devices.is_empty());
     }
 
     #[test]

@@ -57,8 +57,14 @@ fn runtime_model(
         &args.duplicate_after,
         args.source_chain.as_deref(),
     )?;
-    for (component_id, device_ids) in &args.component_shard_devices {
-        model = model.with_component_shard_devices(component_id, device_ids.clone())?;
+    // Shard-only chat controls are component-local physical overrides on top
+    // of automatic placement. Their stable owner does not exist until that
+    // placement converges, so validating them against the manifest's logical
+    // default here would reject a valid physical pool prematurely.
+    if !args.chat || runtime_uses_explicit_placement(args) {
+        for (component_id, device_ids) in &args.component_shard_devices {
+            model = model.with_component_shard_devices(component_id, device_ids.clone())?;
+        }
     }
     Ok(model)
 }
