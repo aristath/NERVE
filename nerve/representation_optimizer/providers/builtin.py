@@ -5,23 +5,27 @@ from nerve.representation_optimizer.descriptor_registry import (
     RepresentationDescriptorRegistry,
     load_builtin_representation_descriptors,
 )
+from nerve.representation_optimizer.providers.attention_head_grouping import (
+    AttentionHeadGroupingToolchainResolver,
+    ExactAttentionHeadGroupingProvider,
+)
 from nerve.representation_optimizer.providers.codebook import (
     CodebookToolchainResolver,
     EmbeddedParameterProgramToolchainResolver,
     ExactEmbeddedHeadNormParameterProgramProvider,
     ExactHeadNormCodebookProvider,
 )
-from nerve.representation_optimizer.providers.attention_head_grouping import (
-    AttentionHeadGroupingToolchainResolver,
-    ExactAttentionHeadGroupingProvider,
-)
-from nerve.representation_optimizer.providers.output_fp8 import (
-    BlockScaledOutputProjectionProvider,
-    BlockScaledOutputToolchainResolver,
+from nerve.representation_optimizer.providers.group_scaled_int4 import (
+    GroupScaledInt4LinearProvider,
+    GroupScaledInt4ToolchainResolver,
 )
 from nerve.representation_optimizer.providers.hyper_norm_fusion import (
     ExactHyperNormFusionProvider,
     HyperNormFusionToolchainResolver,
+)
+from nerve.representation_optimizer.providers.output_fp8 import (
+    BlockScaledOutputProjectionProvider,
+    BlockScaledOutputToolchainResolver,
 )
 from nerve.representation_optimizer.providers.parallel_projection_fusion import (
     ExactParallelProjectionFusionProvider,
@@ -44,6 +48,7 @@ def load_builtin_provider_registry(
             ExactEmbeddedHeadNormParameterProgramProvider(),
             ExactHeadNormCodebookProvider(),
             BlockScaledOutputProjectionProvider(),
+            GroupScaledInt4LinearProvider(),
             ExactResidentExpertExpansionProvider(),
             ExactHyperNormFusionProvider(),
             ExactParallelProjectionFusionProvider(),
@@ -60,6 +65,7 @@ class BuiltinCandidateToolchainResolver:
             CodebookToolchainResolver(),
             EmbeddedParameterProgramToolchainResolver(),
             BlockScaledOutputToolchainResolver(),
+            GroupScaledInt4ToolchainResolver(),
             ResidentExpansionToolchainResolver(),
             HyperNormFusionToolchainResolver(),
             ParallelProjectionFusionToolchainResolver(),

@@ -1,0 +1,164 @@
+{
+  "schema": "nerve.optimizer.representation_descriptor.v1",
+  "descriptor_id": "representation_descriptor_16e12f223a158e7cc21ba93e0e5f5ed1",
+  "identity": {
+    "namespace": "nerve.expressions",
+    "name": "group_scaled_integer_parameter",
+    "version": "1"
+  },
+  "summary": "Represents one dense numeric parameter as signed group-scaled integers while preserving the operator boundary and retaining the native source implementation as the correction path.",
+  "responsibilities": {
+    "may_express": [
+      "feature_transformation"
+    ],
+    "composition_scopes": [
+      "operator",
+      "representation_island"
+    ]
+  },
+  "evidence": [
+    {
+      "claim_kind": "operator_structure",
+      "acceptable_statuses": [
+        "supported"
+      ],
+      "exactness": "approximate",
+      "required_facts": [
+        "operators"
+      ]
+    }
+  ],
+  "representations": {
+    "signals": [
+      {
+        "name": "dense_boundary_signal",
+        "kind": "dense_numeric_vector",
+        "properties": {
+          "materialization": "boundary_only"
+        }
+      }
+    ],
+    "parameters": [
+      {
+        "name": "group_scaled_integer_parameter",
+        "kind": "packed_signed_integer_values_with_scales",
+        "properties": {
+          "scale_granularity": "declared_input_group"
+        }
+      }
+    ],
+    "states": []
+  },
+  "execution": {
+    "topologies": [
+      "group_scaled_projection"
+    ],
+    "time_models": [
+      "streaming_activation",
+      "synchronous_activation"
+    ]
+  },
+  "hardware": {
+    "compatible_processes": [
+      {
+        "name": "shader_vector",
+        "requirement": "required",
+        "operations": [
+          "group_scaled_integer_dot_product"
+        ],
+        "numeric_formats": [
+          "bf16",
+          "f32",
+          "i4"
+        ]
+      }
+    ],
+    "composition": "all_required"
+  },
+  "construction": {
+    "required": true,
+    "phases": [
+      "analyze_dynamic_range",
+      "measure_error",
+      "quantize_groups"
+    ],
+    "artifacts": [
+      {
+        "kind": "packed_integer_parameter",
+        "lifetime": "residency"
+      },
+      {
+        "kind": "quantization_error_report",
+        "lifetime": "compile"
+      },
+      {
+        "kind": "scale_parameter",
+        "lifetime": "residency"
+      }
+    ]
+  },
+  "boundaries": {
+    "accepted_inputs": [
+      "dense_numeric_vector"
+    ],
+    "produced_outputs": [
+      "dense_numeric_vector"
+    ],
+    "cost_terms": [
+      {
+        "name": "parameter_read_bytes",
+        "unit": "bytes",
+        "directions": [
+          "internal"
+        ],
+        "measured_phase": "steady_state"
+      },
+      {
+        "name": "scale_read_bytes",
+        "unit": "bytes",
+        "directions": [
+          "internal"
+        ],
+        "measured_phase": "steady_state"
+      }
+    ],
+    "island_compatibility": {
+      "can_span_scopes": false,
+      "preserves_native_signals": true,
+      "absorbable_transducers": [
+        "parameter_dequantization"
+      ]
+    }
+  },
+  "behavioral": {
+    "exactness": "approximate",
+    "proof_obligations": [],
+    "error_contract": {
+      "metrics": [
+        "normalized_rms_logit_error",
+        "top_1_mismatch_rate",
+        "top_32_mismatch_rate"
+      ],
+      "requires_declared_domain": true
+    },
+    "validity_predicates": [
+      "declared_group_geometry",
+      "finite_source_parameter",
+      "target_kernel_contract"
+    ]
+  },
+  "correction_paths": [
+    {
+      "name": "retain_source_parameter",
+      "trigger": "candidate exceeds its numeric, semantic, or performance contract",
+      "action": "reject the candidate and retain the source representation",
+      "guarantee": "source behavior remains available"
+    }
+  ],
+  "tags": [
+    "group-scaled",
+    "integer",
+    "low-precision",
+    "parameter"
+  ]
+}

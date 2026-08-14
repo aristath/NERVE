@@ -42,6 +42,7 @@ def test_builtin_descriptor_catalog_is_canonical_and_covers_open_expression_spac
         "bounded_multiscale_state",
         "coarse_to_fine_evaluation",
         "generated_program_with_exceptions",
+        "group_scaled_integer_parameter",
         "heterogeneous_composite_island",
         "hierarchical_output_construction",
         "indexed_search_with_exact_refinement",

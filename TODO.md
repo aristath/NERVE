@@ -149,11 +149,30 @@ the local placement calibration, and the mounted graph.
   only after the complete resulting circuit validates. This removes the former
   whole-component replacement requirement for per-layer native/INT4
   alternatives without adding model- or vendor-specific runtime behavior.
-  The current DeepSeek package still passes exact two-R9700 TP contract
-  resolution and full 131,072-activation demand-paged mount admission with the
-  rebuilt runtime; the inspection submitted no work and restored the observed
-  57/88 MiB pre-existing reservations exactly. Constructing and promoting the
-  actual alternative representations remains below.
+  A structure-driven group-32 signed-INT4 provider now emits one independently
+  selectable parameterized-region candidate for each private plain-BF16
+  linear. It retains the native source region as the correction path and
+  requires complete component, whole-model, and product behavioral validation
+  plus a measured complete-region win before promotion. The current DeepSeek
+  package exposes 64 such regions: all 43 MoE routers and 21 indexer
+  projections. Their aggregate parameter residency would fall from
+  101,187,584 to 28,459,008 bytes if every candidate qualified. A real
+  `layer_00` router was streamed from the package, packed, shader-compiled, and
+  mounted workload-free: 2,097,152 source bytes became 589,824 candidate
+  bytes, six decode/prefill execution contracts were reconstructed, and the
+  tensor-only normalized RMS error was 0.100019. The strict provider registry
+  accepts that complete candidate. A fresh Qwen3.5-9B FP8 compile also passes
+  after exact composition of dynamic channel-scale broadcast with TP
+  transpose; it contains 38 circuits, 120 shaders, and 24 independently
+  eligible BF16 delta-state projections. One real Qwen region fell from
+  262,144 to 73,728 bytes at 0.098629 tensor-only normalized RMS error. The
+  temporary 15 GiB package was removed. These measurements prove construction,
+  not route/token equivalence or performance; every candidate remains
+  unpromoted pending the authorized live gate. The current DeepSeek package
+  still passes exact two-R9700 TP contract resolution and full
+  131,072-activation demand-paged mount admission with the rebuilt runtime; the
+  inspection submitted no work and restored the observed 57/88 MiB
+  pre-existing reservations exactly.
 - Hyper-connection/RMS fusion is now a structure-discovered optimizer
   implementation rather than a lowest-common-denominator compiler decision.
   On the current DeepSeek package it discovers two independent physical
@@ -984,7 +1003,10 @@ For every numbered item below:
   through compiler-emitted legal contracts and behavioral-equivalence evidence.
   Use the parameterized component-region v2 ABI to keep unrelated operators and
   bindings native; do not duplicate an entire layer merely to replace one
-  parameterized region.
+  parameterized region. The first group-scaled INT4 family now satisfies the
+  compiler, construction, independent-selection, transactional-mount, and
+  workload-free real-package gates above. Live behavior and performance, plus
+  additional capability-driven formats, remain.
 - Select representation and placement together. Account for whole-island
   execution, conversion boundaries, resident footprint, lazy reload traffic,
   transient peak, and current headroom—not an isolated kernel or advertised
