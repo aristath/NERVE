@@ -70,6 +70,64 @@ fn overlay_explicit_runtime_physical_execution(
     Ok(Some(plan))
 }
 
+/// Applies only the stable-owner part of a caller-declared physical shard
+/// pool. The first participant is the component's boundary coordinator; the
+/// remaining participants stay phase-local in the physical execution plan.
+/// This happens after automatic capacity packing so a local TP request does
+/// not disable automatic placement for the rest of the graph, while also
+/// avoiding the impossible requirement that a caller predict the measured
+/// planner's owner choice.
+fn runtime_model_with_explicit_shard_owners(
+    args: &Args,
+    runtime_model: VulkanResidentRuntimeModel,
+) -> Result<VulkanResidentRuntimeModel, Box<dyn Error>> {
+    if args.component_shard_devices.is_empty() {
+        return Ok(runtime_model);
+    }
+    let default_device_id = runtime_model.placement.default_device_id.clone();
+    let mut owner_by_component = runtime_model
+        .runtime_graph
+        .instances
+        .iter()
+        .map(|instance| (instance.instance_id.clone(), instance.device_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for (component_id, device_ids) in &args.component_shard_devices {
+        let owner = device_ids.first().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("explicit shard pool for component {component_id:?} is empty"),
+            )
+        })?;
+        owner_by_component.insert(component_id.clone(), owner.clone());
+    }
+    vulkan_runtime_model_with_component_placement_owned(
+        runtime_model,
+        &default_device_id,
+        &owner_by_component,
+    )
+    .map_err(|error| Box::new(error) as Box<dyn Error>)
+}
+
+fn signal_processor_owner_constraints(
+    runtime_model: &VulkanResidentRuntimeModel,
+) -> BTreeMap<String, String> {
+    runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| {
+            (
+                component.component_id.clone(),
+                runtime_model
+                    .placement
+                    .device_for_component(&component.component_id)
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
 fn resolve_runtime_hybrid_physical_execution(
     manifest_dir: &Path,
     runtime_model: VulkanResidentRuntimeModel,
@@ -79,6 +137,7 @@ fn resolve_runtime_hybrid_physical_execution(
     context_capacity_activations: usize,
     speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
 ) -> Result<
     (
         VulkanResidentRuntimeModel,
@@ -170,6 +229,7 @@ fn resolve_runtime_hybrid_physical_execution(
         speculative_draft_tokens,
         residency_policy,
         capacity.host_available_bytes,
+        required_owner_by_component,
     )?
     else {
         eprintln!(
@@ -203,6 +263,24 @@ fn run_placed_chat(
     initial_prompt: Option<&str>,
 ) -> Result<(), Box<dyn Error>> {
     let setup_start = Instant::now();
+    let mut auto_placement = auto_placement;
+    let runtime_model = if !args.component_shard_devices.is_empty()
+        && let Some(auto_placement) = &mut auto_placement
+    {
+        // The automatically selected representation was chosen for the
+        // unconstrained owner profile. Re-enter selection from the exact
+        // compiled model after applying the caller's local owner constraint;
+        // carrying the previous representation across a heterogeneous owner
+        // change would be a false compatibility assumption.
+        let constrained = runtime_model_with_explicit_shard_owners(
+            args,
+            auto_placement.exact_runtime_model.clone(),
+        )?;
+        auto_placement.exact_runtime_model = constrained.clone();
+        constrained
+    } else {
+        runtime_model_with_explicit_shard_owners(args, runtime_model)?
+    };
     let speculative_draft_tokens = effective_speculative_draft_tokens(args, &runtime_model)?;
     let chat_session =
         RuntimeChatSession::from_tokenizer_dir(tokenizer_dir, &args.chat_template_variables)?;
@@ -259,17 +337,20 @@ fn run_placed_chat(
                 )?
                 .0
         };
+    let required_owner_by_component = (!args.component_shard_devices.is_empty())
+        .then(|| signal_processor_owner_constraints(&runtime_model));
     let (runtime_model, automatic_physical_execution_plan) =
         resolve_runtime_hybrid_physical_execution(
-        manifest_dir,
-        runtime_model,
-        execution,
-        auto_placement.as_ref(),
-        &bound_devices,
-        capacity,
-        speculative_draft_tokens,
-        args.resource_residency_policy,
-    )?;
+            manifest_dir,
+            runtime_model,
+            execution,
+            auto_placement.as_ref(),
+            &bound_devices,
+            capacity,
+            speculative_draft_tokens,
+            args.resource_residency_policy,
+            required_owner_by_component.as_ref(),
+        )?;
     let physical_execution_plan = overlay_explicit_runtime_physical_execution(
         args,
         &runtime_model,

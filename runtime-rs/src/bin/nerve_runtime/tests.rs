@@ -31,8 +31,8 @@ mod tests {
         resolve_runtime_context_size, resolve_runtime_vulkan_physical_device_ref_in,
         resolve_speculative_draft_tokens, runtime_chat_repl_control, runtime_critical_path_lines,
         runtime_device_bindings_report, runtime_distributed_execution_phase_counter_lines,
-        runtime_model, runtime_physical_device_bindings_in, runtime_uses_explicit_placement,
-        submit_chat_turn,
+        runtime_model, runtime_model_with_explicit_shard_owners,
+        runtime_physical_device_bindings_in, runtime_uses_explicit_placement, submit_chat_turn,
         usage, validate_explicit_distributed_physical_bindings,
         validate_explicit_logical_device_bindings,
         RuntimeWorkloadFreePhysicalCapacityObservation,
@@ -151,6 +151,83 @@ mod tests {
 
         let mounted = runtime_model(&args, &package).unwrap();
         assert!(mounted.placement.component_shard_devices.is_empty());
+    }
+
+    #[test]
+    fn shard_only_chat_makes_the_declared_first_participant_the_stable_owner() {
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixtures/tiny_model/vulkan_resident_package.json");
+        let baseline = runtime_model(&Args::default(), &package).unwrap();
+        let component_id = baseline
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.runtime_role.is_signal_processor())
+            .unwrap()
+            .component_id
+            .clone();
+        let mut args = Args {
+            chat: true,
+            ..Args::default()
+        };
+        args.component_shard_devices.insert(
+            component_id.clone(),
+            vec!["gpu-user-owner".to_string(), "gpu-helper".to_string()],
+        );
+
+        let constrained = runtime_model_with_explicit_shard_owners(&args, baseline).unwrap();
+
+        assert_eq!(
+            constrained.placement.device_for_component(&component_id),
+            "gpu-user-owner",
+        );
+        assert!(constrained.placement.component_shard_devices.is_empty());
+        assert_eq!(
+            constrained
+                .runtime_graph
+                .instances
+                .iter()
+                .find(|instance| instance.instance_id == component_id)
+                .unwrap()
+                .device_id,
+            "gpu-user-owner",
+        );
+    }
+
+    #[test]
+    fn shard_owner_constraints_reject_empty_and_unknown_component_pools() {
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixtures/tiny_model/vulkan_resident_package.json");
+        let baseline = runtime_model(&Args::default(), &package).unwrap();
+
+        let mut empty = Args {
+            chat: true,
+            ..Args::default()
+        };
+        empty
+            .component_shard_devices
+            .insert("missing".to_string(), Vec::new());
+        assert!(
+            runtime_model_with_explicit_shard_owners(&empty, baseline.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("is empty")
+        );
+
+        let mut unknown = Args {
+            chat: true,
+            ..Args::default()
+        };
+        unknown.component_shard_devices.insert(
+            "missing".to_string(),
+            vec!["gpu-owner".to_string(), "gpu-helper".to_string()],
+        );
+        assert!(
+            runtime_model_with_explicit_shard_owners(&unknown, baseline)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown instance")
+        );
     }
 
     #[test]

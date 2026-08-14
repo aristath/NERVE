@@ -60,6 +60,7 @@ use nerve_runtime::{
     vulkan_resident_execution_counters,
     vulkan_device_local_memory_budget_from_available_bytes,
     vulkan_runtime_device_capacity_admission_bytes,
+    vulkan_runtime_model_with_component_placement_owned,
     vulkan_runtime_placement_transfer_byte_counts, vulkan_safe_host_available_bytes,
 };
 

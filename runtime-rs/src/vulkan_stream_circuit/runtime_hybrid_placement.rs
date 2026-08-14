@@ -192,6 +192,7 @@ fn visit_runtime_hybrid_representation_placements_by_duration<T, F>(
     catalog: &VulkanPlacementCalibrationCatalog,
     eligible_capacity: &VulkanPlacementCapacityEnvelope,
     phase: VulkanTargetedComponentExecutionPhase,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
     exact_parameter_planner: Option<&VulkanRuntimeHybridExactCandidateResourcePlanner<'_>>,
     mut visitor: F,
 ) -> Result<Option<T>, VulkanRuntimeHybridPlacementError>
@@ -206,7 +207,7 @@ where
         exact_baseline_incompatible_instance_ids,
         catalog,
         phase,
-        None,
+        required_owner_by_component,
         exact_parameter_planner,
     )?;
     visit_vulkan_hybrid_ordered_graph_routes_by_duration(
@@ -456,6 +457,7 @@ pub fn resolve_vulkan_runtime_hybrid_physical_execution_with_representations(
     speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
     host_safe_capacity_bytes: usize,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
 ) -> Result<Option<VulkanRuntimeHybridPhysicalExecutionResolution>, VulkanRuntimeHybridPlacementError>
 {
     if execution.speculative_draft_tokens != speculative_draft_tokens
@@ -496,6 +498,7 @@ pub fn resolve_vulkan_runtime_hybrid_physical_execution_with_representations(
             residency_policy,
             host_safe_capacity_bytes,
         }),
+        required_owner_by_component,
     )
 }
 
@@ -511,6 +514,7 @@ fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
     context_capacity_activations: usize,
     logical_device_id_by_physical_device: &BTreeMap<String, String>,
     physical_mount_planning: Option<VulkanRuntimeHybridMountPlanningContext<'_>>,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
 ) -> Result<Option<VulkanRuntimeHybridPhysicalExecutionResolution>, VulkanRuntimeHybridPlacementError>
 {
     let exact_baseline_incompatible_instance_ids =
@@ -602,6 +606,7 @@ fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
         catalog,
         capacity,
         VulkanTargetedComponentExecutionPhase::Decode,
+        required_owner_by_component,
         exact_parameter_planner.as_ref(),
         |decode| {
             let mut selected = decode.selected_implementations;

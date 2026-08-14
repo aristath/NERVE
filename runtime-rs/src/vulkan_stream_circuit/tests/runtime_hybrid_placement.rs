@@ -1486,6 +1486,66 @@ fn runtime_hybrid_physical_resolution_carries_measured_tp_into_normal_execution(
 }
 
 #[test]
+fn runtime_hybrid_representation_routes_honor_stable_owner_constraints() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let catalog = hybrid_test_distributed_catalog(&model);
+    let capacity = VulkanPlacementCapacityEnvelope {
+        available_bytes_by_device: BTreeMap::from([
+            (hybrid_test_device("gpu0"), 100),
+            (hybrid_test_device("gpu1"), 100),
+        ]),
+        host_available_bytes: 100,
+    };
+    let required_owners = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| (component.component_id.clone(), "gpu0".to_string()))
+        .collect::<BTreeMap<_, _>>();
+
+    let constrained = visit_runtime_hybrid_representation_placements_by_duration(
+        &model,
+        &[],
+        &BTreeSet::new(),
+        &catalog,
+        &capacity,
+        VulkanTargetedComponentExecutionPhase::Decode,
+        Some(&required_owners),
+        None,
+        |placement| Ok(Some(placement)),
+    )
+    .unwrap()
+    .expect("the required-owner route is present in the measured catalog");
+    assert!(
+        runtime_hybrid_physical_owners(&constrained.ordered_placement)
+            .unwrap()
+            .values()
+            .all(|owner| owner == "gpu0")
+    );
+
+    let impossible_owners = required_owners
+        .keys()
+        .map(|component_id| (component_id.clone(), "gpu1".to_string()))
+        .collect::<BTreeMap<_, _>>();
+    assert!(
+        visit_runtime_hybrid_representation_placements_by_duration(
+            &model,
+            &[],
+            &BTreeSet::new(),
+            &catalog,
+            &capacity,
+            VulkanTargetedComponentExecutionPhase::Decode,
+            Some(&impossible_owners),
+            None,
+            |placement| Ok(Some(placement)),
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
 fn runtime_hybrid_exact_candidate_resources_prune_before_terminal_mount() {
     let model = fixture_model_runtime_model();
     let catalog = hybrid_test_catalog(&model);
@@ -2285,6 +2345,7 @@ fn runtime_hybrid_route_visitor_reaches_a_sampled_dominated_representation() {
         &capacity,
         VulkanTargetedComponentExecutionPhase::Decode,
         None,
+        None,
         |placement| {
             let candidate_id = placement
                 .ordered_placement
@@ -2441,6 +2502,7 @@ fn runtime_hybrid_mounts_the_jointly_selected_representation_and_physical_plan_o
             residency_policy: ResourceResidencyPolicy::Eager,
             host_safe_capacity_bytes: usize::MAX,
         }),
+        None,
     )
     .unwrap()
     .expect("measured alternative has a complete route");
