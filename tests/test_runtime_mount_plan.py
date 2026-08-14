@@ -338,7 +338,7 @@ def test_component_resident_derivation_rejects_invalid_nested_contract(
 
 def component_region_document() -> dict[str, object]:
     return {
-        "schema": "nerve.optimizer.vulkan_component_region_overlay.v1",
+        "schema": "nerve.optimizer.vulkan_component_region_overlay.v2",
         "source_component_id": "component",
         "source": {
             "nodes": [{"id": "producer"}, {"id": "consumer"}],
@@ -346,10 +346,12 @@ def component_region_document() -> dict[str, object]:
                 {"node_id": "producer"},
                 {"node_id": "consumer"},
             ],
+            "parameter_refs": {},
         },
         "replacement": {
             "nodes": [{"id": "producer__consumer"}],
             "kernels": [{"node_id": "producer__consumer"}],
+            "parameter_refs": {},
         },
     }
 
@@ -395,6 +397,88 @@ def test_component_region_overlay_rejects_incomplete_or_ambiguous_edits(
     else:
         payload["replacement"]["nodes"] = []
         payload["replacement"]["kernels"] = []
+    overlay = tmp_path / "overlays" / "component.json"
+    overlay.parent.mkdir()
+    overlay.write_text(json.dumps(payload))
+    (tmp_path / "tensor_fragment.json").write_text(
+        json.dumps({"schema": "nerve.tensor_index.v1", "tensors": {}})
+    )
+    mount = RuntimeMountPlan.from_json(
+        document,
+        candidate_id="candidate_fixture",
+        build_plan=build_plan(),
+    )
+
+    with pytest.raises(ContractValidationError, match=message):
+        validate_runtime_mount_artifacts(tmp_path, mount)
+
+
+def test_mount_artifacts_accept_parameterized_component_region_overlay(
+    tmp_path: Path,
+):
+    document = mount_document()
+    document["regions"][0]["replacements"][0]["kind"] = "component_region"
+    payload = component_region_document()
+    payload["source"]["nodes"][0]["params"] = ["weight"]
+    payload["source"]["parameter_refs"] = {
+        "weight": {"tensor": "model.weight"}
+    }
+    payload["replacement"]["nodes"][0]["params"] = [
+        "weight_int4",
+        "weight_scale",
+    ]
+    payload["replacement"]["parameter_refs"] = {
+        "weight_int4": {"tensor": "candidate.weight_int4"},
+        "weight_scale": {"tensor": "candidate.weight_scale"},
+    }
+    overlay = tmp_path / "overlays" / "component.json"
+    overlay.parent.mkdir()
+    overlay.write_text(json.dumps(payload))
+    (tmp_path / "tensor_fragment.json").write_text(
+        json.dumps({"schema": "nerve.tensor_index.v1", "tensors": {}})
+    )
+    mount = RuntimeMountPlan.from_json(
+        document,
+        candidate_id="candidate_fixture",
+        build_plan=build_plan(),
+    )
+
+    validate_runtime_mount_artifacts(tmp_path, mount)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing_table", "fields are invalid"),
+        ("empty_id", "non-empty string"),
+        ("non_object_ref", "must be an object"),
+        ("unused_ref", "is not used by its nodes"),
+    ],
+)
+def test_component_region_overlay_rejects_invalid_parameter_bindings(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+):
+    document = mount_document()
+    document["regions"][0]["replacements"][0]["kind"] = "component_region"
+    payload = component_region_document()
+    payload["source"]["nodes"][0]["params"] = ["weight"]
+    payload["source"]["parameter_refs"] = {
+        "weight": {"tensor": "model.weight"}
+    }
+    if mutation == "missing_table":
+        del payload["replacement"]["parameter_refs"]
+    elif mutation == "empty_id":
+        payload["replacement"]["nodes"][0]["params"] = [""]
+        payload["replacement"]["parameter_refs"] = {"": {}}
+    elif mutation == "non_object_ref":
+        payload["replacement"]["nodes"][0]["params"] = ["weight"]
+        payload["replacement"]["parameter_refs"] = {"weight": "tensor"}
+    else:
+        payload["replacement"]["parameter_refs"] = {
+            "unused": {"tensor": "candidate.unused"}
+        }
     overlay = tmp_path / "overlays" / "component.json"
     overlay.parent.mkdir()
     overlay.write_text(json.dumps(payload))

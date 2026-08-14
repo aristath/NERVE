@@ -241,10 +241,12 @@ fn component_region_overlay_composes_after_an_unrelated_full_overlay() {
         source: VulkanRuntimeComponentRegion {
             nodes: vec![source_node],
             kernels: vec![source_kernel],
+            parameter_refs: BTreeMap::new(),
         },
         replacement: VulkanRuntimeComponentRegion {
             nodes: vec![replacement_node],
             kernels: vec![replacement_kernel],
+            parameter_refs: BTreeMap::new(),
         },
     };
     validate_runtime_component_region_overlay(
@@ -314,6 +316,37 @@ fn disjoint_component_region_overlays_compose_at_their_own_source_anchors() {
             .iter()
             .map(|index| source_execution.kernels[*index].clone())
             .collect::<Vec<_>>();
+        let produced_signals = source_nodes
+            .iter()
+            .flat_map(|node| node.outputs.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut replacement_node = source_nodes.last().unwrap().clone();
+        replacement_node.inputs = source_nodes
+            .iter()
+            .flat_map(|node| node.inputs.iter().cloned())
+            .filter(|input| !produced_signals.contains(input))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        replacement_node.outputs = produced_signals.into_iter().collect();
+        replacement_node.params = source_nodes
+            .iter()
+            .flat_map(|node| node.params.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        replacement_node.state_reads = source_nodes
+            .iter()
+            .flat_map(|node| node.state_reads.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        replacement_node.state_writes = source_nodes
+            .iter()
+            .flat_map(|node| node.state_writes.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let mut replacement_kernel = source_kernels.last().unwrap().clone();
         replacement_kernel.shader_path = shader_path.to_string();
         VulkanRuntimeComponentRegionOverlay {
@@ -322,10 +355,12 @@ fn disjoint_component_region_overlays_compose_at_their_own_source_anchors() {
             source: VulkanRuntimeComponentRegion {
                 nodes: source_nodes.clone(),
                 kernels: source_kernels,
+                parameter_refs: BTreeMap::new(),
             },
             replacement: VulkanRuntimeComponentRegion {
-                nodes: vec![source_nodes.last().unwrap().clone()],
+                nodes: vec![replacement_node],
                 kernels: vec![replacement_kernel],
+                parameter_refs: BTreeMap::new(),
             },
         }
     };
@@ -339,7 +374,7 @@ fn disjoint_component_region_overlays_compose_at_their_own_source_anchors() {
     mount_runtime_component_region_overlay(
         &mut runtime_model,
         "layer_00",
-        region(&[5, 6, 8], "/candidate/feed-forward-fusion.spv"),
+        region(&[7, 8, 9], "/candidate/feed-forward-fusion.spv"),
         &package_root,
     )
     .unwrap();
@@ -350,7 +385,7 @@ fn disjoint_component_region_overlays_compose_at_their_own_source_anchors() {
         .iter()
         .find(|component| component.component_id == "layer_00")
         .unwrap();
-    let expected_node_ids = [2, 3, 4, 8, 7, 9]
+    let expected_node_ids = [2, 3, 4, 5, 6, 9]
         .into_iter()
         .map(|index| source_component.circuit.nodes[index].id.clone())
         .collect::<Vec<_>>();
@@ -373,7 +408,7 @@ fn disjoint_component_region_overlays_compose_at_their_own_source_anchors() {
         "/candidate/attention-fusion.spv"
     );
     assert_eq!(
-        mounted_execution.kernels[3].shader_path,
+        mounted_execution.kernels[5].shader_path,
         "/candidate/feed-forward-fusion.spv"
     );
     assert!(mounted_execution
@@ -418,10 +453,12 @@ fn component_region_overlay_rejects_a_stale_or_colliding_source_anchor() {
         source: VulkanRuntimeComponentRegion {
             nodes: vec![source_node.clone()],
             kernels: vec![source_kernel.clone()],
+            parameter_refs: BTreeMap::new(),
         },
         replacement: VulkanRuntimeComponentRegion {
             nodes: vec![source_node.clone()],
             kernels: vec![source_kernel.clone()],
+            parameter_refs: BTreeMap::new(),
         },
     };
     let error = mount_runtime_component_region_overlay(
@@ -447,10 +484,12 @@ fn component_region_overlay_rejects_a_stale_or_colliding_source_anchor() {
         source: VulkanRuntimeComponentRegion {
             nodes: vec![source_node],
             kernels: vec![source_kernel],
+            parameter_refs: BTreeMap::new(),
         },
         replacement: VulkanRuntimeComponentRegion {
             nodes: vec![colliding_node],
             kernels: vec![colliding_kernel],
+            parameter_refs: BTreeMap::new(),
         },
     };
     let error = mount_runtime_component_region_overlay(
@@ -462,6 +501,389 @@ fn component_region_overlay_rejects_a_stale_or_colliding_source_anchor() {
     .unwrap_err();
     assert!(error.to_string().contains("collides with an unrelated node"));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn parameterized_operator_norm_region(
+    runtime_model: &VulkanResidentRuntimeModel,
+) -> VulkanRuntimeComponentRegionOverlay {
+    let source_component = runtime_model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap();
+    let source_execution = runtime_model
+        .package
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap();
+    let source_node = source_component.circuit.nodes[0].clone();
+    assert_eq!(source_node.params, ["operator_norm"]);
+    let source_kernel = source_execution.kernels[0].clone();
+    let source_ref = source_component
+        .params
+        .refs
+        .get("operator_norm")
+        .unwrap()
+        .clone();
+    let mut replacement_weight_ref = source_ref.clone();
+    replacement_weight_ref.tensor =
+        Some("candidate.layer_00.operator_norm".to_string());
+    let mut replacement_scale_ref = source_ref.clone();
+    replacement_scale_ref.tensor =
+        Some("candidate.layer_00.operator_norm_scale".to_string());
+    replacement_scale_ref.role =
+        Some("operator_normalization_weight_scale".to_string());
+    let mut replacement_node = source_node.clone();
+    replacement_node
+        .params
+        .push("operator_norm_scale".to_string());
+    VulkanRuntimeComponentRegionOverlay {
+        schema: crate::VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA.to_string(),
+        source_component_id: "layer_00".to_string(),
+        source: VulkanRuntimeComponentRegion {
+            nodes: vec![source_node.clone()],
+            kernels: vec![source_kernel.clone()],
+            parameter_refs: BTreeMap::from([(
+                "operator_norm".to_string(),
+                source_ref,
+            )]),
+        },
+        replacement: VulkanRuntimeComponentRegion {
+            nodes: vec![replacement_node],
+            kernels: vec![source_kernel],
+            parameter_refs: BTreeMap::from([
+                (
+                    "operator_norm".to_string(),
+                    replacement_weight_ref,
+                ),
+                (
+                    "operator_norm_scale".to_string(),
+                    replacement_scale_ref,
+                ),
+            ]),
+        },
+    }
+}
+
+#[test]
+fn component_region_overlay_atomically_replaces_only_its_parameter_binding() {
+    let (root, package_root, _candidate_root, mut runtime_model) =
+        staged_runtime_candidate_fixture();
+    let overlay = parameterized_operator_norm_region(&runtime_model);
+    let source_component = runtime_model
+        .package
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap();
+    let source_execution = runtime_model
+        .package
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap();
+    validate_runtime_component_region_overlay(
+        &overlay,
+        source_component,
+        source_execution,
+    )
+    .unwrap();
+    let untouched = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .params
+        .refs
+        .get("ffn_norm")
+        .unwrap()
+        .clone();
+
+    mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        overlay,
+        &package_root,
+    )
+    .unwrap();
+
+    let mounted = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap();
+    assert_eq!(
+        mounted.params.refs["operator_norm"].tensor.as_deref(),
+        Some("candidate.layer_00.operator_norm")
+    );
+    assert_eq!(
+        mounted.params.refs["operator_norm_scale"].tensor.as_deref(),
+        Some("candidate.layer_00.operator_norm_scale")
+    );
+    assert_eq!(
+        mounted.circuit.parameters.refs,
+        mounted.params.refs
+    );
+    assert_eq!(mounted.params.refs["ffn_norm"], untouched);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn component_region_overlay_rejects_stale_parameter_binding_without_mutation() {
+    let (root, package_root, _candidate_root, mut runtime_model) =
+        staged_runtime_candidate_fixture();
+    let before = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let before_execution = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let mut overlay = parameterized_operator_norm_region(&runtime_model);
+    overlay.source.parameter_refs.get_mut("operator_norm").unwrap().tensor =
+        Some("stale.operator_norm".to_string());
+
+    let error = mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        overlay,
+        &package_root,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("parameter ref \"operator_norm\" is stale"));
+    assert_eq!(
+        runtime_model
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.component_id == "layer_00")
+            .unwrap(),
+        &before
+    );
+    assert_eq!(
+        runtime_model
+            .component_executions
+            .iter()
+            .find(|execution| execution.component_id == "layer_00")
+            .unwrap(),
+        &before_execution
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn component_region_overlay_rejects_parameter_collision_without_mutation() {
+    let (root, package_root, _candidate_root, mut runtime_model) =
+        staged_runtime_candidate_fixture();
+    let before = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let mut overlay = parameterized_operator_norm_region(&runtime_model);
+    let colliding = before.params.refs["ffn_norm"].clone();
+    overlay.replacement.nodes[0].params = vec!["ffn_norm".to_string()];
+    overlay.replacement.parameter_refs =
+        BTreeMap::from([("ffn_norm".to_string(), colliding)]);
+
+    let error = mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        overlay,
+        &package_root,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("collides with an unrelated binding"));
+    assert_eq!(
+        runtime_model
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.component_id == "layer_00")
+            .unwrap(),
+        &before
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn component_region_overlay_rejects_missing_replacement_binding_atomically() {
+    let (root, package_root, _candidate_root, mut runtime_model) =
+        staged_runtime_candidate_fixture();
+    let before = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let before_execution = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == "layer_00")
+        .unwrap()
+        .clone();
+    let mut overlay = parameterized_operator_norm_region(&runtime_model);
+    overlay.replacement.parameter_refs.clear();
+
+    let error = mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        overlay,
+        &package_root,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("parameter \"operator_norm\" is not declared"));
+    assert_eq!(
+        runtime_model
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.component_id == "layer_00")
+            .unwrap(),
+        &before
+    );
+    assert_eq!(
+        runtime_model
+            .component_executions
+            .iter()
+            .find(|execution| execution.component_id == "layer_00")
+            .unwrap(),
+        &before_execution
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn component_region_overlay_cannot_rebind_a_parameter_used_outside_its_region() {
+    let (root, package_root, _candidate_root, mut runtime_model) =
+        staged_runtime_candidate_fixture();
+    let overlay = parameterized_operator_norm_region(&runtime_model);
+    let component = runtime_model
+        .circuit_graph
+        .components
+        .iter_mut()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap();
+    component.circuit.nodes[1]
+        .params
+        .push("operator_norm".to_string());
+    let before = component.clone();
+
+    let error = mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00",
+        overlay,
+        &package_root,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("still used outside the replaced region"));
+    assert_eq!(
+        runtime_model
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.component_id == "layer_00")
+            .unwrap(),
+        &before
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn targeted_component_region_parameter_binding_does_not_leak_to_a_sibling() {
+    let package_root = tiny_model_dir();
+    let manifest = VulkanResidentModelPackageManifest::from_json_file(
+        package_root.join("vulkan_resident_package.json"),
+    )
+    .unwrap();
+    let source = manifest.resolved_source_graph(&package_root).unwrap();
+    let runtime_graph = manifest
+        .runtime_graph_from_controls(
+            Some("gpu0"),
+            &BTreeMap::new(),
+            &[],
+            None,
+        )
+        .unwrap()
+        .duplicate_after_instance(
+            &source,
+            "layer_00",
+            "layer_00__duplicate",
+        )
+        .unwrap();
+    let mut runtime_model = manifest.mount_runtime_graph(&runtime_graph).unwrap();
+    let overlay = parameterized_operator_norm_region(&runtime_model);
+    let original = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .params
+        .refs["operator_norm"]
+        .clone();
+
+    mount_runtime_component_region_overlay(
+        &mut runtime_model,
+        "layer_00__duplicate",
+        overlay,
+        &package_root,
+    )
+    .unwrap();
+
+    let mounted_refs = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter_map(|component| {
+            component
+                .params
+                .refs
+                .get("operator_norm")
+                .cloned()
+                .map(|parameter_ref| {
+                    (component.component_id.as_str(), parameter_ref)
+                })
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(mounted_refs["layer_00"], original);
+    assert_eq!(
+        mounted_refs["layer_00__duplicate"].tensor.as_deref(),
+        Some("candidate.layer_00.operator_norm")
+    );
+    assert!(!runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00")
+        .unwrap()
+        .params
+        .refs
+        .contains_key("operator_norm_scale"));
+    assert!(runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.component_id == "layer_00__duplicate")
+        .unwrap()
+        .params
+        .refs
+        .contains_key("operator_norm_scale"));
 }
 
 fn staged_runtime_candidate_fixture() -> (

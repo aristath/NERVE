@@ -195,6 +195,7 @@ include!("vulkan_stream_circuit/runtime_physical_execution_plan.rs");
 include!("vulkan_stream_circuit/runtime_execution_identity.rs");
 include!("vulkan_stream_circuit/runtime_device_compatibility.rs");
 include!("vulkan_stream_circuit/runtime_implementation_selection.rs");
+include!("vulkan_stream_circuit/runtime_component_region_overlay.rs");
 include!("vulkan_stream_circuit/runtime_resident_derivations.rs");
 include!("vulkan_stream_circuit/runtime_resource_contract.rs");
 include!("vulkan_stream_circuit/compiled_resource_store_residency.rs");

@@ -177,15 +177,17 @@ class ParallelProjectionFusionPhysicalOptimizer:
                 for kernel in component.replacement_kernels
             )
             overlay = {
-                "schema": "nerve.optimizer.vulkan_component_region_overlay.v1",
+                "schema": "nerve.optimizer.vulkan_component_region_overlay.v2",
                 "source_component_id": opportunity.component_id,
                 "source": {
                     "nodes": list(component.transformed.source_nodes),
                     "kernels": list(component.source_kernels),
+                    "parameter_refs": {},
                 },
                 "replacement": {
                     "nodes": list(component.transformed.replacement_nodes),
                     "kernels": list(finalized_kernels),
+                    "parameter_refs": {},
                 },
             }
             context.write_json_artifact(

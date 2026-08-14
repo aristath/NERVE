@@ -108,7 +108,7 @@ def parallel_projection_representation_graph(
                         opportunity.component_id,
                         opportunity.physical_node_id,
                     ),
-                    "format": "nerve.optimizer.vulkan_component_region_overlay.v1",
+                    "format": "nerve.optimizer.vulkan_component_region_overlay.v2",
                 },
                 "provenance": provenance(),
             }
@@ -224,7 +224,7 @@ def parallel_projection_representation_graph(
                     "kind": "source_anchored_component_region",
                     "domain": "topology",
                     "physical_shape": [1],
-                    "encoding": {"schema": "vulkan_component_region_overlay.v1"},
+                    "encoding": {"schema": "vulkan_component_region_overlay.v2"},
                     "storage": {"layout": "candidate_artifact"},
                 },
             ],

@@ -219,15 +219,17 @@ def _verify_candidate(
             for kernel in prepared.replacement_kernels
         )
         expected_overlay = {
-            "schema": "nerve.optimizer.vulkan_component_region_overlay.v1",
+            "schema": "nerve.optimizer.vulkan_component_region_overlay.v2",
             "source_component_id": opportunity.component_id,
             "source": {
                 "nodes": list(prepared.transformed.source_nodes),
                 "kernels": list(prepared.source_kernels),
+                "parameter_refs": {},
             },
             "replacement": {
                 "nodes": list(prepared.transformed.replacement_nodes),
                 "kernels": list(finalized),
+                "parameter_refs": {},
             },
         }
         overlay = _json_file(

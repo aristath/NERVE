@@ -118,7 +118,7 @@ def attention_head_grouping_representation_graph(
                 "physical_representation_id": "repr.topology.component_region",
                 "artifact": {
                     "path": component_overlay_path(opportunity.component_id),
-                    "format": "nerve.optimizer.vulkan_component_region_overlay.v1",
+                    "format": "nerve.optimizer.vulkan_component_region_overlay.v2",
                 },
                 "provenance": provenance(),
             }
@@ -317,7 +317,7 @@ def attention_head_grouping_representation_graph(
             "kind": "source_anchored_component_region",
             "domain": "topology",
             "physical_shape": [1],
-            "encoding": {"schema": "vulkan_component_region_overlay.v1"},
+            "encoding": {"schema": "vulkan_component_region_overlay.v2"},
             "storage": {"layout": "candidate_artifact"},
         },
     ]

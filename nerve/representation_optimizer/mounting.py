@@ -23,7 +23,7 @@ VULKAN_COMPONENT_OVERLAY_SCHEMA = (
     "nerve.optimizer.vulkan_component_overlay.v2"
 )
 VULKAN_COMPONENT_REGION_OVERLAY_SCHEMA = (
-    "nerve.optimizer.vulkan_component_region_overlay.v1"
+    "nerve.optimizer.vulkan_component_region_overlay.v2"
 )
 VULKAN_OUTPUT_TRANSDUCER_OVERLAY_SCHEMA = (
     "nerve.optimizer.vulkan_output_transducer_overlay.v1"
@@ -354,10 +354,14 @@ def _validate_component_region_overlay(overlay: Json, label: str) -> None:
         overlay["replacement"],
         f"{label} replacement",
     )
-    _fields(source, {"nodes", "kernels"}, f"{label} source")
+    _fields(
+        source,
+        {"nodes", "kernels", "parameter_refs"},
+        f"{label} source",
+    )
     _fields(
         replacement,
-        {"nodes", "kernels"},
+        {"nodes", "kernels", "parameter_refs"},
         f"{label} replacement",
     )
     source_node_ids = _region_record_ids(
@@ -384,6 +388,27 @@ def _validate_component_region_overlay(overlay: Json, label: str) -> None:
         raise ContractValidationError(
             f"{label} replacement nodes and kernels must cover the same region"
         )
+    _validate_region_parameter_refs(source, f"{label} source")
+    _validate_region_parameter_refs(replacement, f"{label} replacement")
+
+
+def _validate_region_parameter_refs(region: Json, label: str) -> None:
+    refs = _object(region["parameter_refs"], f"{label} parameter_refs")
+    used = {
+        _text(parameter_id, f"{label} node parameter")
+        for index, raw_node in enumerate(_list(region["nodes"], f"{label} nodes"))
+        for parameter_id in _list(
+            _object(raw_node, f"{label} nodes[{index}]").get("params", []),
+            f"{label} nodes[{index}].params",
+        )
+    }
+    for parameter_id, raw_ref in refs.items():
+        parameter_id = _text(parameter_id, f"{label} parameter ref id")
+        _object(raw_ref, f"{label} parameter_refs[{parameter_id!r}]")
+        if parameter_id not in used:
+            raise ContractValidationError(
+                f"{label} parameter ref {parameter_id!r} is not used by its nodes"
+            )
 
 
 def _region_record_ids(value: object, label: str) -> list[str]:

@@ -308,7 +308,7 @@ class ExactAttentionHeadGroupingProvider:
                 "physical_optimization",
                 "json_contract",
                 {
-                    "schema": "nerve.optimizer.vulkan_component_region_overlay.v1",
+                    "schema": "nerve.optimizer.vulkan_component_region_overlay.v2",
                     "object_required": True,
                 },
             )
