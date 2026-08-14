@@ -22,6 +22,12 @@ from nerve.conversation_gate import (
     run_resident_conversation,
     validate_conversation_turns,
 )
+from nerve.device_reservation_gate import (
+    EXTERNAL_DEVICE_RESERVATION_SNAPSHOT_SCHEMA,
+    DrmDeviceReservation,
+    DrmProcessReservation,
+    ExternalDeviceReservationSnapshot,
+)
 from nerve.text_quality import repeated_segment
 
 
@@ -84,11 +90,16 @@ def _valid_shutdown_transcript() -> str:
     )
 
 
+def _test_pci_address(physical_device_id: str) -> str:
+    suffix = int(physical_device_id.removeprefix("gpu"))
+    return f"0000:{suffix + 1:02x}:00.0"
+
+
 def _device_restoration_snapshot(physical_device_id: str) -> dict[str, object]:
     return {
         "physical_device_id": physical_device_id,
         "device_name": "test device",
-        "pci_address": "0000:01:00.0",
+        "pci_address": _test_pci_address(physical_device_id),
         "api_version": 1,
         "driver_version": 2,
         "memory_budget": {
@@ -153,6 +164,50 @@ def _valid_device_restoration_transcript(
         )
         + "\n"
     )
+
+
+class _StaticDeviceReservationProbe:
+    def __init__(
+        self,
+        *snapshots: ExternalDeviceReservationSnapshot,
+    ) -> None:
+        assert snapshots
+        self.snapshots = snapshots
+        self.capture_count = 0
+
+    def capture(self) -> ExternalDeviceReservationSnapshot:
+        snapshot = self.snapshots[min(self.capture_count, len(self.snapshots) - 1)]
+        self.capture_count += 1
+        return snapshot
+
+
+def _external_reservation_snapshot(
+    physical_device_ids: tuple[str, ...] = ("gpu0",),
+    *,
+    used_delta: int = 0,
+    processes: tuple[DrmProcessReservation, ...] = (),
+) -> ExternalDeviceReservationSnapshot:
+    return ExternalDeviceReservationSnapshot(
+        schema=EXTERNAL_DEVICE_RESERVATION_SNAPSHOT_SCHEMA,
+        devices=tuple(
+            DrmDeviceReservation(
+                pci_address=_test_pci_address(physical_device_id),
+                drm_card=f"card{index}",
+                vram_total_bytes=32 * 1024**3,
+                vram_used_bytes=100 * 1024**2 + used_delta,
+                busy_percent=0,
+                resident_processes=processes,
+            )
+            for index, physical_device_id in enumerate(physical_device_ids)
+        ),
+    )
+
+
+def _reservation_probe(
+    physical_device_ids: tuple[str, ...] = ("gpu0",),
+) -> _StaticDeviceReservationProbe:
+    snapshot = _external_reservation_snapshot(physical_device_ids)
+    return _StaticDeviceReservationProbe(snapshot, snapshot)
 
 
 def _turn_with_execution(
@@ -564,6 +619,7 @@ def test_gate_rejects_mounted_but_unused_tensor_parallelism(
             minimum_decode_tokens_per_second=20.0,
             minimum_tensor_parallel_islands=1,
             require_thinking=True,
+            device_reservation_probe=_reservation_probe(),
         )
 
 
@@ -1051,6 +1107,7 @@ raise SystemExit(7)
 """.lstrip()
     )
     transcript_dir = tmp_path / "transcripts"
+    reservation_probe = _reservation_probe()
 
     with pytest.raises(ConversationGateError, match="runtime exited with status 7"):
         run_conversation_gate(
@@ -1066,12 +1123,14 @@ raise SystemExit(7)
             minimum_decode_tokens_per_second=0.0,
             require_thinking=True,
             transcript_dir=transcript_dir,
+            device_reservation_probe=reservation_probe,
         )
 
     transcript = (transcript_dir / "conversation-seed-19-failed.log").read_text()
     assert "failure-prefix" in transcript
     assert "precise terminal failure" in transcript
     assert "x" * 5000 in transcript
+    assert reservation_probe.capture_count == 2
 
 
 def test_gate_discards_one_complete_resident_conversation_and_measures_the_next(
@@ -1167,6 +1226,7 @@ print("  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 r
         minimum_tensor_parallel_islands=8,
         require_thinking=True,
         warmup_conversation_sets=1,
+        device_reservation_probe=_reservation_probe(),
     )
 
     run = report.runs[0]
@@ -1176,6 +1236,8 @@ print("  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 r
     assert run.device_restoration.complete
     assert run.device_restoration.physical_device_count == 1
     assert run.device_restoration.devices[0].physical_device_id == "gpu0"
+    assert run.external_device_reservation.complete
+    assert run.external_device_reservation.selected_device_count == 1
     assert report.warmup_conversation_sets == 2
     assert run.discarded_warmup_sets[0].mean_decode_tokens_per_second == 1.0
     assert run.measured_set.mean_decode_tokens_per_second == 30.0
@@ -1284,6 +1346,7 @@ print("  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 r
         minimum_decode_tokens_per_second=20.0,
         require_thinking=True,
         warmup_conversation_sets=1,
+        device_reservation_probe=_reservation_probe(),
     )
 
     run = report.runs[0]
@@ -1369,6 +1432,42 @@ def _fully_warm_mock_transcript(*, mutation: str | None = None) -> str:
     return "".join(sections)
 
 
+def test_gate_rejects_loss_of_preexisting_external_gpu_allocation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    package = tmp_path / "package.json"
+    package.write_text('{"package_id":"fixture"}')
+    process = DrmProcessReservation(
+        pid=42,
+        start_time_ticks=100,
+        command="existing-model",
+        vram_bytes=96 * 1024**2,
+        shared_bytes=4 * 1024**2,
+    )
+    probe = _StaticDeviceReservationProbe(
+        _external_reservation_snapshot(processes=(process,)),
+        _external_reservation_snapshot(processes=()),
+    )
+    monkeypatch.setattr(
+        "nerve.conversation_gate.run_resident_conversation",
+        lambda command, **_kwargs: (_fully_warm_mock_transcript(), 0),
+    )
+
+    with pytest.raises(
+        ConversationGateError,
+        match="lost pre-existing process",
+    ):
+        run_conversation_gate(
+            [sys.executable, "--package", str(package), "--chat"],
+            seeds=(0,),
+            minimum_decode_tokens_per_second=20.0,
+            require_thinking=True,
+            warmup_conversation_sets=1,
+            device_reservation_probe=probe,
+        )
+
+
 @pytest.mark.parametrize(
     ("replace", "message"),
     (
@@ -1443,6 +1542,7 @@ def test_gate_rejects_fully_warm_behavior_or_state_drift(
             minimum_decode_tokens_per_second=20.0,
             require_thinking=True,
             warmup_conversation_sets=1,
+            device_reservation_probe=_reservation_probe(),
         )
 
 
@@ -1488,6 +1588,7 @@ def test_gate_reconciles_shutdown_with_package_and_final_residency(
             minimum_decode_tokens_per_second=20.0,
             require_thinking=True,
             warmup_conversation_sets=1,
+            device_reservation_probe=_reservation_probe(),
         )
 
 
@@ -1514,6 +1615,7 @@ def test_gate_requires_residency_evidence_for_shutdown_reconciliation(
             minimum_decode_tokens_per_second=20.0,
             require_thinking=True,
             warmup_conversation_sets=1,
+            device_reservation_probe=_reservation_probe(),
         )
 
 

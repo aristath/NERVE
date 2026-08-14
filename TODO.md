@@ -1070,9 +1070,20 @@ For every numbered item below:
   second implementation. Hardware-neutral adversarial tests cover retained
   allocations, changed/missing/duplicate devices, budget drift, every
   accounting class, pressure changes, malformed evidence, and false completion.
-  The authorized live gate must additionally prove exact post-run restoration
-  of every selected target's externally sampled pre-workload process
-  reservation; aggregate in-process counters cannot establish process identity.
+  The normal conversation gate now also samples every Linux DRM card immediately
+  before process launch and after process exit, then restricts the proof to the
+  exact PCI devices in the runtime report. It records current activity and
+  requires stable card/VRAM identity, bounded unattributed aggregate usage, and
+  preservation of every pre-existing DRM client by PID, process start time, and
+  combined local/shared DRM allocation; new clients do not excuse a missing
+  client or PID reuse. The accepted external report is persisted with the seed
+  result, and runtime failures still verify the widest attributable pre-run
+  device set before propagating the original error.
+  Hardware-neutral tests cover fd deduplication, procfs exit races, missing and
+  reused processes, lost allocations, aggregate leaks, malformed telemetry,
+  target duplication, and successful-gate integration. The authorized live gate
+  must exercise this complete process-identity proof; its implementation is no
+  longer deferred, but no live result is claimed under the GPU quarantine.
 - Require coherent answers and package-owned thinking and sampling.
 - Require at least 17 useful decode tok/s, continue optimizing toward 20 tok/s,
   and investigate any regression before accepting a milestone.

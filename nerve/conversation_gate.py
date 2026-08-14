@@ -14,6 +14,14 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Sequence
 
+from nerve.device_reservation_gate import (
+    DeviceReservationGateError,
+    ExternalDeviceReservationProbe,
+    ExternalDeviceReservationReport,
+    ExternalDeviceReservationSnapshot,
+    LinuxDrmExternalDeviceReservationProbe,
+    verify_external_device_reservations_restored,
+)
 from nerve.text_quality import repeated_segment
 
 
@@ -259,6 +267,7 @@ class ConversationSeedReport:
     physical_execution: PhysicalExecutionSummary | None
     shutdown: ShutdownReport
     device_restoration: DeviceRestorationReport
+    external_device_reservation: ExternalDeviceReservationReport
     discarded_warmup_sets: list[ConversationSetReport]
     measured_set: ConversationSetReport
 
@@ -1518,6 +1527,50 @@ def _package_metadata(command: Sequence[str]) -> dict[str, Any]:
     }
 
 
+def _capture_external_device_reservations(
+    probe: ExternalDeviceReservationProbe,
+    stage: str,
+) -> ExternalDeviceReservationSnapshot:
+    try:
+        return probe.capture()
+    except DeviceReservationGateError as error:
+        raise ConversationGateError(
+            f"could not capture {stage} external device reservations: {error}"
+        ) from error
+
+
+def _selected_restoration_pci_addresses(
+    device_restoration: DeviceRestorationReport,
+) -> tuple[str, ...]:
+    selected = []
+    for device in device_restoration.devices:
+        pci_address = device.before["pci_address"]
+        if not isinstance(pci_address, str) or not pci_address:
+            raise ConversationGateError(
+                "runtime selected a device without externally attributable PCI identity"
+            )
+        selected.append(pci_address)
+    return tuple(selected)
+
+
+def _require_external_device_reservations_restored(
+    selected_pci_addresses: tuple[str, ...],
+    before: ExternalDeviceReservationSnapshot,
+    after: ExternalDeviceReservationSnapshot,
+) -> ExternalDeviceReservationReport:
+    report = verify_external_device_reservations_restored(
+        selected_pci_addresses,
+        before,
+        after,
+    )
+    if not report.complete:
+        raise ConversationGateError(
+            "runtime did not restore external device reservations: "
+            + "; ".join(report.errors)
+        )
+    return report
+
+
 def run_conversation_gate(
     command: Sequence[str],
     *,
@@ -1528,6 +1581,7 @@ def run_conversation_gate(
     warmup_conversation_sets: int = 0,
     maximum_conversation_sets: int = _MAXIMUM_RESIDENT_CONVERSATION_SETS,
     transcript_dir: Path | None = None,
+    device_reservation_probe: ExternalDeviceReservationProbe | None = None,
 ) -> ConversationGateReport:
     if not seeds:
         raise ConversationGateError("at least one fixed sampler seed is required")
@@ -1549,9 +1603,16 @@ def run_conversation_gate(
             "minimum tensor-parallel island count cannot be negative"
         )
     package = _package_metadata(command)
+    reservation_probe = (
+        device_reservation_probe or LinuxDrmExternalDeviceReservationProbe()
+    )
     runs = []
     for seed in seeds:
         seeded_command = canonical_runtime_command(command, seed)
+        external_reservation_before = _capture_external_device_reservations(
+            reservation_probe,
+            "pre-workload",
+        )
         try:
             transcript, _ = run_resident_conversation(
                 seeded_command,
@@ -1560,12 +1621,48 @@ def run_conversation_gate(
                 maximum_conversation_sets=maximum_conversation_sets,
             )
         except ResidentConversationError as error:
+            try:
+                external_reservation_after = _capture_external_device_reservations(
+                    reservation_probe,
+                    "post-failure",
+                )
+                try:
+                    failure_restoration = parse_device_restoration_report(
+                        error.transcript
+                    )
+                    selected_pci_addresses = _selected_restoration_pci_addresses(
+                        failure_restoration
+                    )
+                except ConversationGateError:
+                    selected_pci_addresses = tuple(
+                        device.pci_address
+                        for device in external_reservation_before.devices
+                    )
+                _require_external_device_reservations_restored(
+                    selected_pci_addresses,
+                    external_reservation_before,
+                    external_reservation_after,
+                )
+            except ConversationGateError as reservation_error:
+                if transcript_dir is not None:
+                    transcript_dir.mkdir(parents=True, exist_ok=True)
+                    (
+                        transcript_dir / f"conversation-seed-{seed}-failed.log"
+                    ).write_text(error.transcript)
+                raise ResidentConversationError(
+                    f"{error}; {reservation_error}",
+                    error.transcript,
+                ) from error
             if transcript_dir is not None:
                 transcript_dir.mkdir(parents=True, exist_ok=True)
                 (transcript_dir / f"conversation-seed-{seed}-failed.log").write_text(
                     error.transcript
                 )
             raise
+        external_reservation_after = _capture_external_device_reservations(
+            reservation_probe,
+            "post-workload",
+        )
         if transcript_dir is not None:
             transcript_dir.mkdir(parents=True, exist_ok=True)
             (transcript_dir / f"conversation-seed-{seed}.log").write_text(transcript)
@@ -1666,6 +1763,11 @@ def run_conversation_gate(
             )
         shutdown = parse_shutdown_report(transcript)
         device_restoration = parse_device_restoration_report(transcript)
+        external_device_reservation = _require_external_device_reservations_restored(
+            _selected_restoration_pci_addresses(device_restoration),
+            external_reservation_before,
+            external_reservation_after,
+        )
         if shutdown.packages[0].package_id != package["package_id"]:
             raise ConversationGateError(
                 "runtime shutdown package identity does not match the compiled package"
@@ -1700,6 +1802,7 @@ def run_conversation_gate(
                 physical_execution=physical_execution,
                 shutdown=shutdown,
                 device_restoration=device_restoration,
+                external_device_reservation=external_device_reservation,
                 discarded_warmup_sets=reports[:-1],
                 measured_set=reports[-1],
             )

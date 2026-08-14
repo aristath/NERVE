@@ -118,6 +118,7 @@ Python compiler and CLI package.
 | `nerve/model_package_shader_compiler.py` | SPIR-V artifact creation. |
 | `nerve/resource_residency.py` | Compiler-side addressable-resource discovery and compact residency contracts. |
 | `nerve/conversation_gate.py` | Canonical resident multi-turn correctness and performance gate. |
+| `nerve/device_reservation_gate.py` | Linux DRM pre/post process-reservation attribution and restoration proof used by normal conversation gates. |
 | `nerve/representation_optimizer/` | Semantic scope enumeration, structural analysis, hardware targets, providers, isolated construction, matched benchmarking, behavioral validation, promotion, evidence storage, and package publication. |
 | `nerve/representation_optimizer/ARCHITECTURE.md` | Complete schemas and invariants for the behavioral representation optimizer. |
 
@@ -420,9 +421,16 @@ revalidates physical and driver identity, the opening memory budget, exact
 tracked allocations and pending reservations, driver counters within their
 declared tolerance, unchanged pressure episodes, and inclusion of every
 lazy-resource device. The benchmark package consumes the same runtime verifier.
-An externally sampled pre/post process-reservation comparison is still required
-for a live GPU milestone so unrelated allocations are proven to remain owned by
-the same processes rather than merely producing equal aggregate counters.
+The gate also samples Linux DRM immediately before the runtime starts and after
+it exits. For every physical PCI device named by the runtime restoration report,
+it records current activity, requires stable DRM-card identity, no aggregate
+VRAM retained without an attributable DRM client beyond the driver tolerance,
+and preservation of every pre-existing client by PID plus process start time
+and combined local/shared DRM allocation. This prevents a recycled PID or equal
+aggregate counter from masquerading as preservation of an unrelated workload.
+The accepted external report is persisted beside the in-process shutdown and
+restoration evidence. A live GPU milestone must exercise this complete gate;
+hardware-neutral tests do not substitute for that observation.
 
 ```bash
 .venv/bin/python scripts/run_conversation_gate.py \
