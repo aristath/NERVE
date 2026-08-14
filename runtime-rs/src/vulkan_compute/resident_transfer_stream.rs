@@ -305,6 +305,46 @@ impl VulkanResidentTransferStream {
         })
     }
 
+    pub fn write_all_bounded(
+        &mut self,
+        writes: &[VulkanResidentBufferWriteRange<'_>],
+    ) -> Result<usize, VulkanError> {
+        if writes.is_empty() {
+            return Ok(0);
+        }
+        let mut uploaded = 0usize;
+        let mut batch_start = 0usize;
+        while batch_start < writes.len() {
+            let mut batch_end = batch_start;
+            let mut batch_bytes = 0usize;
+            while let Some(write) = writes.get(batch_end) {
+                let next_bytes = batch_bytes.checked_add(write.bytes.len()).ok_or_else(|| {
+                    VulkanError("bounded resident transfer byte count overflowed".to_string())
+                })?;
+                if next_bytes > self.staging_byte_capacity {
+                    break;
+                }
+                batch_bytes = next_bytes;
+                batch_end += 1;
+            }
+            if batch_end == batch_start {
+                return Err(VulkanError(format!(
+                    "resident transfer write {} needs {} bytes but the bounded staging capacity is {}",
+                    batch_start,
+                    writes[batch_start].bytes.len(),
+                    self.staging_byte_capacity
+                )));
+            }
+            self.submit_consumer_serialized(&writes[batch_start..batch_end])
+                .map_err(|failure| failure.error)?;
+            uploaded = uploaded.checked_add(batch_bytes).ok_or_else(|| {
+                VulkanError("bounded resident transfer uploaded byte count overflowed".to_string())
+            })?;
+            batch_start = batch_end;
+        }
+        Ok(uploaded)
+    }
+
     fn submit_consumer_serialized(
         &mut self,
         writes: &[VulkanResidentBufferWriteRange<'_>],

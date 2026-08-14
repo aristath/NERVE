@@ -1254,6 +1254,60 @@ impl VulkanComputeDevice {
         }
     }
 
+    fn maximum_admitted_host_visible_resident_buffer_capacity(
+        &self,
+        desired_byte_capacity: usize,
+    ) -> Result<usize, VulkanError> {
+        const TRANSFER_ALIGNMENT: usize = 4;
+        if desired_byte_capacity == 0
+            || !desired_byte_capacity.is_multiple_of(TRANSFER_ALIGNMENT)
+        {
+            return Err(VulkanError(format!(
+                "host-visible staging capacity must be a non-zero multiple of {TRANSFER_ALIGNMENT}, got {desired_byte_capacity}"
+            )));
+        }
+        let requirement_is_admitted = |byte_capacity| {
+            let requirement = self.host_visible_resident_buffer_memory_requirement(byte_capacity)?;
+            let remaining = match requirement.domain {
+                VulkanResidentBufferMemoryDomain::DeviceLocal => {
+                    scoped_device_local_memory_capacity_remaining(
+                        &self.device_local_memory_budget_tracker,
+                    )
+                }
+                VulkanResidentBufferMemoryDomain::HostVisible => {
+                    scoped_host_memory_capacity_remaining(&self.context.host_memory_budget_tracker)
+                }
+            };
+            remaining
+                .transpose()
+                .map(|remaining| remaining.is_none_or(|bytes| requirement.byte_count <= bytes))
+        };
+        if requirement_is_admitted(desired_byte_capacity)? {
+            return Ok(desired_byte_capacity);
+        }
+
+        let mut lower_units = 1usize;
+        let mut upper_units = desired_byte_capacity / TRANSFER_ALIGNMENT;
+        let mut admitted_units = 0usize;
+        while lower_units <= upper_units {
+            let middle_units = lower_units + (upper_units - lower_units) / 2;
+            let candidate = middle_units * TRANSFER_ALIGNMENT;
+            if requirement_is_admitted(candidate)? {
+                admitted_units = middle_units;
+                lower_units = middle_units + 1;
+            } else {
+                upper_units = middle_units - 1;
+            }
+        }
+        if admitted_units == 0 {
+            return Err(VulkanError(
+                "active memory admission cannot provide one aligned host-visible staging range"
+                    .to_string(),
+            ));
+        }
+        Ok(admitted_units * TRANSFER_ALIGNMENT)
+    }
+
     fn resident_buffer_memory_requirement_bytes_for_usage(
         &self,
         byte_capacity: usize,
@@ -2236,37 +2290,22 @@ impl VulkanComputeDevice {
         if ranges.is_empty() {
             return Ok(0);
         }
-        let mut packed_ranges = Vec::with_capacity(ranges.len());
-        let total_byte_count = ranges.iter().try_fold(0usize, |offset, range| {
-            let end = offset.checked_add(range.bytes.len()).ok_or_else(|| {
+        let total_byte_count = ranges.iter().try_fold(0usize, |total, range| {
+            total.checked_add(range.bytes.len()).ok_or_else(|| {
                 VulkanError("resident buffer upload capacity overflowed".to_string())
-            })?;
-            packed_ranges.push(offset..end);
-            Ok(end)
+            })
         })?;
         let _scratch_admission = enter_recyclable_vulkan_memory_admission_subscope();
-        let staging = self.create_host_visible_resident_buffer(total_byte_count)?;
-        let mut packed_bytes = Vec::with_capacity(total_byte_count);
-        for range in ranges {
-            packed_bytes.extend_from_slice(range.bytes);
+        let staging_byte_capacity =
+            self.maximum_admitted_host_visible_resident_buffer_capacity(total_byte_count)?;
+        let mut transfer = self.create_resident_transfer_stream(1, staging_byte_capacity)?;
+        let uploaded = transfer.write_all_bounded(ranges)?;
+        if uploaded != total_byte_count {
+            return Err(VulkanError(format!(
+                "resident transfer uploaded {uploaded} bytes but planned {total_byte_count}"
+            )));
         }
-        staging.write_bytes(&packed_bytes)?;
-        let copies = ranges
-            .iter()
-            .zip(&packed_ranges)
-            .map(|(range, source)| {
-                VulkanResidentBufferRangeCopy::new(
-                    &staging,
-                    range.destination,
-                    source.start,
-                    range.destination_offset,
-                    range.bytes.len(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.create_resident_buffer_copy_batch(&copies)?.run()?;
-        drop(staging);
-        Ok(total_byte_count)
+        Ok(uploaded)
     }
 
     pub fn run_resident_buffer_copy(

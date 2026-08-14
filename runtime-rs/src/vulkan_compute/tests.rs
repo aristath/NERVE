@@ -2384,6 +2384,38 @@ mod tests {
     }
 
     #[test]
+    fn resident_buffer_upload_streams_across_bounded_staging_windows() {
+        let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+        let first = device.create_resident_buffer(16).unwrap();
+        let second = device.create_resident_buffer(16).unwrap();
+        let third = device.create_resident_buffer(16).unwrap();
+        let payload = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let writes = [
+            VulkanResidentBufferWriteRange::new(&first, 0, &payload).unwrap(),
+            VulkanResidentBufferWriteRange::new(&second, 0, &payload).unwrap(),
+            VulkanResidentBufferWriteRange::new(&third, 0, &payload).unwrap(),
+        ];
+        let mut transfer = device.create_resident_transfer_stream(1, 16).unwrap();
+        reset_vulkan_resident_execution_counters();
+
+        assert_eq!(transfer.write_all_bounded(&writes).unwrap(), 24);
+        assert_eq!(first.read_bytes(8).unwrap(), payload);
+        assert_eq!(second.read_bytes(8).unwrap(), payload);
+        assert_eq!(third.read_bytes(8).unwrap(), payload);
+        let counters = vulkan_resident_execution_counters();
+        assert_eq!(counters.resident_copy_queue_submits, 2);
+        assert_eq!(counters.resident_copy_waits, 2);
+
+        let oversized = [VulkanResidentBufferWriteRange::new(&first, 0, &[0u8; 16]).unwrap()];
+        let mut undersized = device.create_resident_transfer_stream(1, 8).unwrap();
+        assert!(undersized
+            .write_all_bounded(&oversized)
+            .unwrap_err()
+            .0
+            .contains("bounded staging capacity"));
+    }
+
+    #[test]
     fn resident_buffer_fill_batch_executes_exact_validated_ranges() {
         let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
         let buffer = device.create_resident_buffer(32).unwrap();

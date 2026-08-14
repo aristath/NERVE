@@ -763,6 +763,65 @@ fn enter_recyclable_vulkan_memory_admission_subscope(
     })
 }
 
+fn scoped_device_local_memory_capacity_remaining(
+    tracker: &Arc<Mutex<VulkanDeviceLocalMemoryBudgetTracker>>,
+) -> Option<Result<usize, VulkanError>> {
+    let tracker_key = Arc::as_ptr(tracker) as usize;
+    VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
+        let scopes = scopes.borrow();
+        let scope = scopes.last()?;
+        Some(
+            scope
+                .device_pools
+                .get(&(tracker_key, scope.allocation_class))
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "active stream admission class {:?} has no capacity permit for this physical device",
+                        scope.allocation_class
+                    ))
+                })
+                .and_then(|pool| {
+                    pool.lock()
+                        .map_err(|_| {
+                            VulkanError(
+                                "stream device-local permit pool was poisoned".to_string(),
+                            )
+                        })
+                        .map(|pool| pool.remaining_byte_count())
+                }),
+        )
+    })
+}
+
+fn scoped_host_memory_capacity_remaining(
+    tracker: &Arc<Mutex<VulkanHostMemoryBudgetTracker>>,
+) -> Option<Result<usize, VulkanError>> {
+    let tracker_key = Arc::as_ptr(tracker) as usize;
+    VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
+        let scopes = scopes.borrow();
+        let scope = scopes.last()?;
+        Some(
+            scope
+                .host_pools
+                .get(&scope.allocation_class)
+                .filter(|(key, _)| *key == tracker_key)
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "active stream admission class {:?} has no shared-host capacity permit",
+                        scope.allocation_class
+                    ))
+                })
+                .and_then(|(_, pool)| {
+                    pool.lock()
+                        .map_err(|_| {
+                            VulkanError("stream host permit pool was poisoned".to_string())
+                        })
+                        .map(|pool| pool.remaining_byte_count())
+                }),
+        )
+    })
+}
+
 impl Drop for VulkanMemoryAdmissionScope {
     fn drop(&mut self) {
         VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
