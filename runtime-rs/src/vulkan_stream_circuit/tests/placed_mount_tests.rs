@@ -399,6 +399,57 @@ fn workload_free_graph_edge_routes_are_explicit_only_across_physical_devices() {
 }
 
 #[test]
+fn exact_boundary_routes_override_without_erasing_serialized_routes() {
+    let route = |edge_index, source: &str, destination: &str, route| {
+        VulkanRuntimeMountedBoundaryRoute {
+            edge_index,
+            source_device_id: source.to_string(),
+            destination_device_id: destination.to_string(),
+            frame_byte_count: 4096,
+            route,
+        }
+    };
+    let workload_free = BTreeMap::from([
+        (
+            4,
+            route(
+                4,
+                "gpu0",
+                "gpu1",
+                VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+            ),
+        ),
+        (
+            8,
+            route(
+                8,
+                "gpu1",
+                "gpu2",
+                VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+            ),
+        ),
+    ]);
+    let selected = route(
+        4,
+        "gpu0",
+        "gpu1",
+        VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
+    );
+
+    let composed = compose_vulkan_runtime_mounted_boundary_routes(
+        workload_free,
+        BTreeMap::from([(4, selected.clone())]),
+    );
+
+    assert_eq!(composed.len(), 2);
+    assert_eq!(composed[&4], selected);
+    assert_eq!(
+        composed[&8].route,
+        VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+    );
+}
+
+#[test]
 fn exact_shared_host_mount_rejects_missing_extra_and_aliased_participants() {
     let Some((owner, helper)) = selected_test_vulkan_device_pair() else {
         eprintln!("skipping exact shared-host participant test without two explicit Vulkan devices");

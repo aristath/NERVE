@@ -117,6 +117,19 @@ fn plan_vulkan_workload_free_graph_edge_routes(
     Ok(routes)
 }
 
+/// Composes ordinary serialized graph-edge transport with exact physical
+/// execution islands. Selecting TP for one component must not erase the
+/// staging routes required by unrelated layer-placement boundaries. An exact
+/// measured route owns its edge and therefore replaces the conservative
+/// workload-free route for that edge only.
+fn compose_vulkan_runtime_mounted_boundary_routes(
+    mut workload_free_routes: BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
+    exact_routes: BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
+) -> BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute> {
+    workload_free_routes.extend(exact_routes);
+    workload_free_routes
+}
+
 #[derive(Clone, Debug)]
 struct VulkanPlacedProducedPortEdgeGroup {
     source_device_id: String,

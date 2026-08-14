@@ -535,8 +535,6 @@ pub fn plan_vulkan_runtime_physical_mount(
             .map_err(|error| physical_mount_planning_error("graph-edge planning", error))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let workload_free_execution =
-        physical_execution_plan == &VulkanRuntimePhysicalExecutionPlan::uniform(runtime_model);
     let artifact_manifest = VulkanPhysicalKernelArtifactManifest::new(
         loaded_manifest
             .physical_artifacts
@@ -579,17 +577,18 @@ pub fn plan_vulkan_runtime_physical_mount(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mounted_boundary_routes = if workload_free_execution {
-        plan_vulkan_workload_free_graph_edge_routes(
-            &edge_plans,
-            &physical_device_by_logical_device,
-        )
-        .map_err(|error| physical_mount_planning_error("graph-edge route planning", error))?
-    } else {
-        physical_execution_plan
-            .mounted_boundary_routes()
-            .map_err(|error| physical_mount_planning_error("physical boundary routing", error))?
-    };
+    let workload_free_boundary_routes = plan_vulkan_workload_free_graph_edge_routes(
+        &edge_plans,
+        &physical_device_by_logical_device,
+    )
+    .map_err(|error| physical_mount_planning_error("graph-edge route planning", error))?;
+    let exact_boundary_routes = physical_execution_plan
+        .mounted_boundary_routes()
+        .map_err(|error| physical_mount_planning_error("physical boundary routing", error))?;
+    let mounted_boundary_routes = compose_vulkan_runtime_mounted_boundary_routes(
+        workload_free_boundary_routes,
+        exact_boundary_routes,
+    );
     physical_execution_plan
         .validate_bound_boundary_device_identities(&identity_by_logical_device)
         .map_err(|error| physical_mount_planning_error("physical boundary validation", error))?;

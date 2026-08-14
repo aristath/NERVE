@@ -109,8 +109,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
         }
         let physical_execution_plan = physical_execution_plan
             .unwrap_or_else(|| VulkanRuntimePhysicalExecutionPlan::uniform(&runtime_model));
-        let workload_free_execution =
-            physical_execution_plan == VulkanRuntimePhysicalExecutionPlan::uniform(&runtime_model);
         physical_execution_plan
             .validate(&runtime_model)
             .map_err(|error| {
@@ -403,27 +401,28 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mounted_boundary_routes = if workload_free_execution {
-            plan_vulkan_workload_free_graph_edge_routes(
-                &edge_plans,
-                &physical_device_by_logical_device,
+        let workload_free_boundary_routes = plan_vulkan_workload_free_graph_edge_routes(
+            &edge_plans,
+            &physical_device_by_logical_device,
+        )
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to plan workload-free graph-edge routes: {error}",
+                )),
             )
+        })?;
+        let exact_boundary_routes = physical_execution_plan
+            .mounted_boundary_routes()
             .map_err(|error| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "failed to plan workload-free graph-edge routes: {error}",
-                    )),
+                    VulkanResidentTokenModelPackageError::new(error.to_string()),
                 )
-            })?
-        } else {
-            physical_execution_plan
-                .mounted_boundary_routes()
-                .map_err(|error| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(error.to_string()),
-                    )
-                })?
-        };
+            })?;
+        let mounted_boundary_routes = compose_vulkan_runtime_mounted_boundary_routes(
+            workload_free_boundary_routes,
+            exact_boundary_routes,
+        );
         let Some(transient_resolution) =
             try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
             &runtime_model,
