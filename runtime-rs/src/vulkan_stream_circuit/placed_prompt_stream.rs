@@ -128,8 +128,9 @@ impl VulkanResidentInProcessPlacedPromptStream {
         sampler_config: VulkanResidentSamplerRuntimeConfig,
         resource_residency_policy: ResourceResidencyPolicy,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
-        runtime_model.package.sampler.spec = sampler_config
-            .apply_to(&runtime_model.package.sampler.spec)
+        let package = &mut runtime_model.package;
+        package.sampler.spec = sampler_config
+            .apply_to(&package.sampler.spec)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
         let package = Arc::new(
             VulkanResidentInProcessPlacedModelPackage::from_runtime_model_for_bound_devices_with_residency_policy(

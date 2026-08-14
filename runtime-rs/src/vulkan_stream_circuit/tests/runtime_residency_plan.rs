@@ -285,7 +285,7 @@ fn runtime_residency_preserves_speculative_decoder_scopes_and_two_pending_frames
 
 #[test]
 fn sampler_residency_tracks_random_scratch_and_seed_for_every_random_method() {
-    let mut spec = fixture_model_runtime_model().package.sampler.spec;
+    let mut spec = fixture_model_runtime_model().package.sampler.spec.clone();
     spec.method = "temperature_top_p".to_string();
     spec.scratch_byte_capacity = 4_096;
     let random = sampler_workspace_allocations(&spec, 16, false).unwrap();

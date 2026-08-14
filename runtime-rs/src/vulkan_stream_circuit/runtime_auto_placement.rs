@@ -694,6 +694,11 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
     }
     let maximum_device_count = candidates.len().min(components.len());
     let manifest_dir = manifest_dir.as_ref();
+    let residency_planning_basis = prepare_vulkan_runtime_residency_planning_basis(
+        manifest_dir,
+        runtime_model,
+        tensor_index,
+    )?;
     let paged_balance = (residency_policy == ResourceResidencyPolicy::DemandPaged)
         .then(|| {
             runtime_paged_placement_balance(
@@ -705,14 +710,19 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
         })
         .transpose()?;
     let mut failures = Vec::new();
-    let mut paged_shortfall_fallbacks = Vec::new();
+    // A placement owns the mounted runtime model. Retaining every admissible
+    // candidate used to retain one complete model clone per subset (127 for
+    // seven targets), which made planning memory proportional to the search
+    // space. Keep only the current winners; comparison is a streaming
+    // reduction and has constant model residency.
+    let mut best_paged_shortfall = None;
     for device_count in 1..=maximum_device_count {
         let selections = if placement_costs.is_some() {
             runtime_placement_candidate_subsets(candidates, device_count)?
         } else {
             vec![candidates[..device_count].to_vec()]
         };
-        let mut successful = Vec::new();
+        let mut best_successful = None;
         for selected in selections {
             let selected_ids = selected
                 .iter()
@@ -721,9 +731,9 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
                 .join(",");
             let attempt = if let Some(balance) = paged_balance.as_ref() {
                 capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
-                    manifest_dir,
                     runtime_model,
                     tensor_index,
+                    &residency_planning_basis,
                     &components,
                     &selected,
                     placement_costs,
@@ -733,9 +743,9 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
                 )
             } else {
                 capacity_pack_vulkan_runtime_model_on_devices(
-                    manifest_dir,
                     runtime_model,
                     tensor_index,
+                    &residency_planning_basis,
                     &components,
                     &selected,
                     placement_costs,
@@ -781,10 +791,26 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
                         selected_capacity,
                         placed,
                     );
-                    if shortfall {
-                        paged_shortfall_fallbacks.push(outcome);
+                    let best = if shortfall {
+                        &mut best_paged_shortfall
                     } else {
-                        successful.push(outcome);
+                        &mut best_successful
+                    };
+                    let replace = best.as_ref().is_none_or(|current: &(
+                        u128,
+                        Vec<String>,
+                        u128,
+                        VulkanRuntimeAutoPlacement,
+                    )| {
+                        if shortfall {
+                            (std::cmp::Reverse(outcome.2), outcome.0, &outcome.1)
+                                < (std::cmp::Reverse(current.2), current.0, &current.1)
+                        } else {
+                            (outcome.0, &outcome.1) < (current.0, &current.1)
+                        }
+                    });
+                    if replace {
+                        *best = Some(outcome);
                     }
                 }
                 Err(error) => failures.push(format!(
@@ -792,19 +818,11 @@ fn capacity_pack_vulkan_runtime_model_with_costs(
                 )),
             }
         }
-        if let Some((_, _, _, placed)) = successful
-            .into_iter()
-            .min_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)))
-        {
+        if let Some((_, _, _, placed)) = best_successful {
             return Ok(placed);
         }
     }
-    if let Some((_, _, _, placed)) = paged_shortfall_fallbacks.into_iter().min_by(
-        |left, right| {
-            (std::cmp::Reverse(left.2), left.0, &left.1)
-                .cmp(&(std::cmp::Reverse(right.2), right.0, &right.1))
-        },
-    ) {
+    if let Some((_, _, _, placed)) = best_paged_shortfall {
         return Ok(placed);
     }
     Err(VulkanRuntimeResidencyPlanError(format!(
@@ -913,9 +931,9 @@ fn demand_paged_placement_has_addressable_shortfall(
 
 #[allow(clippy::too_many_arguments)]
 fn capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
-    manifest_dir: &Path,
     runtime_model: &VulkanResidentRuntimeModel,
     tensor_index: &TensorIndex,
+    residency_planning_basis: &VulkanRuntimeResidencyPlanningBasis,
     components: &[CapacityPackedPlacementComponent],
     candidates: &[VulkanRuntimePlacementCandidate],
     placement_costs: Option<&VulkanRuntimePlacementCostModel>,
@@ -956,9 +974,9 @@ fn capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
         ),
     };
     admit_fixed_vulkan_runtime_placement(
-        manifest_dir,
         runtime_model,
         tensor_index,
+        residency_planning_basis,
         &placement,
         &ordered_candidates,
         context_capacity_activations,
@@ -1427,9 +1445,9 @@ fn proportional_paged_component_placement(
 
 #[allow(clippy::too_many_arguments)]
 fn admit_fixed_vulkan_runtime_placement(
-    manifest_dir: &Path,
     runtime_model: &VulkanResidentRuntimeModel,
     tensor_index: &TensorIndex,
+    residency_planning_basis: &VulkanRuntimeResidencyPlanningBasis,
     placement: &BTreeMap<String, String>,
     candidates: &[VulkanRuntimePlacementCandidate],
     context_capacity_activations: usize,
@@ -1441,13 +1459,13 @@ fn admit_fixed_vulkan_runtime_placement(
         &candidates[0].device_id,
         placement,
     )?;
-    let residency_plan = plan_vulkan_runtime_residency(
-        manifest_dir,
+    let residency_plan = plan_vulkan_runtime_residency_with_basis(
         &placed_model,
         tensor_index,
         context_capacity_activations,
         speculative_draft_tokens,
         residency_policy,
+        residency_planning_basis,
     )?;
     for candidate in candidates {
         let device_plan = residency_plan
@@ -1482,9 +1500,9 @@ fn admit_fixed_vulkan_runtime_placement(
 
 #[allow(clippy::too_many_arguments)]
 fn capacity_pack_vulkan_runtime_model_on_devices(
-    manifest_dir: &Path,
     runtime_model: &VulkanResidentRuntimeModel,
     tensor_index: &TensorIndex,
+    residency_planning_basis: &VulkanRuntimeResidencyPlanningBasis,
     components: &[CapacityPackedPlacementComponent],
     candidates: &[VulkanRuntimePlacementCandidate],
     placement_costs: Option<&VulkanRuntimePlacementCostModel>,
@@ -1558,13 +1576,13 @@ fn capacity_pack_vulkan_runtime_model_on_devices(
             &ordered_device_ids[0],
             &placement,
         )?;
-        let residency_plan = plan_vulkan_runtime_residency(
-            manifest_dir,
+        let residency_plan = plan_vulkan_runtime_residency_with_basis(
             &placed_model,
             tensor_index,
             context_capacity_activations,
             speculative_draft_tokens,
             residency_policy,
+            residency_planning_basis,
         )?;
         let mut fits = true;
         let component_weight_by_device = components.iter().try_fold(
@@ -1884,6 +1902,25 @@ pub fn vulkan_runtime_model_with_component_placement_owned(
     default_device_id: &str,
     placement: &BTreeMap<String, String>,
 ) -> Result<VulkanResidentRuntimeModel, VulkanRuntimeResidencyPlanError> {
+    if default_device_id.is_empty() || placement.values().any(String::is_empty) {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "runtime component placement requires nonempty device ids".to_string(),
+        ));
+    }
+    let instance_ids = placed_model
+        .runtime_graph
+        .instances
+        .iter()
+        .map(|instance| instance.instance_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(component_id) = placement
+        .keys()
+        .find(|component_id| !instance_ids.contains(component_id.as_str()))
+    {
+        return Err(VulkanRuntimeResidencyPlanError(format!(
+            "runtime component placement references unknown instance {component_id:?}",
+        )));
+    }
     let mut runtime_graph = placed_model.runtime_graph.clone();
     runtime_graph.default_device_id = default_device_id.to_string();
     for instance in &mut runtime_graph.instances {
@@ -1892,22 +1929,25 @@ pub fn vulkan_runtime_model_with_component_placement_owned(
             .cloned()
             .unwrap_or_else(|| default_device_id.to_string());
     }
-    let source_graph = placed_model
-        .package
-        .resolved_source_graph(PathBuf::from("."))
-        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
-    let runtime_graph = attach_generation_node_devices_for_vulkan(runtime_graph, &source_graph)
-        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+    let runtime_graph = attach_generation_node_devices_for_compiled_package(
+        runtime_graph,
+        &placed_model.package,
+    )
+    .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+    for instance in &runtime_graph.instances {
+        if instance.device_id.is_empty() {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "runtime component placement left instance {:?} without a device",
+                instance.instance_id,
+            )));
+        }
+    }
     let mut placed = StreamCircuitPlacementSpec::new(default_device_id.to_string());
     for instance in &runtime_graph.instances {
         if instance.device_id != default_device_id {
             placed = placed.with_component_device(&instance.instance_id, &instance.device_id);
         }
     }
-    source_graph
-        .instantiate_runtime_graph(&runtime_graph)
-        .and_then(|graph| graph.placement_plan(&placed).map(|_| ()))
-        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     placed_model.runtime_graph = runtime_graph;
     placed_model.placement = placed;
     Ok(placed_model)

@@ -243,11 +243,11 @@ impl VulkanResidentModelPackageManifest {
         validate_generation_execution_contract(&self, &circuit_graph)?;
         Ok(VulkanResidentRuntimeModel {
             execution_scope: "target".to_string(),
-            package: self,
+            package: SharedRuntimeArtifact::new(self),
             runtime_graph,
             placement,
-            circuit_graph,
-            component_executions,
+            circuit_graph: SharedRuntimeArtifact::new(circuit_graph),
+            component_executions: SharedRuntimeArtifact::new(component_executions),
             tensor_index_fragments: Vec::new(),
             implementation_selection: None,
         })
@@ -333,7 +333,7 @@ impl VulkanResidentRuntimeModel {
 }
 
 pub(crate) fn attach_generation_node_devices_for_vulkan(
-    mut runtime_graph: StreamCircuitRuntimeGraph,
+    runtime_graph: StreamCircuitRuntimeGraph,
     graph: &ResolvedLoweredExecutionGraph,
 ) -> Result<StreamCircuitRuntimeGraph, crate::stream_circuit::CircuitPlacementError> {
     runtime_graph.validate_against_graph(graph)?;
@@ -342,16 +342,60 @@ pub(crate) fn attach_generation_node_devices_for_vulkan(
         .iter()
         .map(|artifact| (artifact.component.id.as_str(), artifact))
         .collect::<BTreeMap<_, _>>();
-    let role_for = |instance: &crate::stream_circuit::StreamCircuitNodeInstance| {
-        source_by_id[instance.source_component_id.as_str()]
-            .component
-            .runtime_role
-    };
+    let runtime_graph = attach_generation_node_devices_for_vulkan_roles(
+        runtime_graph,
+        |instance| {
+            source_by_id
+                .get(instance.source_component_id.as_str())
+                .map(|artifact| artifact.component.runtime_role)
+        },
+    )?;
+    runtime_graph.validate_against_graph(graph)?;
+    Ok(runtime_graph)
+}
+
+/// Rebinds only generation endpoint ownership against an already verified
+/// compiled package. Placement search changes device ids but not graph
+/// structure, so it must not reconstruct the package's potentially enormous
+/// resolved execution graph for every candidate.
+pub(crate) fn attach_generation_node_devices_for_compiled_package(
+    runtime_graph: StreamCircuitRuntimeGraph,
+    package: &VulkanResidentModelPackageManifest,
+) -> Result<StreamCircuitRuntimeGraph, crate::stream_circuit::CircuitPlacementError> {
+    let role_by_source = package
+        .circuit_graph
+        .components
+        .iter()
+        .map(|component| (component.component_id.as_str(), component.runtime_role))
+        .collect::<BTreeMap<_, _>>();
+    attach_generation_node_devices_for_vulkan_roles(runtime_graph, |instance| {
+        role_by_source
+            .get(instance.source_component_id.as_str())
+            .copied()
+    })
+}
+
+fn attach_generation_node_devices_for_vulkan_roles(
+    mut runtime_graph: StreamCircuitRuntimeGraph,
+    role_for: impl Fn(
+        &crate::stream_circuit::StreamCircuitNodeInstance,
+    ) -> Option<CircuitRuntimeRole>,
+) -> Result<StreamCircuitRuntimeGraph, crate::stream_circuit::CircuitPlacementError> {
+    for instance in &runtime_graph.instances {
+        if role_for(instance).is_none() {
+            return Err(crate::stream_circuit::CircuitPlacementError(format!(
+                "runtime graph instance {:?} references unknown source component {:?}",
+                instance.instance_id, instance.source_component_id,
+            )));
+        }
+    }
     let instances_with_role = |role: CircuitRuntimeRole| {
         runtime_graph
             .instances
             .iter()
-            .filter(|instance| role_for(instance) == role)
+            .filter(|instance| {
+                role_for(instance).expect("runtime instance roles were validated") == role
+            })
             .map(|instance| instance.instance_id.clone())
             .collect::<Vec<_>>()
     };
@@ -379,7 +423,11 @@ pub(crate) fn attach_generation_node_devices_for_vulkan(
     let processor_ids = runtime_graph
         .instances
         .iter()
-        .filter(|instance| role_for(instance).is_signal_processor())
+        .filter(|instance| {
+            role_for(instance)
+                .expect("runtime instance roles were validated")
+                .is_signal_processor()
+        })
         .map(|instance| instance.instance_id.as_str())
         .collect::<BTreeSet<_>>();
     let input_edges = runtime_graph
@@ -438,7 +486,6 @@ pub(crate) fn attach_generation_node_devices_for_vulkan(
             instance.device_id = output_device.clone();
         }
     }
-    runtime_graph.validate_against_graph(graph)?;
     Ok(runtime_graph)
 }
 

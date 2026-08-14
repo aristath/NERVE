@@ -28,7 +28,7 @@ fn canonical_runtime_execution_identity(
     external_inputs.sort_by(|left, right| left.id.cmp(&right.id));
     let mut public_outputs = runtime_model.runtime_graph.boundary.public_outputs.clone();
     public_outputs.sort_by(|left, right| left.id.cmp(&right.id));
-    let mut component_executions = runtime_model.component_executions.clone();
+    let mut component_executions = runtime_model.component_executions.as_ref().clone();
     component_executions.sort_by(|left, right| left.component_id.cmp(&right.component_id));
 
     let identity = serde_json::json!({

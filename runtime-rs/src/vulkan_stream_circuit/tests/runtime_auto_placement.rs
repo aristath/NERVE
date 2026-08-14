@@ -129,7 +129,7 @@ fn runtime_component_weights_charge_mounted_draft_parameters_to_the_output_tail(
         .unwrap();
     let without_draft =
         capacity_packed_runtime_components(&runtime_model, &tensor_index, false).unwrap();
-    let mut draft_graph = runtime_model.circuit_graph.clone();
+    let mut draft_graph = runtime_model.circuit_graph.as_ref().clone();
     let draft_component = draft_graph
         .components
         .iter_mut()
@@ -1541,6 +1541,34 @@ fn explicit_component_placement_is_the_shared_calibration_and_runtime_transform(
             .all(|instance| instance.device_id == "physical-owner")
     );
     assert_eq!(placed.placement_device_ids(), ["physical-owner"]);
+    assert!(placed.package.ptr_eq(&runtime_model.package));
+    assert!(placed.circuit_graph.ptr_eq(&runtime_model.circuit_graph));
+    assert!(
+        placed
+            .component_executions
+            .ptr_eq(&runtime_model.component_executions)
+    );
+}
+
+#[test]
+fn shared_runtime_artifacts_detach_only_when_a_variant_changes() {
+    let runtime_model = fixture_model_runtime_model();
+    let mut variant = runtime_model.clone();
+    let original_workgroup_count = runtime_model.component_executions[0].kernels[0].workgroup_count_x;
+
+    variant.component_executions[0].kernels[0].workgroup_count_x += 1;
+
+    assert!(!variant.component_executions.ptr_eq(&runtime_model.component_executions));
+    assert_eq!(
+        runtime_model.component_executions[0].kernels[0].workgroup_count_x,
+        original_workgroup_count,
+    );
+    assert_eq!(
+        variant.component_executions[0].kernels[0].workgroup_count_x,
+        original_workgroup_count + 1,
+    );
+    assert!(variant.package.ptr_eq(&runtime_model.package));
+    assert!(variant.circuit_graph.ptr_eq(&runtime_model.circuit_graph));
 }
 
 #[test]
@@ -1682,6 +1710,7 @@ fn measured_auto_placement_can_select_a_nonprefix_single_device() {
         }
     }
 
+    reset_resident_package_planning_basis_preparation_count();
     let placed = capacity_pack_vulkan_runtime_model_with_costs(
         tiny_model_dir(),
         &runtime_model,
@@ -1694,6 +1723,7 @@ fn measured_auto_placement_can_select_a_nonprefix_single_device() {
     )
     .unwrap();
 
+    assert_eq!(resident_package_planning_basis_preparation_count(), 1);
     assert_eq!(placed.selected_device_ids, ["complete"]);
     assert!(
         placed

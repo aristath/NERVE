@@ -601,8 +601,8 @@ fn mount(
     } else if candidate_id.is_some() {
         return Err(invalid_input("candidate_id requires a sealed candidate_root").into());
     }
-    runtime_model.package.sampler.spec =
-        sampler_config.apply_to(&runtime_model.package.sampler.spec)?;
+    let package = &mut runtime_model.package;
+    package.sampler.spec = sampler_config.apply_to(&package.sampler.spec)?;
     validate_runtime_placement(&runtime_model, &physical_to_logical)?;
     let signal_processor_component_count = signal_processor_component_count(&runtime_model)?;
     let stop_token_ids = chat_stop_token_ids_from_manifest(

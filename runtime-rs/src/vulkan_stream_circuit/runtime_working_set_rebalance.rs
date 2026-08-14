@@ -77,10 +77,15 @@ pub fn rebalance_demand_paged_vulkan_runtime_model_from_working_set(
         &boundaries,
         placement_costs,
     )?;
-    let proposed = capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
+    let residency_planning_basis = prepare_vulkan_runtime_residency_planning_basis(
         manifest_dir,
         runtime_model,
         &tensor_index,
+    )?;
+    let proposed = capacity_pack_demand_paged_vulkan_runtime_model_on_devices(
+        runtime_model,
+        &tensor_index,
+        &residency_planning_basis,
         &components,
         candidates,
         Some(placement_costs),

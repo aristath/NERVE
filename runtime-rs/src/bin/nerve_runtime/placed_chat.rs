@@ -11,8 +11,8 @@ fn mount_placed_chat_stream(
     placement_calibration_catalog: Option<&VulkanPlacementCalibrationCatalog>,
     retained_stores: Option<&VulkanRetainedCompiledResourceStores>,
 ) -> Result<VulkanResidentInProcessPlacedPromptStream, Box<dyn Error>> {
-    runtime_model.package.sampler.spec =
-        sampler_runtime_config(args).apply_to(&runtime_model.package.sampler.spec)?;
+    let package = &mut runtime_model.package;
+    package.sampler.spec = sampler_runtime_config(args).apply_to(&package.sampler.spec)?;
     let physical_execution_plan = match physical_execution_plan {
         Some(plan) => plan,
         None => explicit_runtime_physical_execution_plan(args, &runtime_model)?,

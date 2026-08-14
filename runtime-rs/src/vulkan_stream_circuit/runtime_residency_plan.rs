@@ -148,18 +148,46 @@ pub fn plan_vulkan_runtime_residency(
     speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
 ) -> Result<VulkanRuntimeResidencyPlan, VulkanRuntimeResidencyPlanError> {
-    let resource_contract =
-        instantiate_runtime_resource_contract(runtime_model)
-            .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
-    plan_vulkan_runtime_residency_with_contract(
+    let basis = prepare_vulkan_runtime_residency_planning_basis(
         manifest_dir,
+        runtime_model,
+        tensor_index,
+    )?;
+    plan_vulkan_runtime_residency_with_basis(
         runtime_model,
         tensor_index,
         context_capacity_activations,
         speculative_draft_tokens,
         residency_policy,
-        &resource_contract,
+        &basis,
     )
+}
+
+struct VulkanRuntimeResidencyPlanningBasis {
+    manifest_dir: PathBuf,
+    package: VulkanResidentPackagePlanningBasis,
+    resource_contract: CompiledResourceResidencyContract,
+}
+
+fn prepare_vulkan_runtime_residency_planning_basis(
+    manifest_dir: impl AsRef<Path>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    tensor_index: &TensorIndex,
+) -> Result<VulkanRuntimeResidencyPlanningBasis, VulkanRuntimeResidencyPlanError> {
+    let manifest_dir = manifest_dir.as_ref();
+    let resource_contract = instantiate_runtime_resource_contract(runtime_model)
+        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
+    let package = prepare_resident_package_planning_basis(
+        &runtime_model.circuit_graph,
+        manifest_dir,
+        tensor_index,
+    )
+    .map_err(residency_package_error)?;
+    Ok(VulkanRuntimeResidencyPlanningBasis {
+        manifest_dir: manifest_dir.to_path_buf(),
+        package,
+        resource_contract,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -171,6 +199,57 @@ fn plan_vulkan_runtime_residency_with_contract(
     speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
     resource_contract: &CompiledResourceResidencyContract,
+) -> Result<VulkanRuntimeResidencyPlan, VulkanRuntimeResidencyPlanError> {
+    let manifest_dir = manifest_dir.as_ref();
+    let package = prepare_resident_package_planning_basis(
+        &runtime_model.circuit_graph,
+        manifest_dir,
+        tensor_index,
+    )
+    .map_err(residency_package_error)?;
+    plan_vulkan_runtime_residency_from_planning_basis(
+        manifest_dir,
+        runtime_model,
+        tensor_index,
+        context_capacity_activations,
+        speculative_draft_tokens,
+        residency_policy,
+        resource_contract,
+        &package,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_vulkan_runtime_residency_with_basis(
+    runtime_model: &VulkanResidentRuntimeModel,
+    tensor_index: &TensorIndex,
+    context_capacity_activations: usize,
+    speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
+    basis: &VulkanRuntimeResidencyPlanningBasis,
+) -> Result<VulkanRuntimeResidencyPlan, VulkanRuntimeResidencyPlanError> {
+    plan_vulkan_runtime_residency_from_planning_basis(
+        &basis.manifest_dir,
+        runtime_model,
+        tensor_index,
+        context_capacity_activations,
+        speculative_draft_tokens,
+        residency_policy,
+        &basis.resource_contract,
+        &basis.package,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_vulkan_runtime_residency_from_planning_basis(
+    manifest_dir: &Path,
+    runtime_model: &VulkanResidentRuntimeModel,
+    tensor_index: &TensorIndex,
+    context_capacity_activations: usize,
+    speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
+    resource_contract: &CompiledResourceResidencyContract,
+    package_basis: &VulkanResidentPackagePlanningBasis,
 ) -> Result<VulkanRuntimeResidencyPlan, VulkanRuntimeResidencyPlanError> {
     let mount_speculative_decoders = speculative_draft_tokens > 0;
     if context_capacity_activations == 0 {
@@ -184,7 +263,6 @@ fn plan_vulkan_runtime_residency_with_contract(
             runtime_model.package.max_context_activations
         )));
     }
-    let manifest_dir = manifest_dir.as_ref();
     let (input_component_id, output_component_id) = runtime_model
         .circuit_graph
         .signal_processor_endpoint_component_ids()
@@ -205,17 +283,6 @@ fn plan_vulkan_runtime_residency_with_contract(
             "runtime residency plan has no owner devices".to_string(),
         ));
     }
-
-    let (_resource_plan, _placement_plan, _first_placed_plan) =
-        plan_resident_package_placed_stream_circuit_with_tensor_index(
-            &device_ids[0],
-            &runtime_model.placement,
-            &runtime_model.circuit_graph,
-            manifest_dir,
-            tensor_index,
-            runtime_model.package.activation_element_bytes,
-        )
-        .map_err(residency_package_error)?;
 
     let mut by_device = device_ids
         .iter()
@@ -245,14 +312,13 @@ fn plan_vulkan_runtime_residency_with_contract(
     let mut resident_stream_device_allocations_by_device = BTreeMap::new();
 
     for device_id in &device_ids {
-        let (_resources, _placement, placed_plan) =
-            plan_resident_package_placed_stream_circuit_with_tensor_index(
+        let (_placement, placed_plan) = plan_resident_package_from_planning_basis(
                 device_id,
                 &runtime_model.placement,
                 &runtime_model.circuit_graph,
-                manifest_dir,
                 tensor_index,
                 runtime_model.package.activation_element_bytes,
+                package_basis,
             )
             .map_err(residency_package_error)?;
         let breakdown = by_device
@@ -1047,18 +1113,18 @@ fn speculative_decoder_runtime_model(
             has_compiled_execution,
         );
     }
-    let mut package = target.package.clone();
+    let mut package = (*target.package).clone();
     package.package_id = format!("{}::{}", package.package_id, decoder.id);
     package.circuit_graph = circuit_graph.clone();
     package.component_executions = decoder.component_executions.clone();
     package.speculative_decoders.clear();
     VulkanResidentRuntimeModel {
         execution_scope: format!("draft:{}", decoder.id),
-        package,
+        package: SharedRuntimeArtifact::new(package),
         runtime_graph: target.runtime_graph.clone(),
         placement: StreamCircuitPlacementSpec::new(device_id),
-        circuit_graph,
-        component_executions: decoder.component_executions.clone(),
+        circuit_graph: SharedRuntimeArtifact::new(circuit_graph),
+        component_executions: SharedRuntimeArtifact::new(decoder.component_executions.clone()),
         tensor_index_fragments: Vec::new(),
         implementation_selection: None,
     }

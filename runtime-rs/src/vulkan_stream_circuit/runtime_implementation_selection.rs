@@ -1820,14 +1820,15 @@ fn mount_runtime_output_transducer_overlay(
             ))
         })?;
     *component = overlay.component;
-    runtime_model.package.output_transducer = overlay.output_transducer;
+    let package = &mut runtime_model.package;
+    package.output_transducer = overlay.output_transducer;
 
     let speculative_outputs = overlay
         .speculative_output_transducers
         .into_iter()
         .map(|draft| (draft.decoder_id, draft.output_transducer))
         .collect::<BTreeMap<_, _>>();
-    for decoder in &mut runtime_model.package.speculative_decoders {
+    for decoder in &mut package.speculative_decoders {
         if decoder.output_transducer.is_some() {
             decoder.output_transducer = Some(
                 speculative_outputs

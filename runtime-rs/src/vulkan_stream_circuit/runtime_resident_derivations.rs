@@ -176,15 +176,10 @@ fn apply_runtime_component_resident_derivations(
         checkpoints: rewritten_checkpoints,
     };
 
-    let original = std::mem::replace(
-        &mut runtime_model.package.resource_residency,
-        candidate,
-    );
-    if let Err(error) = package::validate_compiled_resource_residency(
-        package_root,
-        &runtime_model.package,
-    ) {
-        runtime_model.package.resource_residency = original;
+    let package = &mut runtime_model.package;
+    let original = std::mem::replace(&mut package.resource_residency, candidate);
+    if let Err(error) = package::validate_compiled_resource_residency(package_root, package) {
+        package.resource_residency = original;
         return runtime_resident_derivation_error(format!(
             "runtime resident derivation produced an invalid resource graph: {error}",
         ));

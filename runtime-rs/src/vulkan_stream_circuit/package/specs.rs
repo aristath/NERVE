@@ -1,3 +1,61 @@
+pub struct SharedRuntimeArtifact<T>(Arc<T>);
+
+impl<T> SharedRuntimeArtifact<T> {
+    pub fn new(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<T> Clone for SharedRuntimeArtifact<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for SharedRuntimeArtifact<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl<T: PartialEq> PartialEq for SharedRuntimeArtifact<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl<T: PartialEq> PartialEq<T> for SharedRuntimeArtifact<T> {
+    fn eq(&self, other: &T) -> bool {
+        self.0.as_ref().eq(other)
+    }
+}
+
+impl<T: Eq> Eq for SharedRuntimeArtifact<T> {}
+
+impl<T> std::ops::Deref for SharedRuntimeArtifact<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl<T: Clone> std::ops::DerefMut for SharedRuntimeArtifact<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<T> AsRef<T> for SharedRuntimeArtifact<T> {
+    fn as_ref(&self) -> &T {
+        self.0.as_ref()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VulkanResidentModelPackageManifest {
     pub schema: String,
@@ -48,11 +106,18 @@ impl VulkanResidentModelPackageManifest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct VulkanResidentRuntimeModel {
     pub execution_scope: String,
-    pub package: VulkanResidentModelPackageManifest,
+    /// The compiled package is immutable after verification and can be
+    /// hundreds of megabytes for large sparse models. Runtime placement and
+    /// representation planning therefore share it instead of deep-cloning it
+    /// for every candidate.
+    pub package: SharedRuntimeArtifact<VulkanResidentModelPackageManifest>,
     pub runtime_graph: StreamCircuitRuntimeGraph,
     pub placement: StreamCircuitPlacementSpec,
-    pub circuit_graph: VulkanResidentPackageCircuitGraph,
-    pub component_executions: Vec<VulkanResidentComponentExecutionSpec>,
+    /// Runtime implementations modify these records. Arc gives untouched
+    /// placement candidates constant-size clones while Arc::make_mut provides
+    /// copy-on-write ownership to the variants that actually replace code.
+    pub circuit_graph: SharedRuntimeArtifact<VulkanResidentPackageCircuitGraph>,
+    pub component_executions: SharedRuntimeArtifact<Vec<VulkanResidentComponentExecutionSpec>>,
     pub tensor_index_fragments: Vec<VulkanRuntimeTensorIndexFragment>,
     pub implementation_selection:
         Option<crate::RuntimeImplementationSelectionReport>,
