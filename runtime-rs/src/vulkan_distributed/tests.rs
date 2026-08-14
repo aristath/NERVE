@@ -2258,21 +2258,21 @@ mod tests {
         let dynamic_address = VulkanResolvedDescriptorBinding {
             binding: 3,
             usage: VulkanKernelDescriptorUsage::DynamicResourceAddressTable,
-            name: "routes.resource_addresses".to_string(),
+            name: "preselected_routes.resource_addresses".to_string(),
             resource: VulkanDescriptorResourceAddress::DynamicResourceAddressTable {
                 component_id: "moe".to_string(),
                 node_id: "independent-down".to_string(),
-                selection_signal: "routes".to_string(),
+                selection_signal: "preselected_routes".to_string(),
             },
         };
         let dynamic_slots = VulkanResolvedDescriptorBinding {
             binding: 4,
             usage: VulkanKernelDescriptorUsage::DynamicResourceParameterSlots,
-            name: "routes.parameter_slots".to_string(),
+            name: "preselected_routes.parameter_slots".to_string(),
             resource: VulkanDescriptorResourceAddress::DynamicResourceParameterSlots {
                 component_id: "moe".to_string(),
                 node_id: "independent-down".to_string(),
-                selection_signal: "routes".to_string(),
+                selection_signal: "preselected_routes".to_string(),
                 parameter_ids: (0..8)
                     .flat_map(|expert| {
                         [
@@ -2304,7 +2304,7 @@ mod tests {
             test_output(2, OutputCollection::Routed, Some(1)),
         );
         contract.selected_resource_partitions = vec![SelectedResourcePartition {
-            selection_signal: "routes".to_string(),
+            selection_signal: "preselected_routes".to_string(),
             address_table_binding: 3,
             parameter_slots_binding: 4,
             kind: ParameterPartitionKind::ExpertRange,
@@ -2323,10 +2323,34 @@ mod tests {
         }];
         contract.phases = vec![ExecutionPhase::Decode, ExecutionPhase::Prefill];
         contract.execution_shape = ExecutionShape::SingleAndMultiLane;
+        let mut preselection_output = activation(1, "preselected_routes", 7, 32);
+        preselection_output.usage = VulkanKernelDescriptorUsage::OutputSignal;
         let prepared = VulkanPreparedDispatchPlan {
             backend_id: "vulkan_stream_circuit".to_string(),
-            reusable_family_count: 1,
-            dispatches: vec![VulkanPreparedDispatch {
+            reusable_family_count: 2,
+            dispatches: vec![
+                VulkanPreparedDispatch {
+                    dispatch_index: 8,
+                    kernel_id: "moe.preselection".to_string(),
+                    component_id: "moe".to_string(),
+                    circuit_id: "moe-circuit".to_string(),
+                    node_index: 3,
+                    node_id: "preselection".to_string(),
+                    op: "parameter_table_resource_preselection".to_string(),
+                    reusable_family_id: "preselection-family".to_string(),
+                    artifact_path: "preselection.spv".to_string(),
+                    entry_point: "main".to_string(),
+                    local_size_x: 64,
+                    descriptors: vec![
+                        activation(0, "token_id", 6, 4),
+                        preselection_output,
+                    ],
+                    push_constants: Vec::new(),
+                    stream_control_binding: None,
+                    physical_execution_contracts: Vec::new(),
+                    resource_representation_dispatch: None,
+                },
+                VulkanPreparedDispatch {
                 dispatch_index: 9,
                 kernel_id: "moe.independent-down".to_string(),
                 component_id: "moe".to_string(),
@@ -2370,8 +2394,9 @@ mod tests {
                             VulkanResidentKernelResourceRepresentationSelection::FixedSource,
                     },
                 ),
-            }],
-            total_descriptor_count: 5,
+                },
+            ],
+            total_descriptor_count: 7,
         };
         let artifacts = test_artifact_manifest_with_physical(VulkanReusableKernelArtifact {
             family_id: "independent-family".to_string(),
@@ -2381,7 +2406,7 @@ mod tests {
             local_size_x: 64,
             workgroup_count_x: 4,
             descriptor_signature: Vec::new(),
-            push_constants: prepared.dispatches[0].push_constants.clone(),
+            push_constants: prepared.dispatches[1].push_constants.clone(),
             stream_control_binding: None,
         });
         let tensor_index = TensorIndex {
@@ -2429,7 +2454,7 @@ mod tests {
                     mapping: CompiledResourceBindingMapping::SelectedAtomicGroup {
                         atomic_group_id: group_id.clone(),
                         resource_id: resource_id.clone(),
-                        selection_signal: "routes".to_string(),
+                        selection_signal: "preselected_routes".to_string(),
                         selector_index: expert,
                         parameter_slot: slot,
                     },
@@ -2458,7 +2483,7 @@ mod tests {
                 node_id: "router".to_string(),
                 domain_id: "experts".to_string(),
                 resource_count: 8,
-                selection_signal: "routes".to_string(),
+                selection_signal: "preselected_routes".to_string(),
                 execution_signal: "routes".to_string(),
                 execution_calibration_word_base: 0,
                 encoding: CompiledResourceSelectionEncoding {
@@ -2492,8 +2517,11 @@ mod tests {
         assert!(dispatch.has_lazy_resource_requirements);
         assert_eq!(dispatch.distributed_parameter_byte_count, 0);
         assert_eq!(dispatch.selected_resource_partitions.len(), 1);
-        let routes = selected_resource_activation(dispatch, "routes").unwrap();
-        assert_eq!(routes.signal_id, "routes");
+        assert_eq!(dispatch.auxiliary_input_activations.len(), 1);
+        assert_eq!(dispatch.auxiliary_input_activations[0].signal_id, "routes");
+        assert_eq!(dispatch.selected_resource_activations.len(), 1);
+        let routes = selected_resource_activation(dispatch, "preselected_routes").unwrap();
+        assert_eq!(routes.signal_id, "preselected_routes");
         assert_eq!(routes.binding, 1);
         assert!(
             selected_resource_activation(dispatch, "missing-routes")
@@ -2502,9 +2530,11 @@ mod tests {
                 .contains("resolves 0 activation signals")
         );
         let mut ambiguous_routes = dispatch.clone();
-        ambiguous_routes.input_activation = routes.clone();
+        ambiguous_routes
+            .selected_resource_activations
+            .push(routes.clone());
         assert!(
-            selected_resource_activation(&ambiguous_routes, "routes")
+            selected_resource_activation(&ambiguous_routes, "preselected_routes")
                 .unwrap_err()
                 .to_string()
                 .contains("resolves 2 activation signals")
@@ -2605,6 +2635,15 @@ mod tests {
         assert_eq!(dispatch.shards[0].row_count, 4);
         assert_eq!(dispatch.shards[1].row_start, 4);
         assert_eq!(dispatch.shards[1].row_count, 4);
+        let activation_plan =
+            VulkanDistributedActivationBufferPlan::from_execution_plan(plan).unwrap();
+        let preselected = activation_plan
+            .allocations
+            .iter()
+            .find(|allocation| allocation.signal_ids == ["preselected_routes"])
+            .expect("the runtime-only selection signal must be replicated to every shard");
+        assert_eq!(preselected.device_ids, vec!["helper", "owner"]);
+        assert_eq!(preselected.input_use_count, 1);
 
         let ownership =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&plans).unwrap();
@@ -2793,10 +2832,50 @@ mod tests {
                 .contains("not partitioned exactly once")
         );
 
+        let mut missing_selection = prepared.clone();
+        missing_selection.dispatches[0].descriptors.clear();
+        let missing_error =
+            VulkanDistributedExecutionPlanSet::from_prepared_plans_with_resource_contract(
+                &[("owner", &missing_selection)],
+                &tensor_index,
+                &artifacts,
+                &VulkanDistributedPhaseComponentDevicePools::uniform(&component_device_pools(
+                    "moe",
+                    &["owner", "helper"],
+                )),
+                &[],
+                256,
+                "target",
+                &residency,
+            )
+            .unwrap_err();
+        assert!(missing_error
+            .to_string()
+            .contains("has no prepared component activation"));
+
+        let mut conflicting_selection = prepared.clone();
+        let mut conflict = conflicting_selection.dispatches[0].descriptors[1].clone();
+        let VulkanDescriptorResourceAddress::ActivationSlot { slot, .. } = &mut conflict.resource
+        else {
+            panic!("fixture preselection output is an activation slot");
+        };
+        *slot += 1;
+        conflicting_selection.dispatches[1]
+            .descriptors
+            .push(conflict);
+        let conflict_error = prepared_component_activation_catalog(&[(
+            "owner",
+            &conflicting_selection,
+        )])
+        .unwrap_err();
+        assert!(conflict_error
+            .to_string()
+            .contains("conflicting prepared storage"));
+
         let mut wrong_abi = prepared;
         let VulkanDescriptorResourceAddress::DynamicResourceParameterSlots {
             parameter_ids, ..
-        } = &mut wrong_abi.dispatches[0].descriptors[4].resource
+        } = &mut wrong_abi.dispatches[1].descriptors[4].resource
         else {
             panic!("fixture descriptor is the dynamic parameter-slot table");
         };
@@ -3037,6 +3116,7 @@ mod tests {
         route.slot = 3;
         producer.auxiliary_input_activations = vec![route.clone()];
         producer.auxiliary_input_distributions = vec![InputDistribution::Replicated];
+        producer.selected_resource_activations = vec![route.clone()];
         assert_eq!(
             selected_resource_gate_lane_layout(&route, 16).unwrap(),
             (route.signal_byte_capacity, 16),
@@ -3176,7 +3256,7 @@ mod tests {
         );
 
         let mut different_route = consumer.clone();
-        different_route.auxiliary_input_activations[0].slot += 1;
+        different_route.selected_resource_activations[0].slot += 1;
         assert_eq!(
             resolved_physical_execution_islands(
                 &[producer.clone(), different_route],
@@ -3294,8 +3374,9 @@ mod tests {
         routes.binding = 8;
         routes.signal_id = "routes".to_string();
         routes.slot += 8;
-        gate_up.auxiliary_input_activations = vec![routes];
+        gate_up.auxiliary_input_activations = vec![routes.clone()];
         gate_up.auxiliary_input_distributions = vec![InputDistribution::Replicated];
+        gate_up.selected_resource_activations = vec![routes];
 
         let mut down = gate_up.clone();
         down.dispatch_index = 5;

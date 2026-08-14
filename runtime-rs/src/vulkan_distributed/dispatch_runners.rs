@@ -72,8 +72,9 @@ pub(crate) fn selected_resource_activation<'a>(
     dispatch: &'a VulkanDistributedDispatchPlan,
     selection_signal: &str,
 ) -> Result<&'a VulkanDistributedActivationSlot, VulkanDistributedDispatchRunnerError> {
-    let matching = std::iter::once(&dispatch.input_activation)
-        .chain(dispatch.auxiliary_input_activations.iter())
+    let matching = dispatch
+        .selected_resource_activations
+        .iter()
         .filter(|activation| {
             activation.component_id == dispatch.component_id
                 && activation.signal_id == selection_signal

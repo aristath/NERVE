@@ -872,6 +872,7 @@ mod exact_case_replay_tests {
                     .collect(),
                 parameter_resource_byte_counts: vec![vec![4, 4]; 4],
             }],
+            selected_resource_activations: vec![activation(2, "routes")],
             owner_residency_requirements: Vec::new(),
             input_byte_capacity: 16,
             output_byte_capacity: 16,
@@ -963,6 +964,7 @@ mod exact_case_replay_tests {
         dispatch.execution_strategy = nerve_execution_contracts::ExecutionStrategy::TensorParallel;
         dispatch.has_lazy_resource_requirements = false;
         dispatch.selected_resource_partitions.clear();
+        dispatch.selected_resource_activations.clear();
         dispatch.input_distribution = InputDistribution::Replicated;
         dispatch.output_collection = OutputCollection::Concatenated;
         dispatch.distribution = VulkanDistributedDispatchDistribution::OutputRows;
@@ -1177,6 +1179,23 @@ mod exact_case_replay_tests {
 
         assert_eq!(first, relabeled_digest);
         assert_ne!(first, different_digest);
+    }
+
+    #[test]
+    fn distributed_execution_graph_identity_includes_runtime_selection_storage() {
+        let plan = plan_with_dispatch(dispatch());
+        let first = vulkan_distributed_execution_graph_digest("signature", &plan, &[0]).unwrap();
+
+        let mut different_selection_storage = plan;
+        different_selection_storage.dispatches[0].selected_resource_activations[0].slot += 1;
+        let different = vulkan_distributed_execution_graph_digest(
+            "signature",
+            &different_selection_storage,
+            &[0],
+        )
+        .unwrap();
+
+        assert_ne!(first, different);
     }
 
     #[test]

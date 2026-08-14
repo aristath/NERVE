@@ -304,6 +304,9 @@ pub(crate) fn vulkan_distributed_execution_graph_digest(
                     "activation": distributed_execution_activation_graph_identity(activation),
                     "distribution": distributed_input_distribution_name(*distribution),
                 })).collect::<Vec<_>>(),
+                "selected_resource_activations": dispatch.selected_resource_activations.iter()
+                    .map(distributed_execution_activation_graph_identity)
+                    .collect::<Vec<_>>(),
                 "output_activation": distributed_execution_activation_graph_identity(&dispatch.output_activation),
                 "output_collection": distributed_output_collection_name(dispatch.output_collection),
                 "reduction": distributed_execution_reduction_graph_identity(dispatch.reduction.as_ref()),

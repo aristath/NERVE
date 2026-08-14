@@ -462,6 +462,15 @@ impl VulkanDistributedActivationBufferPlan {
                     VulkanDistributedActivationAccess::Input,
                 )?;
             }
+            for activation in &dispatch.selected_resource_activations {
+                accumulate_activation_allocation(
+                    &mut allocations,
+                    &dispatch.owner_device_id,
+                    activation,
+                    &participant_device_ids,
+                    VulkanDistributedActivationAccess::Input,
+                )?;
+            }
             let output_participant_device_ids = if dispatch.reduction.is_some() {
                 BTreeSet::from([dispatch.owner_device_id.as_str()])
             } else {

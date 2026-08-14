@@ -275,6 +275,7 @@ impl VulkanDistributedExecutionPlan {
             .map(|component_id| (component_id.as_str(), false))
             .collect::<BTreeMap<_, _>>();
         let mut consumed_contract_ids_by_component = BTreeMap::<String, BTreeSet<String>>::new();
+        let activation_catalog = prepared_component_activation_catalog(prepared_plans)?;
 
         for (owner_device_id, prepared_plan) in prepared_plans {
             for dispatch in &prepared_plan.dispatches {
@@ -313,6 +314,7 @@ impl VulkanDistributedExecutionPlan {
                     contract,
                     storage_buffer_offset_alignment,
                     resource_context,
+                    &activation_catalog,
                 )?
                 else {
                     continue;
@@ -1561,6 +1563,7 @@ fn resolved_physical_execution_island(
         let activations = std::iter::once(&dispatch.input_activation)
             .filter(|_| !private_handoff_consumers.contains(&dispatch.dispatch_index))
             .chain(&dispatch.auxiliary_input_activations)
+            .chain(&dispatch.selected_resource_activations)
             .chain(
                 std::iter::once(&dispatch.output_activation)
                     .filter(|_| !private_handoff_producers.contains(&dispatch.dispatch_index)),
@@ -1983,8 +1986,9 @@ fn distributed_selected_resource_activation<'a>(
     dispatch: &'a VulkanDistributedDispatchPlan,
     selection_signal: &str,
 ) -> Option<&'a VulkanDistributedActivationSlot> {
-    let mut matching = std::iter::once(&dispatch.input_activation)
-        .chain(dispatch.auxiliary_input_activations.iter())
+    let mut matching = dispatch
+        .selected_resource_activations
+        .iter()
         .filter(|activation| {
             activation.component_id == dispatch.component_id
                 && activation.signal_id == selection_signal
@@ -2091,6 +2095,7 @@ pub struct VulkanDistributedDispatchPlan {
     pub local_intermediates: Vec<nerve_execution_contracts::LocalIntermediateContract>,
     pub has_lazy_resource_requirements: bool,
     pub selected_resource_partitions: Vec<VulkanDistributedSelectedResourcePartitionPlan>,
+    pub selected_resource_activations: Vec<VulkanDistributedActivationSlot>,
     pub owner_residency_requirements: Vec<VulkanPhysicalExecutionResidencyRequirement>,
     pub input_byte_capacity: usize,
     pub output_byte_capacity: usize,

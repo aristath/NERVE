@@ -11,6 +11,83 @@ struct ContractParameterSlice<'a> {
     logical_elements_per_index: usize,
 }
 
+fn prepared_component_activation_catalog(
+    prepared_plans: &[(&str, &VulkanPreparedDispatchPlan)],
+) -> Result<
+    BTreeMap<(String, String), VulkanDistributedActivationSlot>,
+    VulkanDistributedPlanError,
+> {
+    let mut catalog = BTreeMap::new();
+    for (_, plan) in prepared_plans {
+        for dispatch in &plan.dispatches {
+            for descriptor in &dispatch.descriptors {
+                let VulkanDescriptorResourceAddress::ActivationSlot {
+                    component_id,
+                    signal_id,
+                    slot,
+                    byte_capacity,
+                    signal_byte_capacity,
+                } = &descriptor.resource
+                else {
+                    continue;
+                };
+                let activation = VulkanDistributedActivationSlot {
+                    binding: descriptor.binding,
+                    component_id: component_id.clone(),
+                    signal_id: signal_id.clone(),
+                    slot: *slot,
+                    byte_capacity: *byte_capacity,
+                    signal_byte_capacity: *signal_byte_capacity,
+                    storage: VulkanDistributedActivationStorage::ActivationSlot,
+                };
+                let key = (component_id.clone(), signal_id.clone());
+                if let Some(existing) = catalog.get(&key) {
+                    if !same_distributed_activation(existing, &activation) {
+                        return Err(dispatch_error(
+                            dispatch,
+                            format!(
+                                "component activation {component_id}.{signal_id} has conflicting prepared storage"
+                            ),
+                        ));
+                    }
+                } else {
+                    catalog.insert(key, activation);
+                }
+            }
+        }
+    }
+    Ok(catalog)
+}
+
+fn resolve_selected_resource_activations(
+    dispatch: &VulkanPreparedDispatch,
+    partitions: &[VulkanDistributedSelectedResourcePartitionPlan],
+    activation_catalog: &BTreeMap<(String, String), VulkanDistributedActivationSlot>,
+) -> Result<Vec<VulkanDistributedActivationSlot>, VulkanDistributedPlanError> {
+    partitions
+        .iter()
+        .map(|partition| partition.selection_signal.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|selection_signal| {
+            activation_catalog
+                .get(&(
+                    dispatch.component_id.clone(),
+                    selection_signal.to_string(),
+                ))
+                .cloned()
+                .ok_or_else(|| {
+                    dispatch_error(
+                        dispatch,
+                        format!(
+                            "selected resource signal {selection_signal:?} has no prepared component activation"
+                        ),
+                    )
+                })
+        })
+        .collect()
+}
+
 fn resolved_owner_residency_requirements(
     owner_device_id: &str,
     dispatch: &VulkanPreparedDispatch,
@@ -196,6 +273,7 @@ fn plan_contract_dispatch(
     contract: &PhysicalExecutionContract,
     storage_buffer_offset_alignment: usize,
     resource_context: Option<(&str, &CompiledResourceResidencyContract)>,
+    activation_catalog: &BTreeMap<(String, String), VulkanDistributedActivationSlot>,
 ) -> Result<Option<VulkanDistributedDispatchPlan>, VulkanDistributedPlanError> {
     let extent = contract.partition_extent.as_ref().ok_or_else(|| {
         dispatch_error(
@@ -215,6 +293,11 @@ fn plan_contract_dispatch(
         artifact,
         contract,
         resource_context,
+    )?;
+    let selected_resource_activations = resolve_selected_resource_activations(
+        dispatch,
+        &selected_resource_partitions,
+        activation_catalog,
     )?;
     let logical_extent = usize::try_from(extent.elements)
         .map_err(|_| dispatch_error(dispatch, "partition extent exceeds usize".to_string()))?;
@@ -673,6 +756,7 @@ fn plan_contract_dispatch(
             resource.kind == nerve_execution_contracts::ResourceKind::LazyResource
         }),
         selected_resource_partitions,
+        selected_resource_activations,
         owner_residency_requirements: resolved_owner_residency_requirements(
             owner_device_id,
             dispatch,
