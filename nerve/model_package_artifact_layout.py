@@ -9,9 +9,14 @@ from pathlib import Path
 from typing import Callable
 
 from nerve.compilation import Json, ModelCompileError, check_compile_cancelled
-from nerve.model_package_common import ROW_MAJOR_LAYOUT, package_artifact_path
+from nerve.model_package_common import (
+    BROADCAST_COLUMNS_TRANSPOSE_DERIVATION,
+    ROW_MAJOR_LAYOUT,
+    package_artifact_path,
+)
 from nerve.model_package_tensors import (
     copy_exact_bytes,
+    write_derived_broadcast_transpose_payload,
     write_derived_matrix_reorder_payload,
 )
 from nerve.model_transpiler import read_safetensors_header
@@ -31,7 +36,7 @@ def write_atomic_tensor_affinity_bank(
     partition_counts: dict[str, int],
     cancel_requested: Callable[[], bool] | None = None,
 ) -> tuple[Json, dict[str, Json], dict[str, list[bytes]]]:
-    """Write direct and byte-preserving reordered tensors into one sealed bank."""
+    """Write direct and independently reproducible tensors into one sealed bank."""
 
     relative_destination = _affinity_bank_path(tensor_names)
     destination = package_artifact_path(
@@ -55,8 +60,14 @@ def write_atomic_tensor_affinity_bank(
                 partition_count = partition_counts.get(tensor_name)
                 derivation = info.get("derived")
                 if isinstance(derivation, dict):
+                    writer = (
+                        write_derived_broadcast_transpose_payload
+                        if derivation.get("kind")
+                        == BROADCAST_COLUMNS_TRANSPOSE_DERIVATION
+                        else write_derived_matrix_reorder_payload
+                    )
                     digest, tensor_partition_digests = (
-                        write_derived_matrix_reorder_payload(
+                        writer(
                             tensor_name=tensor_name,
                             info=info,
                             destination=temporary,

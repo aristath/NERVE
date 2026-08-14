@@ -282,6 +282,48 @@ def ensure_transposed_matrix_tensor(
     if len(shape) != 2:
         raise ModelCompileError(f"tensor {source_tensor!r} is not a matrix")
     rows, columns = shape
+    source_derivation = source_info.get("derived")
+    if (
+        isinstance(source_derivation, dict)
+        and source_derivation.get("kind")
+        == "fp8_channel_scale_to_block_grid"
+    ):
+        source_shape = [
+            int(value) for value in source_derivation.get("source_shape", [])
+        ]
+        if (
+            source_info.get("dtype") != "BF16"
+            or source_shape != [rows, 1]
+            or int(source_derivation.get("block_columns", 0)) <= 0
+        ):
+            raise ModelCompileError(
+                f"tensor {source_tensor!r} has an invalid channel-scale broadcast"
+            )
+        derived = {
+            "kind": BROADCAST_COLUMNS_TRANSPOSE_DERIVATION,
+            "source_tensor": source_derivation["source_tensor"],
+            "source_file": source_derivation["source_file"],
+            "source_header_bytes": int(
+                source_derivation["source_header_bytes"]
+            ),
+            "data_offsets": list(source_derivation["data_offsets"]),
+            "source_shape": source_shape,
+            "broadcast_shape": shape,
+        }
+    elif source_derivation is None:
+        derived = {
+            "kind": "transpose_2d",
+            "source_tensor": source_tensor,
+            "source_file": source_info["source_file"],
+            "source_header_bytes": int(source_info["source_header_bytes"]),
+            "data_offsets": list(source_info["data_offsets"]),
+            "source_shape": shape,
+        }
+    else:
+        raise ModelCompileError(
+            f"tensor {source_tensor!r} cannot compose transpose with derivation "
+            f"{source_derivation.get('kind')!r}"
+        )
     derived_info = {
         "dtype": source_info["dtype"],
         "shape": [columns, rows],
@@ -290,14 +332,7 @@ def ensure_transposed_matrix_tensor(
         "byte_count": int(source_info["byte_count"]),
         "layout": ROW_MAJOR_LAYOUT,
         "physical_execution_only": True,
-        "derived": {
-            "kind": "transpose_2d",
-            "source_tensor": source_tensor,
-            "source_file": source_info["source_file"],
-            "source_header_bytes": int(source_info["source_header_bytes"]),
-            "data_offsets": list(source_info["data_offsets"]),
-            "source_shape": shape,
-        },
+        "derived": derived,
     }
     existing = tensor_index["tensors"].get(derived_tensor)
     if existing is not None and existing != derived_info:

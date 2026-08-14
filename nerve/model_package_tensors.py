@@ -356,6 +356,164 @@ def write_derived_matrix_reorder_payload(
     destination_matrix.flush()
     del destination_matrix
     del source_matrix
+    return _digest_derived_payload(
+        tensor_name=tensor_name,
+        destination=destination,
+        destination_data_offset=destination_data_offset,
+        byte_count=byte_count,
+        partition_count=partition_count,
+    )
+
+
+def write_compiled_derived_broadcast_transpose(
+    *,
+    tensor_name: str,
+    info: Json,
+    destination: Path,
+    layout: str,
+    partition_count: int | None = None,
+) -> tuple[int, str, list[bytes]]:
+    if layout != ROW_MAJOR_LAYOUT:
+        raise ModelCompileError(
+            "derived broadcast-transposes require row-major storage"
+        )
+    dtype = str(info["dtype"])
+    byte_count = int(info["byte_count"])
+    output_shape = [int(value) for value in info["shape"]]
+    header_payload = compiled_safetensors_header(
+        tensor_name,
+        dtype=dtype,
+        shape=output_shape,
+        byte_count=byte_count,
+        layout=layout,
+    )
+    data_start = 8 + len(header_payload)
+    with destination.open("wb") as destination_handle:
+        destination_handle.write(struct.pack("<Q", len(header_payload)))
+        destination_handle.write(header_payload)
+        destination_handle.truncate(data_start + byte_count)
+
+    data_digest, partition_digests = write_derived_broadcast_transpose_payload(
+        tensor_name=tensor_name,
+        info=info,
+        destination=destination,
+        destination_data_offset=data_start,
+        partition_count=partition_count,
+    )
+    return len(header_payload), data_digest, partition_digests
+
+
+def write_derived_broadcast_transpose_payload(
+    *,
+    tensor_name: str,
+    info: Json,
+    destination: Path,
+    destination_data_offset: int,
+    partition_count: int | None = None,
+) -> tuple[str, list[bytes]]:
+    """Broadcast one matrix column, then write its transposed dense matrix."""
+
+    derivation = info.get("derived")
+    if (
+        not isinstance(derivation, dict)
+        or derivation.get("kind")
+        != BROADCAST_COLUMNS_TRANSPOSE_DERIVATION
+    ):
+        raise ModelCompileError(
+            f"tensor {tensor_name!r} is not a broadcast-transpose"
+        )
+    source_shape = [int(value) for value in derivation.get("source_shape", [])]
+    broadcast_shape = [
+        int(value) for value in derivation.get("broadcast_shape", [])
+    ]
+    output_shape = [int(value) for value in info.get("shape", [])]
+    dtype = str(info["dtype"])
+    numpy_dtype = {
+        "F16": np.dtype("<u2"),
+        "BF16": np.dtype("<u2"),
+    }.get(dtype)
+    source = Path(str(derivation.get("source_file", "")))
+    source_header_bytes = int(derivation.get("source_header_bytes", -1))
+    data_offsets = [int(value) for value in derivation.get("data_offsets", [])]
+    byte_count = int(info["byte_count"])
+    if (
+        numpy_dtype is None
+        or len(source_shape) != 2
+        or source_shape[1] != 1
+        or broadcast_shape[:1] != source_shape[:1]
+        or len(broadcast_shape) != 2
+        or broadcast_shape[1] <= 0
+        or output_shape != [broadcast_shape[1], broadcast_shape[0]]
+        or len(data_offsets) != 2
+        or data_offsets[1] - data_offsets[0]
+        != math.prod(source_shape) * numpy_dtype.itemsize
+        or byte_count != math.prod(output_shape) * numpy_dtype.itemsize
+        or source_header_bytes < 0
+        or not source.is_file()
+        or not isinstance(destination_data_offset, int)
+        or isinstance(destination_data_offset, bool)
+        or destination_data_offset < 0
+        or not destination.is_file()
+        or destination.stat().st_size < destination_data_offset + byte_count
+    ):
+        raise ModelCompileError(
+            f"derived broadcast-transpose {tensor_name!r} has inconsistent storage"
+        )
+    if partition_count is not None and (
+        not isinstance(partition_count, int)
+        or isinstance(partition_count, bool)
+        or partition_count <= 0
+        or output_shape[0] != partition_count
+        or byte_count % partition_count
+    ):
+        raise ModelCompileError(
+            f"derived broadcast-transpose {tensor_name!r} has an invalid "
+            "partition count"
+        )
+
+    source_vector = np.memmap(
+        source,
+        dtype=numpy_dtype,
+        mode="r",
+        offset=8 + source_header_bytes + data_offsets[0],
+        shape=(source_shape[0],),
+    )
+    destination_matrix = np.memmap(
+        destination,
+        dtype=numpy_dtype,
+        mode="r+",
+        offset=destination_data_offset,
+        shape=tuple(output_shape),
+        order="C",
+    )
+    row_tile = max(
+        1,
+        (8 * 1024 * 1024)
+        // max(1, output_shape[1] * numpy_dtype.itemsize),
+    )
+    for row_start in range(0, output_shape[0], row_tile):
+        row_end = min(output_shape[0], row_start + row_tile)
+        destination_matrix[row_start:row_end, :] = source_vector
+    destination_matrix.flush()
+    del destination_matrix
+    del source_vector
+    return _digest_derived_payload(
+        tensor_name=tensor_name,
+        destination=destination,
+        destination_data_offset=destination_data_offset,
+        byte_count=byte_count,
+        partition_count=partition_count,
+    )
+
+
+def _digest_derived_payload(
+    *,
+    tensor_name: str,
+    destination: Path,
+    destination_data_offset: int,
+    byte_count: int,
+    partition_count: int | None,
+) -> tuple[str, list[bytes]]:
     digest = sha256()
     partition_digests: list[bytes] = []
     with destination.open("rb") as destination_handle:

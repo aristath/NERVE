@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from nerve.compilation import Json, ModelCompileError, read_json
+from nerve.model_package_common import BROADCAST_COLUMNS_TRANSPOSE_DERIVATION
 from nerve.resource_residency import (
     RESOURCE_IDENTITY_ALGORITHM,
     RESOURCE_RESIDENCY_SCHEMA,
@@ -1357,11 +1358,11 @@ def _validate_partitioned_tensor(
 def _has_atomic_selected_packaging(metadata: Json) -> bool:
     """Return whether packaging emits one sealed tensor without semantic coupling.
 
-    Selected resources may be compiler-reordered before publication as long as
-    the transform is byte-preserving, produces exactly one independently
-    sealable tensor, and does not depend on another derived output. Conversion
-    groups and compile-only dependencies remain ineligible because their
-    publication is not atomic at this resource boundary.
+    Selected resources may be compiler-transformed before publication as long
+    as the transform is exact, produces exactly one independently sealable
+    tensor, and does not depend on another derived output. Conversion groups
+    and compile-only dependencies remain ineligible because their publication
+    is not atomic at this resource boundary.
     """
 
     if metadata.get("compile_only") is True:
@@ -1372,7 +1373,11 @@ def _has_atomic_selected_packaging(metadata: Json) -> bool:
     if not isinstance(derivation, dict):
         return False
     kind = derivation.get("kind")
-    if kind not in {"matrix_to_input_block_major", "transpose_2d"}:
+    if kind not in {
+        BROADCAST_COLUMNS_TRANSPOSE_DERIVATION,
+        "matrix_to_input_block_major",
+        "transpose_2d",
+    }:
         return False
     source_tensor = derivation.get("source_tensor")
     source_file = derivation.get("source_file")
@@ -1404,8 +1409,10 @@ def _has_atomic_selected_packaging(metadata: Json) -> bool:
             not isinstance(offset, int) or isinstance(offset, bool) or offset < 0
             for offset in data_offsets
         )
-        or data_offsets[1] - data_offsets[0] != byte_count
         or not isinstance(output_shape, list)
+        or not isinstance(byte_count, int)
+        or isinstance(byte_count, bool)
+        or byte_count <= 0
         or (
             source_partition_count is not None
             and (
@@ -1417,6 +1424,39 @@ def _has_atomic_selected_packaging(metadata: Json) -> bool:
             )
         )
     ):
+        return False
+    if kind == BROADCAST_COLUMNS_TRANSPOSE_DERIVATION:
+        broadcast_shape = derivation.get("broadcast_shape")
+        output_elements = (
+            output_shape[0] * output_shape[1]
+            if len(output_shape) == 2
+            and all(
+                isinstance(dimension, int)
+                and not isinstance(dimension, bool)
+                and dimension > 0
+                for dimension in output_shape
+            )
+            else 0
+        )
+        element_bytes = (
+            byte_count // output_elements
+            if output_elements and byte_count % output_elements == 0
+            else 0
+        )
+        return (
+            isinstance(broadcast_shape, list)
+            and len(broadcast_shape) == 2
+            and source_shape[1] == 1
+            and broadcast_shape[0] == source_shape[0]
+            and isinstance(broadcast_shape[1], int)
+            and not isinstance(broadcast_shape[1], bool)
+            and broadcast_shape[1] > 0
+            and output_shape == [broadcast_shape[1], broadcast_shape[0]]
+            and element_bytes > 0
+            and data_offsets[1] - data_offsets[0]
+            == source_shape[0] * element_bytes
+        )
+    if data_offsets[1] - data_offsets[0] != byte_count:
         return False
     if kind == "transpose_2d":
         return output_shape == [source_shape[1], source_shape[0]]

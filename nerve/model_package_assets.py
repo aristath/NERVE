@@ -175,7 +175,12 @@ def _supports_atomic_affinity_packaging(info: Json) -> bool:
     derivation = info.get("derived")
     if derivation is not None and (
         not isinstance(derivation, dict)
-        or derivation.get("kind") not in {"matrix_to_input_block_major", "transpose_2d"}
+        or derivation.get("kind")
+        not in {
+            BROADCAST_COLUMNS_TRANSPOSE_DERIVATION,
+            "matrix_to_input_block_major",
+            "transpose_2d",
+        }
     ):
         return False
     quantization = info.get("quantization")
@@ -313,12 +318,17 @@ def copy_tensor_package(
         partition_count = partition_counts.get(tensor_name)
         quantization = info.get("quantization")
         partition_digests: list[bytes] = []
-        matrix_reorder = isinstance(derivation, dict) and derivation.get("kind") in {
-            "matrix_to_input_block_major",
-            "transpose_2d",
-        }
+        matrix_transform = (
+            isinstance(derivation, dict)
+            and derivation.get("kind")
+            in {
+                BROADCAST_COLUMNS_TRANSPOSE_DERIVATION,
+                "matrix_to_input_block_major",
+                "transpose_2d",
+            }
+        )
         if partition_count is not None and (
-            (isinstance(derivation, dict) and not matrix_reorder)
+            (isinstance(derivation, dict) and not matrix_transform)
             or (
                 isinstance(quantization, dict)
                 and quantization.get("format") == "auto_gptq"
@@ -475,9 +485,15 @@ def copy_tensor_package(
                 }
             )
             continue
-        if matrix_reorder:
+        if matrix_transform:
+            writer = (
+                write_compiled_derived_broadcast_transpose
+                if derivation.get("kind")
+                == BROADCAST_COLUMNS_TRANSPOSE_DERIVATION
+                else write_compiled_derived_matrix_reorder
+            )
             header_bytes, data_sha256, partition_digests = (
-                write_compiled_derived_matrix_reorder(
+                writer(
                     tensor_name=tensor_name,
                     info=info,
                     destination=destination,

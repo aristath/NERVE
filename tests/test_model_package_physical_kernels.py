@@ -10,7 +10,10 @@ import pytest
 
 from nerve.model_package_assets import copy_tensor_package
 from nerve.model_package_batching import frame_parallel_batch_shader_file
-from nerve.model_package_common import ModelCompileError
+from nerve.model_package_common import (
+    BROADCAST_COLUMNS_TRANSPOSE_DERIVATION,
+    ModelCompileError,
+)
 from nerve.model_package_derived_tensors import (
     TP_INPUT_BLOCK_COLUMNS,
     derive_tensor_parallel_independent_expert_tensors,
@@ -31,6 +34,7 @@ from nerve.model_package_shader_templates import copy_shader_templates
 from nerve.model_package_spirv_requirements import required_shader_files
 from nerve.model_package_tensors import (
     compiled_safetensors_header,
+    write_compiled_derived_broadcast_transpose,
     write_compiled_derived_matrix_reorder,
 )
 from nerve.physical_execution_contracts import (
@@ -592,6 +596,124 @@ def test_compiler_derives_fp8_weight_and_scale_physical_resources(
         scale_destination.read_bytes()[8 + scale_header_bytes :], dtype="<u2"
     ).reshape(2, 2)
     np.testing.assert_array_equal(actual_scale, scale_values.T)
+
+
+def test_compiler_composes_dynamic_channel_scale_broadcast_with_tp_transpose(
+    tmp_path: Path,
+) -> None:
+    node, circuit, tensor_index, _ = fp8_down_fixture(tmp_path)
+    source_values = np.asarray([1, 3, 5, 7], dtype="<u2").reshape(4, 1)
+    source_payload = source_values.tobytes(order="C")
+    source = tmp_path / "down.weight_scale.safetensors"
+    source_header = compiled_safetensors_header(
+        "down.weight_scale",
+        dtype="BF16",
+        shape=[4, 1],
+        byte_count=len(source_payload),
+        layout="row_major",
+    )
+    source.write_bytes(
+        struct.pack("<Q", len(source_header)) + source_header + source_payload
+    )
+    tensor_index["tensors"]["down.weight_scale_inv"] = {
+        "dtype": "BF16",
+        "shape": [4, 2],
+        "parameter_count": 8,
+        "byte_count": 16,
+        "derived": {
+            "kind": "fp8_channel_scale_to_block_grid",
+            "source_tensor": "down.weight_scale",
+            "source_file": str(source),
+            "source_header_bytes": len(source_header),
+            "data_offsets": [0, len(source_payload)],
+            "source_shape": [4, 1],
+            "block_columns": TP_INPUT_BLOCK_COLUMNS,
+        },
+    }
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
+
+    derive_tensor_parallel_linear_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered_dir,
+        tensor_index,
+        target=NativeTarget(),  # type: ignore[arg-type]
+    )
+
+    scale = transposed_tensor_name("down.weight_scale_inv")
+    scale_info = tensor_index["tensors"][scale]
+    assert scale_info["shape"] == [2, 4]
+    assert scale_info["derived"] == {
+        "kind": BROADCAST_COLUMNS_TRANSPOSE_DERIVATION,
+        "source_tensor": "down.weight_scale",
+        "source_file": str(source),
+        "source_header_bytes": len(source_header),
+        "data_offsets": [0, len(source_payload)],
+        "source_shape": [4, 1],
+        "broadcast_shape": [4, 2],
+    }
+    destination = tmp_path / "broadcast-transposed.safetensors"
+    header_bytes, _, partition_digests = (
+        write_compiled_derived_broadcast_transpose(
+            tensor_name=scale,
+            info=scale_info,
+            destination=destination,
+            layout="row_major",
+            partition_count=2,
+        )
+    )
+    actual = np.frombuffer(
+        destination.read_bytes()[8 + header_bytes :],
+        dtype="<u2",
+    ).reshape(2, 4)
+    np.testing.assert_array_equal(
+        actual,
+        np.repeat(source_values.T, 2, axis=0),
+    )
+    assert len(partition_digests) == 2
+    assert physical_kernel_implementations_for_node(
+        circuit,
+        node,
+        tensor_index,
+    )
+    weight = input_block_major_tensor_name(
+        "down.weight",
+        TP_INPUT_BLOCK_COLUMNS,
+    )
+    packaged = copy_tensor_package(
+        tensor_index,
+        tmp_path / "package",
+        partition_counts={scale: 2, weight: 2},
+        artifact_affinity_groups=[sorted([scale, weight])],
+    )
+    packaged_scale = packaged["tensors"][scale]
+    assert packaged_scale["partition_integrity"]["partition_count"] == 2
+    assert "derived" not in packaged_scale
+
+
+def test_compiler_rejects_an_unsupported_nested_tp_scale_derivation(
+    tmp_path: Path,
+) -> None:
+    _node, circuit, tensor_index, _ = fp8_down_fixture(tmp_path)
+    tensor_index["tensors"]["down.weight_scale_inv"].pop("source_file")
+    tensor_index["tensors"]["down.weight_scale_inv"]["derived"] = {
+        "kind": "unknown_scale_transform"
+    }
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
+
+    with pytest.raises(
+        ModelCompileError,
+        match="cannot compose transpose with derivation 'unknown_scale_transform'",
+    ):
+        derive_tensor_parallel_linear_tensors(
+            {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+            lowered_dir,
+            tensor_index,
+            target=NativeTarget(),  # type: ignore[arg-type]
+        )
 
 
 def test_fp8_dense_ffn_pair_declares_one_local_tp_island_for_decode_and_prefill(
