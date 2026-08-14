@@ -388,6 +388,27 @@ fn distributed_checkpoint_ownership_requires_one_atomic_selected_computation_isl
             .unwrap(),
         BTreeSet::from(["checkpoint".to_string()])
     );
+    assert_eq!(
+        schedule
+            .local_demand_gate_count(ResourceResidencyPolicy::DemandRetained, &[])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        schedule
+            .local_demand_gate_count(
+                ResourceResidencyPolicy::DemandRetained,
+                &[vec![11, 12, 13]],
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        schedule
+            .local_demand_gate_count(ResourceResidencyPolicy::Eager, &[vec![11]])
+            .unwrap(),
+        0
+    );
     assert!(
         distributed_owned_physical_residency_checkpoint_ids(&schedule, &[vec![11]])
             .unwrap_err()

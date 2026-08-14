@@ -67,6 +67,16 @@ fn plan_vulkan_runtime_feedback_control_residency(
             .or_default()
             .extend(island.dispatch_indices());
     }
+    let distributed_islands_by_owner = decode_execution_plan.execution_islands.iter().fold(
+        BTreeMap::<&str, Vec<Vec<usize>>>::new(),
+        |mut groups, island| {
+            groups
+                .entry(island.owner_device_id.as_str())
+                .or_default()
+                .push(island.dispatch_indices());
+            groups
+        },
+    );
     let local_model_dispatch_count = slice_plans.iter().try_fold(0usize, |total, slice| {
         let distributed = distributed_indices_by_owner.get(slice.device_id.as_str());
         let local = slice
@@ -86,7 +96,14 @@ fn plan_vulkan_runtime_feedback_control_residency(
                 total,
                 slice
                     .physical_residency_schedule
-                    .demand_gate_count(residency_policy),
+                    .local_demand_gate_count(
+                        residency_policy,
+                        distributed_islands_by_owner
+                            .get(slice.device_id.as_str())
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                    )
+                    .map_err(runtime_feedback_control_residency_error)?,
                 "local residency gate",
             )
         },

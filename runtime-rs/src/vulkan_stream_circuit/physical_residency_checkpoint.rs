@@ -91,6 +91,24 @@ impl VulkanPhysicalResidencySchedule {
         }
     }
 
+    fn local_demand_gate_count(
+        &self,
+        policy: ResourceResidencyPolicy,
+        physical_execution_islands: &[Vec<usize>],
+    ) -> Result<usize, VulkanError> {
+        if !policy.is_demand_loaded() {
+            return Ok(0);
+        }
+        let distributed_owned = distributed_owned_physical_residency_checkpoint_ids(
+            self,
+            physical_execution_islands,
+        )?;
+        self.checkpoints
+            .len()
+            .checked_sub(distributed_owned.len())
+            .ok_or_else(|| VulkanError("local demand gate count underflowed".to_string()))
+    }
+
     pub fn requires_demand_execution(&self, policy: ResourceResidencyPolicy) -> bool {
         self.demand_gate_count(policy) != 0
     }

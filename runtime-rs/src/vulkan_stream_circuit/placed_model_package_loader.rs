@@ -1528,6 +1528,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .or_default()
                 .extend(group.dispatch_indices());
         }
+        let distributed_islands_by_owner = stream_distributed_execution_plans
+            .decode
+            .execution_islands
+            .iter()
+            .fold(BTreeMap::<&str, Vec<Vec<usize>>>::new(), |mut groups, island| {
+                groups
+                    .entry(island.owner_device_id.as_str())
+                    .or_default()
+                    .push(island.dispatch_indices());
+                groups
+            });
         let local_dispatch_count = self.device_slices.iter().try_fold(0usize, |total, slice| {
             let distributed = distributed_dispatch_indices.get(slice.device_id.as_str());
             let model_dispatch_count = slice
@@ -1540,7 +1551,14 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .count();
             let checkpoint_count = slice
                 .physical_residency_schedule()
-                .demand_gate_count(self.resource_residency_policy);
+                .local_demand_gate_count(
+                    self.resource_residency_policy,
+                    distributed_islands_by_owner
+                        .get(slice.device_id.as_str())
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             total
                 .checked_add(model_dispatch_count)
                 .and_then(|count| count.checked_add(checkpoint_count))
