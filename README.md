@@ -67,7 +67,9 @@ NERVE is not a production inference engine yet. It is a real implementation of t
   content-addressed sharing, single-flight loads, deterministic failures, and
   placement-independent one- or multi-device execution.
 - Default chat reporting for resource selection, hits, misses, I/O, uploads,
-  memory watermarks, per-device stores, and acknowledged teardown.
+  memory watermarks, per-device stores, acknowledged teardown, and exact
+  selected-device memory restoration after the permanent parameter pool is
+  destroyed.
 
 ### Important unfinished work
 
@@ -410,9 +412,17 @@ emit one complete structured shutdown report. It rejects in-flight scheduler
 work, missing device acknowledgements, retained lazy-resource units or payload,
 duplicate stores, a package-identity mismatch, and disagreement between the
 last resident gauges and the resources actually released. The accepted
-shutdown evidence is retained in the JSON gate report; an externally sampled
-pre/post device-reservation comparison remains required for a live GPU
-milestone.
+shutdown evidence is retained in the JSON gate report. Normal chat then
+destroys its permanent parameter pool, quiesces every unique selected physical
+device, and emits the canonical
+`nerve.runtime.device_local_memory_restoration.v1` report. The gate independently
+revalidates physical and driver identity, the opening memory budget, exact
+tracked allocations and pending reservations, driver counters within their
+declared tolerance, unchanged pressure episodes, and inclusion of every
+lazy-resource device. The benchmark package consumes the same runtime verifier.
+An externally sampled pre/post process-reservation comparison is still required
+for a live GPU milestone so unrelated allocations are proven to remain owned by
+the same processes rather than merely producing equal aggregate counters.
 
 ```bash
 .venv/bin/python scripts/run_conversation_gate.py \

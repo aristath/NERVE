@@ -14,6 +14,7 @@ include!("vulkan_compute/device_fault.rs");
 include!("vulkan_compute/device_types.rs");
 include!("vulkan_compute/queue_completion.rs");
 include!("vulkan_compute/device_local_memory_budget.rs");
+include!("vulkan_compute/device_restoration.rs");
 include!("vulkan_compute/memory_admission.rs");
 include!("vulkan_compute/resident_buffers.rs");
 include!("vulkan_compute/resident_buffer_pool.rs");
@@ -55,5 +56,7 @@ include!("vulkan_compute/hardware_profile_tests.rs");
 include!("vulkan_compute/device_fault_tests.rs");
 #[cfg(test)]
 include!("vulkan_compute/device_local_memory_budget_tests.rs");
+#[cfg(test)]
+include!("vulkan_compute/device_restoration_tests.rs");
 #[cfg(test)]
 include!("vulkan_compute/execution_counter_tests.rs");

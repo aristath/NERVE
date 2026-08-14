@@ -496,6 +496,17 @@ fn print_runtime_shutdown(
     }
 }
 
+fn print_runtime_device_restoration(
+    report: &VulkanDeviceLocalMemoryRestorationReport,
+) {
+    println!("device_restoration:");
+    println!(
+        "  {}",
+        serde_json::to_string(report)
+            .expect("device-local memory restoration report is serializable")
+    );
+}
+
 fn token_id_digest(token_ids: &[u32]) -> String {
     use sha2::{Digest, Sha256};
 

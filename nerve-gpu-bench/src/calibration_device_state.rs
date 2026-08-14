@@ -8,7 +8,8 @@ use std::rc::Rc;
 use nerve_runtime::{
     HardwareProcessProfile, VulkanComputeDevice, VulkanComputeDeviceCatalog,
     VulkanDeviceLocalMemoryAccounting, VulkanDeviceLocalMemoryBudget,
-    VulkanDeviceLocalMemoryPressure,
+    VulkanDeviceLocalMemoryPressure, VulkanDeviceLocalMemoryRestorationSnapshot,
+    verify_vulkan_device_local_memory_restoration,
 };
 
 pub fn discover_calibration_hardware_profiles(
@@ -189,63 +190,34 @@ pub fn verify_device_snapshots_restored(
     before: &[DeviceCalibrationSnapshot],
     after: &[DeviceCalibrationSnapshot],
 ) -> Result<(), String> {
-    if before.len() != after.len() {
-        return Err("calibration target set changed during execution".to_string());
+    let before = before
+        .iter()
+        .map(device_calibration_restoration_snapshot)
+        .collect::<Vec<_>>();
+    let after = after
+        .iter()
+        .map(device_calibration_restoration_snapshot)
+        .collect::<Vec<_>>();
+    let report = verify_vulkan_device_local_memory_restoration(&before, &after);
+    if report.complete {
+        return Ok(());
     }
-    for (before, after) in before.iter().zip(after) {
-        if before.physical_device_id != after.physical_device_id
-            || before.memory_budget != after.memory_budget
-        {
-            return Err(format!(
-                "calibration target {:?} changed identity or memory budget",
-                before.physical_device_id
-            ));
-        }
-        let tolerance = before.memory_budget.counter_tolerance_bytes;
-        let accounting = [
-            (
-                "tracked allocation",
-                before.memory_accounting.tracked_allocation_bytes,
-                after.memory_accounting.tracked_allocation_bytes,
-                0,
-            ),
-            (
-                "pending reservation",
-                before.memory_accounting.pending_reservation_bytes,
-                after.memory_accounting.pending_reservation_bytes,
-                0,
-            ),
-            (
-                "untracked acquired",
-                before.memory_accounting.untracked_acquired_bytes,
-                after.memory_accounting.untracked_acquired_bytes,
-                tolerance,
-            ),
-            (
-                "available device-local",
-                before.memory_accounting.currently_available_bytes,
-                after.memory_accounting.currently_available_bytes,
-                tolerance,
-            ),
-        ];
-        for (name, before_bytes, after_bytes, allowed_difference) in accounting {
-            if before_bytes.abs_diff(after_bytes) > allowed_difference {
-                return Err(format!(
-                    "calibration target {:?} did not restore {name} bytes: before={before_bytes}, after={after_bytes}, tolerance={allowed_difference}",
-                    before.physical_device_id
-                ));
-            }
-        }
-        if after.memory_pressure.episode != before.memory_pressure.episode
-            || after.memory_pressure.active != before.memory_pressure.active
-        {
-            return Err(format!(
-                "calibration target {:?} entered a new memory-pressure episode",
-                before.physical_device_id
-            ));
-        }
+    Err(report.errors.join("; "))
+}
+
+fn device_calibration_restoration_snapshot(
+    snapshot: &DeviceCalibrationSnapshot,
+) -> VulkanDeviceLocalMemoryRestorationSnapshot {
+    VulkanDeviceLocalMemoryRestorationSnapshot {
+        physical_device_id: snapshot.physical_device_id.clone(),
+        device_name: snapshot.device_name.clone(),
+        pci_address: snapshot.pci_address.clone(),
+        api_version: 0,
+        driver_version: 0,
+        memory_budget: snapshot.memory_budget,
+        memory_accounting: snapshot.memory_accounting,
+        memory_pressure: snapshot.memory_pressure,
     }
-    Ok(())
 }
 
 pub fn quiesce_and_verify_device_snapshots(
@@ -343,12 +315,12 @@ mod tests {
         assert!(
             verify_device_snapshots_restored(&before, &[changed_reservation])
                 .unwrap_err()
-                .contains("memory-pressure episode")
+                .contains("memory-pressure state")
         );
     }
 
     #[test]
-    fn teardown_proof_is_ordered_and_target_exact() {
+    fn teardown_proof_is_target_exact_but_order_independent() {
         let before = vec![
             snapshot("owner", 900, 0, 0, 0, 0),
             snapshot("worker", 900, 0, 0, 0, 0),
@@ -357,10 +329,13 @@ mod tests {
             snapshot("worker", 900, 0, 0, 0, 0),
             snapshot("owner", 900, 0, 0, 0, 0),
         ];
+        verify_device_snapshots_restored(&before, &after).unwrap();
+
+        let changed = vec![snapshot("other", 900, 0, 0, 0, 0)];
         assert!(
-            verify_device_snapshots_restored(&before, &after)
+            verify_device_snapshots_restored(&before, &changed)
                 .unwrap_err()
-                .contains("changed identity")
+                .contains("set changed")
         );
     }
 }

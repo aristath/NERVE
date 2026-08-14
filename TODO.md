@@ -1059,9 +1059,20 @@ For every numbered item below:
   physical-store acknowledgement, zero remaining units/payload, and exact
   agreement between final resident units/bytes and released units/bytes;
   malformed, incomplete, duplicated, or internally inconsistent teardown
-  evidence fails closed and the accepted report is persisted. The authorized
-  live gate must additionally prove exact post-run restoration of every
-  selected target's externally sampled pre-workload reservation.
+  evidence fails closed and the accepted report is persisted. Normal chat now
+  snapshots every unique selected physical device immediately before model
+  allocation, destroys both the placed engine and permanent parameter pool,
+  quiesces the devices, and emits a canonical v1 restoration report. The gate
+  independently revalidates physical/driver identity, stable budgets, exact
+  tracked and pending bytes, driver counters within the declared tolerance,
+  unchanged pressure state, and inclusion of every lazy-resource device. The
+  calibration package uses this same shared runtime verifier instead of a
+  second implementation. Hardware-neutral adversarial tests cover retained
+  allocations, changed/missing/duplicate devices, budget drift, every
+  accounting class, pressure changes, malformed evidence, and false completion.
+  The authorized live gate must additionally prove exact post-run restoration
+  of every selected target's externally sampled pre-workload process
+  reservation; aggregate in-process counters cannot establish process identity.
 - Require coherent answers and package-owned thinking and sampling.
 - Require at least 17 useful decode tok/s, continue optimizing toward 20 tok/s,
   and investigate any regression before accepting a milestone.

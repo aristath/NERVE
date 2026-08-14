@@ -253,6 +253,10 @@ fn run_placed_chat(
         .clone()
         .ok_or_else(|| io::Error::other("placed runtime has no implementation selection"))?;
     let sparse_moe_contract = runtime_model.sparse_moe_execution_contract()?;
+    let device_restoration_before =
+        capture_vulkan_device_local_memory_restoration_snapshots(
+            bound_devices.devices.values().map(Rc::as_ref),
+        )?;
     let parameter_pool = VulkanResidentBufferPool::default();
     let stream = mount_placed_chat_stream(
         args,
@@ -726,21 +730,32 @@ fn run_placed_chat(
     })();
     let shutdown = engine.shutdown();
     print_runtime_shutdown(&shutdown);
-    match (chat_result, shutdown.complete) {
+    drop(parameter_pool);
+    let device_restoration = quiesce_and_verify_vulkan_device_local_memory_restoration(
+        bound_devices.devices.values().map(Rc::as_ref),
+        &device_restoration_before,
+    );
+    print_runtime_device_restoration(&device_restoration);
+    let teardown_complete = shutdown.complete && device_restoration.complete;
+    match (chat_result, teardown_complete) {
         (Ok(()), true) => Ok(()),
         (Err(error), true) => Err(Box::new(io::Error::other(format!(
-            "placed chat failed: {error}; teardown acknowledged on {}/{} physical devices with {} scheduler activations remaining",
+            "placed chat failed: {error}; teardown acknowledged on {}/{} physical resource devices and restored {}/{} selected physical devices with {} scheduler activations remaining",
             shutdown.acknowledged_device_count,
             shutdown.physical_device_count,
+            device_restoration.restored_device_count,
+            device_restoration.physical_device_count,
             shutdown.scheduler_in_flight_activation_count,
         )))),
         (Ok(()), false) => Err(Box::new(io::Error::other(format!(
-            "placed chat teardown failed: {:?}",
+            "placed chat teardown failed: resource_errors={:?}, device_restoration_errors={:?}",
             shutdown.errors,
+            device_restoration.errors,
         )))),
         (Err(error), false) => Err(Box::new(io::Error::other(format!(
-            "placed chat failed: {error}; teardown also failed: {:?}",
+            "placed chat failed: {error}; teardown also failed: resource_errors={:?}, device_restoration_errors={:?}",
             shutdown.errors,
+            device_restoration.errors,
         )))),
     }
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 
 import pytest
@@ -9,10 +10,12 @@ from nerve.conversation_gate import (
     CANONICAL_OUTPUT_TOKEN_ALLOWANCE,
     MEASURED_PROMPTS,
     WARMUP_PROMPT,
+    _validate_shutdown_device_restoration,
     ConversationGateError,
     ConversationTurn,
     canonical_runtime_command,
     parse_conversation_transcript,
+    parse_device_restoration_report,
     parse_physical_execution_summary,
     parse_shutdown_report,
     run_conversation_gate,
@@ -77,6 +80,78 @@ def _valid_shutdown_transcript() -> str:
         "remaining_units=0 remaining_payload_bytes=0 error=None\n"
         "  store=store1 physical_device=gpu1 acknowledged=true "
         "remaining_units=0 remaining_payload_bytes=0 error=None\n"
+        + _valid_device_restoration_transcript(("gpu0", "gpu1"))
+    )
+
+
+def _device_restoration_snapshot(physical_device_id: str) -> dict[str, object]:
+    return {
+        "physical_device_id": physical_device_id,
+        "device_name": "test device",
+        "pci_address": "0000:01:00.0",
+        "api_version": 1,
+        "driver_version": 2,
+        "memory_budget": {
+            "baseline_available_bytes": 1_000,
+            "reservable_bytes": 800,
+            "protected_headroom_bytes": 200,
+            "counter_tolerance_bytes": 16,
+        },
+        "memory_accounting": {
+            "baseline_available_bytes": 1_000,
+            "currently_available_bytes": 900,
+            "reservable_bytes": 800,
+            "tracked_allocation_bytes": 5,
+            "pending_reservation_bytes": 7,
+            "untracked_acquired_bytes": 9,
+            "remaining_bytes": 779,
+            "admissible_remaining_bytes": 795,
+        },
+        "memory_pressure": {
+            "active": False,
+            "episode": 2,
+            "observed_available_bytes": 900,
+            "current_deficit_bytes": 0,
+            "peak_deficit_bytes": 0,
+        },
+    }
+
+
+def _device_restoration_payload(
+    physical_device_ids: tuple[str, ...] = ("gpu0",),
+) -> dict[str, object]:
+    devices = []
+    for physical_device_id in physical_device_ids:
+        snapshot = _device_restoration_snapshot(physical_device_id)
+        devices.append(
+            {
+                "physical_device_id": physical_device_id,
+                "restored": True,
+                "before": snapshot,
+                "after": json.loads(json.dumps(snapshot)),
+                "errors": [],
+            }
+        )
+    return {
+        "schema": "nerve.runtime.device_local_memory_restoration.v1",
+        "complete": True,
+        "physical_device_count": len(devices),
+        "restored_device_count": len(devices),
+        "devices": devices,
+        "errors": [],
+    }
+
+
+def _valid_device_restoration_transcript(
+    physical_device_ids: tuple[str, ...] = ("gpu0",),
+) -> str:
+    return (
+        "device_restoration:\n  "
+        + json.dumps(
+            _device_restoration_payload(physical_device_ids),
+            separators=(",", ":"),
+        )
+        + "\n"
     )
 
 
@@ -229,6 +304,115 @@ def test_shutdown_report_rejects_missing_or_duplicate_reports() -> None:
     duplicated = _valid_shutdown_transcript() + _valid_shutdown_transcript()
     with pytest.raises(ConversationGateError, match="more than once"):
         parse_shutdown_report(duplicated)
+
+
+def test_device_restoration_report_proves_all_selected_devices_restored() -> None:
+    report = parse_device_restoration_report(
+        _valid_device_restoration_transcript(("gpu0", "gpu1"))
+    )
+
+    assert report.complete
+    assert report.physical_device_count == 2
+    assert report.restored_device_count == 2
+    assert [device.physical_device_id for device in report.devices] == [
+        "gpu0",
+        "gpu1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    (
+        (
+            lambda payload: payload.update(complete=False),
+            "incomplete device restoration",
+        ),
+        (
+            lambda payload: payload.update(restored_device_count=0),
+            "did not restore every selected",
+        ),
+        (
+            lambda payload: payload["devices"][0].update(restored=False),
+            "left 'gpu0' incomplete",
+        ),
+        (
+            lambda payload: payload.update(errors=["failure"]),
+            "reported global errors",
+        ),
+        (
+            lambda payload: payload["devices"][0]["after"]["memory_accounting"].update(
+                tracked_allocation_bytes=6
+            ),
+            "did not restore tracked_allocation_bytes",
+        ),
+        (
+            lambda payload: payload["devices"][0]["after"]["memory_accounting"].update(
+                currently_available_bytes=883
+            ),
+            "did not restore currently_available_bytes",
+        ),
+        (
+            lambda payload: payload["devices"][0]["after"]["memory_pressure"].update(
+                episode=3
+            ),
+            "changed memory pressure",
+        ),
+        (
+            lambda payload: payload["devices"][0]["after"].update(driver_version=3),
+            "changed physical identity",
+        ),
+    ),
+)
+def test_device_restoration_report_rejects_incomplete_or_false_proof(
+    mutate,
+    message: str,
+) -> None:
+    payload = _device_restoration_payload()
+    mutate(payload)
+    transcript = "device_restoration:\n  " + json.dumps(payload) + "\n"
+
+    with pytest.raises(ConversationGateError, match=message):
+        parse_device_restoration_report(transcript)
+
+
+def test_device_restoration_report_rejects_missing_duplicate_and_unknown_schema() -> (
+    None
+):
+    with pytest.raises(ConversationGateError, match="did not report"):
+        parse_device_restoration_report("ready\n")
+
+    duplicate = _valid_device_restoration_transcript() * 2
+    with pytest.raises(ConversationGateError, match="more than once"):
+        parse_device_restoration_report(duplicate)
+
+    payload = _device_restoration_payload()
+    payload["unknown"] = True
+    with pytest.raises(ConversationGateError, match="invalid schema"):
+        parse_device_restoration_report(
+            "device_restoration:\n  " + json.dumps(payload) + "\n"
+        )
+
+
+def test_device_restoration_report_rejects_duplicate_physical_identity() -> None:
+    payload = _device_restoration_payload(("gpu0", "gpu1"))
+    payload["devices"][1]["physical_device_id"] = "gpu0"
+    payload["devices"][1]["before"]["physical_device_id"] = "gpu0"
+    payload["devices"][1]["after"]["physical_device_id"] = "gpu0"
+
+    with pytest.raises(ConversationGateError, match="repeats a physical device"):
+        parse_device_restoration_report(
+            "device_restoration:\n  " + json.dumps(payload) + "\n"
+        )
+
+
+def test_device_restoration_must_cover_every_shutdown_resource_device() -> None:
+    shutdown = parse_shutdown_report(_valid_shutdown_transcript())
+    restoration = parse_device_restoration_report(
+        _valid_device_restoration_transcript(("gpu0",))
+    )
+
+    with pytest.raises(ConversationGateError, match="omits a physical resource"):
+        _validate_shutdown_device_restoration(shutdown, restoration)
 
 
 def test_transcript_parser_requires_all_completed_resident_turns() -> None:
@@ -965,6 +1149,8 @@ print("  physical_devices_acknowledged=1/1 released_units=6 released_payload_byt
 print("  package=fixture scope=target physical_devices_acknowledged=1/1")
 print("  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 remaining_payload_bytes=0 error=None", flush=True)
 """.lstrip()
+        + 'print("device_restoration:")\n'
+        + f"print({('  ' + json.dumps(_device_restoration_payload(), separators=(',', ':')))!r}, flush=True)\n"
     )
 
     report = run_conversation_gate(
@@ -987,6 +1173,9 @@ print("  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 r
     assert len(run.discarded_warmup_sets) == 2
     assert run.physical_execution is not None
     assert run.physical_execution.total_tensor_parallel_island_count == 8
+    assert run.device_restoration.complete
+    assert run.device_restoration.physical_device_count == 1
+    assert run.device_restoration.devices[0].physical_device_id == "gpu0"
     assert report.warmup_conversation_sets == 2
     assert run.discarded_warmup_sets[0].mean_decode_tokens_per_second == 1.0
     assert run.measured_set.mean_decode_tokens_per_second == 30.0
@@ -1078,6 +1267,8 @@ print("  physical_devices_acknowledged=1/1 released_units=7 released_payload_byt
 print("  package=fixture scope=target physical_devices_acknowledged=1/1")
 print("  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 remaining_payload_bytes=0 error=None", flush=True)
 """.lstrip()
+        + 'print("device_restoration:")\n'
+        + f"print({('  ' + json.dumps(_device_restoration_payload(), separators=(',', ':')))!r}, flush=True)\n"
     )
 
     report = run_conversation_gate(
@@ -1174,6 +1365,7 @@ def _fully_warm_mock_transcript(*, mutation: str | None = None) -> str:
             "  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 remaining_payload_bytes=0 error=None\n",
         )
     )
+    sections.append(_valid_device_restoration_transcript())
     return "".join(sections)
 
 

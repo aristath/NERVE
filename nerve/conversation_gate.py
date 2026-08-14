@@ -53,6 +53,8 @@ _PHYSICAL_EXECUTION_SUMMARY = re.compile(
     re.escape(_PHYSICAL_EXECUTION_SUMMARY_START) + r"(?P<body>[^{}\n]*)}"
 )
 _SHUTDOWN_MARKER = re.compile(r"(?:^|\n)you> shutdown:\n")
+_DEVICE_RESTORATION_MARKER = re.compile(r"(?:^|\n)device_restoration:\n")
+_DEVICE_RESTORATION_SCHEMA = "nerve.runtime.device_local_memory_restoration.v1"
 _SHUTDOWN_SUMMARY_LINE = re.compile(
     r"^  complete=(true|false) streams=(\d+) packages=(\d+) "
     r"scheduler_in_flight=(\d+)$"
@@ -178,6 +180,22 @@ class ShutdownReport:
 
 
 @dataclass(frozen=True)
+class DeviceRestorationDeviceReport:
+    physical_device_id: str
+    before: dict[str, Any]
+    after: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DeviceRestorationReport:
+    schema: str
+    complete: bool
+    physical_device_count: int
+    restored_device_count: int
+    devices: list[DeviceRestorationDeviceReport]
+
+
+@dataclass(frozen=True)
 class ConversationTurn:
     prompt: str
     response: str
@@ -240,6 +258,7 @@ class ConversationSeedReport:
     transcript_sha256: str
     physical_execution: PhysicalExecutionSummary | None
     shutdown: ShutdownReport
+    device_restoration: DeviceRestorationReport
     discarded_warmup_sets: list[ConversationSetReport]
     measured_set: ConversationSetReport
 
@@ -464,7 +483,18 @@ def parse_shutdown_report(transcript: str) -> ShutdownReport:
         raise ConversationGateError(
             "runtime reported structured shutdown more than once"
         )
-    lines = transcript[markers[0].end() :].splitlines()
+    shutdown_end = len(transcript)
+    restoration_markers = list(_DEVICE_RESTORATION_MARKER.finditer(transcript))
+    if restoration_markers:
+        if (
+            len(restoration_markers) != 1
+            or restoration_markers[0].start() < markers[0].end()
+        ):
+            raise ConversationGateError(
+                "runtime device restoration report is misplaced or repeated"
+            )
+        shutdown_end = restoration_markers[0].start()
+    lines = transcript[markers[0].end() : shutdown_end].splitlines()
     while lines and not lines[-1]:
         lines.pop()
     if len(lines) < 2:
@@ -606,6 +636,287 @@ def parse_shutdown_report(transcript: str) -> ShutdownReport:
                     "runtime shutdown left a physical resource store incomplete"
                 )
     return report
+
+
+def _required_nonnegative_integer(value: Any, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConversationGateError(
+            f"runtime device restoration field {path} must be a non-negative integer"
+        )
+    return value
+
+
+def _required_exact_object(value: Any, keys: set[str], path: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ConversationGateError(
+            f"runtime device restoration field {path} has an invalid schema"
+        )
+    return value
+
+
+def _validated_device_restoration_snapshot(
+    value: Any,
+    path: str,
+) -> dict[str, Any]:
+    snapshot = _required_exact_object(
+        value,
+        {
+            "physical_device_id",
+            "device_name",
+            "pci_address",
+            "api_version",
+            "driver_version",
+            "memory_budget",
+            "memory_accounting",
+            "memory_pressure",
+        },
+        path,
+    )
+    for field in ("physical_device_id", "device_name"):
+        if not isinstance(snapshot[field], str) or not snapshot[field]:
+            raise ConversationGateError(
+                f"runtime device restoration field {path}.{field} must be a non-empty string"
+            )
+    if snapshot["pci_address"] is not None and (
+        not isinstance(snapshot["pci_address"], str) or not snapshot["pci_address"]
+    ):
+        raise ConversationGateError(
+            f"runtime device restoration field {path}.pci_address is invalid"
+        )
+    for field in ("api_version", "driver_version"):
+        _required_nonnegative_integer(snapshot[field], f"{path}.{field}")
+
+    budget = _required_exact_object(
+        snapshot["memory_budget"],
+        {
+            "baseline_available_bytes",
+            "reservable_bytes",
+            "protected_headroom_bytes",
+            "counter_tolerance_bytes",
+        },
+        f"{path}.memory_budget",
+    )
+    accounting = _required_exact_object(
+        snapshot["memory_accounting"],
+        {
+            "baseline_available_bytes",
+            "currently_available_bytes",
+            "reservable_bytes",
+            "tracked_allocation_bytes",
+            "pending_reservation_bytes",
+            "untracked_acquired_bytes",
+            "remaining_bytes",
+            "admissible_remaining_bytes",
+        },
+        f"{path}.memory_accounting",
+    )
+    pressure = _required_exact_object(
+        snapshot["memory_pressure"],
+        {
+            "active",
+            "episode",
+            "observed_available_bytes",
+            "current_deficit_bytes",
+            "peak_deficit_bytes",
+        },
+        f"{path}.memory_pressure",
+    )
+    for field, field_value in budget.items():
+        _required_nonnegative_integer(field_value, f"{path}.memory_budget.{field}")
+    for field, field_value in accounting.items():
+        _required_nonnegative_integer(field_value, f"{path}.memory_accounting.{field}")
+    if not isinstance(pressure["active"], bool):
+        raise ConversationGateError(
+            f"runtime device restoration field {path}.memory_pressure.active must be boolean"
+        )
+    for field in (
+        "episode",
+        "observed_available_bytes",
+        "current_deficit_bytes",
+        "peak_deficit_bytes",
+    ):
+        _required_nonnegative_integer(
+            pressure[field], f"{path}.memory_pressure.{field}"
+        )
+    if accounting["baseline_available_bytes"] != budget["baseline_available_bytes"]:
+        raise ConversationGateError(
+            f"runtime device restoration field {path} has inconsistent baseline accounting"
+        )
+    if accounting["reservable_bytes"] != budget["reservable_bytes"]:
+        raise ConversationGateError(
+            f"runtime device restoration field {path} has inconsistent reservable accounting"
+        )
+    return snapshot
+
+
+def _validate_device_restoration_pair(
+    physical_device_id: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> None:
+    if before["physical_device_id"] != physical_device_id or (
+        after["physical_device_id"] != physical_device_id
+    ):
+        raise ConversationGateError(
+            "runtime device restoration snapshot identity does not match its device report"
+        )
+    identity_fields = (
+        "physical_device_id",
+        "device_name",
+        "pci_address",
+        "api_version",
+        "driver_version",
+    )
+    if any(before[field] != after[field] for field in identity_fields):
+        raise ConversationGateError(
+            f"runtime device restoration changed physical identity for {physical_device_id!r}"
+        )
+    if before["memory_budget"] != after["memory_budget"]:
+        raise ConversationGateError(
+            f"runtime device restoration changed the memory budget for {physical_device_id!r}"
+        )
+    tolerance = before["memory_budget"]["counter_tolerance_bytes"]
+    accounting_tolerances = {
+        "baseline_available_bytes": 0,
+        "reservable_bytes": 0,
+        "tracked_allocation_bytes": 0,
+        "pending_reservation_bytes": 0,
+        "untracked_acquired_bytes": tolerance,
+        "currently_available_bytes": tolerance,
+        "remaining_bytes": tolerance,
+        "admissible_remaining_bytes": tolerance,
+    }
+    for field, allowed_difference in accounting_tolerances.items():
+        before_value = before["memory_accounting"][field]
+        after_value = after["memory_accounting"][field]
+        if abs(before_value - after_value) > allowed_difference:
+            raise ConversationGateError(
+                f"runtime device restoration did not restore {field} for "
+                f"{physical_device_id!r}"
+            )
+    for field in ("active", "episode"):
+        if before["memory_pressure"][field] != after["memory_pressure"][field]:
+            raise ConversationGateError(
+                f"runtime device restoration changed memory pressure for "
+                f"{physical_device_id!r}"
+            )
+
+
+def parse_device_restoration_report(transcript: str) -> DeviceRestorationReport:
+    markers = list(_DEVICE_RESTORATION_MARKER.finditer(transcript))
+    if not markers:
+        raise ConversationGateError("runtime did not report device restoration")
+    if len(markers) != 1:
+        raise ConversationGateError(
+            "runtime reported device restoration more than once"
+        )
+    lines = transcript[markers[0].end() :].splitlines()
+    while lines and not lines[-1]:
+        lines.pop()
+    if len(lines) != 1 or not lines[0].startswith("  "):
+        raise ConversationGateError("runtime device restoration report is malformed")
+    try:
+        payload = json.loads(lines[0][2:])
+    except json.JSONDecodeError as error:
+        raise ConversationGateError(
+            "runtime device restoration report is not valid JSON"
+        ) from error
+    payload = _required_exact_object(
+        payload,
+        {
+            "schema",
+            "complete",
+            "physical_device_count",
+            "restored_device_count",
+            "devices",
+            "errors",
+        },
+        "report",
+    )
+    if payload["schema"] != _DEVICE_RESTORATION_SCHEMA:
+        raise ConversationGateError(
+            "runtime device restoration report has an unsupported schema"
+        )
+    if payload["complete"] is not True:
+        raise ConversationGateError("runtime reported incomplete device restoration")
+    physical_device_count = _required_nonnegative_integer(
+        payload["physical_device_count"], "report.physical_device_count"
+    )
+    restored_device_count = _required_nonnegative_integer(
+        payload["restored_device_count"], "report.restored_device_count"
+    )
+    if physical_device_count == 0 or restored_device_count != physical_device_count:
+        raise ConversationGateError(
+            "runtime device restoration did not restore every selected physical device"
+        )
+    if payload["errors"] != []:
+        raise ConversationGateError("runtime device restoration reported global errors")
+    if not isinstance(payload["devices"], list) or len(payload["devices"]) != (
+        physical_device_count
+    ):
+        raise ConversationGateError(
+            "runtime device restoration device count does not match its summary"
+        )
+
+    devices = []
+    for index, raw_device in enumerate(payload["devices"]):
+        device = _required_exact_object(
+            raw_device,
+            {"physical_device_id", "restored", "before", "after", "errors"},
+            f"report.devices[{index}]",
+        )
+        physical_device_id = device["physical_device_id"]
+        if not isinstance(physical_device_id, str) or not physical_device_id:
+            raise ConversationGateError(
+                "runtime device restoration has an invalid physical device identity"
+            )
+        if device["restored"] is not True or device["errors"] != []:
+            raise ConversationGateError(
+                f"runtime device restoration left {physical_device_id!r} incomplete"
+            )
+        before = _validated_device_restoration_snapshot(
+            device["before"], f"report.devices[{index}].before"
+        )
+        after = _validated_device_restoration_snapshot(
+            device["after"], f"report.devices[{index}].after"
+        )
+        _validate_device_restoration_pair(physical_device_id, before, after)
+        devices.append(
+            DeviceRestorationDeviceReport(
+                physical_device_id=physical_device_id,
+                before=before,
+                after=after,
+            )
+        )
+    if len({device.physical_device_id for device in devices}) != len(devices):
+        raise ConversationGateError(
+            "runtime device restoration repeats a physical device identity"
+        )
+    return DeviceRestorationReport(
+        schema=payload["schema"],
+        complete=True,
+        physical_device_count=physical_device_count,
+        restored_device_count=restored_device_count,
+        devices=devices,
+    )
+
+
+def _validate_shutdown_device_restoration(
+    shutdown: ShutdownReport,
+    device_restoration: DeviceRestorationReport,
+) -> None:
+    shutdown_physical_device_ids = {
+        device.physical_device_id
+        for package_report in shutdown.packages
+        for device in package_report.devices
+    }
+    restoration_physical_device_ids = {
+        device.physical_device_id for device in device_restoration.devices
+    }
+    if not shutdown_physical_device_ids.issubset(restoration_physical_device_ids):
+        raise ConversationGateError(
+            "runtime device restoration omits a physical resource device"
+        )
 
 
 def parse_conversation_transcript(
@@ -1354,6 +1665,7 @@ def run_conversation_gate(
                 "runtime did not report resource residency for shutdown reconciliation"
             )
         shutdown = parse_shutdown_report(transcript)
+        device_restoration = parse_device_restoration_report(transcript)
         if shutdown.packages[0].package_id != package["package_id"]:
             raise ConversationGateError(
                 "runtime shutdown package identity does not match the compiled package"
@@ -1379,6 +1691,7 @@ def run_conversation_gate(
             raise ConversationGateError(
                 "runtime shutdown released units do not match final residency"
             )
+        _validate_shutdown_device_restoration(shutdown, device_restoration)
         runs.append(
             ConversationSeedReport(
                 seed=seed,
@@ -1386,6 +1699,7 @@ def run_conversation_gate(
                 transcript_sha256=hashlib.sha256(transcript.encode()).hexdigest(),
                 physical_execution=physical_execution,
                 shutdown=shutdown,
+                device_restoration=device_restoration,
                 discarded_warmup_sets=reports[:-1],
                 measured_set=reports[-1],
             )
