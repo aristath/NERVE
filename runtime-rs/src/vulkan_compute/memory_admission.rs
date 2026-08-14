@@ -49,9 +49,8 @@ impl VulkanHostMemoryPermit {
         // MemAvailable already reflects committed host allocations. Add the
         // tracked NERVE allocation back to establish a stable accounting
         // envelope, then include pending-but-not-yet-allocated transactions.
-        let maximum_accounted = currently_available_bytes
-            .checked_add(state.tracked_allocation_bytes)
-            .unwrap_or(usize::MAX);
+        let maximum_accounted =
+            currently_available_bytes.saturating_add(state.tracked_allocation_bytes);
         let projected_accounted = state
             .tracked_allocation_bytes
             .checked_add(projected_pending)
@@ -740,6 +739,28 @@ impl VulkanMemoryAdmission {
             .map(|pool| pool.remaining_byte_count())
             .sum()
     }
+}
+
+/// Borrows the active allocation class for short-lived operation scratch.
+///
+/// The child allocation still consumes the exact physical permit selected by
+/// the enclosing stream transaction. Releasing it returns that permit to the
+/// same class, so construction-time upload/readback buffers cannot silently
+/// consume credit reserved for resident buffers mounted afterward.
+fn enter_recyclable_vulkan_memory_admission_subscope(
+) -> Option<VulkanMemoryAdmissionScope> {
+    VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
+        let mut scopes = scopes.borrow_mut();
+        let mut entry = scopes.last()?.clone();
+        entry.scope_id = NEXT_VULKAN_MEMORY_ADMISSION_SCOPE_ID.fetch_add(1, Ordering::Relaxed);
+        entry.recycle_released_capacity = true;
+        let scope_id = entry.scope_id;
+        scopes.push(entry);
+        Some(VulkanMemoryAdmissionScope {
+            scope_id,
+            _not_send: std::marker::PhantomData,
+        })
+    })
 }
 
 impl Drop for VulkanMemoryAdmissionScope {

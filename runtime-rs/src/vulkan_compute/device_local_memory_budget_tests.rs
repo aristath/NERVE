@@ -861,6 +861,69 @@ fn reusable_stream_memory_admission_recycles_released_device_and_host_capacity()
 }
 
 #[test]
+fn operation_scratch_subscope_returns_credit_to_its_active_allocation_class() {
+    let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
+    let device = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(
+        budget,
+    )));
+    let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
+    let device_key = Arc::as_ptr(&device) as usize;
+    let host_key = Arc::as_ptr(&host) as usize;
+    let admission = VulkanMemoryAdmission::from_test_permits(
+        vec![(
+            device_key,
+            VulkanDeviceLocalMemoryPermit::acquire(&device, 1_000_000, 100_000).unwrap(),
+        )],
+        Some((
+            host_key,
+            VulkanHostMemoryPermit::acquire(&host, 1_000_000, 50_000).unwrap(),
+        )),
+    );
+
+    let permanent_device;
+    let permanent_host;
+    {
+        let _permanent = admission.enter();
+        {
+            let _scratch = enter_recyclable_vulkan_memory_admission_subscope()
+                .expect("an active admission creates a recyclable child scope");
+            let scratch_device = take_scoped_device_local_memory_capacity(&device, 10_000)
+                .unwrap()
+                .unwrap()
+                .commit(10_000)
+                .unwrap();
+            let scratch_host = take_scoped_host_memory_capacity(&host, 5_000)
+                .unwrap()
+                .unwrap()
+                .commit(5_000)
+                .unwrap();
+            drop(scratch_device);
+            drop(scratch_host);
+        }
+        assert_eq!(admission.remaining_device_bytes(device_key), 100_000);
+        assert_eq!(admission.remaining_host_bytes(), 50_000);
+        permanent_device = take_scoped_device_local_memory_capacity(&device, 100_000)
+            .unwrap()
+            .unwrap()
+            .commit(100_000)
+            .unwrap();
+        permanent_host = take_scoped_host_memory_capacity(&host, 50_000)
+            .unwrap()
+            .unwrap()
+            .commit(50_000)
+            .unwrap();
+    }
+    admission
+        .ensure_fully_consumed("permanent allocations after operation scratch")
+        .unwrap();
+    drop(permanent_device);
+    drop(permanent_host);
+    drop(admission);
+    assert_eq!(device.lock().unwrap().tracked_allocation_bytes, 0);
+    assert_eq!(host.lock().unwrap().tracked_allocation_bytes, 0);
+}
+
+#[test]
 fn reusable_stream_memory_admission_rejects_partial_commit_without_losing_credit() {
     let budget = VulkanDeviceLocalMemoryBudget::capture(1_000_000);
     let device = Arc::new(Mutex::new(VulkanDeviceLocalMemoryBudgetTracker::new(

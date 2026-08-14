@@ -719,6 +719,19 @@ pub struct VulkanResidentBuffer {
     _shared_host_allocation: Option<Arc<VulkanSharedHostAllocation>>,
     _shared_device_memory_identity: Option<Arc<VulkanSharedDeviceMemoryIdentity>>,
     _device_local_memory_reservation: Option<Arc<VulkanDeviceLocalMemoryReservation>>,
+    _host_memory_reservation: Option<Arc<VulkanHostMemoryReservation>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VulkanResidentBufferMemoryDomain {
+    DeviceLocal,
+    HostVisible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VulkanResidentBufferMemoryRequirement {
+    pub byte_count: usize,
+    pub domain: VulkanResidentBufferMemoryDomain,
 }
 
 /// Page-aligned host memory imported into multiple Vulkan devices. GPUs access
