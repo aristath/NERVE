@@ -1141,6 +1141,41 @@ fn stream_memory_admission_classifies_each_remountable_runner_independently() {
 }
 
 #[test]
+fn permanent_host_requirements_accumulate_across_memory_domains() {
+    let sampler_history_physical_bytes = 2_101_248;
+    let other_shared_host_physical_bytes = 2_097_024;
+    let mut requirements = BTreeMap::from([(
+        VulkanMemoryAdmissionAllocationClass::Permanent,
+        sampler_history_physical_bytes,
+    )]);
+
+    add_classified_host_requirement(
+        &mut requirements,
+        VulkanMemoryAdmissionAllocationClass::Permanent,
+        other_shared_host_physical_bytes,
+        "base shared-host",
+    )
+    .unwrap();
+
+    assert_eq!(
+        requirements[&VulkanMemoryAdmissionAllocationClass::Permanent],
+        sampler_history_physical_bytes + other_shared_host_physical_bytes,
+        "a later permanent host class must add to the exact host-visible requirement instead of replacing it",
+    );
+
+    let before_overflow = requirements.clone();
+    let error = add_classified_host_requirement(
+        &mut requirements,
+        VulkanMemoryAdmissionAllocationClass::Permanent,
+        usize::MAX,
+        "overflow fixture",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("host requirement overflowed"));
+    assert_eq!(requirements, before_overflow);
+}
+
+#[test]
 fn stream_memory_admission_uses_bound_shared_host_ownership() {
     let (base, edge_plans) = physical_execution_edge_base_plan();
     let activations = VulkanDistributedActivationBufferPlan {

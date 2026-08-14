@@ -268,6 +268,26 @@ fn stream_transient_allocation_class(
     }
 }
 
+fn add_classified_host_requirement(
+    requirements: &mut BTreeMap<VulkanMemoryAdmissionAllocationClass, usize>,
+    allocation_class: VulkanMemoryAdmissionAllocationClass,
+    byte_count: usize,
+    concern: &str,
+) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+    if byte_count == 0 {
+        return Ok(());
+    }
+    let class_total = requirements.entry(allocation_class).or_default();
+    *class_total = class_total.checked_add(byte_count).ok_or_else(|| {
+        VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "physical execution {allocation_class:?} {concern} host requirement overflowed",
+            )),
+        )
+    })?;
+    Ok(())
+}
+
 fn external_device_local_resident_requirement_bytes<'a, F>(
     allocations: &[VulkanRuntimeExternalDeviceLocalResidentAllocation],
     device_for: &F,
@@ -645,18 +665,12 @@ where
                     })?;
             }
             VulkanResidentBufferMemoryDomain::HostVisible => {
-                let class_total = host_visible_host_requirements_by_class
-                    .entry(allocation_class)
-                    .or_default();
-                *class_total = class_total
-                    .checked_add(requirement.byte_count)
-                    .ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(
-                                "host-visible transient host requirement overflowed",
-                            ),
-                        )
-                    })?;
+                add_classified_host_requirement(
+                    &mut host_visible_host_requirements_by_class,
+                    allocation_class,
+                    requirement.byte_count,
+                    "host-visible transient",
+                )?;
             }
         }
     }
@@ -725,27 +739,21 @@ where
         )
     })?;
     let mut host_requirements_by_class = host_visible_host_requirements_by_class;
-    if permanent_base_host_requirement_bytes > 0 {
-        host_requirements_by_class.insert(
-            VulkanMemoryAdmissionAllocationClass::Permanent,
-            permanent_base_host_requirement_bytes,
-        );
-    }
+    add_classified_host_requirement(
+        &mut host_requirements_by_class,
+        VulkanMemoryAdmissionAllocationClass::Permanent,
+        permanent_base_host_requirement_bytes,
+        "base shared-host",
+    )?;
     for allocation_class in VulkanMemoryAdmissionAllocationClass::ALL {
         let exact_class_bytes =
             execution_transient_shared_host_requirement_for(allocation_class)?;
-        if exact_class_bytes > 0 {
-            let class_total = host_requirements_by_class
-                .entry(allocation_class)
-                .or_default();
-            *class_total = class_total.checked_add(exact_class_bytes).ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "physical execution {allocation_class:?} shared-host reservation overflowed",
-                    )),
-                )
-            })?;
-        }
+        add_classified_host_requirement(
+            &mut host_requirements_by_class,
+            allocation_class,
+            exact_class_bytes,
+            "execution-transient shared-host",
+        )?;
     }
     let representative = if host_requirements_by_class.is_empty() {
         None
