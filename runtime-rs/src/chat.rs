@@ -11,7 +11,8 @@ use minijinja::{Environment, Error as TemplateError, ErrorKind as TemplateErrorK
 use serde::Serialize;
 
 use crate::{
-    RuntimeCriticalPathPhase, RuntimeCriticalPathReport, VulkanResidentExecutionCounters,
+    RuntimeCriticalPathPhase, RuntimeCriticalPathReport,
+    VulkanResidentDistributedExecutionCounterScope, VulkanResidentExecutionCounters,
     VulkanResidentHfTokenizerTextCodec, VulkanResidentInProcessPlacedPromptEngine,
     VulkanResidentInProcessPlacedPromptEngineSubmittedInputRun, VulkanResidentModelPackageManifest,
     VulkanResidentTokenInputEvent, VulkanResidentTokenRuntimeSchedulerOutputEvent,
@@ -212,6 +213,7 @@ where
         &VulkanResidentInProcessPlacedPromptEngine,
     ) -> Result<(), Box<dyn Error>>,
 {
+    let distributed_execution_scope = VulkanResidentDistributedExecutionCounterScope::enter()?;
     reset_vulkan_resident_execution_counters();
     reset_runtime_critical_path_counters();
     let started = Instant::now();
@@ -466,6 +468,8 @@ where
                 engine,
             )?;
         }
+        let mut execution_counters = vulkan_resident_execution_counters();
+        execution_counters.distributed = distributed_execution_scope.snapshot();
         Ok(VulkanResidentChatTransactionRun {
             generated_token_ids,
             assistant_content,
@@ -478,7 +482,7 @@ where
             generation_run,
             canonical_commit_run,
             canonical_commit_mode,
-            execution_counters: vulkan_resident_execution_counters(),
+            execution_counters,
             critical_path: RuntimeCriticalPathReport::default(),
             generation_terminated_by_protocol,
             elapsed_ns: 0,

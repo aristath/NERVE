@@ -96,6 +96,60 @@ fn distributed_submission_counters_preserve_phase_strategy_and_shards() {
 }
 
 #[test]
+fn distributed_execution_counter_scope_is_transaction_local() {
+    reset_vulkan_resident_execution_counters();
+    let scope = VulkanResidentDistributedExecutionCounterScope::enter().unwrap();
+    record_vulkan_resident_distributed_execution_submission(
+        VulkanResidentDistributedExecutionPhase::Decode,
+        VulkanResidentDistributedExecutionKind::TensorParallel,
+        3,
+    );
+    reset_vulkan_resident_execution_counters();
+    let transaction = scope.snapshot();
+    assert_eq!(transaction.decode.island_submissions, 1);
+    assert_eq!(transaction.decode.shard_submissions, 3);
+    assert_eq!(transaction.decode.tensor_parallel_island_submissions, 1);
+    assert_eq!(transaction.prefill.island_submissions, 0);
+    drop(scope);
+
+    record_vulkan_resident_distributed_execution_submission(
+        VulkanResidentDistributedExecutionPhase::Prefill,
+        VulkanResidentDistributedExecutionKind::Hybrid,
+        2,
+    );
+    assert_eq!(
+        transaction.decode.tensor_parallel_island_submissions,
+        1,
+        "submissions outside the transaction must not mutate its evidence"
+    );
+    let next = VulkanResidentDistributedExecutionCounterScope::enter().unwrap();
+    assert_eq!(
+        next.snapshot(),
+        VulkanResidentDistributedExecutionCounters::default()
+    );
+    drop(next);
+    reset_vulkan_resident_execution_counters();
+}
+
+#[test]
+fn distributed_execution_counter_scope_rejects_ambiguous_nesting() {
+    let scope = VulkanResidentDistributedExecutionCounterScope::enter().unwrap();
+    let error = VulkanResidentDistributedExecutionCounterScope::enter()
+        .err()
+        .expect("a nested scope must fail closed");
+    assert_eq!(
+        error,
+        VulkanError(
+            "distributed execution counter scope is already active on this host thread"
+                .to_string()
+        )
+    );
+    drop(scope);
+    let replacement = VulkanResidentDistributedExecutionCounterScope::enter().unwrap();
+    drop(replacement);
+}
+
+#[test]
 fn deferred_distributed_observation_requires_submitted_queue_work() {
     reset_vulkan_resident_execution_counters();
     let batch = VulkanResidentQueueSubmissionBatch::new();

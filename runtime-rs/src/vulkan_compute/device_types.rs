@@ -193,6 +193,32 @@ pub struct VulkanResidentDistributedExecutionPhaseCounters {
 }
 
 impl VulkanResidentDistributedExecutionPhaseCounters {
+    fn record_submission(
+        &mut self,
+        kind: VulkanResidentDistributedExecutionKind,
+        shard_count: usize,
+    ) {
+        self.island_submissions = self.island_submissions.saturating_add(1);
+        self.shard_submissions = self
+            .shard_submissions
+            .saturating_add(u64::try_from(shard_count).unwrap_or(u64::MAX));
+        let strategy_counter = match kind {
+            VulkanResidentDistributedExecutionKind::TensorParallel => {
+                &mut self.tensor_parallel_island_submissions
+            }
+            VulkanResidentDistributedExecutionKind::WholeExpertParallel => {
+                &mut self.whole_expert_parallel_island_submissions
+            }
+            VulkanResidentDistributedExecutionKind::IntraExpertTensorParallel => {
+                &mut self.intra_expert_tensor_parallel_island_submissions
+            }
+            VulkanResidentDistributedExecutionKind::Hybrid => {
+                &mut self.hybrid_island_submissions
+            }
+        };
+        *strategy_counter = strategy_counter.saturating_add(1);
+    }
+
     fn saturating_accumulate(&mut self, value: Self) {
         self.island_submissions = self
             .island_submissions
@@ -314,6 +340,56 @@ static DISTRIBUTED_DECODE_EXECUTION_COUNTERS: VulkanResidentDistributedExecution
     VulkanResidentDistributedExecutionCounterBank::new();
 static DISTRIBUTED_PREFILL_EXECUTION_COUNTERS: VulkanResidentDistributedExecutionCounterBank =
     VulkanResidentDistributedExecutionCounterBank::new();
+
+thread_local! {
+    static ACTIVE_DISTRIBUTED_EXECUTION_COUNTER_SCOPE:
+        RefCell<Option<Rc<RefCell<VulkanResidentDistributedExecutionCounters>>>> =
+            const { RefCell::new(None) };
+}
+
+/// Captures distributed queue submissions performed by one synchronous host
+/// transaction. Global execution counters remain useful process diagnostics,
+/// but they cannot prove which concurrent conversation submitted an island.
+pub struct VulkanResidentDistributedExecutionCounterScope {
+    counters: Rc<RefCell<VulkanResidentDistributedExecutionCounters>>,
+}
+
+impl VulkanResidentDistributedExecutionCounterScope {
+    pub fn enter() -> Result<Self, VulkanError> {
+        ACTIVE_DISTRIBUTED_EXECUTION_COUNTER_SCOPE.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.is_some() {
+                return Err(VulkanError(
+                    "distributed execution counter scope is already active on this host thread"
+                        .to_string(),
+                ));
+            }
+            let counters = Rc::new(RefCell::new(
+                VulkanResidentDistributedExecutionCounters::default(),
+            ));
+            *active = Some(Rc::clone(&counters));
+            Ok(Self { counters })
+        })
+    }
+
+    pub fn snapshot(&self) -> VulkanResidentDistributedExecutionCounters {
+        *self.counters.borrow()
+    }
+}
+
+impl Drop for VulkanResidentDistributedExecutionCounterScope {
+    fn drop(&mut self) {
+        ACTIVE_DISTRIBUTED_EXECUTION_COUNTER_SCOPE.with(|active| {
+            let mut active = active.borrow_mut();
+            if active
+                .as_ref()
+                .is_some_and(|counters| Rc::ptr_eq(counters, &self.counters))
+            {
+                *active = None;
+            }
+        });
+    }
+}
 
 static RESIDENT_SEQUENCE_PREPARE_CALLS: AtomicU64 = AtomicU64::new(0);
 static RESIDENT_SEQUENCE_RECORDED_COMMAND_BUFFERS: AtomicU64 = AtomicU64::new(0);
@@ -444,6 +520,17 @@ pub(crate) fn record_vulkan_resident_distributed_execution_submission(
             DISTRIBUTED_PREFILL_EXECUTION_COUNTERS.record(kind, shard_count)
         }
     }
+    ACTIVE_DISTRIBUTED_EXECUTION_COUNTER_SCOPE.with(|active| {
+        let Some(counters) = active.borrow().as_ref().map(Rc::clone) else {
+            return;
+        };
+        let mut counters = counters.borrow_mut();
+        let phase_counters = match phase {
+            VulkanResidentDistributedExecutionPhase::Decode => &mut counters.decode,
+            VulkanResidentDistributedExecutionPhase::Prefill => &mut counters.prefill,
+        };
+        phase_counters.record_submission(kind, shard_count);
+    });
 }
 
 pub(crate) fn record_vulkan_resident_component_sequence_device_duration(duration_ns: u64) {

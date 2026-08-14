@@ -871,9 +871,13 @@ For every numbered item below:
   now commit only after direct queue submission or after every queue submission
   in a resident template succeeds; merely enqueueing or mounting a TP island
   cannot manufacture execution evidence, and failed/empty batches publish
-  none. Hardware-neutral schema and adversarial tests are complete; the
-  authorized live gate must show the observed bound and post-submit TP counters
-  across DeepSeek TP windows and the Qwen controls.
+  none. Normal chat captures those post-submit observations in a host-
+  transaction-local scope, so another thread's submissions or global counter
+  reset cannot manufacture, erase, or inherit the conversation's TP evidence;
+  ambiguous nested scopes fail closed. Hardware-neutral schema and adversarial
+  tests are complete; the authorized live gate must show the observed bound and
+  transaction-local post-submit TP counters across DeepSeek TP windows and the
+  Qwen controls.
 - Preserve bounded watchdog and failure handling outside the hot path. A failed
   worker is quarantined at the last causal checkpoint without corrupting other
   devices, streams, or the UI.
