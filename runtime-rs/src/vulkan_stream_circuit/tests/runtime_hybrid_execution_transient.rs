@@ -1332,6 +1332,77 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
 }
 
 #[test]
+fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
+    let package_root = tiny_model_dir();
+    let model = fixture_model_runtime_model_with_one_dynamic_group();
+    let logical_device_id = model.placement.default_device_id.clone();
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let contract = instantiate_runtime_resource_contract(&model).unwrap();
+    let slice = VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning(
+        &package_root,
+        &model,
+        &contract,
+        &tensor_index,
+        &logical_device_id,
+        64,
+    )
+    .unwrap();
+    let execution_plan = VulkanDistributedExecutionPlan {
+        device_ids: Vec::new(),
+        storage_buffer_offset_alignment: 16,
+        dispatches: Vec::new(),
+        execution_islands: Vec::new(),
+        shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+        shared_input_byte_capacity: 0,
+        shared_output_byte_capacity: 0,
+        distributed_parameter_byte_count: 0,
+    };
+    let decode = exact_vulkan_runtime_mounted_decode_transient_plan(
+        &model,
+        std::slice::from_ref(&slice),
+        &execution_plan,
+        &contract,
+        ResourceResidencyPolicy::DemandRetained,
+    )
+    .unwrap();
+    let prefill = exact_vulkan_runtime_hybrid_prefill_runners_transient_plan(
+        &model,
+        &BTreeSet::from(["layer_00".to_string()]),
+        std::slice::from_ref(&slice),
+        &execution_plan,
+        4,
+        &contract,
+        &VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap(),
+        ResourceResidencyPolicy::DemandRetained,
+        0,
+    )
+    .unwrap();
+
+    assert!(!decode.device_allocations.is_empty());
+    assert!(decode.device_allocations.iter().all(|allocation| {
+        allocation.allocation_class == VulkanRuntimeStreamAllocationClass::Permanent
+    }));
+    assert!(decode.device_allocations.iter().any(|allocation| {
+        allocation.concern == "scalar residency gate"
+    }));
+    assert!(prefill.device_allocations.iter().any(|allocation| {
+        allocation.concern == "scalar residency gate"
+            && allocation.allocation_class
+                == VulkanRuntimeStreamAllocationClass::PromptRunner
+    }));
+
+    let eager = exact_vulkan_runtime_mounted_decode_transient_plan(
+        &model,
+        &[slice],
+        &execution_plan,
+        &contract,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    assert_eq!(eager, VulkanRuntimeHybridExecutionTransientPlan::default());
+}
+
+#[test]
 fn runtime_hybrid_exact_prefill_accounts_cross_device_batch_staging_once() {
     let package_root = tiny_model_dir();
     let model = fixture_model_runtime_model_with_remote_middle();

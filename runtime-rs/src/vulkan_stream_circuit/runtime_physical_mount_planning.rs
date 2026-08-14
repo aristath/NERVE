@@ -104,6 +104,13 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             speculative_draft_tokens > 0,
             &baseline_execution_ownership,
         )?;
+    let baseline_decode_transient = exact_vulkan_runtime_mounted_decode_transient_plan(
+        runtime_model,
+        slice_plans,
+        &baseline_execution_plans.decode,
+        resource_contract,
+        residency_policy,
+    )?;
     let mut execution_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
         runtime_model,
         slice_plans,
@@ -118,6 +125,13 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
         .map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(
                 "failed to attach baseline stream-owned dynamic resources: {error}",
+            ))
+        })?;
+    execution_transient
+        .extend(baseline_decode_transient)
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to attach baseline decode transients: {error}",
             ))
         })?;
     execution_transient
@@ -194,6 +208,19 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
                     "failed to attach resolved stream-owned dynamic resources: {error}",
+                ))
+            })?;
+        resolved_transient
+            .extend(exact_vulkan_runtime_mounted_decode_transient_plan(
+                runtime_model,
+                slice_plans,
+                &resolution.plans.execution_plans.decode,
+                resource_contract,
+                residency_policy,
+            )?)
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to attach resolved decode transients: {error}",
                 ))
             })?;
         resolved_transient

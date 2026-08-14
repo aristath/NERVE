@@ -151,6 +151,32 @@ fn physical_mount_admits_stream_owned_dynamic_parameter_tables_once() {
 
     assert!(expected_stream_fork_bytes > 0);
     assert_eq!(dynamic_stream - baseline_stream, expected_stream_fork_bytes);
+
+    let demand = plan_vulkan_runtime_physical_mount(
+        tiny_model_dir(),
+        &dynamic_model,
+        &dynamic_physical,
+        None,
+        64,
+        0,
+        ResourceResidencyPolicy::DemandRetained,
+        &[device],
+        usize::MAX,
+    )
+    .unwrap()
+    .unwrap();
+    let permanent = &demand.physical_execution_residency_plan.device_plans[0]
+        .execution_transient_device_allocations;
+    assert!(permanent.iter().any(|allocation| {
+        allocation.concern == "stream dynamic parameter slots layer_00.ffn_down_projection__ffn_residual:ffn_hidden"
+            && allocation.allocation_class
+                == VulkanRuntimeStreamAllocationClass::Permanent
+    }));
+    assert!(permanent.iter().any(|allocation| {
+        allocation.concern == "scalar residency gate"
+            && allocation.allocation_class
+                == VulkanRuntimeStreamAllocationClass::Permanent
+    }));
 }
 
 #[test]

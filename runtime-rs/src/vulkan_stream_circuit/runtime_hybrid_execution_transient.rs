@@ -420,6 +420,54 @@ fn exact_vulkan_runtime_mounted_prefill_transient_plan(
     })
 }
 
+fn exact_vulkan_runtime_mounted_decode_transient_plan(
+    runtime_model: &VulkanResidentRuntimeModel,
+    slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
+    execution_plan: &VulkanDistributedExecutionPlan,
+    resource_contract: &CompiledResourceResidencyContract,
+    residency_policy: ResourceResidencyPolicy,
+) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanResidentTokenModelPackageError> {
+    let component_ids = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| component.component_id.clone())
+        .collect::<BTreeSet<_>>();
+    let component_owner_logical_device_ids = slice_plans
+        .iter()
+        .flat_map(|slice| {
+            slice
+                .placed_plan
+                .placed_resident_plan
+                .hosted_component_ids
+                .iter()
+                .filter(|component_id| component_ids.contains(*component_id))
+                .map(|component_id| (component_id.clone(), slice.device_id.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let resource_layout = VulkanCompiledResourceAddressLayout::from_contract(resource_contract)
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to plan mounted decode resource layout: {error}",
+            ))
+        })?;
+    exact_vulkan_runtime_hybrid_gate_device_plan(
+        &component_ids,
+        &component_owner_logical_device_ids,
+        execution_plan,
+        1,
+        resource_contract,
+        &resource_layout,
+        residency_policy,
+    )
+    .map_err(|error| {
+        VulkanResidentTokenModelPackageError::new(format!(
+            "failed to plan mounted decode execution transients: {error}",
+        ))
+    })
+}
+
 fn exact_vulkan_runtime_speculative_catch_up_transient_plan(
     runtime_model: &VulkanResidentRuntimeModel,
     decoder_slice_plans: &BTreeMap<String, VulkanResidentModelPackageDeviceSlicePlan>,
