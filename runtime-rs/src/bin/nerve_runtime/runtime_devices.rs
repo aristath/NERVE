@@ -612,10 +612,7 @@ fn runtime_physical_device_bindings_in(
                 )
             })?
     };
-    let mut logical_device_ids = logical_device_ids.to_vec();
-    logical_device_ids.sort();
-    logical_device_ids.dedup();
-    logical_device_ids
+    declared_runtime_logical_device_ids(args, logical_device_ids)
         .into_iter()
         .map(|logical_device_id| {
             let physical_device_index = runtime_mount_physical_device_index(
@@ -745,6 +742,7 @@ fn validate_explicit_logical_device_bindings(
     args: &Args,
     logical_device_ids: &[String],
 ) -> Result<(), io::Error> {
+    let logical_device_ids = declared_runtime_logical_device_ids(args, logical_device_ids);
     let declared = logical_device_ids
         .iter()
         .map(String::as_str)
@@ -766,6 +764,21 @@ fn validate_explicit_logical_device_bindings(
         ));
     }
     Ok(())
+}
+
+fn declared_runtime_logical_device_ids(
+    args: &Args,
+    graph_logical_device_ids: &[String],
+) -> Vec<String> {
+    let mut declared = graph_logical_device_ids.to_vec();
+    declared.extend(
+        args.component_shard_devices
+            .values()
+            .flat_map(|device_ids| device_ids.iter().cloned()),
+    );
+    declared.sort();
+    declared.dedup();
+    declared
 }
 
 fn bound_devices_report(bound_devices: &RuntimeBoundVulkanDevices) -> Vec<RuntimeBoundDevice> {

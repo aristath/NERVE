@@ -26,6 +26,7 @@ mod tests {
         RuntimeSustainedDecodeSample, parse_allowed_physical_device_id, parse_args_from,
         parse_chat_template_variable, parse_device_binding_assignment, parse_source_chain,
         parse_vulkan_device_uuid_ref,
+        declared_runtime_logical_device_ids,
         explicit_physical_mount_report, workload_free_physical_planning_devices,
         rank_runtime_auto_placement_candidates_across_capability_classes,
         resolve_runtime_context_size, resolve_runtime_vulkan_physical_device_ref_in,
@@ -597,7 +598,7 @@ mod tests {
 
     #[test]
     fn explicit_device_bindings_must_exist_in_the_effective_graph() {
-        let args = parse_args_from(
+        let mut args = parse_args_from(
             [
                 "--bind-device",
                 "gpu0=vulkan-uuid:00000000070000000000000000000000",
@@ -619,6 +620,18 @@ mod tests {
         );
         validate_explicit_logical_device_bindings(&args, &["gpu0".to_string(), "gpu1".to_string()])
             .unwrap();
+
+        args.component_shard_devices.insert(
+            "layer_07".to_string(),
+            vec!["runtime_default".to_string(), "gpu1".to_string()],
+        );
+        args.device_bindings.remove("gpu0");
+        validate_explicit_logical_device_bindings(&args, &["runtime_default".to_string()])
+            .unwrap();
+        assert_eq!(
+            declared_runtime_logical_device_ids(&args, &["runtime_default".to_string()]),
+            ["gpu1".to_string(), "runtime_default".to_string()],
+        );
     }
 
     #[test]
@@ -883,6 +896,22 @@ mod tests {
         assert_eq!(split.get("device_a"), Some(&2));
         assert_eq!(split.get("device_b"), Some(&3));
         assert_eq!(split.values().collect::<BTreeSet<_>>().len(), 2);
+
+        let mut shard_args = split_args;
+        shard_args.component_shard_devices.insert(
+            "layer_07".to_string(),
+            vec!["device_a".to_string(), "device_b".to_string()],
+        );
+        let shard_bindings = runtime_physical_device_bindings_in(
+            &shard_args,
+            &["device_a".to_string()],
+            &available_devices,
+        )
+        .unwrap();
+        assert_eq!(
+            shard_bindings,
+            BTreeMap::from([("device_a".to_string(), 2), ("device_b".to_string(), 3)]),
+        );
     }
 
     #[test]
