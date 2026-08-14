@@ -1526,39 +1526,22 @@ fn exact_vulkan_component_batch_snapshot_allocation_bytes(
                     &mut requested_states,
                 )?;
             } else if stage.state_snapshot_binding.is_some() {
-                let writers = dispatch
-                    .descriptors
-                    .iter()
-                    .filter(|descriptor| {
-                        matches!(
-                            descriptor.usage,
-                            VulkanKernelDescriptorUsage::StateWrite
-                                | VulkanKernelDescriptorUsage::StateView
-                        )
-                    })
-                    .filter(|descriptor| {
-                        matches!(
-                            descriptor.resource,
-                            VulkanDescriptorResourceAddress::StateBuffer {
-                                static_bytes: Some(bytes),
-                                ..
-                            } | VulkanDescriptorResourceAddress::StateView {
-                                static_bytes: Some(bytes),
-                                ..
-                            } if bytes > 0
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let [writer] = writers.as_slice() else {
+                let writers = exact_vulkan_component_batch_snapshot_writer_states(dispatch)?;
+                if writers.len() != 1 {
                     return runtime_hybrid_error(format!(
                         "exact hybrid snapshot writer {}.{} has {} static state targets",
                         dispatch.component_id,
                         dispatch.node_id,
                         writers.len(),
                     ));
-                };
-                exact_vulkan_component_batch_insert_snapshot_state(
-                    writer,
+                }
+                let (state, static_bytes) = writers
+                    .into_iter()
+                    .next()
+                    .expect("one snapshot writer was checked above");
+                exact_vulkan_component_batch_insert_snapshot_state_capacity(
+                    state,
+                    static_bytes,
                     &mut requested_states,
                 )?;
             }
@@ -1579,6 +1562,31 @@ fn exact_vulkan_component_batch_snapshot_allocation_bytes(
         }
     }
     Ok(allocations)
+}
+
+fn exact_vulkan_component_batch_snapshot_writer_states(
+    dispatch: &VulkanPreparedDispatch,
+) -> Result<BTreeMap<(String, String), usize>, VulkanRuntimeHybridPlacementError> {
+    let mut writers = BTreeMap::new();
+    for descriptor in &dispatch.descriptors {
+        if !matches!(
+            descriptor.usage,
+            VulkanKernelDescriptorUsage::StateWrite | VulkanKernelDescriptorUsage::StateView
+        ) || !matches!(
+            descriptor.resource,
+            VulkanDescriptorResourceAddress::StateBuffer {
+                static_bytes: Some(bytes),
+                ..
+            } | VulkanDescriptorResourceAddress::StateView {
+                static_bytes: Some(bytes),
+                ..
+            } if bytes > 0
+        ) {
+            continue;
+        }
+        exact_vulkan_component_batch_insert_snapshot_state(descriptor, &mut writers)?;
+    }
+    Ok(writers)
 }
 
 fn exact_vulkan_component_batch_insert_snapshot_state(
@@ -1605,8 +1613,22 @@ fn exact_vulkan_component_batch_insert_snapshot_state(
             ));
         }
     };
-    let key = (component_id.clone(), state_id.clone());
-    if states.insert(key.clone(), static_bytes).is_some_and(|existing| existing != static_bytes) {
+    exact_vulkan_component_batch_insert_snapshot_state_capacity(
+        (component_id.clone(), state_id.clone()),
+        static_bytes,
+        states,
+    )
+}
+
+fn exact_vulkan_component_batch_insert_snapshot_state_capacity(
+    key: (String, String),
+    static_bytes: usize,
+    states: &mut BTreeMap<(String, String), usize>,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    if states
+        .insert(key.clone(), static_bytes)
+        .is_some_and(|existing| existing != static_bytes)
+    {
         return runtime_hybrid_error(format!(
             "exact hybrid snapshot state {:?}.{:?} has conflicting capacities",
             key.0, key.1,

@@ -54,6 +54,63 @@ fn runtime_hybrid_shared_host_ledger_extends_without_collapsing_allocations() {
 }
 
 #[test]
+fn exact_hybrid_snapshot_writers_deduplicate_state_aliases_and_reject_conflicts() {
+    let descriptor = |binding, usage, state_id: &str, static_bytes| {
+        VulkanResolvedDescriptorBinding {
+            binding,
+            usage,
+            name: format!("state-{binding}"),
+            resource: VulkanDescriptorResourceAddress::StateBuffer {
+                component_id: "layer".to_string(),
+                state_id: state_id.to_string(),
+                state_type: "recurrent".to_string(),
+                byte_capacity: static_bytes,
+                static_bytes: Some(static_bytes),
+                bytes_per_activation: None,
+            },
+        }
+    };
+    let mut dispatch = contract_attachment_test_dispatch(0, "layer");
+    dispatch.descriptors = vec![
+        descriptor(1, VulkanKernelDescriptorUsage::StateView, "memory", 4096),
+        descriptor(2, VulkanKernelDescriptorUsage::StateWrite, "memory", 4096),
+    ];
+
+    let writers = exact_vulkan_component_batch_snapshot_writer_states(&dispatch).unwrap();
+    assert_eq!(
+        writers,
+        BTreeMap::from([(("layer".to_string(), "memory".to_string()), 4096)])
+    );
+
+    dispatch.descriptors.push(descriptor(
+        3,
+        VulkanKernelDescriptorUsage::StateWrite,
+        "other-memory",
+        2048,
+    ));
+    assert_eq!(
+        exact_vulkan_component_batch_snapshot_writer_states(&dispatch)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    dispatch.descriptors.pop();
+    dispatch.descriptors.push(descriptor(
+        3,
+        VulkanKernelDescriptorUsage::StateWrite,
+        "memory",
+        2048,
+    ));
+    assert!(
+        exact_vulkan_component_batch_snapshot_writer_states(&dispatch)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting capacities")
+    );
+}
+
+#[test]
 fn speculative_catch_up_transient_matches_one_canonical_component_batch_and_embedding() {
     let package_root = tiny_model_dir();
     let mut model = fixture_model_runtime_model();
