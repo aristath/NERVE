@@ -322,7 +322,14 @@ struct VulkanRuntimePhysicalSelectedResourceSummary {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn plan_vulkan_runtime_physical_mount(
+/// Reconstructs the exact production mount and stream residency transaction
+/// without creating a logical Vulkan device or allocating model buffers.
+///
+/// Callers must supply live safe capacities and exact device identities. A
+/// successful plan is therefore suitable for fail-closed admission preflight;
+/// `None` means that no package-supported prefill width fits the supplied
+/// capacity envelope.
+pub fn plan_vulkan_runtime_physical_mount(
     manifest_dir: impl AsRef<Path>,
     runtime_model: &VulkanResidentRuntimeModel,
     physical_execution_plan: &VulkanRuntimePhysicalExecutionPlan,

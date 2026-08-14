@@ -26,6 +26,7 @@ mod tests {
         RuntimeSustainedDecodeSample, parse_allowed_physical_device_id, parse_args_from,
         parse_chat_template_variable, parse_device_binding_assignment, parse_source_chain,
         parse_vulkan_device_uuid_ref,
+        explicit_physical_mount_report, workload_free_physical_planning_devices,
         rank_runtime_auto_placement_candidates_across_capability_classes,
         resolve_runtime_context_size, resolve_runtime_vulkan_physical_device_ref_in,
         resolve_speculative_draft_tokens, runtime_chat_repl_control, runtime_critical_path_lines,
@@ -33,6 +34,7 @@ mod tests {
         runtime_physical_device_bindings_in, runtime_uses_explicit_placement, submit_chat_turn,
         usage, validate_explicit_distributed_physical_bindings,
         validate_explicit_logical_device_bindings,
+        RuntimeWorkloadFreePhysicalCapacityObservation,
     };
 
     fn formatter(template_source: &str) -> RuntimeChatFormatter {
@@ -837,6 +839,272 @@ mod tests {
             &BTreeMap::from([("gpu0".to_string(), 2), ("gpu1".to_string(), 2)]),
         )
         .unwrap();
+    }
+
+    fn preflight_compute_device(
+        physical_device_index: usize,
+        physical_device_id: &str,
+    ) -> VulkanComputeDeviceInfo {
+        VulkanComputeDeviceInfo {
+            physical_device_index,
+            physical_device_id: physical_device_id.to_string(),
+            device_uuid: [physical_device_index as u8; 16],
+            device_name: format!("GPU {physical_device_index}"),
+            pci_address: None,
+            device_type: "discrete_gpu".to_string(),
+            vendor_id: 0x1002,
+            device_id: physical_device_index as u32,
+            api_version: 14,
+            driver_version: 27,
+            compute_queue_family_indices: vec![0],
+            memory_heaps: vec![nerve_runtime::VulkanMemoryHeapInfo {
+                heap_index: 0,
+                size_bytes: 4_096,
+                device_local: true,
+            }],
+            selected_by_default: physical_device_index == 2,
+        }
+    }
+
+    fn preflight_hardware_profile(
+        physical_device_id: &str,
+        minimum_alignment_bytes: u64,
+    ) -> nerve_runtime::HardwareProcessProfile {
+        nerve_runtime::HardwareProcessProfile {
+            schema: nerve_runtime::HARDWARE_PROCESS_PROFILE_SCHEMA.to_string(),
+            profile_id: format!("profile:{physical_device_id}"),
+            hardware_identity: nerve_runtime::HardwareIdentity {
+                device_kind: nerve_runtime::HardwareDeviceKind::Gpu,
+                stable_device_id: physical_device_id.to_string(),
+                name: physical_device_id.to_string(),
+                vendor_id: "0x1002".to_string(),
+                device_id: "0x0001".to_string(),
+                architecture: "test".to_string(),
+                physical_location: "test".to_string(),
+            },
+            capability_class: "test".to_string(),
+            processes: Vec::new(),
+            memory_domains: vec![nerve_runtime::HardwareMemoryDomain {
+                name: "device_local".to_string(),
+                kind: "device_local_memory_type".to_string(),
+                capacity_bytes: 4_096,
+                host_visible: false,
+                device_local: true,
+                coherent: false,
+                cached: false,
+                minimum_alignment_bytes,
+                properties: BTreeMap::new(),
+            }],
+            interconnects: Vec::new(),
+            measurements: Vec::new(),
+            provenance: nerve_runtime::HardwareProfileProvenance {
+                api: "vulkan".to_string(),
+                api_version: "1.4".to_string(),
+                driver: "test".to_string(),
+                driver_version: "1".to_string(),
+                compiler: "test".to_string(),
+                operating_system: "test".to_string(),
+                discovery_backend: "test".to_string(),
+            },
+            capability_extensions: BTreeMap::new(),
+            identity_extensions: BTreeMap::new(),
+            runtime_bindings: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn workload_free_mount_devices_use_live_capacity_and_production_headroom() {
+        let logical_device_ids = vec!["gpu0".to_string(), "gpu1".to_string()];
+        let bindings = BTreeMap::from([("gpu0".to_string(), 2), ("gpu1".to_string(), 3)]);
+        let compute_devices = vec![
+            preflight_compute_device(2, "physical:2"),
+            preflight_compute_device(3, "physical:3"),
+        ];
+        let profiles = vec![
+            preflight_hardware_profile("physical:2", 32),
+            preflight_hardware_profile("physical:3", 64),
+        ];
+        let snapshots = vec![
+            nerve_runtime::VulkanDeviceLocalMemorySnapshot {
+                physical_device_id: "physical:2".to_string(),
+                device_name: "GPU 2".to_string(),
+                pci_address: None,
+                heap_index: 0,
+                physical_heap_bytes: 4_096,
+                memory_budget_supported: true,
+                budget_bytes: Some(3_000),
+                usage_bytes: Some(1_000),
+                available_bytes: Some(2_000),
+            },
+            nerve_runtime::VulkanDeviceLocalMemorySnapshot {
+                physical_device_id: "physical:3".to_string(),
+                device_name: "GPU 3".to_string(),
+                pci_address: None,
+                heap_index: 0,
+                physical_heap_bytes: 4_096,
+                memory_budget_supported: true,
+                budget_bytes: Some(3_000),
+                usage_bytes: Some(2_000),
+                available_bytes: Some(1_000),
+            },
+        ];
+
+        let (devices, observations) = workload_free_physical_planning_devices(
+            &logical_device_ids,
+            &bindings,
+            &compute_devices,
+            &profiles,
+            &snapshots,
+        )
+        .unwrap();
+
+        assert_eq!(devices[0].safe_capacity_bytes, 1_600);
+        assert_eq!(devices[1].safe_capacity_bytes, 800);
+        assert_eq!(devices[0].storage_buffer_offset_alignment, 32);
+        assert_eq!(devices[1].storage_buffer_offset_alignment, 64);
+        assert_eq!(observations["gpu0"].protected_headroom_bytes, 400);
+        assert_eq!(observations["gpu1"].protected_headroom_bytes, 200);
+
+        let error = workload_free_physical_planning_devices(
+            &logical_device_ids,
+            &bindings,
+            &compute_devices,
+            &profiles,
+            &snapshots[..1],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no live memory snapshot"));
+        assert!(error.to_string().contains("physical:3"));
+    }
+
+    fn preflight_mount_plan() -> nerve_runtime::VulkanRuntimePhysicalMountPlan {
+        let mut breakdown =
+            nerve_runtime::VulkanRuntimePhysicalExecutionResidencyBreakdown::default();
+        breakdown.owner_parameter_bytes_before_distributed_replacement = 100;
+        breakdown.excluded_owner_parameter_bytes = 40;
+        breakdown.distributed_parameter_bytes = 30;
+        breakdown.execution_transient_device_bytes_per_stream = 20;
+        nerve_runtime::VulkanRuntimePhysicalMountPlan {
+            physical_execution_residency_plan:
+                nerve_runtime::VulkanRuntimePhysicalExecutionResidencyPlan {
+                    schema: nerve_runtime::VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA
+                        .to_string(),
+                    package_id: "test-package".to_string(),
+                    device_plans: vec![
+                        nerve_runtime::VulkanRuntimePhysicalExecutionDeviceResidencyPlan {
+                            device_id: "gpu0".to_string(),
+                            breakdown,
+                            mount_device_local_bytes: 100,
+                            stream_device_local_bytes: 50,
+                            stream_shared_host_bytes: 25,
+                            resident_stream_device_allocations: Vec::new(),
+                            external_device_local_resident_allocations: Vec::new(),
+                            execution_transient_device_allocations: Vec::new(),
+                        },
+                    ],
+                    total_mount_device_local_bytes: 100,
+                    total_stream_device_local_bytes: 50,
+                    total_stream_shared_host_bytes: 25,
+                    execution_transient_shared_host_bytes_per_stream: 0,
+                    execution_transient_shared_host_allocations: Vec::new(),
+                    resident_shared_host_allocations: Vec::new(),
+                    shared_stream_control_host_bytes_per_stream: 0,
+                    graph_edge_memory_domains_bound: true,
+                    feedback_control_memory_domain_bound: true,
+                },
+            exact_parameter_resources_by_component: BTreeMap::from([(
+                "layer_00".to_string(),
+                nerve_runtime::VulkanHybridCandidateResources::new(Vec::new()),
+            )]),
+            selected_resource_placements: Vec::new(),
+            selected_resource_cache_quota_bytes_by_logical_device: BTreeMap::from([(
+                "gpu0".to_string(),
+                600,
+            )]),
+            maximum_load_wave_bytes_by_logical_device: BTreeMap::from([(
+                "gpu0".to_string(),
+                64,
+            )]),
+            shared_host_cache_quota_bytes: 4_096,
+            normal_prefill_lane_capacity: 4,
+        }
+    }
+
+    #[test]
+    fn explicit_mount_report_is_complete_and_fails_closed_on_inconsistent_capacity() {
+        let mount = preflight_mount_plan();
+        let planning_devices = vec![nerve_runtime::VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu0".to_string(),
+            identity: nerve_runtime::VulkanPlacementDeviceExecutionIdentity {
+                physical_device_id: "physical:2".to_string(),
+                api_version: 14,
+                driver_version: 27,
+            },
+            safe_capacity_bytes: 800,
+            storage_buffer_offset_alignment: 32,
+        }];
+        let observations = BTreeMap::from([(
+            "gpu0".to_string(),
+            RuntimeWorkloadFreePhysicalCapacityObservation {
+                physical_device_index: 2,
+                physical_heap_bytes: 1_000,
+                memory_budget_supported: true,
+                reported_budget_bytes: Some(1_000),
+                reported_usage_bytes: Some(0),
+                baseline_available_bytes: 1_000,
+                protected_headroom_bytes: 200,
+            },
+        )]);
+
+        let report = explicit_physical_mount_report(
+            &mount,
+            &planning_devices,
+            &observations,
+            131_072,
+            2,
+            ResourceResidencyPolicy::DemandPaged,
+            32_768,
+        )
+        .unwrap();
+
+        assert_eq!(report.context_capacity_activations, 131_072);
+        assert_eq!(report.normal_prefill_lane_capacity, 4);
+        assert_eq!(report.exact_parameter_component_count, 1);
+        assert_eq!(report.devices.len(), 1);
+        assert_eq!(report.devices[0].total_required_device_local_bytes, 150);
+        assert_eq!(report.devices[0].remaining_safe_capacity_bytes, 650);
+        assert_eq!(report.devices[0].selected_resource_cache_quota_bytes, 600);
+        assert_eq!(report.devices[0].maximum_load_wave_bytes, 64);
+        assert_eq!(
+            report.devices[0].residency.distributed_parameter_bytes,
+            30,
+        );
+
+        let missing = explicit_physical_mount_report(
+            &mount,
+            &planning_devices,
+            &BTreeMap::new(),
+            131_072,
+            2,
+            ResourceResidencyPolicy::DemandPaged,
+            32_768,
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("one planning, observation"));
+
+        let mut insufficient = planning_devices;
+        insufficient[0].safe_capacity_bytes = 149;
+        let error = explicit_physical_mount_report(
+            &mount,
+            &insufficient,
+            &observations,
+            131_072,
+            2,
+            ResourceResidencyPolicy::DemandPaged,
+            32_768,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds safe capacity"));
     }
 
     #[test]

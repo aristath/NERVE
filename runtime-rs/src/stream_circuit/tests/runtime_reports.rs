@@ -506,6 +506,49 @@
                     BTreeSet::from(["prefill-contract".to_string()]),
                 )]),
             }),
+            explicit_physical_mount: Some(RuntimeExplicitPhysicalMountReport {
+                schema: RUNTIME_EXPLICIT_PHYSICAL_MOUNT_REPORT_SCHEMA.to_string(),
+                residency_plan_schema:
+                    "nerve.vulkan_runtime_physical_execution_residency_plan.v9".to_string(),
+                context_capacity_activations: 131_072,
+                speculative_draft_tokens: 2,
+                resource_residency_policy: "demand-paged".to_string(),
+                normal_prefill_lane_capacity: 4,
+                host_safe_capacity_bytes: 64 * 1024,
+                total_mount_device_local_bytes: 12 * 1024,
+                total_stream_device_local_bytes: 2 * 1024,
+                total_stream_shared_host_bytes: 1024,
+                shared_host_cache_quota_bytes: 32 * 1024,
+                exact_parameter_component_count: 1,
+                exact_parameter_claim_count: 2,
+                selected_resource_placement_count: 1,
+                selected_resource_assignment_count: 6,
+                graph_edge_memory_domains_bound: true,
+                feedback_control_memory_domain_bound: true,
+                devices: vec![RuntimeExplicitPhysicalMountDeviceReport {
+                    logical_device_id: "vulkan:5".to_string(),
+                    physical_device_id: "physical:5".to_string(),
+                    physical_device_index: 5,
+                    physical_heap_bytes: 32 * 1024,
+                    memory_budget_supported: true,
+                    reported_budget_bytes: Some(30 * 1024),
+                    reported_usage_bytes: Some(4 * 1024),
+                    baseline_available_bytes: 26 * 1024,
+                    safe_capacity_bytes: 20 * 1024,
+                    protected_headroom_bytes: 6 * 1024,
+                    mount_device_local_bytes: 12 * 1024,
+                    stream_device_local_bytes: 2 * 1024,
+                    total_required_device_local_bytes: 14 * 1024,
+                    remaining_safe_capacity_bytes: 6 * 1024,
+                    selected_resource_cache_quota_bytes: 5 * 1024,
+                    maximum_load_wave_bytes: 1024,
+                    residency: RuntimeExplicitPhysicalMountResidencyBreakdownReport {
+                        distributed_parameter_bytes: 4 * 1024,
+                        execution_transient_device_bytes_per_stream: 512,
+                        ..Default::default()
+                    },
+                }],
+            }),
             placement: RuntimeGraphPlacementReport {
                 schema: STREAM_CIRCUIT_PLACEMENT_SCHEMA.to_string(),
                 topology: "series".to_string(),
@@ -548,6 +591,20 @@
             payload["explicit_physical_execution"]["decode_contract_ids_by_component"]
                 ["layer_05_repeat"][0],
             "decode-contract"
+        );
+        assert_eq!(
+            payload["explicit_physical_mount"]["context_capacity_activations"],
+            131_072,
+        );
+        assert_eq!(
+            payload["explicit_physical_mount"]["devices"][0]
+                ["total_required_device_local_bytes"],
+            14 * 1024,
+        );
+        assert_eq!(
+            payload["explicit_physical_mount"]["devices"][0]["residency"]
+                ["distributed_parameter_bytes"],
+            4 * 1024,
         );
     }
 

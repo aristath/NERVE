@@ -38,6 +38,18 @@ pub fn vulkan_device_local_memory_policy() -> VulkanDeviceLocalMemoryPolicy {
     }
 }
 
+/// Applies the runtime's device-local headroom policy to a workload-free
+/// observation of currently available capacity.
+///
+/// Device discovery and admission preflight use this entry point so they do
+/// not need to create a logical Vulkan device merely to reproduce the exact
+/// capacity boundary enforced when that device is opened for execution.
+pub fn vulkan_device_local_memory_budget_from_available_bytes(
+    available_bytes: u64,
+) -> VulkanDeviceLocalMemoryBudget {
+    VulkanDeviceLocalMemoryBudget::capture(available_bytes)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanDeviceLocalMemoryAdmission {
     pub baseline_available_bytes: u64,

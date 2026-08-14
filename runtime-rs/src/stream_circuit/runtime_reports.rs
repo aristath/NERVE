@@ -221,6 +221,8 @@ pub struct RuntimeGraphInspectionReport {
     pub effective_edge_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explicit_physical_execution: Option<RuntimeExplicitPhysicalExecutionReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicit_physical_mount: Option<RuntimeExplicitPhysicalMountReport>,
     pub placement: RuntimeGraphPlacementReport,
 }
 
@@ -229,6 +231,70 @@ pub struct RuntimeExplicitPhysicalExecutionReport {
     pub decode_contract_ids_by_component: BTreeMap<String, BTreeSet<String>>,
     pub decode_batch_contract_ids_by_component: BTreeMap<String, BTreeSet<String>>,
     pub prefill_contract_ids_by_component: BTreeMap<String, BTreeSet<String>>,
+}
+
+pub const RUNTIME_EXPLICIT_PHYSICAL_MOUNT_REPORT_SCHEMA: &str =
+    "nerve.runtime_explicit_physical_mount_report.v1";
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeExplicitPhysicalMountResidencyBreakdownReport {
+    pub owner_parameter_bytes_before_distributed_replacement: usize,
+    pub excluded_owner_parameter_bytes: usize,
+    pub independently_admitted_resource_store_bytes: usize,
+    pub owner_stream_device_bytes: usize,
+    pub owner_stream_control_device_bytes_per_stream: usize,
+    pub owner_edge_buffer_bytes_per_stream: usize,
+    pub distributed_parameter_bytes: usize,
+    pub distributed_shared_activation_device_bytes_per_stream: usize,
+    pub distributed_private_activation_device_bytes_per_stream: usize,
+    pub distributed_shared_host_bytes_per_stream: usize,
+    pub external_edge_device_bytes_per_stream: usize,
+    pub staged_edge_shared_host_bytes_per_stream: usize,
+    pub feedback_control_shared_host_bytes_per_stream: usize,
+    pub execution_transient_device_bytes_per_stream: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeExplicitPhysicalMountDeviceReport {
+    pub logical_device_id: String,
+    pub physical_device_id: String,
+    pub physical_device_index: usize,
+    pub physical_heap_bytes: u64,
+    pub memory_budget_supported: bool,
+    pub reported_budget_bytes: Option<u64>,
+    pub reported_usage_bytes: Option<u64>,
+    pub baseline_available_bytes: usize,
+    pub safe_capacity_bytes: usize,
+    pub protected_headroom_bytes: usize,
+    pub mount_device_local_bytes: usize,
+    pub stream_device_local_bytes: usize,
+    pub total_required_device_local_bytes: usize,
+    pub remaining_safe_capacity_bytes: usize,
+    pub selected_resource_cache_quota_bytes: usize,
+    pub maximum_load_wave_bytes: usize,
+    pub residency: RuntimeExplicitPhysicalMountResidencyBreakdownReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeExplicitPhysicalMountReport {
+    pub schema: String,
+    pub residency_plan_schema: String,
+    pub context_capacity_activations: usize,
+    pub speculative_draft_tokens: usize,
+    pub resource_residency_policy: String,
+    pub normal_prefill_lane_capacity: usize,
+    pub host_safe_capacity_bytes: usize,
+    pub total_mount_device_local_bytes: usize,
+    pub total_stream_device_local_bytes: usize,
+    pub total_stream_shared_host_bytes: usize,
+    pub shared_host_cache_quota_bytes: usize,
+    pub exact_parameter_component_count: usize,
+    pub exact_parameter_claim_count: usize,
+    pub selected_resource_placement_count: usize,
+    pub selected_resource_assignment_count: usize,
+    pub graph_edge_memory_domains_bound: bool,
+    pub feedback_control_memory_domain_bound: bool,
+    pub devices: Vec<RuntimeExplicitPhysicalMountDeviceReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

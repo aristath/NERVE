@@ -315,14 +315,368 @@ fn inspect_device_capabilities(args: &Args) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeWorkloadFreePhysicalCapacityObservation {
+    physical_device_index: usize,
+    physical_heap_bytes: u64,
+    memory_budget_supported: bool,
+    reported_budget_bytes: Option<u64>,
+    reported_usage_bytes: Option<u64>,
+    baseline_available_bytes: usize,
+    protected_headroom_bytes: usize,
+}
+
+fn workload_free_physical_planning_devices(
+    logical_device_ids: &[String],
+    physical_device_index_by_logical_device: &BTreeMap<String, usize>,
+    compute_devices: &[VulkanComputeDeviceInfo],
+    hardware_profiles: &[HardwareProcessProfile],
+    memory_snapshots: &[VulkanDeviceLocalMemorySnapshot],
+) -> Result<
+    (
+        Vec<VulkanRuntimePhysicalPlanningDevice>,
+        BTreeMap<String, RuntimeWorkloadFreePhysicalCapacityObservation>,
+    ),
+    io::Error,
+> {
+    let mut planning_devices = Vec::with_capacity(logical_device_ids.len());
+    let mut observations = BTreeMap::new();
+    for logical_device_id in logical_device_ids {
+        let physical_device_index = physical_device_index_by_logical_device
+            .get(logical_device_id)
+            .copied()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "workload-free mount preflight has no physical binding for logical device {logical_device_id:?}",
+                    ),
+                )
+            })?;
+        let compute_device = compute_devices
+            .iter()
+            .find(|device| device.physical_device_index == physical_device_index)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "workload-free mount preflight cannot find Vulkan physical device index {physical_device_index}",
+                    ),
+                )
+            })?;
+        let profile = hardware_profiles
+            .iter()
+            .find(|profile| {
+                profile.hardware_identity.stable_device_id == compute_device.physical_device_id
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "workload-free mount preflight has no hardware profile for physical device {:?}",
+                        compute_device.physical_device_id,
+                    ),
+                )
+            })?;
+        let snapshot = memory_snapshots
+            .iter()
+            .find(|snapshot| snapshot.physical_device_id == compute_device.physical_device_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "workload-free mount preflight has no live memory snapshot for physical device {:?}",
+                        compute_device.physical_device_id,
+                    ),
+                )
+            })?;
+        let storage_buffer_offset_alignment = profile
+            .memory_domains
+            .iter()
+            .filter(|domain| domain.device_local)
+            .map(|domain| domain.minimum_alignment_bytes)
+            .max()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "workload-free mount preflight has no device-local memory domain for physical device {:?}",
+                        compute_device.physical_device_id,
+                    ),
+                )
+            })?;
+        let storage_buffer_offset_alignment = usize::try_from(
+            storage_buffer_offset_alignment,
+        )
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "storage-buffer alignment exceeds usize for physical device {:?}",
+                    compute_device.physical_device_id,
+                ),
+            )
+        })?;
+        let baseline_available_bytes = snapshot
+            .available_bytes
+            .unwrap_or(snapshot.physical_heap_bytes);
+        let budget =
+            vulkan_device_local_memory_budget_from_available_bytes(baseline_available_bytes);
+        let baseline_available_bytes = usize::try_from(budget.baseline_available_bytes)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "available capacity exceeds usize for physical device {:?}",
+                        compute_device.physical_device_id,
+                    ),
+                )
+            })?;
+        let safe_capacity_bytes = usize::try_from(budget.reservable_bytes).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "safe capacity exceeds usize for physical device {:?}",
+                    compute_device.physical_device_id,
+                ),
+            )
+        })?;
+        let protected_headroom_bytes = usize::try_from(budget.protected_headroom_bytes)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "protected headroom exceeds usize for physical device {:?}",
+                        compute_device.physical_device_id,
+                    ),
+                )
+            })?;
+        planning_devices.push(VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: logical_device_id.clone(),
+            identity: VulkanPlacementDeviceExecutionIdentity {
+                physical_device_id: compute_device.physical_device_id.clone(),
+                api_version: compute_device.api_version,
+                driver_version: compute_device.driver_version,
+            },
+            safe_capacity_bytes,
+            storage_buffer_offset_alignment,
+        });
+        if observations
+            .insert(
+                logical_device_id.clone(),
+                RuntimeWorkloadFreePhysicalCapacityObservation {
+                    physical_device_index,
+                    physical_heap_bytes: snapshot.physical_heap_bytes,
+                    memory_budget_supported: snapshot.memory_budget_supported,
+                    reported_budget_bytes: snapshot.budget_bytes,
+                    reported_usage_bytes: snapshot.usage_bytes,
+                    baseline_available_bytes,
+                    protected_headroom_bytes,
+                },
+            )
+            .is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "workload-free mount preflight repeats logical device {logical_device_id:?}",
+                ),
+            ));
+        }
+    }
+    Ok((planning_devices, observations))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn explicit_physical_mount_report(
+    mount: &VulkanRuntimePhysicalMountPlan,
+    planning_devices: &[VulkanRuntimePhysicalPlanningDevice],
+    observations: &BTreeMap<String, RuntimeWorkloadFreePhysicalCapacityObservation>,
+    context_capacity_activations: usize,
+    speculative_draft_tokens: usize,
+    resource_residency_policy: ResourceResidencyPolicy,
+    host_safe_capacity_bytes: usize,
+) -> Result<RuntimeExplicitPhysicalMountReport, io::Error> {
+    let planning_by_logical_device = planning_devices
+        .iter()
+        .map(|device| (device.logical_device_id.as_str(), device))
+        .collect::<BTreeMap<_, _>>();
+    let residency = &mount.physical_execution_residency_plan;
+    if planning_by_logical_device.len() != planning_devices.len()
+        || residency.device_plans.len() != planning_devices.len()
+        || observations.len() != planning_devices.len()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "physical mount report requires one planning, observation, and residency record per logical device",
+        ));
+    }
+    let mut devices = Vec::with_capacity(residency.device_plans.len());
+    for device in &residency.device_plans {
+        let planning = planning_by_logical_device
+            .get(device.device_id.as_str())
+            .copied()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "physical mount residency has no planning record for logical device {:?}",
+                        device.device_id,
+                    ),
+                )
+            })?;
+        let observation = observations.get(&device.device_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "physical mount residency has no capacity observation for logical device {:?}",
+                    device.device_id,
+                ),
+            )
+        })?;
+        let total_required_device_local_bytes = device
+            .mount_device_local_bytes
+            .checked_add(device.stream_device_local_bytes)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "physical mount report device requirement overflowed",
+                )
+            })?;
+        let remaining_safe_capacity_bytes = planning
+            .safe_capacity_bytes
+            .checked_sub(total_required_device_local_bytes)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "physical mount report exceeds safe capacity on logical device {:?}",
+                        device.device_id,
+                    ),
+                )
+            })?;
+        let selected_resource_cache_quota_bytes = mount
+            .selected_resource_cache_quota_bytes_by_logical_device
+            .get(&device.device_id)
+            .copied()
+            .unwrap_or(0);
+        if selected_resource_cache_quota_bytes > remaining_safe_capacity_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "physical mount report selected-resource quota exceeds remaining safe capacity on logical device {:?}",
+                    device.device_id,
+                ),
+            ));
+        }
+        let breakdown = &device.breakdown;
+        devices.push(RuntimeExplicitPhysicalMountDeviceReport {
+            logical_device_id: device.device_id.clone(),
+            physical_device_id: planning.identity.physical_device_id.clone(),
+            physical_device_index: observation.physical_device_index,
+            physical_heap_bytes: observation.physical_heap_bytes,
+            memory_budget_supported: observation.memory_budget_supported,
+            reported_budget_bytes: observation.reported_budget_bytes,
+            reported_usage_bytes: observation.reported_usage_bytes,
+            baseline_available_bytes: observation.baseline_available_bytes,
+            safe_capacity_bytes: planning.safe_capacity_bytes,
+            protected_headroom_bytes: observation.protected_headroom_bytes,
+            mount_device_local_bytes: device.mount_device_local_bytes,
+            stream_device_local_bytes: device.stream_device_local_bytes,
+            total_required_device_local_bytes,
+            remaining_safe_capacity_bytes,
+            selected_resource_cache_quota_bytes,
+            maximum_load_wave_bytes: mount
+                .maximum_load_wave_bytes_by_logical_device
+                .get(&device.device_id)
+                .copied()
+                .unwrap_or(0),
+            residency: RuntimeExplicitPhysicalMountResidencyBreakdownReport {
+                owner_parameter_bytes_before_distributed_replacement: breakdown
+                    .owner_parameter_bytes_before_distributed_replacement,
+                excluded_owner_parameter_bytes: breakdown.excluded_owner_parameter_bytes,
+                independently_admitted_resource_store_bytes: breakdown
+                    .independently_admitted_resource_store_bytes,
+                owner_stream_device_bytes: breakdown.owner_stream_device_bytes,
+                owner_stream_control_device_bytes_per_stream: breakdown
+                    .owner_stream_control_device_bytes_per_stream,
+                owner_edge_buffer_bytes_per_stream: breakdown
+                    .owner_edge_buffer_bytes_per_stream,
+                distributed_parameter_bytes: breakdown.distributed_parameter_bytes,
+                distributed_shared_activation_device_bytes_per_stream: breakdown
+                    .distributed_shared_activation_device_bytes_per_stream,
+                distributed_private_activation_device_bytes_per_stream: breakdown
+                    .distributed_private_activation_device_bytes_per_stream,
+                distributed_shared_host_bytes_per_stream: breakdown
+                    .distributed_shared_host_bytes_per_stream,
+                external_edge_device_bytes_per_stream: breakdown
+                    .external_edge_device_bytes_per_stream,
+                staged_edge_shared_host_bytes_per_stream: breakdown
+                    .staged_edge_shared_host_bytes_per_stream,
+                feedback_control_shared_host_bytes_per_stream: breakdown
+                    .feedback_control_shared_host_bytes_per_stream,
+                execution_transient_device_bytes_per_stream: breakdown
+                    .execution_transient_device_bytes_per_stream,
+            },
+        });
+    }
+    let exact_parameter_claim_count = mount
+        .exact_parameter_resources_by_component
+        .values()
+        .try_fold(0usize, |count, resources| {
+            count.checked_add(resources.claims.len()).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "physical mount report parameter claim count overflowed",
+                )
+            })
+        })?;
+    let selected_resource_assignment_count = mount
+        .selected_resource_placements
+        .iter()
+        .try_fold(0usize, |count, placement| {
+            count
+                .checked_add(placement.assignments.len())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "physical mount report selected-resource assignment count overflowed",
+                    )
+                })
+        })?;
+    Ok(RuntimeExplicitPhysicalMountReport {
+        schema: RUNTIME_EXPLICIT_PHYSICAL_MOUNT_REPORT_SCHEMA.to_string(),
+        residency_plan_schema: residency.schema.clone(),
+        context_capacity_activations,
+        speculative_draft_tokens,
+        resource_residency_policy: resource_residency_policy.as_runtime_name().to_string(),
+        normal_prefill_lane_capacity: mount.normal_prefill_lane_capacity,
+        host_safe_capacity_bytes,
+        total_mount_device_local_bytes: residency.total_mount_device_local_bytes,
+        total_stream_device_local_bytes: residency.total_stream_device_local_bytes,
+        total_stream_shared_host_bytes: residency.total_stream_shared_host_bytes,
+        shared_host_cache_quota_bytes: mount.shared_host_cache_quota_bytes,
+        exact_parameter_component_count: mount.exact_parameter_resources_by_component.len(),
+        exact_parameter_claim_count,
+        selected_resource_placement_count: mount.selected_resource_placements.len(),
+        selected_resource_assignment_count,
+        graph_edge_memory_domains_bound: residency.graph_edge_memory_domains_bound,
+        feedback_control_memory_domain_bound: residency
+            .feedback_control_memory_domain_bound,
+        devices,
+    })
+}
+
 fn inspect_graph(
     args: &Args,
     package_manifest: &Path,
     manifest_dir: &Path,
     manifest: VulkanResidentModelPackageManifest,
 ) -> Result<(), Box<dyn Error>> {
-    let compute_devices = inspect_compute_devices(args)?;
+    let device_catalog = runtime_vulkan_device_catalog(args)?;
+    let compute_devices = device_catalog.available_compute_devices().to_vec();
     let mut physical_execution_device_ids = Vec::new();
+    let mut explicit_physical_mount = None;
     let explicit_physical_execution = if args.component_shard_devices.is_empty() {
         None
     } else {
@@ -344,14 +698,57 @@ fn inspect_graph(
             &compute_devices,
         )?;
         validate_explicit_distributed_physical_bindings(args, &physical_bindings)?;
-        (!args.component_physical_strategies.is_empty()).then(|| {
-            RuntimeExplicitPhysicalExecutionReport {
+        if args.component_physical_strategies.is_empty() {
+            None
+        } else {
+            let hardware_profiles = device_catalog.available_hardware_profiles()?;
+            let memory_snapshots = device_catalog.device_local_memory_snapshots()?;
+            let (planning_devices, capacity_observations) =
+                workload_free_physical_planning_devices(
+                    &physical_execution_device_ids,
+                    &physical_bindings,
+                    &compute_devices,
+                    &hardware_profiles,
+                    &memory_snapshots,
+                )?;
+            let context_capacity_activations =
+                choose_chat_runtime_context_size(package_manifest, args.context_size)?;
+            let speculative_draft_tokens =
+                effective_speculative_draft_tokens(args, &runtime_model)?;
+            let host_safe_capacity_bytes = vulkan_safe_host_available_bytes()?;
+            let mount = plan_vulkan_runtime_physical_mount(
+                manifest_dir,
+                &runtime_model,
+                &plan,
+                None,
+                context_capacity_activations,
+                speculative_draft_tokens,
+                args.resource_residency_policy,
+                &planning_devices,
+                host_safe_capacity_bytes,
+            )?
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "explicit physical execution cannot admit its exact model, state, transient, lazy-resource, and full-context residency within the current safe device and host capacities",
+                )
+            })?;
+            explicit_physical_mount = Some(explicit_physical_mount_report(
+                &mount,
+                &planning_devices,
+                &capacity_observations,
+                context_capacity_activations,
+                speculative_draft_tokens,
+                args.resource_residency_policy,
+                host_safe_capacity_bytes,
+            )?);
+            Some(RuntimeExplicitPhysicalExecutionReport {
                 decode_contract_ids_by_component: plan.decode_contract_ids_by_component,
                 decode_batch_contract_ids_by_component: plan
                     .decode_batch_contract_ids_by_component,
                 prefill_contract_ids_by_component: plan.prefill_contract_ids_by_component,
-            }
-        })
+            })
+        }
     };
     let source_graph = manifest.resolved_source_graph(manifest_dir.to_path_buf())?;
     let runtime_graph = manifest.runtime_graph_from_controls(
@@ -384,6 +781,7 @@ fn inspect_graph(
         effective_component_count: instance_count,
         effective_edge_count: edge_count,
         explicit_physical_execution,
+        explicit_physical_mount,
         placement: RuntimeGraphPlacementReport {
             schema: placement.schema,
             topology: placement.topology,
