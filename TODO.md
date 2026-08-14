@@ -237,9 +237,24 @@ the local placement calibration, and the mounted graph.
   participants silently resolve to the same physical device. With two distinct
   stable AMD device bindings, DeepSeek `layer_00` resolves exact gate/up plus
   down pairs for all three intra-expert TP phase/shape paths, and separately
-  resolves all three whole-expert paths. This closes the manual-selection and
-  ceremonial-sharding ambiguity but remains preflight evidence, not a
-  real-model TP token.
+  resolves all three whole-expert paths. The exact production mount planner now
+  also admits that real intra-expert TP selection at 128K context, the package
+  default seven speculative tokens, and demand-paged residency. Its
+  workload-free report accounts the complete 46-component graph, exact
+  parameter claims, recurrent state, prefill transients, graph edges,
+  feedback control, lazy-resource cache quotas, maximum expert load waves,
+  live per-device capacity, and the same protected headroom used by execution.
+  The accepted two-R9700 plan requires 17,162,676,852 bytes on the owner and
+  209,680 bytes of fixed helper residency before their separately accounted
+  lazy-resource cache quotas. Compact route-major TP handoffs exclude the
+  logical routing-schedule tail, aliased read/write descriptors resolve to one
+  recurrent state snapshot, and helper-only participants no longer require a
+  duplicate owner slice. Missing execution metadata, unsupported handoff
+  formats, inconsistent state aliases, duplicate physical bindings, incomplete
+  helper records, or insufficient live capacity fail closed. Inspection opens
+  no logical compute device, allocates no model buffer, and submits no GPU work.
+  This closes exact real-package mount/admission—not live TP inference,
+  equivalence, performance, or teardown.
 - Calibration now separates a component-instance-independent compiled
   transaction signature from the exact component contracts used at replay.
   Repeated layers with identical implementation digests, artifacts, operation
@@ -333,8 +348,11 @@ For every numbered item below:
   counters used by the conversation gate. Manual participant selection now
   also requires a unique typed strategy whenever a compiler exposes competing
   distributed families, and the resolved decode/batched-decode/prefill contract
-  IDs can be inspected without model allocation. The remaining acceptance
-  below is the explicitly authorized mounted real-model proof.
+  IDs can be inspected without model allocation. The real DeepSeek package now
+  also passes the exact production mount and full-context capacity transaction
+  for a two-device `layer_00` intra-expert TP island without opening a logical
+  device or submitting work. The remaining acceptance below is the explicitly
+  authorized live real-model proof.
 - On an explicitly selected real transformer component, compare immediate
   decode and package-supported prefill output plus persistent state against the
   canonical single-device execution. Exercise the compiler-declared BF16 and
