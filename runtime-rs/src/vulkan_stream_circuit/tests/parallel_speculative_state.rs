@@ -227,7 +227,8 @@ fn parallel_feedback_allocation_plan_preserves_every_runner_and_history_allocati
     )])
     .unwrap();
 
-    assert_eq!(plan.device_allocations.len(), 4);
+    assert_eq!(plan.device_allocations.len(), 3);
+    assert_eq!(plan.host_visible_allocations.len(), 1);
     assert_eq!(plan.logical_bytes_by_device().unwrap()["gpu0"], 420);
     assert_eq!(
         plan.device_allocations
@@ -235,11 +236,18 @@ fn parallel_feedback_allocation_plan_preserves_every_runner_and_history_allocati
             .map(|allocation| allocation.concern.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "speculative decoder draft resident feedback state ingestion RuntimeTokenIds",
             "speculative decoder draft resident feedback state ingestion CausalStateSnapshotDummy",
             "speculative decoder draft resident feedback source history context",
             "speculative decoder draft resident feedback source history hidden",
         ],
+    );
+    assert_eq!(
+        plan.host_visible_allocations[0].concern,
+        "speculative decoder draft resident feedback state ingestion RuntimeTokenIds",
+    );
+    assert_eq!(
+        plan.host_visible_allocations[0].allocation_class,
+        VulkanRuntimeStreamAllocationClass::Permanent,
     );
 }
 
@@ -247,6 +255,7 @@ fn parallel_feedback_allocation_plan_preserves_every_runner_and_history_allocati
 fn parallel_feedback_allocation_plan_rejects_malformed_or_mismatched_residency() {
     let empty = VulkanParallelSpeculativeFeedbackAllocationPlan::from_decoders(&[], 8).unwrap();
     assert!(empty.device_allocations.is_empty());
+    assert!(empty.host_visible_allocations.is_empty());
 
     let zero_lane = VulkanParallelSpeculativeFeedbackAllocationPlan::from_decoders(&[], 0)
         .unwrap_err();

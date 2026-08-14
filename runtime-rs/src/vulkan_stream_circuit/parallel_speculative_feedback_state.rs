@@ -11,6 +11,7 @@ struct VulkanResidentParallelSpeculativeFeedbackState {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct VulkanParallelSpeculativeFeedbackAllocationPlan {
     device_allocations: Vec<VulkanRuntimeDeviceLocalTransientAllocation>,
+    host_visible_allocations: Vec<VulkanRuntimeHostVisibleTransientAllocation>,
 }
 
 impl VulkanParallelSpeculativeFeedbackAllocationPlan {
@@ -25,6 +26,7 @@ impl VulkanParallelSpeculativeFeedbackAllocationPlan {
         >,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         let mut device_allocations = Vec::new();
+        let mut host_visible_allocations = Vec::new();
         for (decoder_id, device_id, runner_allocations, histories) in decoder_allocations {
             if decoder_id.is_empty() || device_id.is_empty() {
                 return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
@@ -45,17 +47,27 @@ impl VulkanParallelSpeculativeFeedbackAllocationPlan {
                     ),
                 ));
             }
-            device_allocations.extend(runner_allocations.into_iter().map(|allocation| {
-                VulkanRuntimeDeviceLocalTransientAllocation {
-                    logical_device_id: device_id.clone(),
-                    byte_capacity: allocation.byte_capacity,
-                    concern: format!(
-                        "speculative decoder {decoder_id} resident feedback state ingestion {:?}",
-                        allocation.kind,
-                    ),
-                    allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
+            for allocation in runner_allocations {
+                let concern = format!(
+                    "speculative decoder {decoder_id} resident feedback state ingestion {:?}",
+                    allocation.kind,
+                );
+                if allocation.host_visible {
+                    host_visible_allocations.push(VulkanRuntimeHostVisibleTransientAllocation {
+                        logical_device_id: device_id.clone(),
+                        byte_capacity: allocation.byte_capacity,
+                        concern,
+                        allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
+                    });
+                } else {
+                    device_allocations.push(VulkanRuntimeDeviceLocalTransientAllocation {
+                        logical_device_id: device_id.clone(),
+                        byte_capacity: allocation.byte_capacity,
+                        concern,
+                        allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
+                    });
                 }
-            }));
+            }
             for (destination_signal_id, byte_capacity) in histories {
                 if destination_signal_id.is_empty() || byte_capacity == 0 {
                     return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
@@ -75,7 +87,10 @@ impl VulkanParallelSpeculativeFeedbackAllocationPlan {
                 });
             }
         }
-        Ok(Self { device_allocations })
+        Ok(Self {
+            device_allocations,
+            host_visible_allocations,
+        })
     }
 
     fn from_decoders(
@@ -145,11 +160,20 @@ impl VulkanParallelSpeculativeFeedbackAllocationPlan {
         &self,
     ) -> Result<BTreeMap<String, usize>, VulkanResidentInProcessPlacedRuntimeError> {
         let mut totals = BTreeMap::<String, usize>::new();
-        for allocation in &self.device_allocations {
+        for (logical_device_id, byte_capacity) in self
+            .device_allocations
+            .iter()
+            .map(|allocation| (&allocation.logical_device_id, allocation.byte_capacity))
+            .chain(
+                self.host_visible_allocations
+                    .iter()
+                    .map(|allocation| (&allocation.logical_device_id, allocation.byte_capacity)),
+            )
+        {
             let total = totals
-                .entry(allocation.logical_device_id.clone())
+                .entry(logical_device_id.clone())
                 .or_default();
-            *total = total.checked_add(allocation.byte_capacity).ok_or_else(|| {
+            *total = total.checked_add(byte_capacity).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                     "parallel speculative feedback allocation bytes overflowed".to_string(),
                 ))
@@ -183,7 +207,9 @@ where
 {
     let allocation_plan =
         VulkanParallelSpeculativeFeedbackAllocationPlan::from_decoders(decoders, lane_capacity)?;
-    if allocation_plan.device_allocations.is_empty() {
+    if allocation_plan.device_allocations.is_empty()
+        && allocation_plan.host_visible_allocations.is_empty()
+    {
         return Ok(None);
     }
     let mut requirement_bytes_by_device = BTreeMap::<String, usize>::new();
@@ -201,13 +227,52 @@ where
             ))
         })?;
     }
+    let mut host_requirement_bytes = 0usize;
+    let mut host_representative = None;
+    for allocation in &allocation_plan.host_visible_allocations {
+        let device = device_for(&allocation.logical_device_id)?;
+        let requirement = device
+            .host_visible_resident_buffer_memory_requirement(allocation.byte_capacity)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        match requirement.domain {
+            VulkanResidentBufferMemoryDomain::DeviceLocal => {
+                let total = requirement_bytes_by_device
+                    .entry(allocation.logical_device_id.clone())
+                    .or_default();
+                *total = total.checked_add(requirement.byte_count).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "parallel speculative feedback device-local host-visible requirement overflowed"
+                            .to_string(),
+                    ))
+                })?;
+            }
+            VulkanResidentBufferMemoryDomain::HostVisible => {
+                host_requirement_bytes = host_requirement_bytes
+                    .checked_add(requirement.byte_count)
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            "parallel speculative feedback host requirement overflowed"
+                                .to_string(),
+                        ))
+                    })?;
+                host_representative.get_or_insert(device);
+            }
+        }
+    }
     let requirements = requirement_bytes_by_device
         .iter()
         .map(|(device_id, byte_count)| {
             device_for(device_id).map(|device| (device, *byte_count))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    VulkanMemoryAdmission::reserve(&requirements, None)
+    let host_requirement = host_representative
+        .map(|device| {
+            vulkan_safe_host_available_bytes()
+                .map(|available| (device, available, host_requirement_bytes))
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)
+        })
+        .transpose()?;
+    VulkanMemoryAdmission::reserve(&requirements, host_requirement)
         .map(Arc::new)
         .map(Some)
         .map_err(|error| {
