@@ -1726,15 +1726,15 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .filter(|group| group.owner_device_id == package_slice.device_id)
                 .map(|group| group.dispatch_indices())
                 .collect::<Vec<_>>();
-            let replaced_parameter_dispatches = physical_execution_islands
+            let distributed_dispatch_indices = physical_execution_islands
                 .iter()
                 .flatten()
                 .copied()
                 .collect::<BTreeSet<_>>();
             let mounted_bound = mounted
-                .mounted_placed_bound_dispatch_plan_with_replaced_parameter_dispatches(
+                .mounted_placed_bound_dispatch_plan_with_distributed_dispatches(
                     &reusable_manifest,
-                    &replaced_parameter_dispatches,
+                    &distributed_dispatch_indices,
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BoundDispatchPlan)?;
             let tick_plan =

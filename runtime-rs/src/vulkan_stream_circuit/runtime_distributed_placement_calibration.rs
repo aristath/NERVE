@@ -1249,15 +1249,15 @@ impl VulkanRuntimeDistributedPlacementSession {
             .iter()
             .map(VulkanPhysicalExecutionIslandPlan::dispatch_indices)
             .collect::<Vec<_>>();
-        let replaced_parameter_dispatches = physical_execution_islands
+        let distributed_dispatch_indices = physical_execution_islands
             .iter()
             .flatten()
             .copied()
             .collect::<BTreeSet<_>>();
         let mounted_bound = mounted
-            .mounted_placed_bound_dispatch_plan_with_replaced_parameter_dispatches(
+            .mounted_placed_bound_dispatch_plan_with_distributed_dispatches(
                 &reusable_manifest,
-                &replaced_parameter_dispatches,
+                &distributed_dispatch_indices,
             )
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         let terminal_dispatch = mounted_bound

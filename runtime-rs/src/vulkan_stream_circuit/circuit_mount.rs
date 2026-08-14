@@ -447,11 +447,57 @@ impl VulkanMountedPlacedStreamCircuit {
         let prepared_plan = self
             .prepared_dispatch_plan(manifest)
             .map_err(VulkanBoundDispatchPlanError::PreparedDispatch)?;
+        self.mounted_placed_bound_dispatch_plan_from_prepared(
+            &prepared_plan,
+            replaced_dispatch_indices,
+        )
+    }
+
+    pub fn mounted_placed_bound_dispatch_plan_with_distributed_dispatches(
+        &self,
+        manifest: &VulkanReusableKernelArtifactManifest,
+        distributed_dispatch_indices: &BTreeSet<usize>,
+    ) -> Result<VulkanMountedPlacedBoundDispatchPlan, VulkanBoundDispatchPlanError> {
+        let prepared_plan = self
+            .prepared_dispatch_plan(manifest)
+            .map_err(VulkanBoundDispatchPlanError::PreparedDispatch)?;
+        let prepared_by_index = prepared_plan
+            .dispatches
+            .iter()
+            .map(|dispatch| (dispatch.dispatch_index, dispatch))
+            .collect::<BTreeMap<_, _>>();
+        let mut replaced_parameter_dispatches = BTreeSet::new();
+        for dispatch_index in distributed_dispatch_indices {
+            let prepared = prepared_by_index.get(dispatch_index).ok_or(
+                VulkanBoundDispatchPlanError::MissingDistributedDispatch {
+                    dispatch_index: *dispatch_index,
+                },
+            )?;
+            if prepared.descriptors.iter().any(|descriptor| {
+                matches!(
+                    descriptor.resource,
+                    VulkanDescriptorResourceAddress::PermanentParameter { .. }
+                )
+            }) {
+                replaced_parameter_dispatches.insert(*dispatch_index);
+            }
+        }
+        self.mounted_placed_bound_dispatch_plan_from_prepared(
+            &prepared_plan,
+            &replaced_parameter_dispatches,
+        )
+    }
+
+    fn mounted_placed_bound_dispatch_plan_from_prepared(
+        &self,
+        prepared_plan: &VulkanPreparedDispatchPlan,
+        replaced_parameter_dispatches: &BTreeSet<usize>,
+    ) -> Result<VulkanMountedPlacedBoundDispatchPlan, VulkanBoundDispatchPlanError> {
         let bound_plan =
             VulkanBoundDispatchPlan::from_prepared_plan_with_replaced_parameter_dispatches(
-                &prepared_plan,
+                prepared_plan,
                 &self.buffers,
-                replaced_dispatch_indices,
+                replaced_parameter_dispatches,
             )?;
         let placed_bound_plan = VulkanPlacedBoundDispatchPlan::from_bound_plan(
             &bound_plan,

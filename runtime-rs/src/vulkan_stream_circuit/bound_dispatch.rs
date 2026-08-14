@@ -424,6 +424,9 @@ pub enum VulkanBoundDispatchPlanError {
     MissingReplacedDispatch {
         dispatch_index: usize,
     },
+    MissingDistributedDispatch {
+        dispatch_index: usize,
+    },
     ReplacedDispatchHasNoPermanentParameters {
         dispatch_index: usize,
     },
@@ -502,6 +505,10 @@ impl Display for VulkanBoundDispatchPlanError {
             Self::MissingReplacedDispatch { dispatch_index } => write!(
                 f,
                 "cannot replace permanent parameters for missing dispatch {dispatch_index}"
+            ),
+            Self::MissingDistributedDispatch { dispatch_index } => write!(
+                f,
+                "physical execution plan references missing dispatch {dispatch_index}"
             ),
             Self::ReplacedDispatchHasNoPermanentParameters { dispatch_index } => write!(
                 f,

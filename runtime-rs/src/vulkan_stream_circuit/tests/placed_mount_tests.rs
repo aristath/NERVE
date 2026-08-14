@@ -1096,6 +1096,81 @@ fn state_initialization_fills_only_the_prefix_and_uploads_the_page_table() {
 }
 
 #[test]
+fn distributed_binding_replaces_parameters_only_where_they_exist() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let manifest_dir = fixture_model_package_manifest_path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let slice = VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
+        &device,
+        &manifest_dir,
+        fixture_model_runtime_model_with_colocated_three_layer_series(),
+        "gpu0",
+        Some(4),
+    )
+    .unwrap();
+    let mounted = slice.create_mounted_stream_circuit(&device).unwrap();
+    let manifest = resident_package_reusable_kernel_manifest(&mounted.placed_plan);
+    let prepared = mounted.prepared_dispatch_plan(&manifest).unwrap();
+    let parameterized = prepared
+        .dispatches
+        .iter()
+        .find(|dispatch| {
+            dispatch.descriptors.iter().any(|descriptor| {
+                matches!(
+                    descriptor.resource,
+                    VulkanDescriptorResourceAddress::PermanentParameter { .. }
+                )
+            })
+        })
+        .expect("fixture must contain a parameterized dispatch");
+    let parameterless = prepared
+        .dispatches
+        .iter()
+        .find(|dispatch| {
+            dispatch.descriptors.iter().all(|descriptor| {
+                !matches!(
+                    descriptor.resource,
+                    VulkanDescriptorResourceAddress::PermanentParameter { .. }
+                )
+            })
+        })
+        .expect("fixture must contain a parameterless dispatch");
+    let distributed = BTreeSet::from([
+        parameterized.dispatch_index,
+        parameterless.dispatch_index,
+    ]);
+
+    let bound = mounted
+        .mounted_placed_bound_dispatch_plan_with_distributed_dispatches(&manifest, &distributed)
+        .unwrap();
+    let bound_parameterized = bound
+        .dispatches
+        .iter()
+        .find(|dispatch| dispatch.dispatch_index == parameterized.dispatch_index)
+        .unwrap();
+    let bound_parameterless = bound
+        .dispatches
+        .iter()
+        .find(|dispatch| dispatch.dispatch_index == parameterless.dispatch_index)
+        .unwrap();
+    assert!(bound_parameterized.descriptors.len() < parameterized.descriptors.len());
+    assert_eq!(bound_parameterless.descriptors.len(), parameterless.descriptors.len());
+
+    let missing = BTreeSet::from([usize::MAX]);
+    let error = mounted
+        .mounted_placed_bound_dispatch_plan_with_distributed_dispatches(&manifest, &missing)
+        .unwrap_err();
+    assert_eq!(
+        error,
+        VulkanBoundDispatchPlanError::MissingDistributedDispatch {
+            dispatch_index: usize::MAX,
+        }
+    );
+}
+
+#[test]
 fn mounted_placed_stream_circuit_binds_only_local_device_slice() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let (_, mounted) = mounted_remote_middle_slices(&device);
