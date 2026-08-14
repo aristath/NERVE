@@ -1391,17 +1391,27 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                         device.device_id,
                     ))
                 })?;
+            if device
+                .breakdown
+                .owner_stream_control_device_bytes_per_stream
+                == 0
+            {
+                continue;
+            }
             indices_by_physical_device
                 .entry(physical_device_id.clone())
                 .or_default()
                 .push(index);
         }
-        if indices_by_physical_device.is_empty()
-            || physical_device_by_logical_device.len() != next.device_plans.len()
-        {
+        if physical_device_by_logical_device.len() != next.device_plans.len() {
             return Err(VulkanRuntimeResidencyPlanError(
                 "stream-control binding is incomplete or contains extra logical devices"
                     .to_string(),
+            ));
+        }
+        if indices_by_physical_device.is_empty() {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "stream-control binding has no logical execution participants".to_string(),
             ));
         }
 
@@ -1654,27 +1664,6 @@ fn exact_stream_control_shared_host_allocation<'a>(
                 .to_string(),
         ));
     }
-    let mut logical_devices_by_physical = BTreeMap::<String, BTreeSet<String>>::new();
-    for device_id in planned_logical_devices {
-        logical_devices_by_physical
-            .entry(
-                physical_device_by_logical_device
-                    .get(device_id)
-                    .expect("stream-control physical binding was validated above")
-                    .clone(),
-            )
-            .or_default()
-            .insert(device_id.to_string());
-    }
-    let expected_participant_device_ids = logical_devices_by_physical
-        .values()
-        .map(|logical_device_ids| {
-            logical_device_ids
-                .first()
-                .expect("physical stream-control participant set is nonempty")
-                .clone()
-        })
-        .collect::<Vec<_>>();
     let matches = plan
         .resident_shared_host_allocations
         .iter()
@@ -1688,11 +1677,25 @@ fn exact_stream_control_shared_host_allocation<'a>(
             matches.len(),
         )));
     };
-    let expected_owner_device_id = expected_participant_device_ids
-        .first()
-        .expect("stream control has participants");
-    if allocation.owner_device_id != *expected_owner_device_id
-        || allocation.participant_device_ids != expected_participant_device_ids
+    let mut previous_physical_device_id = None::<&str>;
+    let mut physical_participants = BTreeSet::new();
+    let participants_are_exact = allocation.participant_device_ids.iter().all(|device_id| {
+        let Some(physical_device_id) = physical_device_by_logical_device.get(device_id) else {
+            return false;
+        };
+        if !physical_participants.insert(physical_device_id.as_str())
+            || previous_physical_device_id.is_some_and(|previous| {
+                previous >= physical_device_id.as_str()
+            })
+        {
+            return false;
+        }
+        previous_physical_device_id = Some(physical_device_id);
+        true
+    });
+    if allocation.participant_device_ids.is_empty()
+        || allocation.owner_device_id != allocation.participant_device_ids[0]
+        || !participants_are_exact
         || allocation.byte_capacity != VULKAN_STREAM_CONTROL_BYTE_CAPACITY
     {
         return Err(VulkanRuntimeResidencyPlanError(

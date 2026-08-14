@@ -457,6 +457,16 @@ fn exact_shared_host_mount_rejects_missing_extra_and_aliased_participants() {
         participant_device_ids: vec!["owner".to_string()],
         ..allocation.clone()
     };
+    let mounted_owner_only = exact_physical_allocation_devices(
+        &owner_only.owner_device_id,
+        &owner_only.participant_device_ids,
+        owner_only.byte_capacity,
+        &missing,
+        "fixture",
+        &device_for,
+    )
+    .unwrap();
+    assert_eq!(mounted_owner_only.len(), 1);
     assert!(
         exact_physical_allocation_devices(
             &owner_only.owner_device_id,
