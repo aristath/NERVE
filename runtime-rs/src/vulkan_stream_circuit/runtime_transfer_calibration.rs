@@ -317,7 +317,7 @@ fn calibrate_vulkan_runtime_placement_transfer(
         .measure(source, target, 2)?
         .min(transaction.measure(source, target, 3)?)
         .max(1);
-    let output = transaction.output.read_bytes(byte_count)?;
+    let output = transaction.read_output()?;
     validate_runtime_transfer_calibration_output(&fixture, &output)?;
     let output_digest = format!("sha256:{:x}", Sha256::digest(&output));
     Ok(VulkanRuntimePlacementTransferCalibrationReport {
@@ -341,7 +341,7 @@ fn calibrate_vulkan_runtime_placement_transfer(
 
 struct VulkanRuntimeTransferCalibrationTransaction {
     route: VulkanPlacedEdgeTransferRoute,
-    output: Arc<VulkanResidentBuffer>,
+    readback: VulkanResidentBufferReadbackBinding,
     source_copy: Option<VulkanResidentBufferCopy>,
     destination_copy: Option<VulkanResidentBufferCopy>,
     source_signal: VulkanTimelineSemaphore,
@@ -375,19 +375,16 @@ impl VulkanRuntimeTransferCalibrationTransaction {
             .get(1)
             .cloned()
             .ok_or_else(|| VulkanError("transfer calibration omitted its target view".to_string()))?;
-        match shared.route {
+        let (route, output, source_copy, destination_copy, mut buffers) = match shared.route {
             VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
                 source_shared.write_bytes(fixture)?;
-                Ok(Self {
-                    route: VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
-                    output: Arc::clone(&target_shared),
-                    source_copy: None,
-                    destination_copy: None,
-                    source_signal,
-                    destination_wait,
-                    completion,
-                    _buffers: shared.buffers,
-                })
+                (
+                    VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
+                    Arc::clone(&target_shared),
+                    None,
+                    None,
+                    shared.buffers,
+                )
             }
             VulkanSharedResidentBufferRoute::SharedHost => {
                 let source_buffer = Arc::new(source.create_resident_buffer(byte_count)?);
@@ -406,18 +403,33 @@ impl VulkanRuntimeTransferCalibrationTransaction {
                 let mut buffers = shared.buffers;
                 buffers.push(source_buffer);
                 buffers.push(Arc::clone(&target_buffer));
-                Ok(Self {
-                    route: VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
-                    output: target_buffer,
-                    source_copy: Some(source_copy),
-                    destination_copy: Some(destination_copy),
-                    source_signal,
-                    destination_wait,
-                    completion,
-                    _buffers: buffers,
-                })
+                (
+                    VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                    target_buffer,
+                    Some(source_copy),
+                    Some(destination_copy),
+                    buffers,
+                )
             }
-        }
+        };
+        let readback = target.create_resident_buffer_readback_binding(&[
+            VulkanResidentBufferReadRange::new(&output, 0, byte_count)?,
+        ])?;
+        buffers.push(output);
+        Ok(Self {
+            route,
+            readback,
+            source_copy,
+            destination_copy,
+            source_signal,
+            destination_wait,
+            completion,
+            _buffers: buffers,
+        })
+    }
+
+    fn read_output(&self) -> Result<Vec<u8>, VulkanError> {
+        Ok(self.readback.run()?.range_bytes(0)?.to_vec())
     }
 
     fn measure(
@@ -513,6 +525,19 @@ fn validate_runtime_transfer_calibration_output(
 mod runtime_transfer_calibration_validation_tests {
     use super::*;
 
+    fn explicit_vulkan_device(environment_name: &str) -> Option<VulkanComputeDevice> {
+        let physical_device_id = std::env::var(environment_name).ok()?;
+        let encoded = physical_device_id.strip_prefix("vulkan-uuid:")?;
+        if encoded.len() != ash::vk::UUID_SIZE * 2 {
+            return None;
+        }
+        let mut uuid = [0u8; ash::vk::UUID_SIZE];
+        for (index, byte) in uuid.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16).ok()?;
+        }
+        VulkanComputeDevice::new_for_device_uuid(uuid).ok()
+    }
+
     #[test]
     fn fixture_is_nonuniform_and_deterministic() {
         let first = runtime_transfer_calibration_fixture(4096);
@@ -532,6 +557,46 @@ mod runtime_transfer_calibration_validation_tests {
             assert!(validate_runtime_transfer_calibration_output(&fixture, &corrupt).is_err());
         }
         assert!(validate_runtime_transfer_calibration_output(&fixture, &fixture[..256]).is_err());
+    }
+
+    #[test]
+    fn cross_vendor_calibration_validates_both_directed_routes() {
+        let (Some(first), Some(second)) = (
+            explicit_vulkan_device("NERVE_TEST_VULKAN_DEVICE_UUID"),
+            explicit_vulkan_device("NERVE_TEST_VULKAN_SECONDARY_DEVICE_UUID"),
+        ) else {
+            eprintln!("skipping cross-vendor calibration test: explicit device pair unset");
+            return;
+        };
+        assert_ne!(first.physical_device_id(), second.physical_device_id());
+        let before =
+            crate::vulkan_compute::capture_vulkan_device_local_memory_restoration_snapshots([
+                &first, &second,
+            ])
+            .unwrap();
+        for (source, target) in [(&first, &second), (&second, &first)] {
+            let reports = calibrate_vulkan_runtime_placement_transfers(
+                source.physical_device_id(),
+                source,
+                target.physical_device_id(),
+                target,
+                &[32 * 1024],
+            )
+            .unwrap();
+            assert_eq!(reports.len(), 1);
+            assert!(matches!(
+                reports[0].route,
+                VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal
+                    | VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+            ));
+            assert_eq!(reports[0].fixture_digest, reports[0].output_digest);
+        }
+        let restoration =
+            crate::vulkan_compute::quiesce_and_verify_vulkan_device_local_memory_restoration(
+                [&first, &second],
+                &before,
+            );
+        assert!(restoration.complete, "{restoration:#?}");
     }
 
     fn report(

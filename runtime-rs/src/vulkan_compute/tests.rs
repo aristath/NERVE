@@ -1653,6 +1653,44 @@ mod tests {
     }
 
     #[test]
+    fn device_local_readback_uses_staging_after_gpu_write() {
+        let Ok(device) = selected_test_vulkan_device() else {
+            eprintln!("skipping Vulkan readback test: explicit device UUID unset");
+            return;
+        };
+        let byte_count = 32 * 1024;
+        let fixture = (0..byte_count)
+            .map(|index| (index as u8).wrapping_mul(37) ^ 0xa5)
+            .collect::<Vec<_>>();
+        let before = capture_vulkan_device_local_memory_restoration_snapshots([&device]).unwrap();
+        {
+            let mut source = device
+                .create_host_visible_resident_buffer(byte_count)
+                .unwrap();
+            assert!(source.memory_access.cpu_mapping_is_safe());
+            assert!(!source
+                .memory_access
+                .property_flags
+                .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL));
+            source.persistently_map().unwrap();
+            source.write_bytes(&fixture).unwrap();
+            let destination = device.create_resident_buffer(byte_count).unwrap();
+            assert!(
+                destination.memory_access.uses_staging_transfer(),
+                "explicit discrete test target must expose non-device-local staging memory"
+            );
+            device
+                .copy_resident_buffer_bytes(&source, &destination, byte_count)
+                .unwrap();
+
+            assert_eq!(destination.read_bytes(byte_count).unwrap(), fixture);
+        }
+        let restoration =
+            quiesce_and_verify_vulkan_device_local_memory_restoration([&device], &before);
+        assert!(restoration.complete, "{restoration:#?}");
+    }
+
+    #[test]
     fn multi_device_resident_queue_batch_uses_one_host_submission_per_device() {
         fn exact_device_from_env(name: &str) -> VulkanComputeDevice {
             let encoded = std::env::var(name)

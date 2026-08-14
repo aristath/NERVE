@@ -290,3 +290,59 @@ fn memory_type_selection_rejects_implicit_amd_coherent_memory() {
         Some(0)
     );
 }
+
+#[test]
+fn staging_memory_selection_excludes_device_local_bar_memory() {
+    let mut properties = vk::PhysicalDeviceMemoryProperties {
+        memory_type_count: 2,
+        memory_heap_count: 2,
+        ..Default::default()
+    };
+    properties.memory_heaps[0].size = 32 * 1024 * 1024;
+    properties.memory_heaps[1].size = 128 * 1024 * 1024;
+    properties.memory_types[0] = vk::MemoryType {
+        property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL
+            | vk::MemoryPropertyFlags::HOST_VISIBLE
+            | vk::MemoryPropertyFlags::HOST_COHERENT,
+        heap_index: 1,
+    };
+    properties.memory_types[1] = vk::MemoryType {
+        property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
+            | vk::MemoryPropertyFlags::HOST_COHERENT
+            | vk::MemoryPropertyFlags::HOST_CACHED,
+        heap_index: 0,
+    };
+
+    assert_eq!(
+        select_memory_type_index_excluding(
+            &properties,
+            0b11,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::MemoryPropertyFlags::HOST_CACHED,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        select_memory_type_index_excluding(
+            &properties,
+            0b01,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::MemoryPropertyFlags::HOST_CACHED,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ),
+        None
+    );
+    let staging_bits = safe_staging_memory_type_bits(&properties);
+    let preferred_bits = staging_bits & cached_memory_type_bits(&properties);
+    assert_eq!(staging_bits, 0b10);
+    assert_eq!(preferred_bits, 0b10);
+    assert_eq!(
+        select_compatible_staging_memory_type_index(0b11, staging_bits, preferred_bits),
+        Some(1)
+    );
+    assert_eq!(
+        select_compatible_staging_memory_type_index(0b01, staging_bits, preferred_bits),
+        None
+    );
+}

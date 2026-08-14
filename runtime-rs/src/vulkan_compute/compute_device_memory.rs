@@ -1022,34 +1022,27 @@ impl VulkanComputeDevice {
         let directly_mappable = property_flags.contains(
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         );
-        let staging_memory_type_index = if directly_mappable {
-            None
+        let staging_memory_type_bits = if property_flags
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        {
+            safe_staging_memory_type_bits(&memory_properties)
         } else {
-            Some(
-                unsafe {
-                    find_memory_type(
-                        &self.context.instance,
-                        self.physical_device,
-                        u32::MAX,
-                        vk::MemoryPropertyFlags::HOST_VISIBLE
-                            | vk::MemoryPropertyFlags::HOST_COHERENT,
-                        vk::MemoryPropertyFlags::empty(),
-                    )
-                }
-                .ok_or_else(|| {
-                    VulkanError(
-                        "no host-visible coherent memory type for resident staging transfers"
-                            .to_string(),
-                    )
-                })?,
-            )
+            0
         };
+        if !directly_mappable && staging_memory_type_bits == 0 {
+            return Err(VulkanError(
+                "no non-device-local host-visible coherent memory type for safe resident staging transfers"
+                    .to_string(),
+            ));
+        }
         Ok(VulkanResidentMemoryAccess {
             queue_submission: self.compute_queue_submission.clone(),
             queue_family_index: self.queue_family_index,
             device_health: self.device_health.clone(),
             property_flags,
-            staging_memory_type_index,
+            staging_memory_type_bits,
+            preferred_staging_memory_type_bits: staging_memory_type_bits
+                & cached_memory_type_bits(&memory_properties),
         })
     }
 
@@ -1104,6 +1097,7 @@ impl VulkanComputeDevice {
                 byte_capacity,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::empty(),
                 resident_buffer_usage() | vk::BufferUsageFlags::CONDITIONAL_RENDERING_EXT,
                 false,
                 None,
@@ -1231,6 +1225,7 @@ impl VulkanComputeDevice {
                 byte_capacity,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::empty(),
                 true,
                 capacity_permit,
             )?;
@@ -1283,6 +1278,7 @@ impl VulkanComputeDevice {
                 byte_capacity,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 vk::MemoryPropertyFlags::HOST_CACHED,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 true,
                 None,
             )?;
@@ -1326,10 +1322,13 @@ impl VulkanComputeDevice {
             ));
         }
         let (buffer, memory, byte_capacity, memory_access, device_local_memory_reservation) =
-            self.create_resident_storage_buffer(
+            self.create_resident_storage_buffer_with_addressability(
                 byte_capacity,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::HOST_CACHED,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                false,
+                None,
             )?;
         Ok(VulkanResidentBuffer {
             device: self.device.clone(),
@@ -1357,10 +1356,13 @@ impl VulkanComputeDevice {
             ));
         }
         let (buffer, memory, byte_capacity, memory_access, device_local_memory_reservation) =
-            self.create_resident_storage_buffer(
+            self.create_resident_storage_buffer_with_addressability(
                 byte_capacity,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 vk::MemoryPropertyFlags::HOST_CACHED,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                false,
+                None,
             )?;
         Ok(VulkanResidentBuffer {
             device: self.device.clone(),
@@ -1397,6 +1399,7 @@ impl VulkanComputeDevice {
             byte_capacity,
             required_memory_flags,
             preferred_memory_flags,
+            vk::MemoryPropertyFlags::empty(),
             false,
             None,
         )
@@ -1407,6 +1410,7 @@ impl VulkanComputeDevice {
         byte_capacity: usize,
         required_memory_flags: vk::MemoryPropertyFlags,
         preferred_memory_flags: vk::MemoryPropertyFlags,
+        avoided_memory_flags: vk::MemoryPropertyFlags,
         addressable: bool,
         capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
     ) -> Result<
@@ -1428,6 +1432,7 @@ impl VulkanComputeDevice {
             byte_capacity,
             required_memory_flags,
             preferred_memory_flags,
+            avoided_memory_flags,
             usage,
             addressable,
             capacity_permit,
@@ -1439,6 +1444,7 @@ impl VulkanComputeDevice {
         byte_capacity: usize,
         required_memory_flags: vk::MemoryPropertyFlags,
         preferred_memory_flags: vk::MemoryPropertyFlags,
+        avoided_memory_flags: vk::MemoryPropertyFlags,
         usage: vk::BufferUsageFlags,
         addressable: bool,
         capacity_permit: Option<VulkanDeviceLocalMemoryPermit>,
@@ -1467,13 +1473,23 @@ impl VulkanComputeDevice {
                     ))
                 })?;
             let requirements = self.device.get_buffer_memory_requirements(buffer);
-            let memory_type_index = find_memory_type(
+            let memory_type_index = find_memory_type_excluding(
                 &self.context.instance,
                 self.physical_device,
                 requirements.memory_type_bits,
                 required_memory_flags,
                 preferred_memory_flags,
+                avoided_memory_flags,
             )
+            .or_else(|| {
+                find_memory_type(
+                    &self.context.instance,
+                    self.physical_device,
+                    requirements.memory_type_bits,
+                    required_memory_flags,
+                    preferred_memory_flags,
+                )
+            })
             .ok_or_else(|| {
                 self.device.destroy_buffer(buffer, None);
                 VulkanError(format!(
@@ -1524,27 +1540,11 @@ impl VulkanComputeDevice {
                 } else {
                     None
                 };
-            let directly_mappable = property_flags.contains(
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            );
-            let staging_memory_type_index = if directly_mappable {
-                None
-            } else {
-                match find_memory_type(
-                    &self.context.instance,
-                    self.physical_device,
-                    u32::MAX,
-                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                    vk::MemoryPropertyFlags::empty(),
-                ) {
-                    Some(memory_type_index) => Some(memory_type_index),
-                    None => {
-                        self.device.destroy_buffer(buffer, None);
-                        return Err(VulkanError(
-                            "no host-visible coherent memory type for resident staging transfers"
-                                .to_string(),
-                        ));
-                    }
+            let memory_access = match self.resident_memory_access(memory_type_index) {
+                Ok(memory_access) => memory_access,
+                Err(error) => {
+                    self.device.destroy_buffer(buffer, None);
+                    return Err(error);
                 }
             };
             let mut address_flags = vk::MemoryAllocateFlagsInfo::default()
@@ -1575,13 +1575,7 @@ impl VulkanComputeDevice {
                 buffer,
                 memory,
                 byte_capacity,
-                VulkanResidentMemoryAccess {
-                    queue_submission: self.compute_queue_submission.clone(),
-                    queue_family_index: self.queue_family_index,
-                    device_health: self.device_health.clone(),
-                    property_flags,
-                    staging_memory_type_index,
-                },
+                memory_access,
                 device_local_memory_reservation,
             ))
         }

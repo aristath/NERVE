@@ -1087,6 +1087,25 @@ unsafe fn find_memory_type(
     )
 }
 
+unsafe fn find_memory_type_excluding(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    memory_type_bits: u32,
+    required_flags: vk::MemoryPropertyFlags,
+    preferred_flags: vk::MemoryPropertyFlags,
+    excluded_flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    let memory_properties =
+        unsafe { instance.get_physical_device_memory_properties(physical_device) };
+    select_memory_type_index_excluding(
+        &memory_properties,
+        memory_type_bits,
+        required_flags,
+        preferred_flags,
+        excluded_flags,
+    )
+}
+
 fn select_memory_type_index(
     memory_properties: &vk::PhysicalDeviceMemoryProperties,
     memory_type_bits: u32,
@@ -1113,6 +1132,87 @@ fn select_memory_type_index(
         })
 }
 
+fn select_memory_type_index_excluding(
+    memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    memory_type_bits: u32,
+    required_flags: vk::MemoryPropertyFlags,
+    preferred_flags: vk::MemoryPropertyFlags,
+    excluded_flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    let opt_in_memory_flags = vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+        | vk::MemoryPropertyFlags::DEVICE_UNCACHED_AMD;
+    (0..memory_properties.memory_type_count)
+        .filter(|index| {
+            let supported = (memory_type_bits & (1 << index)) != 0;
+            let properties = memory_properties.memory_types[*index as usize].property_flags;
+            supported
+                && properties.contains(required_flags)
+                && !properties.intersects(excluded_flags)
+                && !(properties & opt_in_memory_flags).intersects(opt_in_memory_flags)
+        })
+        .max_by_key(|index| {
+            let memory_type = memory_properties.memory_types[*index as usize];
+            let heap_size = memory_properties.memory_heaps[memory_type.heap_index as usize].size;
+            let preferred_property_count = (memory_type.property_flags & preferred_flags)
+                .as_raw()
+                .count_ones();
+            (preferred_property_count, heap_size)
+        })
+}
+
+fn memory_type_bits_matching(
+    memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    required_flags: vk::MemoryPropertyFlags,
+    excluded_flags: vk::MemoryPropertyFlags,
+) -> u32 {
+    let opt_in_memory_flags = vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD
+        | vk::MemoryPropertyFlags::DEVICE_UNCACHED_AMD;
+    (0..memory_properties.memory_type_count).fold(0u32, |bits, index| {
+        let properties = memory_properties.memory_types[index as usize].property_flags;
+        if properties.contains(required_flags)
+            && !properties.intersects(excluded_flags)
+            && !(properties & opt_in_memory_flags).intersects(opt_in_memory_flags)
+        {
+            bits | (1 << index)
+        } else {
+            bits
+        }
+    })
+}
+
+fn safe_staging_memory_type_bits(
+    memory_properties: &vk::PhysicalDeviceMemoryProperties,
+) -> u32 {
+    memory_type_bits_matching(
+        memory_properties,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )
+}
+
+fn cached_memory_type_bits(memory_properties: &vk::PhysicalDeviceMemoryProperties) -> u32 {
+    memory_type_bits_matching(
+        memory_properties,
+        vk::MemoryPropertyFlags::HOST_CACHED,
+        vk::MemoryPropertyFlags::empty(),
+    )
+}
+
+fn select_compatible_staging_memory_type_index(
+    buffer_memory_type_bits: u32,
+    staging_memory_type_bits: u32,
+    preferred_staging_memory_type_bits: u32,
+) -> Option<u32> {
+    let compatible = buffer_memory_type_bits & staging_memory_type_bits;
+    let preferred = compatible & preferred_staging_memory_type_bits;
+    let selected = if preferred != 0 {
+        preferred
+    } else {
+        compatible
+    };
+    (selected != 0).then(|| selected.trailing_zeros())
+}
+
 unsafe fn write_device_local_bytes(
     device: &ash::Device,
     destination: vk::Buffer,
@@ -1122,15 +1222,12 @@ unsafe fn write_device_local_bytes(
     input: &[u8],
 ) -> Result<(), VulkanError> {
     access.device_health.require_healthy()?;
-    let memory_type_index = access
-        .staging_memory_type_index
-        .ok_or_else(|| VulkanError("device-local buffer has no staging memory type".to_string()))?;
     let (staging_buffer, staging_memory) = unsafe {
         create_temporary_staging_buffer(
             device,
             byte_len,
             vk::BufferUsageFlags::TRANSFER_SRC,
-            memory_type_index,
+            access,
         )?
     };
     let result = (|| {
@@ -1167,15 +1264,12 @@ unsafe fn read_device_local_bytes(
     byte_len: vk::DeviceSize,
 ) -> Result<Vec<u8>, VulkanError> {
     access.device_health.require_healthy()?;
-    let memory_type_index = access
-        .staging_memory_type_index
-        .ok_or_else(|| VulkanError("device-local buffer has no staging memory type".to_string()))?;
     let (staging_buffer, staging_memory) = unsafe {
         create_temporary_staging_buffer(
             device,
             byte_len,
             vk::BufferUsageFlags::TRANSFER_DST,
-            memory_type_index,
+            access,
         )?
     };
     let result = (|| unsafe {
@@ -1207,7 +1301,7 @@ unsafe fn create_temporary_staging_buffer(
     device: &ash::Device,
     byte_len: vk::DeviceSize,
     usage: vk::BufferUsageFlags,
-    memory_type_index: u32,
+    access: &VulkanResidentMemoryAccess,
 ) -> Result<(vk::Buffer, vk::DeviceMemory), VulkanError> {
     let buffer_info = vk::BufferCreateInfo::default()
         .size(byte_len)
@@ -1216,12 +1310,20 @@ unsafe fn create_temporary_staging_buffer(
     let buffer = unsafe { device.create_buffer(&buffer_info, None) }
         .map_err(|error| VulkanError(format!("failed to create staging buffer: {error:?}")))?;
     let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-    if requirements.memory_type_bits & (1 << memory_type_index) == 0 {
-        unsafe { device.destroy_buffer(buffer, None) };
-        return Err(VulkanError(format!(
-            "staging memory type {memory_type_index} is incompatible with transfer buffer"
-        )));
-    }
+    let memory_type_index = match select_compatible_staging_memory_type_index(
+        requirements.memory_type_bits,
+        access.staging_memory_type_bits,
+        access.preferred_staging_memory_type_bits,
+    ) {
+        Some(memory_type_index) => memory_type_index,
+        None => {
+            unsafe { device.destroy_buffer(buffer, None) };
+            return Err(VulkanError(
+                "transfer buffer has no compatible non-device-local host-visible coherent staging memory type"
+                    .to_string(),
+            ));
+        }
+    };
     let memory_info = vk::MemoryAllocateInfo::default()
         .allocation_size(requirements.size)
         .memory_type_index(memory_type_index);

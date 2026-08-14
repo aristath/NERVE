@@ -7,9 +7,9 @@ impl VulkanResidentBuffer {
         if self.persistent_mapping.is_some() {
             return Ok(());
         }
-        if !self.memory_access.is_directly_mappable() {
+        if !self.memory_access.cpu_mapping_is_safe() {
             return Err(VulkanError(
-                "resident buffer memory is not host-visible and coherent".to_string(),
+                "resident buffer memory is not safe for direct CPU mapping".to_string(),
             ));
         }
         let pointer = unsafe {
@@ -134,7 +134,18 @@ impl VulkanResidentBuffer {
                 );
             }
             Ok(())
-        } else if self.memory_access.is_directly_mappable() {
+        } else if self.memory_access.uses_staging_transfer() {
+            unsafe {
+                write_device_local_bytes(
+                    &self.device,
+                    self.buffer,
+                    &self.memory_access,
+                    offset as vk::DeviceSize,
+                    byte_len,
+                    input,
+                )
+            }
+        } else if self.memory_access.cpu_mapping_is_safe() {
             unsafe {
                 write_byte_memory_at(
                     &self.device,
@@ -150,16 +161,9 @@ impl VulkanResidentBuffer {
                 )
             }
         } else {
-            unsafe {
-                write_device_local_bytes(
-                    &self.device,
-                    self.buffer,
-                    &self.memory_access,
-                    offset as vk::DeviceSize,
-                    byte_len,
-                    input,
-                )
-            }
+            Err(VulkanError(
+                "resident buffer has no safe host upload path".to_string(),
+            ))
         }
     }
 
@@ -188,7 +192,17 @@ impl VulkanResidentBuffer {
                 unsafe { std::slice::from_raw_parts((address as *const u8).add(offset), len) }
                     .to_vec(),
             )
-        } else if self.memory_access.is_directly_mappable() {
+        } else if self.memory_access.uses_staging_transfer() {
+            unsafe {
+                read_device_local_bytes(
+                    &self.device,
+                    self.buffer,
+                    &self.memory_access,
+                    offset as vk::DeviceSize,
+                    byte_len,
+                )
+            }
+        } else if self.memory_access.cpu_mapping_is_safe() {
             unsafe {
                 read_byte_memory_at(
                     &self.device,
@@ -204,15 +218,9 @@ impl VulkanResidentBuffer {
                 )
             }
         } else {
-            unsafe {
-                read_device_local_bytes(
-                    &self.device,
-                    self.buffer,
-                    &self.memory_access,
-                    offset as vk::DeviceSize,
-                    byte_len,
-                )
-            }
+            Err(VulkanError(
+                "resident buffer has no safe host readback path".to_string(),
+            ))
         }
     }
 

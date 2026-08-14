@@ -1492,7 +1492,8 @@ struct VulkanResidentMemoryAccess {
     queue_family_index: u32,
     device_health: VulkanDeviceHealth,
     property_flags: vk::MemoryPropertyFlags,
-    staging_memory_type_index: Option<u32>,
+    staging_memory_type_bits: u32,
+    preferred_staging_memory_type_bits: u32,
 }
 
 impl VulkanResidentMemoryAccess {
@@ -1500,6 +1501,14 @@ impl VulkanResidentMemoryAccess {
         self.property_flags.contains(
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )
+    }
+
+    fn uses_staging_transfer(&self) -> bool {
+        self.staging_memory_type_bits != 0
+    }
+
+    fn cpu_mapping_is_safe(&self) -> bool {
+        self.is_directly_mappable() && !self.uses_staging_transfer()
     }
 }
 
