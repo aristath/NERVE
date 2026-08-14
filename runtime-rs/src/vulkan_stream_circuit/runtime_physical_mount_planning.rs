@@ -110,6 +110,11 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
         &baseline_execution_plans.decode,
         resource_contract,
         residency_policy,
+        devices,
+        residency_plan
+            .context_capacity_activations
+            .max(1)
+            .min(VULKAN_BACKEND_LOOP_MAX_WINDOW),
     )?;
     let mut execution_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
         runtime_model,
@@ -217,6 +222,11 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
                 &resolution.plans.execution_plans.decode,
                 resource_contract,
                 residency_policy,
+                devices,
+                residency_plan
+                    .context_capacity_activations
+                    .max(1)
+                    .min(VULKAN_BACKEND_LOOP_MAX_WINDOW),
             )?)
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(

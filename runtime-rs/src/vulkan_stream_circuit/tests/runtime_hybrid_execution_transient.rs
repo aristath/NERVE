@@ -1,3 +1,22 @@
+fn selected_resource_mount_test_device(
+    logical_device_id: &str,
+) -> VulkanRuntimeSelectedResourceMountDevice {
+    selected_resource_mount_test_device_on(logical_device_id, "gpu0")
+}
+
+fn selected_resource_mount_test_device_on(
+    logical_device_id: &str,
+    physical_device_id: &str,
+) -> VulkanRuntimeSelectedResourceMountDevice {
+    VulkanRuntimeSelectedResourceMountDevice {
+        logical_device_id: logical_device_id.to_string(),
+        physical_device_id: physical_device_id.to_string(),
+        execution_identity: hybrid_test_device(physical_device_id),
+        live_safe_capacity_bytes: usize::MAX,
+        upload_alignment: 8,
+    }
+}
+
 #[test]
 fn runtime_hybrid_shared_host_ledger_extends_without_collapsing_allocations() {
     let mut normal = VulkanRuntimeHybridExecutionTransientPlan::default();
@@ -51,6 +70,128 @@ fn runtime_hybrid_shared_host_ledger_extends_without_collapsing_allocations() {
         .unwrap_err();
     assert!(malformed.to_string().contains("owner participant"));
     assert_eq!(normal, original);
+}
+
+#[test]
+fn decode_pipeline_predicate_is_local_for_one_logical_device() {
+    let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
+    add_exact_vulkan_runtime_decode_pipeline_predicate(
+        &mut plan,
+        &["gpu0".to_string()],
+        &BTreeMap::from([("gpu0".to_string(), "physical-a".to_string())]),
+    )
+    .unwrap();
+
+    assert_eq!(plan.device_allocations.len(), 1);
+    assert_eq!(plan.device_allocations[0].logical_device_id, "gpu0");
+    assert_eq!(
+        plan.device_allocations[0].byte_capacity,
+        VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+    );
+    assert_eq!(
+        plan.device_allocations[0].concern,
+        "decode demand-feedback pipeline predicate",
+    );
+    assert!(plan.shared_host_allocations.is_empty());
+}
+
+#[test]
+fn decode_pipeline_predicate_is_one_shared_allocation_for_multiple_logical_devices() {
+    let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
+    let logical_device_ids = ["gpu1".to_string(), "gpu0".to_string()];
+    add_exact_vulkan_runtime_decode_pipeline_predicate(
+        &mut plan,
+        &logical_device_ids,
+        &BTreeMap::from([
+            ("gpu0".to_string(), "physical-a".to_string()),
+            ("gpu1".to_string(), "physical-b".to_string()),
+        ]),
+    )
+    .unwrap();
+
+    assert!(plan.device_allocations.is_empty());
+    assert_eq!(plan.shared_host_allocations.len(), 1);
+    assert_eq!(plan.shared_host_allocations[0].owner_device_id, "gpu1");
+    assert_eq!(
+        plan.shared_host_allocations[0].participant_device_ids,
+        vec!["gpu0".to_string(), "gpu1".to_string()],
+    );
+    assert_eq!(
+        plan.shared_host_allocations[0].byte_capacity,
+        VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+    );
+    assert_eq!(
+        plan.shared_host_allocations[0].concern,
+        "decode demand-feedback pipeline predicate",
+    );
+}
+
+#[test]
+fn decode_shard_predicate_uses_physical_identity_for_locality() {
+    let physical_devices = BTreeMap::from([
+        ("owner".to_string(), "physical-a".to_string()),
+        ("alias".to_string(), "physical-a".to_string()),
+        ("remote".to_string(), "physical-b".to_string()),
+    ]);
+    let mut local = VulkanRuntimeHybridExecutionTransientPlan::default();
+    add_exact_vulkan_runtime_decode_shard_predicate(
+        &mut local,
+        "owner",
+        "alias",
+        &physical_devices,
+    )
+    .unwrap();
+    assert_eq!(local.device_allocations.len(), 1);
+    assert_eq!(local.device_allocations[0].logical_device_id, "owner");
+    assert_eq!(
+        local.device_allocations[0].concern,
+        "decode local shard residency predicate",
+    );
+    assert!(local.shared_host_allocations.is_empty());
+
+    let mut remote = VulkanRuntimeHybridExecutionTransientPlan::default();
+    add_exact_vulkan_runtime_decode_shard_predicate(
+        &mut remote,
+        "owner",
+        "remote",
+        &physical_devices,
+    )
+    .unwrap();
+    assert!(remote.device_allocations.is_empty());
+    assert_eq!(remote.shared_host_allocations.len(), 1);
+    assert_eq!(
+        remote.shared_host_allocations[0].participant_device_ids,
+        vec!["owner".to_string(), "remote".to_string()],
+    );
+    assert_eq!(
+        remote.shared_host_allocations[0].concern,
+        "decode cross-device shard residency predicate",
+    );
+}
+
+#[test]
+fn decode_predicate_planning_rejects_incomplete_bindings_atomically() {
+    let original = VulkanRuntimeHybridExecutionTransientPlan::default();
+    let mut pipeline = original.clone();
+    let error = add_exact_vulkan_runtime_decode_pipeline_predicate(
+        &mut pipeline,
+        &["gpu0".to_string(), "gpu1".to_string()],
+        &BTreeMap::from([("gpu0".to_string(), "physical-a".to_string())]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unbound logical device"));
+    assert_eq!(pipeline, original);
+
+    let mut shard = original.clone();
+    let error = add_exact_vulkan_runtime_decode_shard_predicate(
+        &mut shard,
+        "gpu0",
+        "gpu1",
+        &BTreeMap::from([("gpu0".to_string(), "physical-a".to_string())]),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("participant \"gpu1\" is unbound"));
+    assert_eq!(shard, original);
 }
 
 #[test]
@@ -1313,6 +1454,8 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
         &contract,
         &layout,
         ResourceResidencyPolicy::DemandRetained,
+        1,
+        None,
     )
     .unwrap();
     let four = exact_vulkan_runtime_hybrid_gate_device_plan(
@@ -1323,6 +1466,8 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
         &contract,
         &layout,
         ResourceResidencyPolicy::DemandRetained,
+        1,
+        None,
     )
     .unwrap();
     assert!(one.device_bytes_by_logical_device["gpu0"] > size_of::<u32>());
@@ -1381,6 +1526,8 @@ fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
         &execution_plan,
         &contract,
         ResourceResidencyPolicy::DemandRetained,
+        &[selected_resource_mount_test_device(&logical_device_id)],
+        4,
     )
     .unwrap();
     let prefill = exact_vulkan_runtime_hybrid_prefill_runners_transient_plan(
@@ -1403,10 +1550,81 @@ fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
     assert!(decode.device_allocations.iter().any(|allocation| {
         allocation.concern == "scalar residency gate"
     }));
+    assert_eq!(
+        decode
+            .device_allocations
+            .iter()
+            .filter(|allocation| {
+                allocation.concern == "decode demand-feedback pipeline predicate"
+            })
+            .count(),
+        1,
+    );
+    assert!(decode.device_allocations.iter().all(|allocation| {
+        allocation.concern != "scalar residency predicate"
+    }));
+    assert!(decode.shared_host_allocations.is_empty());
+
+    let remote_logical_device_id = "tp_remote".to_string();
+    let distributed_decode = exact_vulkan_runtime_mounted_decode_transient_plan(
+        &model,
+        std::slice::from_ref(&slice),
+        &execution_plan,
+        &contract,
+        ResourceResidencyPolicy::DemandRetained,
+        &[
+            selected_resource_mount_test_device_on(&logical_device_id, "physical0"),
+            selected_resource_mount_test_device_on(&remote_logical_device_id, "physical1"),
+        ],
+        4,
+    )
+    .unwrap();
+    assert!(distributed_decode.device_allocations.iter().all(|allocation| {
+        allocation.concern != "decode demand-feedback pipeline predicate"
+    }));
+    let pipeline_predicates = distributed_decode
+        .shared_host_allocations
+        .iter()
+        .filter(|allocation| {
+            allocation.concern == "decode demand-feedback pipeline predicate"
+        })
+        .collect::<Vec<_>>();
+    let [pipeline_predicate] = pipeline_predicates.as_slice()
+    else {
+        panic!("multi-device decode must have exactly one shared pipeline predicate")
+    };
+    assert_eq!(pipeline_predicate.owner_device_id, logical_device_id);
+    assert_eq!(
+        pipeline_predicate.participant_device_ids,
+        vec![logical_device_id.clone(), remote_logical_device_id],
+    );
     assert!(decode.host_visible_allocations.iter().any(|allocation| {
         allocation.concern == "scalar residency miss queue"
             && allocation.allocation_class == VulkanRuntimeStreamAllocationClass::Permanent
     }));
+    assert_eq!(
+        decode
+            .host_visible_allocations
+            .iter()
+            .filter(|allocation| allocation.concern == "scalar residency miss queue")
+            .count(),
+        5,
+        "one scalar chain plus four feedback lanes each own a miss queue",
+    );
+    let scalar_selector_count = contract
+        .selectors
+        .iter()
+        .filter(|selector| selector.component_id == "layer_00")
+        .count();
+    assert_eq!(
+        decode
+            .device_allocations
+            .iter()
+            .filter(|allocation| allocation.concern == "scalar residency gate")
+            .count(),
+        scalar_selector_count * 4 * 5,
+        "every scalar and feedback chain owns four private gate buffers per selector",
+    );
     assert!(prefill.device_allocations.iter().any(|allocation| {
         allocation.concern == "scalar residency gate"
             && allocation.allocation_class
@@ -1424,6 +1642,8 @@ fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
         &execution_plan,
         &contract,
         ResourceResidencyPolicy::Eager,
+        &[selected_resource_mount_test_device(&logical_device_id)],
+        4,
     )
     .unwrap();
     assert_eq!(eager, VulkanRuntimeHybridExecutionTransientPlan::default());

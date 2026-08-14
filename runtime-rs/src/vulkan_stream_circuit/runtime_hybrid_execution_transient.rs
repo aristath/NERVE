@@ -426,6 +426,8 @@ fn exact_vulkan_runtime_mounted_decode_transient_plan(
     execution_plan: &VulkanDistributedExecutionPlan,
     resource_contract: &CompiledResourceResidencyContract,
     residency_policy: ResourceResidencyPolicy,
+    devices: &[VulkanRuntimeSelectedResourceMountDevice],
+    feedback_lane_capacity: usize,
 ) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanResidentTokenModelPackageError> {
     let component_ids = runtime_model
         .circuit_graph
@@ -452,6 +454,19 @@ fn exact_vulkan_runtime_mounted_decode_transient_plan(
                 "failed to plan mounted decode resource layout: {error}",
             ))
         })?;
+    let logical_device_ids = devices
+        .iter()
+        .map(|device| device.logical_device_id.clone())
+        .collect::<Vec<_>>();
+    let physical_device_by_logical_device = devices
+        .iter()
+        .map(|device| {
+            (
+                device.logical_device_id.clone(),
+                device.physical_device_id.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     exact_vulkan_runtime_hybrid_gate_device_plan(
         &component_ids,
         &component_owner_logical_device_ids,
@@ -460,6 +475,17 @@ fn exact_vulkan_runtime_mounted_decode_transient_plan(
         resource_contract,
         &resource_layout,
         residency_policy,
+        feedback_lane_capacity
+            .checked_add(1)
+            .ok_or_else(|| {
+                VulkanResidentTokenModelPackageError::new(
+                    "mounted decode demand-chain replica count overflowed",
+                )
+            })?,
+        Some((
+            logical_device_ids.as_slice(),
+            &physical_device_by_logical_device,
+        )),
     )
     .map_err(|error| {
         VulkanResidentTokenModelPackageError::new(format!(
@@ -1386,6 +1412,8 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         resource_contract,
         resource_layout,
         residency_policy,
+        1,
+        None,
     )?;
     plan.extend(gates)?;
     Ok(plan)
@@ -1408,6 +1436,8 @@ fn exact_vulkan_runtime_hybrid_gate_device_bytes(
         resource_contract,
         resource_layout,
         residency_policy,
+        1,
+        None,
     )
     .map(|plan| plan.device_bytes_by_logical_device)
 }
@@ -1420,14 +1450,19 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
     resource_contract: &CompiledResourceResidencyContract,
     resource_layout: &VulkanCompiledResourceAddressLayout,
     residency_policy: ResourceResidencyPolicy,
+    scalar_gate_replica_count: usize,
+    decode_predicate_placement: Option<(&[String], &BTreeMap<String, String>)>,
 ) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanRuntimeHybridPlacementError> {
-    if lane_count == 0 {
-        return runtime_hybrid_error("exact hybrid residency gate lane count is zero");
+    if lane_count == 0 || scalar_gate_replica_count == 0 {
+        return runtime_hybrid_error(
+            "exact hybrid residency gate lane and scalar replica counts must be positive",
+        );
     }
     if !residency_policy.is_demand_loaded() {
         return Ok(VulkanRuntimeHybridExecutionTransientPlan::default());
     }
     let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
+    let mut has_residency_gate = false;
     let distributed_components = execution_plan
         .dispatches
         .iter()
@@ -1451,6 +1486,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
         if selector_ids.is_empty() {
             continue;
         }
+        has_residency_gate = true;
         let mut missing_capacity = 0usize;
         for selector_id in selector_ids {
             let selector = exact_vulkan_runtime_hybrid_selector(
@@ -1483,27 +1519,35 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
             let private = config
                 .private_device_bytes()
                 .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-            for byte_capacity in [
-                private.configuration_bytes,
-                private.resource_group_record_bytes,
-                private.resource_address_slot_bytes,
-                private.resolved_address_bytes,
-            ] {
-                plan.add_device_allocation(owner, byte_capacity, "scalar residency gate")?;
+            for _ in 0..scalar_gate_replica_count {
+                for byte_capacity in [
+                    private.configuration_bytes,
+                    private.resource_group_record_bytes,
+                    private.resource_address_slot_bytes,
+                    private.resolved_address_bytes,
+                ] {
+                    plan.add_device_allocation(owner, byte_capacity, "scalar residency gate")?;
+                }
             }
         }
-        plan.add_host_visible_allocation(
-            owner,
+        let missing_queue_byte_capacity =
             VulkanGpuResidencyMissQueue::device_bytes_for_capacity(missing_capacity)
                 .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
-                .byte_count,
-            "scalar residency miss queue",
-        )?;
-        plan.add_device_allocation(
-            owner,
-            size_of::<u32>(),
-            "scalar residency predicate",
-        )?;
+                .byte_count;
+        for _ in 0..scalar_gate_replica_count {
+            plan.add_host_visible_allocation(
+                owner,
+                missing_queue_byte_capacity,
+                "scalar residency miss queue",
+            )?;
+        }
+        if decode_predicate_placement.is_none() {
+            plan.add_device_allocation(
+                owner,
+                size_of::<u32>(),
+                "scalar residency predicate",
+            )?;
+        }
     }
 
     let store_plan = VulkanDistributedSelectedResourceStorePlan::from_execution_plan(execution_plan)
@@ -1517,6 +1561,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
         {
             continue;
         }
+        has_residency_gate = true;
         for shard in &leader.shards {
             let device_plan = store_plan.device(&shard.device_id).ok_or_else(|| {
                 VulkanRuntimeHybridPlacementError(format!(
@@ -1594,15 +1639,107 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                 // The runtime creates one predicate on each shard and shares
                 // that predicate across every selected-resource partition on
                 // the shard.
-                plan.add_device_allocation(
-                    &shard.device_id,
-                    VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
-                    "distributed shard residency predicate",
-                )?;
+                match decode_predicate_placement {
+                    Some((_, physical_device_by_logical_device)) => {
+                        add_exact_vulkan_runtime_decode_shard_predicate(
+                            &mut plan,
+                            &island.owner_device_id,
+                            &shard.device_id,
+                            physical_device_by_logical_device,
+                        )?;
+                    }
+                    None => plan.add_device_allocation(
+                        &shard.device_id,
+                        VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+                        "distributed shard residency predicate",
+                    )?,
+                }
             }
         }
     }
+    if has_residency_gate {
+        if let Some((logical_device_ids, physical_device_by_logical_device)) =
+            decode_predicate_placement
+        {
+            add_exact_vulkan_runtime_decode_pipeline_predicate(
+                &mut plan,
+                logical_device_ids,
+                physical_device_by_logical_device,
+            )?;
+        }
+    }
     Ok(plan)
+}
+
+fn add_exact_vulkan_runtime_decode_pipeline_predicate(
+    plan: &mut VulkanRuntimeHybridExecutionTransientPlan,
+    logical_device_ids: &[String],
+    physical_device_by_logical_device: &BTreeMap<String, String>,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    let Some(owner_device_id) = logical_device_ids.first() else {
+        return runtime_hybrid_error(
+            "exact decode demand-feedback predicate has no logical device",
+        );
+    };
+    if logical_device_ids.iter().any(|device_id| {
+        !physical_device_by_logical_device.contains_key(device_id)
+    }) {
+        return runtime_hybrid_error(
+            "exact decode demand-feedback predicate has an unbound logical device",
+        );
+    }
+    if logical_device_ids.len() == 1 {
+        plan.add_device_allocation(
+            owner_device_id,
+            VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+            "decode demand-feedback pipeline predicate",
+        )
+    } else {
+        plan.add_shared_host_allocation(
+            VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id,
+            logical_device_ids.iter().cloned(),
+            VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+            "decode demand-feedback pipeline predicate",
+        )
+    }
+}
+
+fn add_exact_vulkan_runtime_decode_shard_predicate(
+    plan: &mut VulkanRuntimeHybridExecutionTransientPlan,
+    owner_device_id: &str,
+    shard_device_id: &str,
+    physical_device_by_logical_device: &BTreeMap<String, String>,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    let owner_physical_device_id = physical_device_by_logical_device
+        .get(owner_device_id)
+        .ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(format!(
+                "exact decode shard predicate owner {owner_device_id:?} is unbound",
+            ))
+        })?;
+    let shard_physical_device_id = physical_device_by_logical_device
+        .get(shard_device_id)
+        .ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(format!(
+                "exact decode shard predicate participant {shard_device_id:?} is unbound",
+            ))
+        })?;
+    if owner_physical_device_id == shard_physical_device_id {
+        plan.add_device_allocation(
+            owner_device_id,
+            VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+            "decode local shard residency predicate",
+        )
+    } else {
+        plan.add_shared_host_allocation(
+            VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id,
+            [owner_device_id.to_string(), shard_device_id.to_string()],
+            VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+            "decode cross-device shard residency predicate",
+        )
+    }
 }
 
 fn exact_vulkan_runtime_hybrid_selector<'a>(
