@@ -37,6 +37,12 @@ where
     }
     plan.allocations
         .iter()
+        // Graph-edge allocations are deferred and rebound through the exact
+        // mounted-route ledger. Charging them here as generic distributed
+        // buffers would reserve the same physical staging allocation twice.
+        .filter(|allocation| {
+            !matches!(allocation.storage, VulkanDistributedActivationStorage::Edge { .. })
+        })
         .map(|allocation| {
             shared_host_allocation_requirement_for_logical_devices(
                 &allocation.owner_device_id,
@@ -61,6 +67,65 @@ where
                     ),
                 )
             })
+        })
+}
+
+fn physical_execution_unclassified_shared_host_logical_bytes(
+    plan: &VulkanRuntimePhysicalExecutionResidencyPlan,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
+    let distributed = plan.device_plans.iter().try_fold(0usize, |total, device| {
+        total
+            .checked_add(
+                device
+                    .breakdown
+                    .distributed_shared_host_bytes_per_stream,
+            )
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(
+                        "physical distributed shared-host residency overflowed",
+                    ),
+                )
+            })
+    })?;
+    let resident = plan
+        .resident_shared_host_allocations
+        .iter()
+        .try_fold(0usize, |total, allocation| {
+            total.checked_add(allocation.byte_capacity).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(
+                        "resident shared-host logical residency overflowed",
+                    ),
+                )
+            })
+        })?;
+    let classified = [
+        distributed,
+        resident,
+        plan.execution_transient_shared_host_bytes_per_stream,
+        plan.shared_stream_control_host_bytes_per_stream,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, bytes| total.checked_add(bytes))
+    .ok_or_else(|| {
+        VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(
+                "classified physical shared-host residency overflowed",
+            ),
+        )
+    })?;
+    plan.total_stream_shared_host_bytes
+        .checked_sub(classified)
+        .ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "physical shared-host residency declares {} total bytes but its bound ledgers require {classified}: distributed={distributed}, resident={resident}, execution_transient={}, stream_control={}",
+                    plan.total_stream_shared_host_bytes,
+                    plan.execution_transient_shared_host_bytes_per_stream,
+                    plan.shared_stream_control_host_bytes_per_stream,
+                )),
+            )
         })
 }
 
@@ -536,65 +601,8 @@ where
         ));
     }
 
-    let distributed_shared_host_logical_bytes = if package.distributed_activation_plan.route
-        == VulkanSharedResidentBufferRoute::SharedHost
-    {
-        package
-            .distributed_activation_plan
-            .allocations
-            .iter()
-            .filter(|allocation| {
-                !matches!(allocation.storage, VulkanDistributedActivationStorage::Edge { .. })
-            })
-            .map(|allocation| allocation.byte_capacity)
-            .chain(
-                package
-                    .distributed_activation_plan
-                    .reduction_allocations
-                    .iter()
-                    .map(|allocation| allocation.byte_capacity),
-            )
-            .try_fold(0usize, |total, bytes| {
-                total.checked_add(bytes).ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(
-                            "distributed shared-host logical residency overflowed",
-                        ),
-                    )
-                })
-            })?
-        } else {
-            0
-        };
-    let resident_shared_host_logical_bytes = plan
-        .resident_shared_host_allocations
-        .iter()
-        .try_fold(0usize, |total, allocation| {
-            total.checked_add(allocation.byte_capacity).ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(
-                        "resident shared-host logical residency overflowed",
-                    ),
-                )
-            })
-        })?;
-    let non_distributed_shared_host_bytes = plan
-        .total_stream_shared_host_bytes
-        .checked_sub(distributed_shared_host_logical_bytes)
-        .and_then(|bytes| bytes.checked_sub(resident_shared_host_logical_bytes))
-        .and_then(|bytes| {
-            bytes.checked_sub(plan.execution_transient_shared_host_bytes_per_stream)
-        })
-        .and_then(|bytes| {
-            bytes.checked_sub(plan.shared_stream_control_host_bytes_per_stream)
-        })
-        .ok_or_else(|| {
-            VulkanResidentInProcessPlacedRuntimeError::Package(
-                VulkanResidentTokenModelPackageError::new(
-                    "physical execution shared-host residency omits distributed allocations",
-                ),
-            )
-        })?;
+    let unclassified_shared_host_bytes =
+        physical_execution_unclassified_shared_host_logical_bytes(plan)?;
     let shared_stream_control_requirement =
         shared_stream_control_requirement_bytes(&physical_devices)?;
     let execution_transient_shared_host_requirement_for =
@@ -618,7 +626,7 @@ where
     )?;
     let permanent_base_host_requirement_bytes =
         distributed_shared_host_requirement_bytes(&package.distributed_activation_plan, device_for)?
-            .checked_add(non_distributed_shared_host_bytes)
+            .checked_add(unclassified_shared_host_bytes)
             .and_then(|bytes| bytes.checked_add(resident_shared_host_requirement))
             .and_then(|bytes| bytes.checked_add(shared_stream_control_requirement))
             .ok_or_else(|| {
