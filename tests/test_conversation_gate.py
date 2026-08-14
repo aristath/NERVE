@@ -283,7 +283,7 @@ def test_gate_rejects_mounted_but_unused_tensor_parallelism(
     transcript = "".join(sections)
     monkeypatch.setattr(
         "nerve.conversation_gate.run_resident_conversation",
-        lambda command, warmup_conversation_sets=0: (transcript, 0),
+        lambda command, warmup_conversation_sets=0, **_kwargs: (transcript, 0),
     )
 
     with pytest.raises(
@@ -534,6 +534,45 @@ def test_gate_averages_all_five_measured_turns_and_enforces_floor() -> None:
             turns,
             require_thinking=True,
             minimum_decode_tokens_per_second=20.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("statistic", "value"),
+    (
+        ("decode_tokens_per_second", float("nan")),
+        ("decode_tokens_per_second", -1.0),
+        ("prefill_tokens_per_second", float("inf")),
+    ),
+)
+def test_gate_rejects_invalid_throughput_telemetry(
+    statistic: str,
+    value: float,
+) -> None:
+    turns = _valid_turns()
+    stats = dict(turns[0].stats)
+    stats[statistic] = value
+    turns[0] = ConversationTurn(
+        prompt=turns[0].prompt,
+        response=turns[0].response,
+        stats=stats,
+    )
+
+    with pytest.raises(ConversationGateError, match=f"invalid {statistic}"):
+        validate_conversation_turns(
+            turns,
+            require_thinking=True,
+            minimum_decode_tokens_per_second=20.0,
+        )
+
+
+@pytest.mark.parametrize("minimum", (float("nan"), float("inf"), -1.0))
+def test_gate_rejects_invalid_throughput_floor(minimum: float) -> None:
+    with pytest.raises(ConversationGateError, match="finite non-negative"):
+        validate_conversation_turns(
+            _valid_turns(),
+            require_thinking=True,
+            minimum_decode_tokens_per_second=minimum,
         )
 
 
@@ -844,10 +883,10 @@ while True:
     )
 
     run = report.runs[0]
-    assert len(run.discarded_warmup_sets) == 1
+    assert len(run.discarded_warmup_sets) == 2
     assert run.physical_execution is not None
     assert run.physical_execution.total_tensor_parallel_island_count == 8
-    assert report.warmup_conversation_sets == 1
+    assert report.warmup_conversation_sets == 2
     assert run.discarded_warmup_sets[0].mean_decode_tokens_per_second == 1.0
     assert run.measured_set.mean_decode_tokens_per_second == 30.0
     assert run.measured_set.residency_policy == "demand-paged"
@@ -864,6 +903,137 @@ while True:
     assert run.measured_set.residency_gauges_end == (
         run.measured_set.residency_gauges_start
     )
+
+
+def test_gate_requires_two_consecutive_fully_warm_sets_after_recurrent_loads(
+    tmp_path,
+) -> None:
+    package = tmp_path / "package.json"
+    package.write_text("{}")
+    fake_runtime = tmp_path / "recurrent_load_runtime.py"
+    fake_runtime.write_text(
+        """
+import sys
+
+answers = (
+    "Hello.",
+    "I am a language model.",
+    "The capital of Greece is Athens.",
+    "There are several cities named Corinth.",
+    "My knowledge cutoff is unavailable.",
+    "The country was Greece.",
+)
+loads_per_set = (6, 0, 1, 0, 0)
+print("ready")
+conversation_set = 0
+conversation_turn = 0
+while True:
+    print("you> ", end="", flush=True)
+    prompt = sys.stdin.readline().rstrip("\\n")
+    if prompt == "/exit":
+        break
+    if prompt == "/new":
+        if conversation_turn != len(answers):
+            raise SystemExit(91)
+        conversation_set += 1
+        conversation_turn = 0
+        print("session_reset: zeroed_state_buffers=17", flush=True)
+        continue
+    if conversation_set >= len(loads_per_set):
+        raise SystemExit(92)
+    answer = answers[conversation_turn]
+    conversation_turn += 1
+    prior_loads = sum(loads_per_set[:conversation_set])
+    set_loads = min(conversation_turn, loads_per_set[conversation_set])
+    loads = prior_loads + set_loads
+    print(f"llm> reasoning</think> {answer}")
+    print("stats:")
+    print("  prefill_tokens_per_second=100.000")
+    print(f"  decode_tokens_per_second={20 + conversation_set:.3f}")
+    print("execution:")
+    print("resource_residency:")
+    print("  policy=demand-paged physical_stores=3")
+    print(f"  gpu_accesses(selections/resident_hits/misses)={conversation_set * 6 + conversation_turn}/{conversation_set * 6 + conversation_turn - loads}/{loads}")
+    print(f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={loads}/{loads}/0/{loads}/0/0")
+    print("  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0")
+    print(f"  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={loads * 8}/{loads * 2}/80/20")
+    print(f"  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={loads}/{loads * 10}/{loads * 20}/{loads * 20}/{loads}.0/{loads / 2}/{loads}.0/{loads}.0", flush=True)
+""".lstrip()
+    )
+
+    report = run_conversation_gate(
+        [
+            sys.executable,
+            "-u",
+            str(fake_runtime),
+            "--package",
+            str(package),
+            "--chat",
+        ],
+        seeds=(0,),
+        minimum_decode_tokens_per_second=20.0,
+        require_thinking=True,
+        warmup_conversation_sets=1,
+    )
+
+    run = report.runs[0]
+    assert len(run.discarded_warmup_sets) == 4
+    assert report.warmup_conversation_sets == 4
+    assert [
+        warmup.residency_delta["residency_requests.load_required"]
+        for warmup in run.discarded_warmup_sets
+        if warmup.residency_delta is not None
+    ] == [6, 0, 1, 0]
+    assert run.measured_set.residency_delta is not None
+    assert run.measured_set.residency_delta["residency_requests.load_required"] == 0
+    assert run.measured_set.mean_decode_tokens_per_second == 24.0
+
+
+def test_resident_runner_fails_when_full_residency_never_stabilizes(tmp_path) -> None:
+    fake_runtime = tmp_path / "never_warm_runtime.py"
+    fake_runtime.write_text(
+        """
+import sys
+
+print("ready")
+completed = 0
+conversation_turn = 0
+while True:
+    print("you> ", end="", flush=True)
+    prompt = sys.stdin.readline().rstrip("\\n")
+    if prompt == "/exit":
+        break
+    if prompt == "/new":
+        conversation_turn = 0
+        print("session_reset: zeroed_state_buffers=1", flush=True)
+        continue
+    completed += 1
+    conversation_turn += 1
+    print("llm> reasoning</think> answer")
+    print("stats:")
+    print("  prefill_tokens_per_second=100.000")
+    print("  decode_tokens_per_second=25.000")
+    print("execution:")
+    print("resource_residency:")
+    print("  policy=demand-paged physical_stores=1")
+    print(f"  gpu_accesses(selections/resident_hits/misses)={completed}/0/{completed}")
+    print(f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={completed}/{completed}/0/{completed}/0/0")
+    print("  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0")
+    print(f"  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={completed}/0/80/20")
+    print(f"  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={completed}/{completed}/{completed}/{completed}/{completed}.0/0.0/0.0/{completed}.0", flush=True)
+""".lstrip()
+    )
+
+    with pytest.raises(
+        ConversationGateError,
+        match="did not produce two consecutive fully warm conversation sets within 3 sets",
+    ):
+        run_resident_conversation(
+            [sys.executable, "-u", str(fake_runtime)],
+            warmup_conversation_sets=1,
+            warm_until_fully_resident=True,
+            maximum_conversation_sets=3,
+        )
 
 
 def test_resident_runner_rejects_a_runtime_that_does_not_acknowledge_session_reset(

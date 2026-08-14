@@ -392,12 +392,15 @@ that NERVE released the capacity it acquired and the recorded pre-existing
 allocations remain present:
 
 Demand-resident sparse packages require a stronger steady-state measurement.
-Pass `--warmup-conversation-sets 1` to run the complete canonical six-input
-conversation twice in one uninterrupted model process. The first conversation
-is validated but discarded; only the second conversation is used for the
-throughput gate. The report includes cumulative residency counter snapshots and
-their per-conversation deltas, so a second set that still loads or reloads
-resources is visible rather than mislabeled as fully warm.
+Pass `--warmup-conversation-sets 1` to keep repeating the complete canonical
+six-input conversation in one uninterrupted model process until two consecutive
+sets have zero misses, loads, evictions, reads, derivations, uploads, reloads,
+and residency blocking. The first clean set proves that the working set is
+resident; only the following clean set is measured. Any intervening load resets
+the sequence. `--maximum-conversation-sets` is a caller-visible safety bound
+(16 by default), and failure to stabilize within it fails the gate instead of
+mislabeling a cache-thrashing conversation as fully warm. The report records the
+actual number of discarded sets and every per-conversation residency delta.
 
 ```bash
 .venv/bin/python scripts/run_conversation_gate.py \
@@ -405,6 +408,7 @@ resources is visible rather than mislabeled as fully warm.
   --minimum-decode-tps 20 \
   --require-thinking \
   --warmup-conversation-sets 1 \
+  --maximum-conversation-sets 16 \
   --transcript-dir /tmp/nerve-conversation-gate \
   --report /tmp/nerve-conversation-gate/report.json \
   -- \

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -58,6 +59,27 @@ _CUMULATIVE_RESIDENCY_COUNTER_GROUPS = {
     "transfers",
 }
 _RESIDENCY_GAUGE_GROUPS = {"memory_tiers"}
+_FULLY_WARM_ZERO_COUNTERS = (
+    "gpu_accesses.misses",
+    "residency_requests.load_required",
+    "residency_requests.succeeded",
+    "residency_requests.failed",
+    "residency_requests.cancelled",
+    "residency_eviction.cycles",
+    "residency_eviction.units",
+    "residency_eviction.payload_bytes",
+    "residency_eviction.device_bytes",
+    "residency_eviction.reloads",
+    "transfers.reads",
+    "transfers.source_bytes",
+    "transfers.resident_bytes",
+    "transfers.uploaded_bytes",
+    "transfers.read_ms",
+    "transfers.derivation_ms",
+    "transfers.upload_ms",
+    "transfers.blocking_ms",
+)
+_MAXIMUM_RESIDENT_CONVERSATION_SETS = 16
 
 
 class ConversationGateError(RuntimeError):
@@ -100,18 +122,30 @@ class ConversationTurn:
     @property
     def decode_tokens_per_second(self) -> float:
         value = self.stats.get("decode_tokens_per_second")
-        if not isinstance(value, (int, float)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
             raise ConversationGateError(
-                f"turn {self.prompt!r} did not report decode_tokens_per_second"
+                f"turn {self.prompt!r} reported invalid decode_tokens_per_second: "
+                f"{value!r}"
             )
         return float(value)
 
     @property
     def prefill_tokens_per_second(self) -> float:
         value = self.stats.get("prefill_tokens_per_second")
-        if not isinstance(value, (int, float)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
             raise ConversationGateError(
-                f"turn {self.prompt!r} did not report prefill_tokens_per_second"
+                f"turn {self.prompt!r} reported invalid prefill_tokens_per_second: "
+                f"{value!r}"
             )
         return float(value)
 
@@ -147,6 +181,7 @@ class ConversationGateReport:
     minimum_tensor_parallel_islands: int
     require_thinking: bool
     warmup_conversation_sets: int
+    maximum_conversation_sets: int
     package: dict[str, Any]
     runs: list[ConversationSeedReport]
 
@@ -189,7 +224,11 @@ def _residency_metrics(
             )
         for label, value in zip(labels, values, strict=True):
             parsed = _parse_scalar(value)
-            if not isinstance(parsed, (int, float)):
+            if (
+                isinstance(parsed, bool)
+                or not isinstance(parsed, (int, float))
+                or not math.isfinite(parsed)
+            ):
                 raise ConversationGateError(
                     f"resource residency counter {group}.{label} is not numeric: "
                     f"{value!r}"
@@ -293,6 +332,19 @@ def parse_conversation_transcript(
 ) -> list[ConversationTurn]:
     if warmup_conversation_sets < 0:
         raise ConversationGateError("warmup conversation set count cannot be negative")
+    turns = _parse_all_conversation_turns(transcript)
+    expected_turn_count = len(CANONICAL_CONVERSATION_PROMPTS) * (
+        warmup_conversation_sets + 1
+    )
+    if len(turns) != expected_turn_count:
+        raise ConversationGateError(
+            "chat transcript contains "
+            f"{len(turns)} completed turn(s); expected {expected_turn_count}"
+        )
+    return turns
+
+
+def _parse_all_conversation_turns(transcript: str) -> list[ConversationTurn]:
     completed_sections = []
     for section in transcript.split(_TURN_START)[1:]:
         if _STATS_MARKER not in section:
@@ -312,12 +364,17 @@ def parse_conversation_transcript(
             (response.rstrip(), stats, policy, counters, gauges, execution_counters)
         )
 
-    expected_prompts = CANONICAL_CONVERSATION_PROMPTS * (warmup_conversation_sets + 1)
-    if len(completed_sections) != len(expected_prompts):
+    if not completed_sections or (
+        len(completed_sections) % len(CANONICAL_CONVERSATION_PROMPTS)
+    ):
         raise ConversationGateError(
             "chat transcript contains "
-            f"{len(completed_sections)} completed turn(s); expected {len(expected_prompts)}"
+            f"{len(completed_sections)} completed turn(s); expected a non-zero multiple "
+            f"of {len(CANONICAL_CONVERSATION_PROMPTS)}"
         )
+    expected_prompts = CANONICAL_CONVERSATION_PROMPTS * (
+        len(completed_sections) // len(CANONICAL_CONVERSATION_PROMPTS)
+    )
     return [
         ConversationTurn(
             prompt=prompt,
@@ -332,6 +389,14 @@ def parse_conversation_transcript(
             expected_prompts, completed_sections, strict=True
         )
     ]
+
+
+def _conversation_sets_from_transcript(
+    transcript: str,
+) -> list[list[ConversationTurn]]:
+    turns = _parse_all_conversation_turns(transcript)
+    width = len(CANONICAL_CONVERSATION_PROMPTS)
+    return [turns[index : index + width] for index in range(0, len(turns), width)]
 
 
 def _required_execution_counter(turn: ConversationTurn, key: str) -> int:
@@ -429,6 +494,15 @@ def validate_conversation_turns(
     minimum_decode_tokens_per_second: float,
     require_tensor_parallel_execution: bool = False,
 ) -> tuple[float, float]:
+    if (
+        isinstance(minimum_decode_tokens_per_second, bool)
+        or not isinstance(minimum_decode_tokens_per_second, (int, float))
+        or not math.isfinite(minimum_decode_tokens_per_second)
+        or minimum_decode_tokens_per_second < 0
+    ):
+        raise ConversationGateError(
+            "minimum decode throughput must be a finite non-negative number"
+        )
     if len(turns) != len(MEASURED_PROMPTS):
         raise ConversationGateError(
             f"expected {len(MEASURED_PROMPTS)} measured turns; found {len(turns)}"
@@ -542,13 +616,69 @@ def _terminate(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
+def _fully_warm_residency_delta(
+    delta: dict[str, int | float] | None,
+    *,
+    label: str,
+) -> bool:
+    if delta is None:
+        raise ConversationGateError(
+            f"{label} did not report cumulative resource residency counters"
+        )
+    missing = [key for key in _FULLY_WARM_ZERO_COUNTERS if key not in delta]
+    if missing:
+        raise ConversationGateError(
+            f"{label} cannot prove full residency; missing counter(s): "
+            + ", ".join(missing)
+        )
+    return all(delta[key] == 0 for key in _FULLY_WARM_ZERO_COUNTERS)
+
+
+def _conversation_set_warmth(
+    turns: Sequence[ConversationTurn],
+    prior_residency: dict[str, int | float] | None,
+    *,
+    set_index: int,
+) -> tuple[bool, dict[str, int | float]]:
+    if len(turns) != len(CANONICAL_CONVERSATION_PROMPTS):
+        raise ConversationGateError(
+            f"conversation set {set_index} contains {len(turns)} turn(s); "
+            f"expected {len(CANONICAL_CONVERSATION_PROMPTS)}"
+        )
+    residency_end = turns[-1].residency_counters
+    if residency_end is None:
+        raise ConversationGateError(
+            f"conversation set {set_index} did not report cumulative resource "
+            "residency counters"
+        )
+    delta = _residency_delta(prior_residency, residency_end)
+    return (
+        _fully_warm_residency_delta(
+            delta,
+            label=f"conversation set {set_index}",
+        ),
+        residency_end,
+    )
+
+
 def run_resident_conversation(
     command: Sequence[str],
     *,
     warmup_conversation_sets: int = 0,
+    warm_until_fully_resident: bool = False,
+    maximum_conversation_sets: int = _MAXIMUM_RESIDENT_CONVERSATION_SETS,
 ) -> tuple[str, int]:
     if warmup_conversation_sets < 0:
         raise ConversationGateError("warmup conversation set count cannot be negative")
+    if maximum_conversation_sets < 1:
+        raise ConversationGateError("maximum conversation set count must be positive")
+    minimum_set_count = warmup_conversation_sets + 1
+    if warm_until_fully_resident:
+        minimum_set_count = max(minimum_set_count, 2)
+    if maximum_conversation_sets < minimum_set_count:
+        raise ConversationGateError(
+            "maximum conversation set count cannot satisfy the requested warmup"
+        )
     process = subprocess.Popen(
         list(command),
         stdin=subprocess.PIPE,
@@ -560,18 +690,20 @@ def run_resident_conversation(
         _terminate(process)
         raise ConversationGateError("could not open runtime process pipes")
 
-    prompts: list[str] = []
-    for set_index in range(warmup_conversation_sets + 1):
-        prompts.extend(CANONICAL_CONVERSATION_PROMPTS)
-        if set_index < warmup_conversation_sets:
-            prompts.append(_NEW_CONVERSATION_COMMAND)
-    prompts.append("/exit")
+    prompts: list[str] = list(CANONICAL_CONVERSATION_PROMPTS)
+    if not warm_until_fully_resident:
+        for _set_index in range(warmup_conversation_sets):
+            prompts.extend((_NEW_CONVERSATION_COMMAND, *CANONICAL_CONVERSATION_PROMPTS))
+        prompts.append("/exit")
     transcript = bytearray()
     search_from = 0
     accepted_marker_end = 0
     sent = 0
     checked_response_bytes = 0
     live_error: str | None = None
+    completed_set_count = 0
+    consecutive_fully_warm_sets = 0
+    prior_residency: dict[str, int | float] | None = None
     try:
         while True:
             chunk = os.read(process.stdout.fileno(), 65_536)
@@ -609,6 +741,43 @@ def run_resident_conversation(
                             break
                     elif _STATS_MARKER.encode() not in previous_output:
                         continue
+                if warm_until_fully_resident and sent == len(prompts):
+                    try:
+                        conversation_sets = _conversation_sets_from_transcript(
+                            transcript.decode(errors="replace")
+                        )
+                        if len(conversation_sets) != completed_set_count + 1:
+                            raise ConversationGateError(
+                                "resident runtime completed an unexpected number of "
+                                "conversation sets"
+                            )
+                        completed_set_count += 1
+                        fully_warm, prior_residency = _conversation_set_warmth(
+                            conversation_sets[-1],
+                            prior_residency,
+                            set_index=completed_set_count,
+                        )
+                    except ConversationGateError as error:
+                        live_error = str(error)
+                        break
+                    consecutive_fully_warm_sets = (
+                        consecutive_fully_warm_sets + 1 if fully_warm else 0
+                    )
+                    if (
+                        completed_set_count >= minimum_set_count
+                        and consecutive_fully_warm_sets >= 2
+                    ):
+                        prompts.append("/exit")
+                    elif completed_set_count >= maximum_conversation_sets:
+                        live_error = (
+                            "runtime did not produce two consecutive fully warm "
+                            f"conversation sets within {maximum_conversation_sets} sets"
+                        )
+                        break
+                    else:
+                        prompts.extend(
+                            (_NEW_CONVERSATION_COMMAND, *CANONICAL_CONVERSATION_PROMPTS)
+                        )
                 if sent >= len(prompts):
                     live_error = (
                         "runtime requested more chat turns than the gate supplied"
@@ -713,6 +882,7 @@ def run_conversation_gate(
     require_thinking: bool,
     minimum_tensor_parallel_islands: int = 0,
     warmup_conversation_sets: int = 0,
+    maximum_conversation_sets: int = _MAXIMUM_RESIDENT_CONVERSATION_SETS,
     transcript_dir: Path | None = None,
 ) -> ConversationGateReport:
     if not seeds:
@@ -724,6 +894,12 @@ def run_conversation_gate(
         )
     if warmup_conversation_sets < 0:
         raise ConversationGateError("warmup conversation set count cannot be negative")
+    if maximum_conversation_sets < 1:
+        raise ConversationGateError("maximum conversation set count must be positive")
+    if maximum_conversation_sets < warmup_conversation_sets + 1:
+        raise ConversationGateError(
+            "maximum conversation set count cannot satisfy the requested warmup"
+        )
     if minimum_tensor_parallel_islands < 0:
         raise ConversationGateError(
             "minimum tensor-parallel island count cannot be negative"
@@ -736,6 +912,8 @@ def run_conversation_gate(
             transcript, _ = run_resident_conversation(
                 seeded_command,
                 warmup_conversation_sets=warmup_conversation_sets,
+                warm_until_fully_resident=warmup_conversation_sets > 0,
+                maximum_conversation_sets=maximum_conversation_sets,
             )
         except ResidentConversationError as error:
             if transcript_dir is not None:
@@ -747,10 +925,7 @@ def run_conversation_gate(
         if transcript_dir is not None:
             transcript_dir.mkdir(parents=True, exist_ok=True)
             (transcript_dir / f"conversation-seed-{seed}.log").write_text(transcript)
-        parsed = parse_conversation_transcript(
-            transcript,
-            warmup_conversation_sets=warmup_conversation_sets,
-        )
+        parsed = _parse_all_conversation_turns(transcript)
         physical_execution = parse_physical_execution_summary(
             transcript,
             minimum_tensor_parallel_islands=minimum_tensor_parallel_islands,
@@ -759,6 +934,10 @@ def run_conversation_gate(
             parsed[index : index + len(CANONICAL_CONVERSATION_PROMPTS)]
             for index in range(0, len(parsed), len(CANONICAL_CONVERSATION_PROMPTS))
         ]
+        if warmup_conversation_sets > 0 and len(conversation_sets) < 2:
+            raise ConversationGateError(
+                "fully warm measurement requires at least two resident conversation sets"
+            )
         reports: list[ConversationSetReport] = []
         prior_residency: dict[str, int | float] | None = None
         prior_residency_gauges: dict[str, int | float] | None = None
@@ -774,7 +953,7 @@ def run_conversation_gate(
                 _validate_tensor_parallel_turn_execution(warmup)
             set_minimum = (
                 minimum_decode_tokens_per_second
-                if set_index == warmup_conversation_sets
+                if set_index == len(conversation_sets) - 1
                 else 0.0
             )
             mean_decode, mean_prefill = validate_conversation_turns(
@@ -813,6 +992,20 @@ def run_conversation_gate(
             )
             prior_residency = residency_end
             prior_residency_gauges = residency_gauges_end
+        if warmup_conversation_sets > 0:
+            if len(reports) - 1 < warmup_conversation_sets:
+                raise ConversationGateError(
+                    "runtime completed fewer discarded conversation sets than requested"
+                )
+            for report_index, report in enumerate(reports[-2:], start=len(reports) - 1):
+                if not _fully_warm_residency_delta(
+                    report.residency_delta,
+                    label=f"conversation set {report_index}",
+                ):
+                    raise ConversationGateError(
+                        "measured conversation was not preceded by two consecutive "
+                        "fully warm conversation sets"
+                    )
         session_policies = {
             report.residency_policy
             for report in reports
@@ -837,7 +1030,10 @@ def run_conversation_gate(
         minimum_decode_tokens_per_second=minimum_decode_tokens_per_second,
         minimum_tensor_parallel_islands=minimum_tensor_parallel_islands,
         require_thinking=require_thinking,
-        warmup_conversation_sets=warmup_conversation_sets,
+        warmup_conversation_sets=(
+            len(runs[0].discarded_warmup_sets) if runs else warmup_conversation_sets
+        ),
+        maximum_conversation_sets=maximum_conversation_sets,
         package=package,
         runs=runs,
     )
@@ -895,8 +1091,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=0,
         help=(
-            "run and discard this many complete canonical conversations in the "
-            "same resident process before measuring the final conversation"
+            "discard at least this many complete canonical conversations and "
+            "continue in the same process until two consecutive sets are fully "
+            "resident before measuring the latter"
+        ),
+    )
+    parser.add_argument(
+        "--maximum-conversation-sets",
+        type=int,
+        default=_MAXIMUM_RESIDENT_CONVERSATION_SETS,
+        help=(
+            "fail if adaptive full-residency warming cannot produce two "
+            "consecutive zero-load conversations within this many sets"
         ),
     )
     parser.add_argument("--report", type=Path)
@@ -912,6 +1118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             minimum_tensor_parallel_islands=args.minimum_tensor_parallel_islands,
             require_thinking=args.require_thinking,
             warmup_conversation_sets=args.warmup_conversation_sets,
+            maximum_conversation_sets=args.maximum_conversation_sets,
             transcript_dir=args.transcript_dir,
         )
     except ConversationGateError as error:

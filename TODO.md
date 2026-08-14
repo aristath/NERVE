@@ -1044,9 +1044,13 @@ For every numbered item below:
 - Test single-target, serialized multi-target, TP, expert-parallel, and selected
   hybrid plans with equivalent model work. Multi-target measurements include
   computation, synchronization, transfers, and collectives.
-- Warm DeepSeek with complete conversations until one full conversation has zero
-  residency loads. Discard all warmup timings and measure the following complete
-  conversation without unloading or remounting the model.
+- The generic gate now keeps one resident process alive until two consecutive
+  complete conversations have zero misses, loads, evictions, reads,
+  derivations, uploads, reloads, and residency blocking. The first clean set
+  proves residency and the second is truth; any recurrent load resets the
+  sequence, non-finite telemetry fails closed, and a caller-visible safety
+  bound prevents an unfit working set from looping forever. Run this gate on
+  DeepSeek and every Qwen control once live validation is authorized.
 - Require coherent answers, package-owned thinking and sampling, identical
   accepted behavior and state digests where exactness is required, and exact
   post-run restoration of every selected target's pre-workload reservation.
