@@ -420,6 +420,95 @@ fn exact_vulkan_runtime_mounted_prefill_transient_plan(
     })
 }
 
+fn exact_vulkan_runtime_decode_scalar_queue_groups(
+    slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
+    execution_plan: &VulkanDistributedExecutionPlan,
+    resource_contract: &CompiledResourceResidencyContract,
+) -> Result<BTreeMap<String, String>, VulkanRuntimeHybridPlacementError> {
+    let distributed_components = execution_plan
+        .dispatches
+        .iter()
+        .map(|dispatch| dispatch.component_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let scalar_components = resource_contract
+        .checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.component_id.as_str())
+        .filter(|component_id| !distributed_components.contains(component_id))
+        .collect::<BTreeSet<_>>();
+    let mut groups = BTreeMap::new();
+    for slice in slice_plans {
+        let distributed_dispatch_indices = execution_plan
+            .execution_islands
+            .iter()
+            .filter(|island| island.owner_device_id == slice.device_id)
+            .flat_map(|island| island.dispatch_indices())
+            .collect::<BTreeSet<_>>();
+        let resident = &slice.placed_plan.placed_resident_plan;
+        let mut segment_open = false;
+        let mut segment_index = 0usize;
+        for dispatch in &slice.prepared_plan.dispatches {
+            let receives_remote_input = dispatch.descriptors.iter().any(|descriptor| {
+                let VulkanDescriptorResourceAddress::BoundaryInput { signal_id } =
+                    &descriptor.resource
+                else {
+                    return false;
+                };
+                matches!(
+                    classify_boundary_input(&dispatch.component_id, signal_id, resident),
+                    VulkanPlacedBoundDescriptorTarget::IncomingEdge { .. }
+                )
+            });
+            if receives_remote_input
+                || distributed_dispatch_indices.contains(&dispatch.dispatch_index)
+            {
+                segment_open = false;
+            }
+            if distributed_dispatch_indices.contains(&dispatch.dispatch_index) {
+                continue;
+            }
+            if !segment_open {
+                segment_index = segment_index.checked_add(1).ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(
+                        "decode demand-segment count overflowed".to_string(),
+                    )
+                })?;
+                segment_open = true;
+            }
+            if scalar_components.contains(dispatch.component_id.as_str()) {
+                let group = format!("{}:decode-segment:{segment_index}", slice.device_id);
+                if groups
+                    .insert(dispatch.component_id.clone(), group.clone())
+                    .is_some_and(|existing| existing != group)
+                {
+                    return runtime_hybrid_error(format!(
+                        "scalar demand component {:?} crosses decode transport segments",
+                        dispatch.component_id,
+                    ));
+                }
+            }
+            let publishes_remote_output = dispatch.descriptors.iter().any(|descriptor| {
+                let VulkanDescriptorResourceAddress::BoundaryOutput { signal_id } =
+                    &descriptor.resource
+                else {
+                    return false;
+                };
+                matches!(
+                    classify_boundary_output(&dispatch.component_id, signal_id, resident),
+                    VulkanPlacedBoundDescriptorTarget::ProducedPort {
+                        outgoing_edges,
+                        ..
+                    } if !outgoing_edges.is_empty()
+                )
+            });
+            if publishes_remote_output {
+                segment_open = false;
+            }
+        }
+    }
+    Ok(groups)
+}
+
 fn exact_vulkan_runtime_mounted_decode_transient_plan(
     runtime_model: &VulkanResidentRuntimeModel,
     slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
@@ -467,6 +556,12 @@ fn exact_vulkan_runtime_mounted_decode_transient_plan(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let scalar_queue_groups = exact_vulkan_runtime_decode_scalar_queue_groups(
+        slice_plans,
+        execution_plan,
+        resource_contract,
+    )
+    .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
     exact_vulkan_runtime_hybrid_gate_device_plan(
         &component_ids,
         &component_owner_logical_device_ids,
@@ -475,13 +570,8 @@ fn exact_vulkan_runtime_mounted_decode_transient_plan(
         resource_contract,
         &resource_layout,
         residency_policy,
-        feedback_lane_capacity
-            .checked_add(1)
-            .ok_or_else(|| {
-                VulkanResidentTokenModelPackageError::new(
-                    "mounted decode demand-chain replica count overflowed",
-                )
-            })?,
+        feedback_lane_capacity,
+        Some(&scalar_queue_groups),
         Some((
             logical_device_ids.as_slice(),
             &physical_device_by_logical_device,
@@ -834,6 +924,17 @@ fn exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
             "proposal",
             proposal,
         )?;
+
+        transient
+            .add_host_visible_allocation(
+                &slice.device_id,
+                VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                &format!(
+                    "speculative decoder {} mounted stream control",
+                    decoder.id,
+                ),
+            )
+            .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
 
         let committed_context_scope = VulkanComponentBatchExecutionScope::nodes(
             scopes.state_node_ids_by_component,
@@ -1414,6 +1515,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         residency_policy,
         1,
         None,
+        None,
     )?;
     plan.extend(gates)?;
     Ok(plan)
@@ -1438,6 +1540,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_bytes(
         residency_policy,
         1,
         None,
+        None,
     )
     .map(|plan| plan.device_bytes_by_logical_device)
 }
@@ -1451,6 +1554,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
     resource_layout: &VulkanCompiledResourceAddressLayout,
     residency_policy: ResourceResidencyPolicy,
     scalar_gate_replica_count: usize,
+    scalar_queue_group_by_component: Option<&BTreeMap<String, String>>,
     decode_predicate_placement: Option<(&[String], &BTreeMap<String, String>)>,
 ) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanRuntimeHybridPlacementError> {
     if lane_count == 0 || scalar_gate_replica_count == 0 {
@@ -1463,6 +1567,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
     }
     let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
     let mut has_residency_gate = false;
+    let mut scalar_missing_queues = BTreeMap::<String, (String, usize)>::new();
     let distributed_components = execution_plan
         .dispatches
         .iter()
@@ -1530,8 +1635,39 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                 }
             }
         }
+        let queue_group = match scalar_queue_group_by_component {
+            Some(groups) => groups.get(component_id).cloned().ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(format!(
+                    "exact hybrid scalar residency queue has no decode segment for {component_id:?}",
+                ))
+            })?,
+            None => component_id.clone(),
+        };
+        match scalar_missing_queues.get_mut(&queue_group) {
+            Some((group_owner, group_capacity)) => {
+                if group_owner != owner {
+                    return runtime_hybrid_error(format!(
+                        "scalar residency queue group {queue_group:?} spans owners {group_owner:?} and {owner:?}",
+                    ));
+                }
+                *group_capacity = (*group_capacity).max(missing_capacity);
+            }
+            None => {
+                scalar_missing_queues.insert(queue_group, (owner.clone(), missing_capacity));
+            }
+        }
+        if decode_predicate_placement.is_none() {
+            plan.add_device_allocation(
+                owner,
+                size_of::<u32>(),
+                "scalar residency predicate",
+            )?;
+        }
+    }
+
+    for (owner, missing_capacity) in scalar_missing_queues.values() {
         let missing_queue_byte_capacity =
-            VulkanGpuResidencyMissQueue::device_bytes_for_capacity(missing_capacity)
+            VulkanGpuResidencyMissQueue::device_bytes_for_capacity(*missing_capacity)
                 .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
                 .byte_count;
         for _ in 0..scalar_gate_replica_count {
@@ -1539,13 +1675,6 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                 owner,
                 missing_queue_byte_capacity,
                 "scalar residency miss queue",
-            )?;
-        }
-        if decode_predicate_placement.is_none() {
-            plan.add_device_allocation(
-                owner,
-                size_of::<u32>(),
-                "scalar residency predicate",
             )?;
         }
     }

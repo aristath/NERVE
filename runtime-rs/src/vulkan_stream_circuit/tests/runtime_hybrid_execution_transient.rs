@@ -696,12 +696,27 @@ fn parallel_speculative_processor_transient_matches_mounted_permanent_allocation
     .unwrap();
     let readback_bytes = 7 * (size_of::<u32>() + size_of::<f32>());
     let source_tap_bytes = model.package.activation_element_bytes.unwrap() * 16;
+    let proposal_device_bytes = proposal
+        .allocations
+        .iter()
+        .filter(|allocation| !allocation.host_visible)
+        .map(|allocation| allocation.byte_capacity)
+        .sum::<usize>();
+    let committed_device_bytes = committed
+        .allocations
+        .iter()
+        .filter(|allocation| !allocation.host_visible)
+        .map(|allocation| allocation.byte_capacity)
+        .sum::<usize>();
+    let component_batch_device_allocation_count = proposal
+        .allocations
+        .iter()
+        .chain(&committed.allocations)
+        .filter(|allocation| !allocation.host_visible)
+        .count();
     assert_eq!(
         planned.device_bytes_by_logical_device[&slice.device_id],
-        proposal.total_byte_capacity
-            + committed.total_byte_capacity
-            + readback_bytes
-            + source_tap_bytes,
+        proposal_device_bytes + committed_device_bytes + source_tap_bytes,
     );
     assert_eq!(
         planned.device_bytes_by_logical_device["source_gpu"],
@@ -709,10 +724,14 @@ fn parallel_speculative_processor_transient_matches_mounted_permanent_allocation
     );
     assert_eq!(
         planned.device_allocations.len(),
-        proposal.allocations.len() + committed.allocations.len() + 3,
+        component_batch_device_allocation_count + 2,
     );
     assert!(planned.device_allocations.iter().all(|allocation| {
         allocation.allocation_class == VulkanRuntimeStreamAllocationClass::Permanent
+    }));
+    assert!(planned.host_visible_allocations.iter().any(|allocation| {
+        allocation.concern == "speculative decoder parallel_draft mounted stream control"
+            && allocation.byte_capacity == VULKAN_STREAM_CONTROL_BYTE_CAPACITY
     }));
 
     let (same_model, same_slices, mut same_devices) =
@@ -735,8 +754,12 @@ fn parallel_speculative_processor_transient_matches_mounted_permanent_allocation
         .contains_key("source_gpu"));
     assert_eq!(
         same.device_bytes_by_logical_device[&slice.device_id],
-        proposal.total_byte_capacity + committed.total_byte_capacity + readback_bytes,
+        proposal_device_bytes + committed_device_bytes,
     );
+    assert!(planned.host_visible_allocations.iter().any(|allocation| {
+        allocation.concern == "speculative decoder parallel_draft output readback"
+            && allocation.byte_capacity == readback_bytes
+    }));
 }
 
 #[test]
@@ -1456,6 +1479,7 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
         ResourceResidencyPolicy::DemandRetained,
         1,
         None,
+        None,
     )
     .unwrap();
     let four = exact_vulkan_runtime_hybrid_gate_device_plan(
@@ -1467,6 +1491,7 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
         &layout,
         ResourceResidencyPolicy::DemandRetained,
         1,
+        None,
         None,
     )
     .unwrap();
@@ -1492,6 +1517,74 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
         .device_allocations
         .iter()
         .all(|allocation| allocation.concern != "scalar residency miss queue"));
+}
+
+#[test]
+fn runtime_hybrid_exact_gate_plan_shares_one_miss_queue_per_dispatch_segment() {
+    let model = fixture_model_runtime_model_with_one_dynamic_group();
+    let mut contract = instantiate_runtime_resource_contract(&model).unwrap();
+    let mut second_selector = contract.selectors[0].clone();
+    second_selector.id = "fixture_second_selector".to_string();
+    second_selector.component_id = "layer_01".to_string();
+    let mut second_checkpoint = contract.checkpoints[0].clone();
+    second_checkpoint.id = "fixture_second_checkpoint".to_string();
+    second_checkpoint.component_id = "layer_01".to_string();
+    second_checkpoint.selector_ids = vec![second_selector.id.clone()];
+    contract.selectors.push(second_selector);
+    contract.checkpoints.push(second_checkpoint);
+    let layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
+    let execution_plan = VulkanDistributedExecutionPlan {
+        device_ids: Vec::new(),
+        storage_buffer_offset_alignment: 16,
+        dispatches: Vec::new(),
+        execution_islands: Vec::new(),
+        shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+        shared_input_byte_capacity: 0,
+        shared_output_byte_capacity: 0,
+        distributed_parameter_byte_count: 0,
+    };
+    let components = BTreeSet::from(["layer_00".to_string(), "layer_01".to_string()]);
+    let owners = BTreeMap::from([
+        ("layer_00".to_string(), "gpu0".to_string()),
+        ("layer_01".to_string(), "gpu0".to_string()),
+    ]);
+    let per_component = exact_vulkan_runtime_hybrid_gate_device_plan(
+        &components,
+        &owners,
+        &execution_plan,
+        1,
+        &contract,
+        &layout,
+        ResourceResidencyPolicy::DemandRetained,
+        1,
+        None,
+        None,
+    )
+    .unwrap();
+    let grouped = exact_vulkan_runtime_hybrid_gate_device_plan(
+        &components,
+        &owners,
+        &execution_plan,
+        1,
+        &contract,
+        &layout,
+        ResourceResidencyPolicy::DemandRetained,
+        1,
+        Some(&BTreeMap::from([
+            ("layer_00".to_string(), "gpu0:segment:0".to_string()),
+            ("layer_01".to_string(), "gpu0:segment:0".to_string()),
+        ])),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(per_component.host_visible_allocations.len(), 2);
+    assert_eq!(grouped.host_visible_allocations.len(), 1);
+    assert_eq!(
+        grouped.device_allocations.len(),
+        per_component.device_allocations.len(),
+        "queue sharing must not merge selector-private gate state",
+    );
 }
 
 #[test]
@@ -1608,8 +1701,8 @@ fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
             .iter()
             .filter(|allocation| allocation.concern == "scalar residency miss queue")
             .count(),
-        5,
-        "one scalar chain plus four feedback lanes each own a miss queue",
+        4,
+        "each preallocated feedback lane owns a miss queue",
     );
     let scalar_selector_count = contract
         .selectors
@@ -1622,8 +1715,8 @@ fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
             .iter()
             .filter(|allocation| allocation.concern == "scalar residency gate")
             .count(),
-        scalar_selector_count * 4 * 5,
-        "every scalar and feedback chain owns four private gate buffers per selector",
+        scalar_selector_count * 4 * 4,
+        "every preallocated feedback chain owns four private gate buffers per selector",
     );
     assert!(prefill.device_allocations.iter().any(|allocation| {
         allocation.concern == "scalar residency gate"
