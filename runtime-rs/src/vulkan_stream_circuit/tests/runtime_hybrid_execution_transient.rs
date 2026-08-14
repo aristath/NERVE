@@ -1305,7 +1305,7 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
     .unwrap();
     assert!(eager.is_empty());
 
-    let one = exact_vulkan_runtime_hybrid_gate_device_bytes(
+    let one = exact_vulkan_runtime_hybrid_gate_device_plan(
         &components,
         &owners,
         &execution_plan,
@@ -1315,7 +1315,7 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
         ResourceResidencyPolicy::DemandRetained,
     )
     .unwrap();
-    let four = exact_vulkan_runtime_hybrid_gate_device_bytes(
+    let four = exact_vulkan_runtime_hybrid_gate_device_plan(
         &components,
         &owners,
         &execution_plan,
@@ -1325,10 +1325,28 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
         ResourceResidencyPolicy::DemandRetained,
     )
     .unwrap();
-    assert!(one["gpu0"] > size_of::<u32>());
-    assert!(four["gpu0"] > one["gpu0"]);
-    assert_eq!(one.len(), 1);
-    assert_eq!(four.len(), 1);
+    assert!(one.device_bytes_by_logical_device["gpu0"] > size_of::<u32>());
+    assert!(
+        four.device_bytes_by_logical_device["gpu0"]
+            > one.device_bytes_by_logical_device["gpu0"]
+    );
+    assert_eq!(one.device_bytes_by_logical_device.len(), 1);
+    assert_eq!(four.device_bytes_by_logical_device.len(), 1);
+    assert_eq!(one.host_visible_allocations.len(), 1);
+    assert_eq!(four.host_visible_allocations.len(), 1);
+    assert_eq!(
+        one.host_visible_allocations[0].concern,
+        "scalar residency miss queue"
+    );
+    assert_eq!(one.host_visible_allocations[0].logical_device_id, "gpu0");
+    assert!(
+        four.host_visible_allocations[0].byte_capacity
+            > one.host_visible_allocations[0].byte_capacity
+    );
+    assert!(one
+        .device_allocations
+        .iter()
+        .all(|allocation| allocation.concern != "scalar residency miss queue"));
 }
 
 #[test]
@@ -1385,8 +1403,17 @@ fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
     assert!(decode.device_allocations.iter().any(|allocation| {
         allocation.concern == "scalar residency gate"
     }));
+    assert!(decode.host_visible_allocations.iter().any(|allocation| {
+        allocation.concern == "scalar residency miss queue"
+            && allocation.allocation_class == VulkanRuntimeStreamAllocationClass::Permanent
+    }));
     assert!(prefill.device_allocations.iter().any(|allocation| {
         allocation.concern == "scalar residency gate"
+            && allocation.allocation_class
+                == VulkanRuntimeStreamAllocationClass::PromptRunner
+    }));
+    assert!(prefill.host_visible_allocations.iter().any(|allocation| {
+        allocation.concern == "scalar residency miss queue"
             && allocation.allocation_class
                 == VulkanRuntimeStreamAllocationClass::PromptRunner
     }));

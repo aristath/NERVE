@@ -1492,7 +1492,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                 plan.add_device_allocation(owner, byte_capacity, "scalar residency gate")?;
             }
         }
-        plan.add_device_allocation(
+        plan.add_host_visible_allocation(
             owner,
             VulkanGpuResidencyMissQueue::device_bytes_for_capacity(missing_capacity)
                 .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
@@ -1576,7 +1576,6 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                     private.resource_group_record_bytes,
                     private.resource_address_slot_bytes,
                     private.resolved_address_bytes,
-                    queue,
                 ] {
                     plan.add_device_allocation(
                         &shard.device_id,
@@ -1584,6 +1583,11 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                         "distributed residency gate",
                     )?;
                 }
+                plan.add_host_visible_allocation(
+                    &shard.device_id,
+                    queue,
+                    "distributed residency miss queue",
+                )?;
                 gate_count += 1;
             }
             if gate_count > 0 {
