@@ -68,9 +68,102 @@ fn physical_execution_residency_replaces_owner_tensors_without_double_counting()
     assert_eq!(helper.stream_device_local_bytes, 32);
     assert_eq!(owner.breakdown.owner_stream_device_bytes, 36);
     assert!(owner.resident_stream_device_allocations.is_empty());
+    assert!(owner.private_activation_resident_allocations.is_empty());
+    assert_eq!(
+        helper.private_activation_resident_allocations,
+        vec![VulkanRuntimePrivateActivationResidentAllocation {
+            producer_dispatch_index: 0,
+            consumer_dispatch_index: 1,
+            component_id: "component".to_string(),
+            signal_id: "private".to_string(),
+            byte_capacity: 32,
+        }],
+    );
+    validate_vulkan_runtime_private_activation_residency(&plan, &activations).unwrap();
     assert_eq!(plan.total_mount_device_local_bytes, 800);
     assert_eq!(plan.total_stream_device_local_bytes, 164);
     assert_eq!(plan.total_stream_shared_host_bytes, 0);
+}
+
+#[test]
+fn private_activation_resident_requirements_are_queried_per_physical_allocation() {
+    let allocations = vec![
+        VulkanRuntimePrivateActivationResidentAllocation {
+            producer_dispatch_index: 1,
+            consumer_dispatch_index: 2,
+            component_id: "layer_00".to_string(),
+            signal_id: "first".to_string(),
+            byte_capacity: 17,
+        },
+        VulkanRuntimePrivateActivationResidentAllocation {
+            producer_dispatch_index: 3,
+            consumer_dispatch_index: 4,
+            component_id: "layer_00".to_string(),
+            signal_id: "second".to_string(),
+            byte_capacity: 29,
+        },
+    ];
+    let mut queried = Vec::new();
+
+    let exact = private_activation_resident_requirement_bytes_with(
+        &allocations,
+        |allocation| {
+            queried.push(allocation.signal_id.clone());
+            Ok(allocation.byte_capacity.next_multiple_of(64))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(queried, vec!["first", "second"]);
+    assert_eq!(exact, 128);
+    assert_ne!(exact, (17usize + 29).next_multiple_of(64));
+}
+
+#[test]
+fn private_activation_mount_validation_rejects_missing_and_altered_ledgers() {
+    let base = physical_execution_residency_base_plan(1_000, 100);
+    let activations =
+        physical_execution_activation_plan(VulkanSharedResidentBufferRoute::SharedHost);
+    let plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &activations,
+    )
+    .unwrap();
+
+    validate_vulkan_runtime_private_activation_residency(&plan, &activations).unwrap();
+
+    let mut missing = plan.clone();
+    missing
+        .device_plans
+        .iter_mut()
+        .find(|device| device.device_id == "helper")
+        .unwrap()
+        .private_activation_resident_allocations
+        .clear();
+    assert!(
+        validate_vulkan_runtime_private_activation_residency(&missing, &activations)
+            .unwrap_err()
+            .to_string()
+            .contains("disagrees with the mounted distributed plan")
+    );
+
+    let mut altered = plan;
+    altered
+        .device_plans
+        .iter_mut()
+        .find(|device| device.device_id == "helper")
+        .unwrap()
+        .private_activation_resident_allocations[0]
+        .byte_capacity += 1;
+    assert!(
+        validate_vulkan_runtime_private_activation_residency(&altered, &activations)
+            .unwrap_err()
+            .to_string()
+            .contains("disagrees with the mounted distributed plan")
+    );
 }
 
 #[test]
@@ -159,9 +252,16 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
             allocation_class: VulkanRuntimeStreamAllocationClass::PromptRunner,
         },
     ];
+    let host_visible_transient = VulkanRuntimeHostVisibleTransientAllocation {
+        logical_device_id: "helper".to_string(),
+        byte_capacity: 13,
+        concern: "helper host control".to_string(),
+        allocation_class: VulkanRuntimeStreamAllocationClass::PromptRunner,
+    };
 
     plan.add_execution_transient_reservation(
         &device_transients,
+        std::slice::from_ref(&host_visible_transient),
         std::slice::from_ref(&shared_transient),
     )
     .unwrap();
@@ -178,6 +278,12 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
         .unwrap();
     assert_eq!(owner.breakdown.execution_transient_device_bytes_per_stream, 33);
     assert_eq!(helper.breakdown.execution_transient_device_bytes_per_stream, 17);
+    assert_eq!(
+        helper
+            .breakdown
+            .execution_transient_host_visible_bytes_per_stream,
+        13
+    );
     assert_eq!(owner.execution_transient_device_allocations.len(), 1);
     assert_eq!(helper.execution_transient_device_allocations.len(), 1);
     assert_eq!(
@@ -186,12 +292,16 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
     );
     assert_eq!(plan.execution_transient_shared_host_bytes_per_stream, 19);
     assert_eq!(
+        plan.execution_transient_host_visible_allocations,
+        vec![host_visible_transient]
+    );
+    assert_eq!(
         plan.execution_transient_shared_host_allocations,
         vec![shared_transient]
     );
     assert_eq!(
         plan.total_stream_shared_host_bytes,
-        baseline.total_stream_shared_host_bytes + 19
+        baseline.total_stream_shared_host_bytes + 32
     );
     assert_eq!(
         physical_execution_stream_working_set_bytes(
@@ -213,7 +323,7 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
 
     let accepted = plan.clone();
     let repeated = plan
-        .add_execution_transient_reservation(&[], &[])
+        .add_execution_transient_reservation(&[], &[], &[])
         .unwrap_err();
     assert!(repeated.to_string().contains("already attached"));
     assert_eq!(plan, accepted);
@@ -236,6 +346,7 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
                     allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
                 },
             ],
+            &[],
             &[],
         )
         .unwrap_err();
@@ -525,7 +636,7 @@ fn physical_execution_stream_control_moves_to_one_shared_host_allocation_across_
 }
 
 #[test]
-fn aliased_logical_devices_retain_exactly_one_device_local_stream_control() {
+fn aliased_logical_devices_use_one_shared_host_stream_control() {
     let mut base = physical_execution_residency_base_plan(1_000, 100);
     base.device_plans[0].breakdown.stream_control_bytes =
         VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
@@ -556,19 +667,28 @@ fn aliased_logical_devices_retain_exactly_one_device_local_stream_control() {
                     .owner_stream_control_device_bytes_per_stream
             })
             .sum::<usize>(),
-        VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+        0
     );
     assert_eq!(
         plan.total_stream_device_local_bytes,
-        baseline.total_stream_device_local_bytes - VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+        baseline.total_stream_device_local_bytes - 2 * VULKAN_STREAM_CONTROL_BYTE_CAPACITY
     );
     assert_eq!(
         plan.total_stream_shared_host_bytes,
-        baseline.total_stream_shared_host_bytes
+        baseline.total_stream_shared_host_bytes + VULKAN_STREAM_CONTROL_BYTE_CAPACITY
     );
-    assert!(plan.resident_shared_host_allocations.iter().all(|allocation| {
-        allocation.kind != VulkanRuntimeSharedHostResidentAllocationKind::StreamControl
-    }));
+    let stream_control = plan
+        .resident_shared_host_allocations
+        .iter()
+        .find(|allocation| {
+            allocation.kind == VulkanRuntimeSharedHostResidentAllocationKind::StreamControl
+        })
+        .unwrap();
+    assert_eq!(stream_control.participant_device_ids.len(), 1);
+    assert_eq!(
+        stream_control.byte_capacity,
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    );
 }
 
 #[test]
@@ -639,11 +759,7 @@ fn exact_stream_control_allocation_rejects_ledger_drift() {
     ]);
     plan.bind_stream_control_memory_domain(&binding).unwrap();
 
-    assert!(
-        exact_stream_control_shared_host_allocation(&plan, &binding)
-            .unwrap()
-            .is_some()
-    );
+    exact_stream_control_shared_host_allocation(&plan, &binding).unwrap();
 
     let stream_control_index = plan
         .resident_shared_host_allocations
@@ -737,9 +853,39 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
         },
     ] {
         let error = plan
-            .add_execution_transient_reservation(&[malformed], &[])
+            .add_execution_transient_reservation(&[malformed], &[], &[])
             .unwrap_err();
         assert!(error.to_string().contains("is malformed"));
+        assert_eq!(plan, original);
+    }
+
+    for malformed in [
+        VulkanRuntimeHostVisibleTransientAllocation {
+            logical_device_id: "".to_string(),
+            byte_capacity: 19,
+            concern: "missing device".to_string(),
+            allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
+        },
+        VulkanRuntimeHostVisibleTransientAllocation {
+            logical_device_id: "owner".to_string(),
+            byte_capacity: 0,
+            concern: "zero capacity".to_string(),
+            allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
+        },
+        VulkanRuntimeHostVisibleTransientAllocation {
+            logical_device_id: "absent".to_string(),
+            byte_capacity: 19,
+            concern: "unknown device".to_string(),
+            allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
+        },
+    ] {
+        let error = plan
+            .add_execution_transient_reservation(&[], &[malformed], &[])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("is malformed")
+                || error.to_string().contains("absent logical device")
+        );
         assert_eq!(plan, original);
     }
 
@@ -786,7 +932,7 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
         },
     ] {
         let error = plan
-            .add_execution_transient_reservation(&[], &[malformed])
+            .add_execution_transient_reservation(&[], &[], &[malformed])
             .unwrap_err();
         assert!(error.to_string().contains("is malformed"));
         assert_eq!(plan, original);
@@ -1081,6 +1227,7 @@ fn graph_edge_binding_preserves_execution_transient_shared_host_residency() {
     .unwrap();
     plan.add_execution_transient_reservation(
         &[],
+        &[],
         &[VulkanRuntimeSharedHostTransientAllocation {
             mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
             owner_device_id: "owner".to_string(),
@@ -1333,6 +1480,76 @@ fn distributed_shared_host_requirement_exactly_backs_runtime_activation_allocati
         .ensure_fully_consumed("distributed activation fixture")
         .unwrap();
     assert_eq!(buffers.total_shared_byte_capacity, byte_capacity);
+}
+
+#[test]
+fn feedback_control_mount_consumes_its_exact_physical_allocation_ledger() {
+    let Some((owner, helper)) = selected_test_vulkan_device_pair() else {
+        eprintln!("skipping exact feedback-control mount test without two explicit Vulkan devices");
+        return;
+    };
+    let vocabulary_size = 129_280;
+    let dispatch_capacity = 256;
+    let byte_capacity =
+        resident_feedback_control_byte_capacity(vocabulary_size, dispatch_capacity).unwrap();
+    let requirement = owner
+        .shared_host_allocation_requirement_bytes(&[helper.as_ref()], byte_capacity)
+        .unwrap();
+    let planned = VulkanRuntimeSharedHostResidentAllocation {
+        kind: VulkanRuntimeSharedHostResidentAllocationKind::FeedbackControl {
+            scope_id: "target".to_string(),
+        },
+        owner_device_id: "owner".to_string(),
+        participant_device_ids: vec!["owner".to_string(), "helper".to_string()],
+        byte_capacity,
+    };
+    let device_for = |device_id: &str| match device_id {
+        "owner" => Ok::<_, String>(owner.as_ref()),
+        "helper" => Ok(helper.as_ref()),
+        other => Err(format!("unexpected fixture device {other}")),
+    };
+    let mut wrong_capacity = planned.clone();
+    wrong_capacity.byte_capacity += 1;
+    assert!(
+        VulkanResidentFeedbackControlPlane::new(
+            &["owner".to_string(), "helper".to_string()],
+            "helper",
+            vocabulary_size,
+            dispatch_capacity,
+            &wrong_capacity,
+            &device_for,
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("disagrees with its physical allocation ledger")
+    );
+    let admission = VulkanMemoryAdmission::reserve(
+        &[],
+        Some((
+            owner.as_ref(),
+            vulkan_safe_host_available_bytes().unwrap(),
+            requirement,
+        )),
+    )
+    .unwrap();
+    let _scope = admission.enter();
+
+    let control = VulkanResidentFeedbackControlPlane::new(
+        &["owner".to_string(), "helper".to_string()],
+        "helper",
+        vocabulary_size,
+        dispatch_capacity,
+        &planned,
+        &device_for,
+    )
+    .unwrap();
+
+    admission
+        .ensure_fully_consumed("feedback-control fixture")
+        .unwrap();
+    assert!(control.buffers["owner"].shares_host_allocation_with(&control.buffers["helper"]));
+    assert_eq!(control.host_buffer_device_id, "helper");
 }
 
 #[test]
@@ -1832,7 +2049,7 @@ fn graph_edge_binding_never_consumes_same_named_speculative_allocations() {
 }
 
 #[test]
-fn feedback_control_binding_uses_one_device_allocation_when_colocated() {
+fn feedback_control_binding_uses_one_shared_host_allocation_when_colocated() {
     let (mut base, _) = physical_execution_edge_base_plan();
     add_feedback_control_residency(&mut base, 12_345);
     let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
@@ -1852,9 +2069,92 @@ fn feedback_control_binding_uses_one_device_allocation_when_colocated() {
     .unwrap();
 
     assert!(plan.feedback_control_memory_domain_bound);
-    assert_eq!(plan.total_stream_device_local_bytes, original_total);
-    assert_eq!(plan.total_stream_shared_host_bytes, 0);
-    assert!(plan.resident_shared_host_allocations.is_empty());
+    assert_eq!(
+        plan.total_stream_device_local_bytes,
+        original_total - 12_345
+    );
+    assert_eq!(plan.total_stream_shared_host_bytes, 12_345);
+    let [allocation] = plan.resident_shared_host_allocations.as_slice() else {
+        panic!("colocated feedback control must have one host allocation");
+    };
+    assert!(matches!(
+        allocation.kind,
+        VulkanRuntimeSharedHostResidentAllocationKind::FeedbackControl { .. }
+    ));
+    assert_eq!(allocation.owner_device_id, "owner");
+    assert_eq!(allocation.participant_device_ids, ["owner".to_string()]);
+}
+
+#[test]
+fn host_visible_sampler_buffers_move_to_typed_host_allocations() {
+    let mut base = physical_execution_residency_base_plan(1_000, 100);
+    let owner = &mut base.device_plans[0];
+    for (buffer_id, byte_capacity) in [
+        ("history_and_output", 144),
+        ("scratch", 1_024),
+        ("random_seed", 4),
+        ("seen_token_batch", 256),
+    ] {
+        owner
+            .resident_stream_device_allocations
+            .push(VulkanRuntimeResidentStreamAllocation {
+                scope: VulkanRuntimeResidentStreamAllocationScope::Target,
+                kind: VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                    class: VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+                    scope_id: "sampler".to_string(),
+                    buffer_id: buffer_id.to_string(),
+                },
+                byte_capacity,
+            });
+        owner.breakdown.sampler_workspace_bytes += byte_capacity;
+        owner.working_set.activation_headroom_bytes += byte_capacity;
+        owner.initial_device_resident_bytes += byte_capacity;
+        base.total_initial_device_resident_bytes += byte_capacity;
+    }
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &empty_physical_execution_activation_plan(),
+    )
+    .unwrap();
+    let original_device_bytes = plan.total_stream_device_local_bytes;
+
+    plan.bind_host_visible_runtime_buffer_memory_domains()
+        .unwrap();
+
+    let host_bytes = 144 + 4 + 256;
+    assert!(plan.host_visible_runtime_buffer_memory_domains_bound);
+    assert_eq!(
+        plan.total_stream_device_local_bytes,
+        original_device_bytes - host_bytes
+    );
+    assert_eq!(plan.total_stream_shared_host_bytes, host_bytes);
+    assert_eq!(plan.resident_shared_host_allocations.len(), 3);
+    assert!(plan.resident_shared_host_allocations.iter().all(|allocation| {
+        matches!(
+            allocation.kind,
+            VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer { .. }
+        ) && allocation.owner_device_id == "owner"
+            && allocation.participant_device_ids == ["owner".to_string()]
+    }));
+    let owner = &plan.device_plans[0];
+    assert_eq!(
+        owner
+            .resident_stream_device_allocations
+            .iter()
+            .filter_map(|allocation| match &allocation.kind {
+                VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                    class: VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+                    buffer_id,
+                    ..
+                } => Some((buffer_id.as_str(), allocation.byte_capacity)),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![("scratch", 1_024)]
+    );
 }
 
 #[test]
@@ -1912,6 +2212,7 @@ fn feedback_control_binding_moves_exactly_one_allocation_to_shared_host() {
     )
     .unwrap();
     plan.add_execution_transient_reservation(
+        &[],
         &[],
         &[VulkanRuntimeSharedHostTransientAllocation {
             mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,

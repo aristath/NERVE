@@ -206,6 +206,99 @@ pub struct VulkanResidentSamplerStreamConfig {
     pub random_seed: u32,
 }
 
+fn validate_sampler_host_visible_allocations(
+    spec: &VulkanResidentSamplerSpec,
+    history_byte_capacity: usize,
+    token_state_is_active: bool,
+    planned: Option<(&str, &[&VulkanRuntimeSharedHostResidentAllocation])>,
+) -> Result<(), VulkanResidentSamplerRunnerError> {
+    let Some((logical_device_id, allocations)) = planned else {
+        return Ok(());
+    };
+    let mut expected = BTreeMap::from([("history_and_output", history_byte_capacity)]);
+    if sampler_method_uses_randomness(&spec.method) {
+        expected.insert("random_seed", 4);
+    }
+    if token_state_is_active {
+        expected.insert(
+            "seen_token_batch",
+            VULKAN_BACKEND_LOOP_MAX_WINDOW * std::mem::size_of::<u32>(),
+        );
+    }
+    if allocations.len() != expected.len() {
+        return Err(VulkanError(format!(
+            "sampler {:?} resolves {} host-visible allocation ledgers, expected {}",
+            spec.sampler_id,
+            allocations.len(),
+            expected.len(),
+        ))
+        .into());
+    }
+    let mut found = BTreeSet::new();
+    for allocation in allocations {
+        let VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+            scope,
+            class,
+            scope_id,
+            buffer_id,
+        } = &allocation.kind
+        else {
+            return Err(VulkanError(format!(
+                "sampler {:?} received a non-runtime host-visible allocation ledger",
+                spec.sampler_id,
+            ))
+            .into());
+        };
+        let expected_capacity = expected.get(buffer_id.as_str()).copied();
+        if scope != &VulkanRuntimeResidentStreamAllocationScope::Target
+            || class != &VulkanRuntimeResidentBufferClass::SamplerWorkspace
+            || scope_id != &spec.sampler_id
+            || allocation.owner_device_id != logical_device_id
+            || allocation.participant_device_ids != [logical_device_id.to_string()]
+            || expected_capacity != Some(allocation.byte_capacity)
+            || !found.insert(buffer_id.as_str())
+        {
+            return Err(VulkanError(format!(
+                "sampler {:?} host-visible allocation ledger disagrees with its exact mounted workspace",
+                spec.sampler_id,
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn create_sampler_host_visible_buffer(
+    device: &VulkanComputeDevice,
+    spec: &VulkanResidentSamplerSpec,
+    buffer_id: &str,
+    byte_capacity: usize,
+    planned: Option<(&str, &[&VulkanRuntimeSharedHostResidentAllocation])>,
+) -> Result<VulkanResidentBuffer, VulkanResidentSamplerRunnerError> {
+    let Some((_, allocations)) = planned else {
+        return device
+            .create_host_visible_resident_buffer(byte_capacity)
+            .map_err(Into::into);
+    };
+    let allocation = allocations
+        .iter()
+        .find(|allocation| {
+            matches!(
+                &allocation.kind,
+                VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+                    scope_id,
+                    buffer_id: planned_buffer_id,
+                    ..
+                } if scope_id == &spec.sampler_id && planned_buffer_id == buffer_id
+            )
+        })
+        .expect("sampler host-visible allocation ledger was validated above");
+    let host_allocation = device.create_shared_host_allocation(&[], allocation.byte_capacity)?;
+    device
+        .import_shared_host_buffer(host_allocation)
+        .map_err(Into::into)
+}
+
 impl VulkanResidentSamplerRunner {
     pub fn from_output_transducer_with_spec(
         device: &VulkanComputeDevice,
@@ -227,17 +320,20 @@ impl VulkanResidentSamplerRunner {
                 random_seed,
             },
             None,
+            None,
         )
     }
 
     fn from_output_transducer_with_spec_and_feedback_control(
         device: &VulkanComputeDevice,
+        logical_device_id: &str,
         mounted: &VulkanMountedPlacedStreamCircuit,
         output_transducer: &VulkanResidentOutputTransducerRunner,
         kernels: &[VulkanResidentSamplerKernelArtifact],
         spec: &VulkanResidentSamplerSpec,
         random_seed: u32,
         feedback_control: VulkanResidentSamplerFeedbackControlBindings,
+        planned_host_allocations: &[&VulkanRuntimeSharedHostResidentAllocation],
     ) -> Result<Self, VulkanResidentSamplerRunnerError> {
         Self::from_logits_buffer_with_feedback_control(
             device,
@@ -251,6 +347,7 @@ impl VulkanResidentSamplerRunner {
                 random_seed,
             },
             Some(feedback_control),
+            Some((logical_device_id, planned_host_allocations)),
         )
     }
 
@@ -272,6 +369,7 @@ impl VulkanResidentSamplerRunner {
             spec,
             stream,
             None,
+            None,
         )
     }
 
@@ -285,6 +383,10 @@ impl VulkanResidentSamplerRunner {
         spec: &VulkanResidentSamplerSpec,
         stream: VulkanResidentSamplerStreamConfig,
         feedback_control: Option<VulkanResidentSamplerFeedbackControlBindings>,
+        planned_host_allocations: Option<(
+            &str,
+            &[&VulkanRuntimeSharedHostResidentAllocation],
+        )>,
     ) -> Result<Self, VulkanResidentSamplerRunnerError> {
         let VulkanResidentSamplerStreamConfig {
             history_capacity_activations,
@@ -449,11 +551,28 @@ impl VulkanResidentSamplerRunner {
             .checked_mul(VULKAN_SAMPLER_HISTORY_RECORD_BYTE_CAPACITY)
             .and_then(|bytes| bytes.checked_add(spec.output_byte_capacity))
             .ok_or(VulkanResidentSamplerRunnerError::HistoryCapacityOverflow)?;
-        let mut output_buffer =
-            device.create_host_visible_resident_buffer(history_byte_capacity)?;
+        validate_sampler_host_visible_allocations(
+            spec,
+            history_byte_capacity,
+            token_state_is_active,
+            planned_host_allocations,
+        )?;
+        let mut output_buffer = create_sampler_host_visible_buffer(
+            device,
+            spec,
+            "history_and_output",
+            history_byte_capacity,
+            planned_host_allocations,
+        )?;
         output_buffer.persistently_map()?;
         let sampler_seed_buffer = if sampler_method_uses_randomness(&spec.method) {
-            let buffer = device.create_host_visible_resident_buffer(4)?;
+            let buffer = create_sampler_host_visible_buffer(
+                device,
+                spec,
+                "random_seed",
+                4,
+                planned_host_allocations,
+            )?;
             buffer.write_bytes(&random_seed.to_le_bytes())?;
             Some(buffer)
         } else {
@@ -493,8 +612,12 @@ impl VulkanResidentSamplerRunner {
             })
             .transpose()?;
         let seen_token_batch_buffer = if token_state_is_active {
-            let mut buffer = device.create_host_visible_resident_buffer(
+            let mut buffer = create_sampler_host_visible_buffer(
+                device,
+                spec,
+                "seen_token_batch",
                 VULKAN_BACKEND_LOOP_MAX_WINDOW * std::mem::size_of::<u32>(),
+                planned_host_allocations,
             )?;
             buffer.persistently_map()?;
             Some(buffer)

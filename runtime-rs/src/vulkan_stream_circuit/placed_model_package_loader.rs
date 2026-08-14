@@ -109,6 +109,8 @@ impl VulkanResidentInProcessPlacedModelPackage {
         }
         let physical_execution_plan = physical_execution_plan
             .unwrap_or_else(|| VulkanRuntimePhysicalExecutionPlan::uniform(&runtime_model));
+        let workload_free_execution =
+            physical_execution_plan == VulkanRuntimePhysicalExecutionPlan::uniform(&runtime_model);
         physical_execution_plan
             .validate(&runtime_model)
             .map_err(|error| {
@@ -316,13 +318,6 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     VulkanResidentTokenModelPackageError::new(error.to_string()),
                 )
             })?;
-        let mounted_boundary_routes = physical_execution_plan
-            .mounted_boundary_routes()
-            .map_err(|error| {
-                VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(error.to_string()),
-                )
-            })?;
         let mut distributed_execution_plans =
             VulkanDistributedExecutionPlanSet::from_prepared_plans_with_resource_contract_and_execution_cases(
                 &prepared_plans,
@@ -408,6 +403,27 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mounted_boundary_routes = if workload_free_execution {
+            plan_vulkan_workload_free_graph_edge_routes(
+                &edge_plans,
+                &physical_device_by_logical_device,
+            )
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "failed to plan workload-free graph-edge routes: {error}",
+                    )),
+                )
+            })?
+        } else {
+            physical_execution_plan
+                .mounted_boundary_routes()
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(error.to_string()),
+                    )
+                })?
+        };
         let Some(transient_resolution) =
             try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients(
             &runtime_model,
@@ -1472,6 +1488,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
         let stream_memory_admission =
             reserve_vulkan_runtime_physical_execution_stream_memory(self, &device_for)?;
         let _stream_memory_scope = stream_memory_admission.enter();
+        validate_vulkan_runtime_private_activation_residency(
+            &self.physical_execution_residency_plan,
+            &self.distributed_activation_plan,
+        )
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "invalid exact private activation allocation ledger: {error}",
+                )),
+            )
+        })?;
         let distributed_dynamic_resource_buffers = self
             .distributed_dynamic_resource_buffers
             .iter()
@@ -1611,14 +1638,40 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )),
             ));
         }
+        let feedback_control_shared_allocations = self
+            .physical_execution_residency_plan
+            .resident_shared_host_allocations
+            .iter()
+            .filter(|allocation| {
+                matches!(
+                    allocation.kind,
+                    VulkanRuntimeSharedHostResidentAllocationKind::FeedbackControl { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        let [planned_feedback_control_shared_allocation] =
+            feedback_control_shared_allocations.as_slice()
+        else {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "physical feedback control resolves {} shared-host allocation ledgers, expected one",
+                    feedback_control_shared_allocations.len(),
+                )),
+            ));
+        };
         let mut feedback_control = VulkanResidentFeedbackControlPlane::new(
             &self.device_ids,
             &self.output_device_id,
             vocabulary_size,
             feedback_dispatch_capacity,
+            planned_feedback_control_shared_allocation,
             &device_for,
         )
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "failed to mount exact resident feedback control: {error}",
+            )))
+        })?;
         let mut devices = Vec::with_capacity(self.device_slices.len());
         for package_slice in &self.device_slices {
             let device = device_for(&package_slice.device_id)?;
@@ -1861,9 +1914,25 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )),
             ));
         }
+        let sampler_host_allocations = self
+            .physical_execution_residency_plan
+            .resident_shared_host_allocations
+            .iter()
+            .filter(|allocation| {
+                matches!(
+                    allocation.kind,
+                    VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+                        scope: VulkanRuntimeResidentStreamAllocationScope::Target,
+                        class: VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
         let sampler =
             VulkanResidentSamplerRunner::from_output_transducer_with_spec_and_feedback_control(
                 output_device,
+                &self.output_device_id,
                 &output_slice.mounted,
                 &output_transducer,
                 &self.sampler_kernels,
@@ -1872,6 +1941,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 feedback_control
                     .sampler_bindings()
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                &sampler_host_allocations,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
         let feedback_lane_capacity =

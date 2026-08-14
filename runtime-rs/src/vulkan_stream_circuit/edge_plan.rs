@@ -315,7 +315,12 @@ impl VulkanPlacedEdgeIoPlan {
         for (key, (byte_capacity, buffer_override)) in produced_port_requirements {
             let buffer = match buffer_override {
                 Some(buffer) => buffer,
-                None => Arc::new(device.create_resident_buffer(byte_capacity)?),
+                None => Arc::new(device.create_resident_buffer(byte_capacity).map_err(|error| {
+                    VulkanError(format!(
+                        "failed to allocate produced edge port {}.{} on {:?} ({byte_capacity} logical bytes): {error}",
+                        key.0, key.1, self.device_id,
+                    ))
+                })?),
             };
             produced_port_buffers.insert(key, buffer);
         }
@@ -373,10 +378,12 @@ impl VulkanPlacedEdgeIoPlan {
                     {
                         endpoint_override.buffer.clone()
                     } else {
-                        let mut buffer =
-                            device.create_host_visible_resident_buffer(byte_capacity)?;
-                        buffer.persistently_map()?;
-                        Arc::new(buffer)
+                        // An unoverridden incoming endpoint is local to this
+                        // logical device. Cross-device routes install an
+                        // explicit shared transport buffer before mount; host
+                        // visibility here would put a purely GPU-resident
+                        // signal in the wrong admission domain.
+                        Arc::new(device.create_resident_buffer(byte_capacity)?)
                     }
                 }
             };

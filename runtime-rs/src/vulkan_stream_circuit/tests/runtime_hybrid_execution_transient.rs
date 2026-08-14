@@ -671,34 +671,50 @@ fn physical_mount_admits_parallel_speculative_processor_allocations() {
     )
     .unwrap()
     .unwrap();
-    let allocations = planned
+    let device_allocations = planned
         .physical_execution_residency_plan
         .device_plans
         .iter()
         .flat_map(|device| &device.execution_transient_device_allocations)
         .collect::<Vec<_>>();
-    assert!(allocations
+    let host_allocations = &planned
+        .physical_execution_residency_plan
+        .execution_transient_host_visible_allocations;
+    assert!(device_allocations
         .iter()
         .any(|allocation| allocation.concern.contains("proposal")
             && allocation.allocation_class == VulkanRuntimeStreamAllocationClass::Permanent));
-    assert!(allocations
+    assert!(device_allocations
         .iter()
         .any(|allocation| allocation.concern.contains("committed context")
             && allocation.allocation_class == VulkanRuntimeStreamAllocationClass::Permanent));
-    assert!(allocations
+    assert!(host_allocations
         .iter()
         .any(|allocation| allocation.concern.contains("output readback")
             && allocation.allocation_class == VulkanRuntimeStreamAllocationClass::Permanent));
-    assert!(allocations
-        .iter()
-        .any(|allocation| allocation.concern.contains("normal prefill state ingestion")
+    assert!(
+        device_allocations.iter().any(|allocation| allocation
+            .concern
+            .contains("normal prefill state ingestion")
+            && allocation.allocation_class == VulkanRuntimeStreamAllocationClass::PromptRunner)
+            || host_allocations.iter().any(|allocation| allocation
+                .concern
+                .contains("normal prefill state ingestion")
+                && allocation.allocation_class
+                    == VulkanRuntimeStreamAllocationClass::PromptRunner)
+    );
+    assert!(
+        device_allocations.iter().any(|allocation| allocation
+            .concern
+            .contains("causal verification state ingestion")
             && allocation.allocation_class
-                == VulkanRuntimeStreamAllocationClass::PromptRunner));
-    assert!(allocations.iter().any(|allocation| allocation
-        .concern
-        .contains("causal verification state ingestion")
-        && allocation.allocation_class
-            == VulkanRuntimeStreamAllocationClass::VerificationRunner));
+                == VulkanRuntimeStreamAllocationClass::VerificationRunner)
+            || host_allocations.iter().any(|allocation| allocation
+                .concern
+                .contains("causal verification state ingestion")
+                && allocation.allocation_class
+                    == VulkanRuntimeStreamAllocationClass::VerificationRunner)
+    );
 }
 
 #[test]
@@ -770,12 +786,12 @@ fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
         false,
     )
     .unwrap();
-    let fixed = exact_vulkan_component_batch_fixed_control_bytes().unwrap()
-        + size_of::<u32>();
+    let fixed_device = size_of::<u32>();
+    let fixed_host = exact_vulkan_component_batch_fixed_control_bytes().unwrap();
     let one_bytes = one.device_bytes_by_logical_device[&logical_device_id];
     let four_bytes = four.device_bytes_by_logical_device[&logical_device_id];
-    assert!(one_bytes > fixed, "the fixture must require lane storage");
-    assert_eq!(four_bytes, fixed + 4 * (one_bytes - fixed));
+    assert!(one_bytes > fixed_device, "the fixture must require lane storage");
+    assert_eq!(four_bytes, fixed_device + 4 * (one_bytes - fixed_device));
     assert_eq!(
         three_in_four.device_bytes_by_logical_device[&logical_device_id],
         four_bytes,
@@ -798,11 +814,32 @@ fn runtime_hybrid_exact_prefill_transient_scales_only_lane_residency() {
     );
     assert_eq!(
         four
-            .device_allocations
+            .host_visible_allocations
             .iter()
             .filter(|allocation| allocation.concern == "component-batch lane stream-control")
             .count(),
         4
+    );
+    assert_eq!(
+        one.host_visible_allocations
+            .iter()
+            .map(|allocation| allocation.byte_capacity)
+            .sum::<usize>(),
+        fixed_host
+            + size_of::<[u32; 2]>()
+            + VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize
+            + VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+    );
+    assert_eq!(
+        four
+            .host_visible_allocations
+            .iter()
+            .map(|allocation| allocation.byte_capacity)
+            .sum::<usize>(),
+        fixed_host
+            + size_of::<[u32; 8]>()
+            + VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize
+            + 4 * VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
     );
     assert_eq!(one.device_bytes_by_logical_device.len(), 1);
     assert_eq!(four.device_bytes_by_logical_device.len(), 1);

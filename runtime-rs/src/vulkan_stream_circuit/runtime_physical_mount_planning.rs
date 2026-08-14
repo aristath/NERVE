@@ -268,6 +268,7 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
             .physical_execution_residency_plan
             .add_execution_transient_reservation(
                 &execution_transient.device_allocations,
+                &execution_transient.host_visible_allocations,
                 &execution_transient.shared_host_allocations,
             )
             .map_err(|error| {
@@ -292,6 +293,16 @@ fn try_resolve_vulkan_runtime_selected_resources_with_exact_execution_transients
             .bind_feedback_control_memory_domain(&physical_device_by_logical_device)
             .map_err(|error| {
                 physical_mount_planning_error("feedback-control memory-domain binding", error)
+            })?;
+        resolution
+            .plans
+            .physical_execution_residency_plan
+            .bind_host_visible_runtime_buffer_memory_domains()
+            .map_err(|error| {
+                physical_mount_planning_error(
+                    "host-visible runtime-buffer memory-domain binding",
+                    error,
+                )
             })?;
         resolution
             .plans
@@ -434,9 +445,8 @@ pub fn plan_vulkan_runtime_physical_mount(
             .map_err(|error| physical_mount_planning_error("graph-edge planning", error))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mounted_boundary_routes = physical_execution_plan
-        .mounted_boundary_routes()
-        .map_err(|error| physical_mount_planning_error("physical boundary routing", error))?;
+    let workload_free_execution =
+        physical_execution_plan == &VulkanRuntimePhysicalExecutionPlan::uniform(runtime_model);
     let artifact_manifest = VulkanPhysicalKernelArtifactManifest::new(
         loaded_manifest
             .physical_artifacts
@@ -470,6 +480,26 @@ pub fn plan_vulkan_runtime_physical_mount(
         .iter()
         .map(|device| (device.logical_device_id.clone(), device.identity.clone()))
         .collect::<BTreeMap<_, _>>();
+    let physical_device_by_logical_device = identity_by_logical_device
+        .iter()
+        .map(|(logical_device_id, identity)| {
+            (
+                logical_device_id.clone(),
+                identity.physical_device_id.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mounted_boundary_routes = if workload_free_execution {
+        plan_vulkan_workload_free_graph_edge_routes(
+            &edge_plans,
+            &physical_device_by_logical_device,
+        )
+        .map_err(|error| physical_mount_planning_error("graph-edge route planning", error))?
+    } else {
+        physical_execution_plan
+            .mounted_boundary_routes()
+            .map_err(|error| physical_mount_planning_error("physical boundary routing", error))?
+    };
     physical_execution_plan
         .validate_bound_boundary_device_identities(&identity_by_logical_device)
         .map_err(|error| physical_mount_planning_error("physical boundary validation", error))?;

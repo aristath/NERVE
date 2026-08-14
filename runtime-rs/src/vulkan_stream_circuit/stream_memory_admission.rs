@@ -104,6 +104,10 @@ fn physical_execution_unclassified_shared_host_logical_bytes(
         distributed,
         resident,
         plan.execution_transient_shared_host_bytes_per_stream,
+        plan.execution_transient_host_visible_allocations
+            .iter()
+            .map(|allocation| allocation.byte_capacity)
+            .sum::<usize>(),
     ]
     .into_iter()
     .try_fold(0usize, |total, bytes| total.checked_add(bytes))
@@ -290,6 +294,26 @@ where
     })
 }
 
+fn private_activation_resident_requirement_bytes_with<F>(
+    allocations: &[VulkanRuntimePrivateActivationResidentAllocation],
+    mut requirement_for: F,
+) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError>
+where
+    F: FnMut(
+        &VulkanRuntimePrivateActivationResidentAllocation,
+    ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    allocations.iter().try_fold(0usize, |total, allocation| {
+        total.checked_add(requirement_for(allocation)?).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(
+                    "private activation resident requirements overflowed",
+                ),
+            )
+        })
+    })
+}
+
 fn external_device_local_resident_requirement_bytes_with<F>(
     allocations: &[VulkanRuntimeExternalDeviceLocalResidentAllocation],
     mut requirement_for: F,
@@ -362,7 +386,7 @@ where
     let mut physical_device_by_logical_device = BTreeMap::new();
     let mut safe_capacity_by_physical_device = BTreeMap::new();
     let mut physical_devices = BTreeMap::<String, &VulkanComputeDevice>::new();
-    let stream_device_requirements = plan
+    let mut stream_device_requirements = plan
         .device_plans
         .iter()
         .map(|device_plan| {
@@ -447,9 +471,38 @@ where
                         )
                     })
                 })?;
+            let private_activation_ledger_logical_bytes = device_plan
+                .private_activation_resident_allocations
+                .iter()
+                .try_fold(0usize, |total, allocation| {
+                    total.checked_add(allocation.byte_capacity).ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "physical execution device {:?} private activation allocation ledger overflowed",
+                                device_plan.device_id,
+                            )),
+                        )
+                    })
+                })?;
+            if private_activation_ledger_logical_bytes
+                != device_plan
+                    .breakdown
+                    .distributed_private_activation_device_bytes_per_stream
+            {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "physical execution device {:?} private activation allocation ledger declares {private_activation_ledger_logical_bytes} bytes but its residency breakdown declares {}",
+                        device_plan.device_id,
+                        device_plan
+                            .breakdown
+                            .distributed_private_activation_device_bytes_per_stream,
+                    )),
+                ));
+            }
             let residual_logical_bytes = logical_without_execution_transients
                 .checked_sub(resident_ledger_logical_bytes)
                 .and_then(|bytes| bytes.checked_sub(external_ledger_logical_bytes))
+                .and_then(|bytes| bytes.checked_sub(private_activation_ledger_logical_bytes))
                 .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
                         VulkanResidentTokenModelPackageError::new(format!(
@@ -482,6 +535,15 @@ where
                 &device_plan.external_device_local_resident_allocations,
                 device_for,
             )?;
+            let exact_private_activation_bytes =
+                private_activation_resident_requirement_bytes_with(
+                    &device_plan.private_activation_resident_allocations,
+                    |allocation| {
+                        device
+                            .resident_buffer_memory_requirement_bytes(allocation.byte_capacity)
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                    },
+                )?;
             let exact_transient_bytes_for =
                 |allocation_class: VulkanMemoryAdmissionAllocationClass| {
                     execution_transient_device_requirement_bytes_with(
@@ -505,6 +567,7 @@ where
                 };
             let permanent_base_bytes = residual_logical_bytes
                 .checked_add(exact_external_bytes)
+                .and_then(|bytes| bytes.checked_add(exact_private_activation_bytes))
                 .ok_or_else(|| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
                         VulkanResidentTokenModelPackageError::new(format!(
@@ -543,6 +606,60 @@ where
             Ok((device, requirements_by_class))
         })
         .collect::<Result<Vec<_>, VulkanResidentInProcessPlacedRuntimeError>>()?;
+
+    let mut host_visible_host_requirements_by_class = BTreeMap::<
+        VulkanMemoryAdmissionAllocationClass,
+        usize,
+    >::new();
+    for allocation in &plan.execution_transient_host_visible_allocations {
+        let device = device_for(&allocation.logical_device_id)?;
+        let requirement = device
+            .host_visible_resident_buffer_memory_requirement(allocation.byte_capacity)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let allocation_class = stream_transient_allocation_class(allocation.allocation_class);
+        match requirement.domain {
+            VulkanResidentBufferMemoryDomain::DeviceLocal => {
+                let (_, requirements_by_class) = stream_device_requirements
+                    .iter_mut()
+                    .find(|(candidate, _)| {
+                        candidate.physical_device_id() == device.physical_device_id()
+                    })
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "host-visible transient on {:?} has no physical device admission",
+                                allocation.logical_device_id,
+                            )),
+                        )
+                    })?;
+                let class_total = requirements_by_class.entry(allocation_class).or_default();
+                *class_total = class_total
+                    .checked_add(requirement.byte_count)
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "host-visible transient device requirement overflowed on {:?}",
+                                allocation.logical_device_id,
+                            )),
+                        )
+                    })?;
+            }
+            VulkanResidentBufferMemoryDomain::HostVisible => {
+                let class_total = host_visible_host_requirements_by_class
+                    .entry(allocation_class)
+                    .or_default();
+                *class_total = class_total
+                    .checked_add(requirement.byte_count)
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(
+                                "host-visible transient host requirement overflowed",
+                            ),
+                        )
+                    })?;
+            }
+        }
+    }
 
     let safe_host_bytes = if plan.total_stream_shared_host_bytes == 0
         && physical_devices.len() <= 1
@@ -607,7 +724,7 @@ where
             ),
         )
     })?;
-    let mut host_requirements_by_class = BTreeMap::new();
+    let mut host_requirements_by_class = host_visible_host_requirements_by_class;
     if permanent_base_host_requirement_bytes > 0 {
         host_requirements_by_class.insert(
             VulkanMemoryAdmissionAllocationClass::Permanent,

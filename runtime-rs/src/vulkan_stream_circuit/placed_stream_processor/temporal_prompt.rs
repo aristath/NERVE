@@ -658,8 +658,41 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     "prompt runner",
                 )
             {
+                let mounted = self
+                    .temporal_block_executions
+                    .borrow()
+                    .get(&false)
+                    .map(|runner| runner.execution_graph.resident_transient_allocation_report())
+                    .unwrap_or_default();
                 self.remove_temporal_block_execution(false);
-                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(error));
+                let planned = self
+                    .model
+                    .physical_execution_residency_plan()
+                    .device_plans
+                    .iter()
+                    .flat_map(|device| {
+                        device
+                            .execution_transient_device_allocations
+                            .iter()
+                            .filter(|allocation| {
+                                allocation.allocation_class
+                                    == VulkanRuntimeStreamAllocationClass::PromptRunner
+                            })
+                            .map(|allocation| {
+                                format!(
+                                    "{}:{}:{}",
+                                    allocation.logical_device_id,
+                                    allocation.concern,
+                                    allocation.byte_capacity,
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "{error}; exact prompt-runner allocation ledger={planned:?}; mounted prompt-runner allocations={mounted:?}",
+                    )),
+                ));
             }
         }
         Ok(())

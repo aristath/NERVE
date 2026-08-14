@@ -2,6 +2,7 @@
 struct VulkanRuntimeHybridExecutionTransientPlan {
     device_bytes_by_logical_device: BTreeMap<String, usize>,
     device_allocations: Vec<VulkanRuntimeDeviceLocalTransientAllocation>,
+    host_visible_allocations: Vec<VulkanRuntimeHostVisibleTransientAllocation>,
     shared_host_allocations: Vec<VulkanRuntimeSharedHostTransientAllocation>,
 }
 
@@ -16,6 +17,14 @@ pub enum VulkanRuntimeStreamAllocationClass {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeDeviceLocalTransientAllocation {
+    pub logical_device_id: String,
+    pub byte_capacity: usize,
+    pub concern: String,
+    pub allocation_class: VulkanRuntimeStreamAllocationClass,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VulkanRuntimeHostVisibleTransientAllocation {
     pub logical_device_id: String,
     pub byte_capacity: usize,
     pub concern: String,
@@ -44,6 +53,9 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         for allocation in &mut self.device_allocations {
             allocation.allocation_class = allocation_class;
         }
+        for allocation in &mut self.host_visible_allocations {
+            allocation.allocation_class = allocation_class;
+        }
         for allocation in &mut self.shared_host_allocations {
             allocation.allocation_class = allocation_class;
         }
@@ -57,6 +69,14 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         let mut next = self.clone();
         for allocation in other.device_allocations {
             next.add_device_allocation_with_class(
+                &allocation.logical_device_id,
+                allocation.byte_capacity,
+                &allocation.concern,
+                allocation.allocation_class,
+            )?;
+        }
+        for allocation in other.host_visible_allocations {
+            next.add_host_visible_allocation_with_class(
                 &allocation.logical_device_id,
                 allocation.byte_capacity,
                 &allocation.concern,
@@ -128,6 +148,44 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
             .iter()
             .map(|allocation| allocation.byte_capacity)
             .sum()
+    }
+
+    fn add_host_visible_allocation(
+        &mut self,
+        logical_device_id: &str,
+        byte_count: usize,
+        concern: &str,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        self.add_host_visible_allocation_with_class(
+            logical_device_id,
+            byte_count,
+            concern,
+            VulkanRuntimeStreamAllocationClass::Permanent,
+        )
+    }
+
+    fn add_host_visible_allocation_with_class(
+        &mut self,
+        logical_device_id: &str,
+        byte_count: usize,
+        concern: &str,
+        allocation_class: VulkanRuntimeStreamAllocationClass,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        if logical_device_id.trim().is_empty() || byte_count == 0 || concern.trim().is_empty() {
+            return Err(VulkanRuntimeHybridPlacementError(
+                "exact hybrid host-visible transient allocation requires a device, positive capacity, and concern"
+                    .to_string(),
+            ));
+        }
+        self.host_visible_allocations.push(
+            VulkanRuntimeHostVisibleTransientAllocation {
+                logical_device_id: logical_device_id.to_string(),
+                byte_capacity: byte_count,
+                concern: concern.to_string(),
+                allocation_class,
+            },
+        );
+        Ok(())
     }
 
     fn add_shared_host_allocation(
@@ -349,15 +407,24 @@ fn exact_vulkan_runtime_speculative_catch_up_transient_plan(
             ))
         })?;
         for allocation in allocation_plan.allocations {
-            transient
-                .add_device_allocation(
+            let concern = format!(
+                "speculative catch-up {} component batch {:?}",
+                decoder.id, allocation.kind,
+            );
+            let result = if allocation.host_visible {
+                transient.add_host_visible_allocation(
                     &slice.device_id,
                     allocation.byte_capacity,
-                    &format!(
-                        "speculative catch-up {} component batch {:?}",
-                        decoder.id, allocation.kind,
-                    ),
+                    &concern,
                 )
+            } else {
+                transient.add_device_allocation(
+                    &slice.device_id,
+                    allocation.byte_capacity,
+                    &concern,
+                )
+            };
+            result
                 .map_err(|error| {
                     VulkanResidentTokenModelPackageError::new(error.to_string())
                 })?;
@@ -376,7 +443,7 @@ fn exact_vulkan_runtime_speculative_catch_up_transient_plan(
             (batch_control_byte_count as usize, "embedding batch control"),
         ] {
             transient
-                .add_device_allocation(
+                .add_host_visible_allocation(
                     &slice.device_id,
                     byte_capacity,
                     &format!("speculative catch-up {} {concern}", decoder.id),
@@ -530,16 +597,24 @@ fn exact_vulkan_runtime_add_component_batch_allocations(
     allocation_plan: VulkanComponentBatchResidentAllocationPlan,
 ) -> Result<(), VulkanResidentTokenModelPackageError> {
     for allocation in allocation_plan.allocations {
-        transient
-            .add_device_allocation(
+        let concern = format!(
+            "speculative decoder {decoder_id} {concern} {:?}",
+            allocation.kind,
+        );
+        let result = if allocation.host_visible {
+            transient.add_host_visible_allocation(
                 logical_device_id,
                 allocation.byte_capacity,
-                &format!(
-                    "speculative decoder {decoder_id} {concern} {:?}",
-                    allocation.kind,
-                ),
+                &concern,
             )
-            .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+        } else {
+            transient.add_device_allocation(
+                logical_device_id,
+                allocation.byte_capacity,
+                &concern,
+            )
+        };
+        result.map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
     }
     Ok(())
 }
@@ -650,7 +725,7 @@ fn exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
                 ))
             })?;
         transient
-            .add_device_allocation(
+            .add_host_visible_allocation(
                 &slice.device_id,
                 readback_byte_capacity,
                 &format!("speculative decoder {} output readback", decoder.id),
@@ -870,6 +945,30 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         );
     }
     let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
+    let input_component_id = runtime_model
+        .circuit_graph
+        .signal_processor_endpoint_component_ids()
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
+        .0;
+    let input_device_id = runtime_model
+        .placement
+        .device_for_component(&input_component_id);
+    plan.add_host_visible_allocation(
+        input_device_id,
+        allocation_lane_capacity
+            .checked_mul(size_of::<u32>())
+            .ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(
+                    "exact hybrid input token-id capacity overflowed".to_string(),
+                )
+            })?,
+        "input embedding token IDs",
+    )?;
+    plan.add_host_visible_allocation(
+        input_device_id,
+        VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY as usize,
+        "input embedding batch control",
+    )?;
     let distributed_dispatch_indices = execution_plan
         .dispatches
         .iter()
@@ -975,13 +1074,13 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
             }
         }
         for _ in 0..allocation_lane_capacity {
-            plan.add_device_allocation(
+            plan.add_host_visible_allocation(
                 &slice.device_id,
                 VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
                 "component-batch lane stream-control",
             )?;
         }
-        plan.add_device_allocation(
+        plan.add_host_visible_allocation(
             &slice.device_id,
             size_of::<u32>()
                 .checked_mul(allocation_lane_capacity)
@@ -993,7 +1092,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
             "component-batch token IDs",
         )?;
         for payload in exact_vulkan_component_batch_fixed_control_payloads() {
-            plan.add_device_allocation(
+            plan.add_host_visible_allocation(
                 &slice.device_id,
                 payload.byte_count() as usize,
                 "component-batch control",
@@ -1102,7 +1201,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
             .collect::<Vec<_>>();
         for shard in &dispatch.shards {
             for payload in &control_payloads {
-                plan.add_device_allocation(
+                plan.add_host_visible_allocation(
                     &shard.device_id,
                     payload.byte_count() as usize,
                     "distributed batch control",

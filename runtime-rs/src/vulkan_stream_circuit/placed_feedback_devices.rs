@@ -239,14 +239,6 @@ struct VulkanResidentPlacedFeedbackTimelineSynchronization {
     destination_waits: BTreeMap<String, VulkanTimelineSemaphore>,
     next_value: Cell<u64>,
     pending_value: Cell<Option<u64>>,
-    device_local_staging: Option<VulkanResidentPlacedFeedbackDeviceLocalStaging>,
-}
-
-struct VulkanResidentPlacedFeedbackDeviceLocalStaging {
-    output_copy: Box<VulkanResidentBufferCopy>,
-    destination_copies: BTreeMap<String, Box<VulkanResidentBufferCopy>>,
-    _output_staging: Arc<VulkanResidentBuffer>,
-    _destination_staging: BTreeMap<String, Arc<VulkanResidentBuffer>>,
 }
 
 #[derive(Clone, Copy)]
@@ -269,16 +261,6 @@ impl<'a> VulkanPlacedFeedbackTimelineTurn<'a> {
             .map(|wait| VulkanTimelineSemaphorePoint::new(wait, value))
     }
 
-    fn destination_copy(self, device_id: &str) -> Option<&'a VulkanResidentBufferCopy> {
-        self.destination_value?;
-        self.synchronization
-            .device_local_staging
-            .as_ref()?
-            .destination_copies
-            .get(device_id)
-            .map(Box::as_ref)
-    }
-
     fn output_signal(self) -> VulkanTimelineSemaphorePoint<'a> {
         VulkanTimelineSemaphorePoint::new(
             &self.synchronization.output_signal,
@@ -286,12 +268,6 @@ impl<'a> VulkanPlacedFeedbackTimelineTurn<'a> {
         )
     }
 
-    fn output_copy(self) -> Option<&'a VulkanResidentBufferCopy> {
-        self.synchronization
-            .device_local_staging
-            .as_ref()
-            .map(|staging| staging.output_copy.as_ref())
-    }
 }
 
 struct VulkanResidentPlacedOutputTimelineSynchronization {
@@ -368,50 +344,17 @@ impl VulkanResidentPlacedFeedbackTimelineSynchronization {
             control.shares_device_memory_with(output_stream_control)
                 || control.shares_host_allocation_with(output_stream_control)
         });
-        let device_local_staging = if controls_are_directly_shared {
-            None
-        } else {
-            let peers = destinations
-                .iter()
-                .map(|(_, device, _)| *device)
-                .collect::<Vec<_>>();
-            let allocation = output_device
-                .create_shared_host_allocation(&peers, VULKAN_STREAM_CONTROL_BYTE_CAPACITY)?;
-            let output_staging = Arc::new(
-                output_device.import_shared_host_buffer(Arc::clone(&allocation))?,
-            );
-            let output_copy = Box::new(output_device.create_resident_buffer_copy(
-                output_stream_control,
-                &output_staging,
-                VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
-            )?);
-            let mut destination_copies = BTreeMap::new();
-            let mut destination_staging = BTreeMap::new();
-            for (device_id, device, stream_control) in &destinations {
-                let staging = Arc::new(
-                    device.import_shared_host_buffer(Arc::clone(&allocation))?,
-                );
-                let copy = Box::new(device.create_resident_buffer_copy(
-                    &staging,
-                    stream_control,
-                    VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
-                )?);
-                destination_copies.insert((*device_id).to_string(), copy);
-                destination_staging.insert((*device_id).to_string(), staging);
-            }
-            Some(VulkanResidentPlacedFeedbackDeviceLocalStaging {
-                output_copy,
-                destination_copies,
-                _output_staging: output_staging,
-                _destination_staging: destination_staging,
-            })
-        };
+        if !controls_are_directly_shared {
+            return Err(VulkanError(
+                "resident feedback stream controls do not share their exact physical allocation"
+                    .to_string(),
+            ));
+        }
         Ok(Some(Self {
             output_signal,
             destination_waits,
             next_value: Cell::new(1),
             pending_value: Cell::new(None),
-            device_local_staging,
         }))
     }
 
@@ -1932,83 +1875,44 @@ where
             "invalid mounted stream-control allocation: {error}",
         )))
     })?;
-    let unique_devices = if let Some(allocation) = planned_stream_control {
-        exact_physical_allocation_devices(
-            &allocation.owner_device_id,
-            &allocation.participant_device_ids,
-            allocation.byte_capacity,
-            &actual_stream_control_participants,
-            "shared stream control",
-            device_for,
-        )?
-    } else {
-        let mut devices = Vec::<(&VulkanComputeDevice, Vec<String>)>::new();
-        for device_id in &actual_stream_control_participants {
-            let device = device_for(device_id)?;
-            if let Some((_, logical_device_ids)) = devices
-                .iter_mut()
-                .find(|(candidate, _)| candidate.shares_logical_device_with(device))
-            {
-                logical_device_ids.push(device_id.clone());
-            } else {
-                devices.push((device, vec![device_id.clone()]));
-            }
-        }
-        if devices.len() > 1 {
-            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                VulkanError(
-                    "stream-control mounting spans unplanned physical allocation domains"
-                        .to_string(),
-                ),
-            ));
-        }
-        devices
-    };
+    let unique_devices = exact_physical_allocation_devices(
+        &planned_stream_control.owner_device_id,
+        &planned_stream_control.participant_device_ids,
+        planned_stream_control.byte_capacity,
+        &actual_stream_control_participants,
+        "shared stream control",
+        device_for,
+    )?;
     let mut stream_control_buffers = BTreeMap::new();
     let feedback_stream_control_is_resident_replayable = true;
     if let Some((owner_device, _)) = unique_devices.first() {
-        let buffers = if planned_stream_control.is_none() {
-            let mut buffer = owner_device
-                .create_host_visible_resident_buffer(VULKAN_STREAM_CONTROL_BYTE_CAPACITY)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            buffer
-                .persistently_map()
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            vec![Arc::new(buffer)]
-        } else {
-            let peers = unique_devices
-                .iter()
-                .skip(1)
-                .map(|(device, _)| *device)
-                .collect::<Vec<_>>();
-            // Token/tick metadata is a tiny coherence-critical control plane,
-            // not a bulk activation. Keep one host-coherent allocation bound
-            // into every physical device so scalar execution, resident
-            // feedback, rollback, and replay all observe exactly the same
-            // bytes. A device-local DMA-BUF would need explicit external queue
-            // ownership transfers for cross-device read-after-write; the few
-            // control words cannot justify that weaker and more complex path.
-            let byte_capacity = planned_stream_control
-                .expect("cross-device stream control was validated above")
-                .byte_capacity;
-            let allocation = owner_device
-                .create_shared_host_allocation(&peers, byte_capacity)
-                .map_err(|error| {
-                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
-                        "failed to allocate shared stream control across {} physical devices: {error}",
-                        unique_devices.len(),
-                    )))
-                })?;
-            unique_devices
-                .iter()
-                .map(|(device, _)| {
-                    device
-                        .import_shared_host_buffer(Arc::clone(&allocation))
-                        .map(Arc::new)
-                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        let peers = unique_devices
+            .iter()
+            .skip(1)
+            .map(|(device, _)| *device)
+            .collect::<Vec<_>>();
+        // Token/tick metadata is a tiny coherence-critical control plane,
+        // not a bulk activation. Keep one host-coherent allocation bound into
+        // every physical device, including the one-device case, so admission,
+        // scalar execution, feedback, rollback, and replay all refer to the
+        // same typed physical allocation.
+        let allocation = owner_device
+            .create_shared_host_allocation(&peers, planned_stream_control.byte_capacity)
+            .map_err(|error| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "failed to allocate shared stream control across {} physical devices: {error}",
+                    unique_devices.len(),
+                )))
+            })?;
+        let buffers = unique_devices
+            .iter()
+            .map(|(device, _)| {
+                device
+                    .import_shared_host_buffer(Arc::clone(&allocation))
+                    .map(Arc::new)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         for buffer in &buffers {
             buffer
                 .write_bytes(&[0; VULKAN_STREAM_CONTROL_BYTE_CAPACITY])

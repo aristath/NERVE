@@ -61,6 +61,62 @@ fn pair_placed_edge_endpoints(
     Ok(pairs)
 }
 
+/// Produces the complete, deterministic graph-edge transport plan used by the
+/// workload-free baseline. Unlike a calibrated physical execution plan, the
+/// baseline has no measured boundary cases from which to recover a route. It
+/// therefore explicitly selects device-local staging for every edge that
+/// crosses a physical-device boundary; edges whose logical devices alias one
+/// physical device remain resident aliases and need no transport route.
+///
+/// This is planning, not an allocation-time fallback. The resulting routes are
+/// consumed by physical residency admission and then replayed unchanged by the
+/// mount, so the admitted host/device storage is the storage that execution
+/// actually uses.
+fn plan_vulkan_workload_free_graph_edge_routes(
+    plans: &[VulkanPlacedEdgeIoPlan],
+    physical_device_by_logical_device: &BTreeMap<String, String>,
+) -> Result<BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>, VulkanError> {
+    let mut routes = BTreeMap::new();
+    for (outgoing, incoming) in pair_placed_edge_endpoints(plans)? {
+        let source_physical_device_id = physical_device_by_logical_device
+            .get(&outgoing.local_device_id)
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "workload-free graph edge {} has no physical binding for source logical device {:?}",
+                    outgoing.edge_index, outgoing.local_device_id,
+                ))
+            })?;
+        let destination_physical_device_id = physical_device_by_logical_device
+            .get(&incoming.local_device_id)
+            .ok_or_else(|| {
+                VulkanError(format!(
+                    "workload-free graph edge {} has no physical binding for destination logical device {:?}",
+                    outgoing.edge_index, incoming.local_device_id,
+                ))
+            })?;
+        if source_physical_device_id == destination_physical_device_id {
+            continue;
+        }
+        let frame_byte_count = outgoing
+            .byte_capacity
+            .expect("paired outgoing edge capacity was validated");
+        let route = VulkanRuntimeMountedBoundaryRoute {
+            edge_index: outgoing.edge_index,
+            source_device_id: outgoing.local_device_id,
+            destination_device_id: incoming.local_device_id,
+            frame_byte_count,
+            route: VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+        };
+        if routes.insert(route.edge_index, route).is_some() {
+            return Err(VulkanError(format!(
+                "workload-free graph-edge planning repeated edge {}",
+                outgoing.edge_index,
+            )));
+        }
+    }
+    Ok(routes)
+}
+
 #[derive(Clone, Debug)]
 struct VulkanPlacedProducedPortEdgeGroup {
     source_device_id: String,

@@ -406,7 +406,12 @@ impl VulkanStreamCircuitResidentPlan {
                 static_byte_capacity: state.static_bytes,
                 bytes_per_activation: state.bytes_per_activation,
                 clone_from: state.clone_from.clone(),
-                buffer: device.create_resident_buffer(byte_capacity)?,
+                buffer: device.create_resident_buffer(byte_capacity).map_err(|error| {
+                    VulkanError(format!(
+                        "failed to allocate stream state {}.{} ({byte_capacity} logical bytes): {error}",
+                        state.component_id, state.state_id,
+                    ))
+                })?,
             });
         }
 
@@ -416,7 +421,17 @@ impl VulkanStreamCircuitResidentPlan {
                 telemetry.byte_capacity,
                 "selection telemetry buffer allocation",
             )?;
-            let buffer = device.create_resident_buffer(telemetry.byte_capacity)?;
+            let buffer = device
+                .create_resident_buffer(telemetry.byte_capacity)
+                .map_err(|error| {
+                    VulkanError(format!(
+                        "failed to allocate selection telemetry {}.{}.{} ({} logical bytes): {error}",
+                        telemetry.component_id,
+                        telemetry.node_id,
+                        telemetry.domain_id,
+                        telemetry.byte_capacity,
+                    ))
+                })?;
             buffer.write_bytes(&vec![0u8; telemetry.byte_capacity])?;
             selection_telemetry_buffers.push(VulkanSelectionTelemetryBufferAllocation {
                 component_id: telemetry.component_id.clone(),
@@ -447,7 +462,14 @@ impl VulkanStreamCircuitResidentPlan {
                 let (buffer, shared_across_devices) = match activation_override {
                     Some(activation_override) => (Arc::clone(&activation_override.buffer), true),
                     None => (
-                        Arc::new(device.create_resident_buffer(byte_capacity)?),
+                        Arc::new(device.create_resident_buffer(byte_capacity).map_err(
+                            |error| {
+                                VulkanError(format!(
+                                    "failed to allocate activation {}.slot_{} ({byte_capacity} logical bytes): {error}",
+                                    bank.component_id, slot.slot,
+                                ))
+                            },
+                        )?),
                         false,
                     ),
                 };

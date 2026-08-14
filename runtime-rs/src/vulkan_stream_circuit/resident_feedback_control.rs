@@ -145,6 +145,7 @@ impl VulkanResidentFeedbackControlPlane {
         output_device_id: &str,
         vocabulary_size: usize,
         dispatch_capacity: usize,
+        planned_shared_allocation: &VulkanRuntimeSharedHostResidentAllocation,
         device_for: &F,
     ) -> Result<Self, VulkanError>
     where
@@ -171,73 +172,54 @@ impl VulkanResidentFeedbackControlPlane {
             vocabulary_size,
             dispatch_capacity,
         )?;
-        let resolved_devices = device_ids
-            .iter()
-            .map(|device_id| {
-                device_for(device_id)
-                    .map(|device| (device_id.as_str(), device))
-                    .map_err(|error| {
-                        VulkanError(format!(
-                            "failed to resolve resident feedback device {device_id:?}: {error}"
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let output_device = resolved_devices
-            .iter()
-            .find(|(device_id, _)| *device_id == output_device_id)
-            .map(|(_, device)| *device)
-            .ok_or_else(|| {
-                VulkanError(format!(
-                    "resident feedback output device {output_device_id:?} is not bound"
-                ))
-            })?;
-
-        let mut unique_devices = Vec::<(&str, &VulkanComputeDevice)>::new();
-        for (device_id, device) in &resolved_devices {
-            if unique_devices
-                .iter()
-                .all(|(_, existing)| !existing.shares_logical_device_with(device))
-            {
-                unique_devices.push((*device_id, *device));
-            }
+        if !device_ids.iter().any(|device_id| device_id == output_device_id) {
+            return Err(VulkanError(format!(
+                "resident feedback output device {output_device_id:?} is not bound"
+            )));
         }
+        if !matches!(
+            planned_shared_allocation.kind,
+            VulkanRuntimeSharedHostResidentAllocationKind::FeedbackControl { .. }
+        ) || planned_shared_allocation.byte_capacity != byte_capacity
+        {
+            return Err(VulkanError(
+                "resident feedback control disagrees with its physical allocation ledger"
+                    .to_string(),
+            ));
+        }
+        let actual_participant_device_ids = device_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let allocation_devices = exact_physical_allocation_devices(
+            &planned_shared_allocation.owner_device_id,
+            &planned_shared_allocation.participant_device_ids,
+            planned_shared_allocation.byte_capacity,
+            &actual_participant_device_ids,
+            "resident feedback control",
+            &|device_id| {
+                device_for(device_id).map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "failed to resolve resident feedback device {device_id:?}: {error}",
+                    )))
+                })
+            },
+        )
+        .map_err(|error| VulkanError(error.to_string()))?;
+        let (allocation_owner, _) = allocation_devices
+            .first()
+            .expect("feedback allocation has an owner");
+        let peers = allocation_devices
+            .iter()
+            .skip(1)
+            .map(|(device, _)| *device)
+            .collect::<Vec<_>>();
+        let allocation = allocation_owner.create_shared_host_allocation(
+            &peers,
+            planned_shared_allocation.byte_capacity,
+        )?;
         let mut buffers = BTreeMap::new();
-        if unique_devices.len() == 1 {
-            let mut buffer = output_device.create_host_visible_resident_buffer(byte_capacity)?;
-            buffer.persistently_map()?;
-            let buffer = Arc::new(buffer);
-            for (device_id, _) in &resolved_devices {
-                buffers.insert((*device_id).to_string(), Arc::clone(&buffer));
-            }
-        } else {
-            let peers = unique_devices
-                .iter()
-                .map(|(_, device)| *device)
-                .filter(|device| !device.shares_logical_device_with(output_device))
-                .collect::<Vec<_>>();
-            let allocation =
-                output_device.create_shared_host_allocation(&peers, byte_capacity)?;
-            let mut imported = Vec::<(&VulkanComputeDevice, Arc<VulkanResidentBuffer>)>::new();
-            for (_, device) in &unique_devices {
-                imported.push((
-                    *device,
-                    Arc::new(device.import_shared_host_buffer(Arc::clone(&allocation))?),
-                ));
-            }
-            for (device_id, device) in &resolved_devices {
-                let buffer = imported
-                    .iter()
-                    .find(|(imported_device, _)| {
-                        imported_device.shares_logical_device_with(device)
-                    })
-                    .map(|(_, buffer)| Arc::clone(buffer))
-                    .ok_or_else(|| {
-                        VulkanError(format!(
-                            "resident feedback control has no buffer import for {device_id:?}"
-                        ))
-                    })?;
-                buffers.insert((*device_id).to_string(), buffer);
+        for (device, logical_device_ids) in &allocation_devices {
+            let buffer = Arc::new(device.import_shared_host_buffer(Arc::clone(&allocation))?);
+            for device_id in logical_device_ids {
+                buffers.insert(device_id.clone(), Arc::clone(&buffer));
             }
         }
 

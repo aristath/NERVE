@@ -435,28 +435,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     let wait = turn
                         .destination_wait(slice.device_id())
                         .expect("resident feedback input wait was present");
-                    if let Some(copy) = turn.destination_copy(slice.device_id()) {
-                        if let Some(batch) = submission_batch {
-                            batch
-                                .enqueue_resident_buffer_copy(slice.device, copy, &[wait], &[])
-                                .map_err(
-                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
-                                )?;
-                        } else {
-                            slice
-                                .device
-                                .submit_resident_buffer_copy_with_timeline_semaphores(
-                                    copy,
-                                    &[wait],
-                                    &[],
-                                )
-                                .map_err(
-                                    VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
-                                )?;
-                        }
-                    } else {
-                        wait_points.push(wait);
-                    }
+                    wait_points.push(wait);
                 }
                 let next_dependency = match next_distributed
                     .map(|dispatch_index| {
@@ -542,9 +521,8 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                 let is_terminal_segment = slice.execution_plan.last_dispatch_segment_stage_index()
                     == Some(segment.start_stage_index);
                 if is_terminal_segment
-                    && feedback_turn.is_some_and(|turn| {
-                        turn.output_device_id == slice.device_id() && turn.output_copy().is_none()
-                    })
+                    && feedback_turn
+                        .is_some_and(|turn| turn.output_device_id == slice.device_id())
                 {
                     signal_points.push(
                         feedback_turn
@@ -554,7 +532,6 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                 }
                 if is_terminal_segment
                     && output_turn.is_some_and(|turn| turn.output_device_id == slice.device_id())
-                    && feedback_turn.is_none_or(|turn| turn.output_copy().is_none())
                 {
                     signal_points.push(
                         output_turn
@@ -686,37 +663,6 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             VulkanMountedPlacedResidentStreamTickError::Dispatch(error),
                         ),
                     );
-                }
-                if is_terminal_segment
-                    && let Some(turn) = feedback_turn
-                    && turn.output_device_id == slice.device_id()
-                    && let Some(copy) = turn.output_copy()
-                {
-                    let mut copy_signals = SmallVec::<[VulkanTimelineSemaphorePoint<'_>; 2]>::new();
-                    copy_signals.push(turn.output_signal());
-                    if let Some(output_turn) = output_turn
-                        && output_turn.output_device_id == slice.device_id()
-                    {
-                        copy_signals.push(output_turn.signal);
-                    }
-                    if let Some(batch) = submission_batch {
-                        batch
-                            .enqueue_resident_buffer_copy(slice.device, copy, &[], &copy_signals)
-                            .map_err(
-                                VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
-                            )?;
-                    } else {
-                        slice
-                            .device
-                            .submit_resident_buffer_copy_with_timeline_semaphores(
-                                copy,
-                                &[],
-                                &copy_signals,
-                            )
-                            .map_err(
-                                VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
-                            )?;
-                    }
                 }
                 if consumes_distributed_completion {
                     completion_dependency = None;

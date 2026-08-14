@@ -1,4 +1,58 @@
 impl VulkanResidentPlacedComponentBatchRunner {
+    fn resident_transient_allocation_report(&self) -> BTreeMap<String, Vec<String>> {
+        let distributed = self
+            .distributed_dispatches
+            .resident_transient_bytes_by_device()
+            .unwrap_or_default();
+        self.device_ids
+            .iter()
+            .zip(&self.slices)
+            .enumerate()
+            .map(|(device_index, (device_id, slice))| {
+                let mut allocations = Vec::new();
+                if let Some(byte_capacity) = distributed.get(device_id).copied()
+                    && byte_capacity > 0
+                {
+                    allocations.push(format!("distributed_dispatches:{byte_capacity}"));
+                }
+                allocations.extend(
+                    slice
+                        .signal_buffers
+                        .iter()
+                        .map(|buffer| format!("signal:{}", buffer.buffer.byte_capacity())),
+                );
+                allocations.extend(
+                    slice
+                        .stream_control_buffers
+                        .iter()
+                        .map(|buffer| format!("stream_control:{}", buffer.byte_capacity())),
+                );
+                allocations.push(format!(
+                    "token_ids:{}",
+                    slice.runtime_token_ids_buffer.byte_capacity(),
+                ));
+                allocations.extend(
+                    slice
+                        .batch_control_buffers
+                        .values()
+                        .map(|buffer| format!("batch_control:{}", buffer.byte_capacity())),
+                );
+                allocations.push(format!(
+                    "causal_snapshots:{}",
+                    slice.causal_state_snapshots.total_byte_capacity(),
+                ));
+                if let Some(predicate) = self
+                    .demand_pipeline_predicates
+                    .as_ref()
+                    .and_then(|predicates| predicates.get(device_index))
+                {
+                    allocations.push(format!("demand_predicate:{}", predicate.byte_capacity()));
+                }
+                (device_id.clone(), allocations)
+            })
+            .collect()
+    }
+
     fn resident_transient_bytes_by_device(
         &self,
     ) -> Result<BTreeMap<String, usize>, VulkanError> {

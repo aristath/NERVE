@@ -345,6 +345,60 @@ fn produced_port_resident_route_resolution_is_exact_and_physical() {
 }
 
 #[test]
+fn workload_free_graph_edge_routes_are_explicit_only_across_physical_devices() {
+    let first = outgoing_fanout_endpoint(0, 5, "gpu1", "draft_01");
+    let second = outgoing_fanout_endpoint(1, 6, "gpu2", "draft_02");
+    let plans = [VulkanPlacedEdgeIoPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "gpu0".to_string(),
+        signal_element_bytes: Some(2),
+        local_edges: Vec::new(),
+        endpoints: vec![
+            first.clone(),
+            second.clone(),
+            incoming_fanout_endpoint(&first),
+            incoming_fanout_endpoint(&second),
+        ],
+        local_edge_count: 0,
+        incoming_endpoint_count: 2,
+        outgoing_endpoint_count: 2,
+        total_buffer_count: 4,
+        total_endpoint_count: 4,
+        total_byte_capacity: Some(4 * 8_192),
+        unresolved_byte_edges: Vec::new(),
+    }];
+    let routes = plan_vulkan_workload_free_graph_edge_routes(
+        &plans,
+        &BTreeMap::from([
+            ("gpu0".to_string(), "physical_0".to_string()),
+            ("gpu1".to_string(), "physical_1".to_string()),
+            ("gpu2".to_string(), "physical_0".to_string()),
+        ]),
+    )
+    .unwrap();
+
+    assert_eq!(routes.len(), 1);
+    assert_eq!(
+        routes[&first.edge_index],
+        VulkanRuntimeMountedBoundaryRoute {
+            edge_index: first.edge_index,
+            source_device_id: "gpu0".to_string(),
+            destination_device_id: "gpu1".to_string(),
+            frame_byte_count: 8_192,
+            route: VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+        }
+    );
+    assert!(!routes.contains_key(&second.edge_index));
+
+    let error = plan_vulkan_workload_free_graph_edge_routes(
+        &plans,
+        &BTreeMap::from([("gpu0".to_string(), "physical_0".to_string())]),
+    )
+    .unwrap_err();
+    assert!(error.0.contains("destination logical device \"gpu1\""));
+}
+
+#[test]
 fn exact_shared_host_mount_rejects_missing_extra_and_aliased_participants() {
     let Some((owner, helper)) = selected_test_vulkan_device_pair() else {
         eprintln!("skipping exact shared-host participant test without two explicit Vulkan devices");
@@ -731,6 +785,7 @@ fn mounted_three_device_fanout_uses_one_physical_source_and_publishes_every_edge
                 stream_shared_host_bytes: 0,
                 resident_stream_device_allocations: Vec::new(),
                 external_device_local_resident_allocations: Vec::new(),
+                private_activation_resident_allocations: Vec::new(),
                 execution_transient_device_allocations: Vec::new(),
             })
             .collect(),
@@ -740,9 +795,11 @@ fn mounted_three_device_fanout_uses_one_physical_source_and_publishes_every_edge
             + VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
         execution_transient_shared_host_bytes_per_stream: 0,
         execution_transient_shared_host_allocations: Vec::new(),
+        execution_transient_host_visible_allocations: Vec::new(),
         resident_shared_host_allocations: edge_staging_allocations,
         graph_edge_memory_domains_bound: true,
         feedback_control_memory_domain_bound: true,
+        host_visible_runtime_buffer_memory_domains_bound: true,
         stream_control_memory_domain_bound: true,
     };
     let links = create_placed_device_links(

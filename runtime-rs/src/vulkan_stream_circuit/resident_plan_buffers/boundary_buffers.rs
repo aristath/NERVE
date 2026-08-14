@@ -207,7 +207,17 @@ impl VulkanModelBoundaryBufferPlan {
                 ))
                 .map(|override_| Arc::clone(&override_.buffer))
                 .map(Ok)
-                .unwrap_or_else(|| device.create_resident_buffer(byte_capacity).map(Arc::new))?;
+                .unwrap_or_else(|| {
+                    device
+                        .create_resident_buffer(byte_capacity)
+                        .map(Arc::new)
+                        .map_err(|error| {
+                            VulkanError(format!(
+                                "failed to allocate model input boundary {}.{} on {:?} ({byte_capacity} logical bytes): {error}",
+                                boundary.component_id, boundary.signal_id, self.device_id,
+                            ))
+                        })
+                })?;
             input_buffers.push(VulkanModelBoundaryBufferAllocation {
                 boundary: boundary.clone(),
                 byte_capacity,
@@ -258,7 +268,12 @@ impl VulkanModelBoundaryBufferPlan {
                     byte_capacity,
                     "model output boundary buffer allocation",
                 )?;
-                Arc::new(device.create_resident_buffer(byte_capacity)?)
+                Arc::new(device.create_resident_buffer(byte_capacity).map_err(|error| {
+                    VulkanError(format!(
+                        "failed to allocate model output boundary {}.{} on {:?} ({byte_capacity} logical bytes): {error}",
+                        boundary.component_id, boundary.signal_id, self.device_id,
+                    ))
+                })?)
             };
             output_buffers.push(VulkanModelBoundaryBufferAllocation {
                 boundary: boundary.clone(),
