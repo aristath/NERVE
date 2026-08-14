@@ -184,6 +184,98 @@ fn physical_mount_plan_sizes_feedback_control_from_the_exact_dispatch_set() {
 }
 
 #[test]
+fn feedback_control_accepts_decode_helpers_without_duplicate_owner_slices() {
+    let mut model = fixture_model_runtime_model();
+    let package_root = tiny_model_dir();
+    let owner = model.placement.default_device_id.clone();
+    let helper = "gpu-helper".to_string();
+    model.placement = model.placement.clone().with_component_shard_devices(
+        "layer_00",
+        vec![owner.clone(), helper.clone()],
+    );
+    let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let resource_contract = instantiate_runtime_resource_contract(&model).unwrap();
+    let owner_slice =
+        VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning(
+            &package_root,
+            &model,
+            &resource_contract,
+            &tensor_index,
+            &owner,
+            16,
+        )
+        .unwrap();
+    let decode = VulkanDistributedExecutionPlan {
+        device_ids: vec![owner.clone(), helper.clone()],
+        storage_buffer_offset_alignment: 1,
+        dispatches: Vec::new(),
+        execution_islands: Vec::new(),
+        shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+        shared_input_byte_capacity: 1,
+        shared_output_byte_capacity: 1,
+        distributed_parameter_byte_count: 0,
+    };
+    let store = VulkanDistributedSelectedResourceStorePlan {
+        devices: Vec::new(),
+        tensor_sharded_residency_cohorts: Vec::new(),
+        device_count: 0,
+        selector_count: 0,
+        selector_placement_count: 0,
+        unique_atomic_group_count: 0,
+        total_addressable_bytes: 0,
+    };
+    let mount_device = |logical_device_id: &str| VulkanRuntimeSelectedResourceMountDevice {
+        logical_device_id: logical_device_id.to_string(),
+        physical_device_id: format!("physical-{logical_device_id}"),
+        execution_identity: VulkanPlacementDeviceExecutionIdentity {
+            physical_device_id: format!("physical-{logical_device_id}"),
+            api_version: 1,
+            driver_version: 2,
+        },
+        live_safe_capacity_bytes: usize::MAX,
+        upload_alignment: 8,
+    };
+    let devices = [mount_device(&owner), mount_device(&helper)];
+
+    let planned = plan_vulkan_runtime_feedback_control_residency(
+        &model,
+        &resource_contract,
+        std::slice::from_ref(&owner_slice),
+        &decode,
+        &store,
+        &devices,
+        &owner,
+        &owner,
+        false,
+        ResourceResidencyPolicy::Eager,
+    )
+    .unwrap();
+    assert_eq!(
+        planned.local_model_dispatch_count,
+        owner_slice.prepared_plan.dispatches.len()
+    );
+    assert_eq!(planned.distributed_model_dispatch_count, 0);
+
+    assert!(
+        plan_vulkan_runtime_feedback_control_residency(
+            &model,
+            &resource_contract,
+            &[owner_slice],
+            &decode,
+            &store,
+            &devices[..1],
+            &owner,
+            &owner,
+            false,
+            ResourceResidencyPolicy::Eager,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("one device record per decode participant")
+    );
+}
+
+#[test]
 fn physical_mount_plan_rejects_missing_and_duplicate_device_records() {
     let model = fixture_model_runtime_model();
     let physical = VulkanRuntimePhysicalExecutionPlan::uniform(&model);

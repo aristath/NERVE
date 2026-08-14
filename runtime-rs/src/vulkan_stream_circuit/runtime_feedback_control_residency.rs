@@ -32,17 +32,31 @@ fn plan_vulkan_runtime_feedback_control_residency(
         .iter()
         .map(|device| device.logical_device_id.as_str())
         .collect::<BTreeSet<_>>();
+    let owner_devices = runtime_model
+        .circuit_graph
+        .signal_processor_owner_device_ids(&runtime_model.placement)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     if planned_devices.is_empty()
         || planned_devices.len() != slice_plans.len()
-        || supplied_devices != planned_devices
+        || planned_devices
+            != owner_devices
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+        || planned_devices
+            .iter()
+            .any(|device_id| !supplied_devices.contains(device_id))
         || supplied_devices.len() != devices.len()
+        || !supplied_devices.contains(input_device_id)
+        || !supplied_devices.contains(output_device_id)
         || decode_execution_plan
             .device_ids
             .iter()
-            .any(|device_id| !planned_devices.contains(device_id.as_str()))
+            .any(|device_id| !supplied_devices.contains(device_id.as_str()))
     {
         return Err(runtime_feedback_control_residency_error(
-            "feedback-control planning requires one prepared slice for every decode device",
+            "feedback-control planning requires one prepared slice per signal-processor owner and one device record per decode participant",
         ));
     }
 
