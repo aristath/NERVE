@@ -113,7 +113,11 @@ the local placement calibration, and the mounted graph.
   activation shape, devices and drivers, endpoints, owner, shards, selected
   resources, and transport routes. Normal chat reports both the mounted
   physical-execution summary and transaction-local distributed submissions by
-  phase and physical strategy. When TP proof is requested, the conversation
+  phase and physical strategy. Selected distributed contracts remain scoped to
+  their component through physical lowering, and every selected contract must
+  be consumed exactly; a missing gate/up or down member, an extra contract, or
+  a contract set attached to the wrong shard pool fails before allocation.
+  When TP proof is requested, the conversation
   gate now requires every completed warmup and measured turn to submit at
   least one actual TP, intra-expert TP, or hybrid island in both decode and
   package-supported prefill. Mounted-but-unused islands, whole-expert-only

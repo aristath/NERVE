@@ -3770,7 +3770,10 @@ mod tests {
         );
 
         let selected_contract_id = format!("sha256:{}", "d".repeat(64));
-        let selected = BTreeSet::from([selected_contract_id.clone()]);
+        let selected = BTreeMap::from([(
+            "component".to_string(),
+            BTreeSet::from([selected_contract_id.clone()]),
+        )]);
         let exact = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
             &[("owner", &prepared_plan)],
             &fixture_tensor_index("row_major"),
@@ -3790,7 +3793,10 @@ mod tests {
             selected_contract_id,
         );
 
-        let unavailable = BTreeSet::from([format!("sha256:{}", "e".repeat(64))]);
+        let unavailable = BTreeMap::from([(
+            "component".to_string(),
+            BTreeSet::from([format!("sha256:{}", "e".repeat(64))]),
+        )]);
         let error = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
             &[("owner", &prepared_plan)],
             &fixture_tensor_index("row_major"),
@@ -3808,6 +3814,70 @@ mod tests {
             error
                 .to_string()
                 .contains("no compatible distributable dispatch")
+        );
+    }
+
+    #[test]
+    fn exact_distributed_planning_consumes_every_component_scoped_contract() {
+        let prepared_plan = fixture_prepared_plan();
+        let selected = BTreeMap::from([(
+            "component".to_string(),
+            BTreeSet::from([
+                format!("sha256:{}", "a".repeat(64)),
+                format!("sha256:{}", "e".repeat(64)),
+            ]),
+        )]);
+
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+            ExecutionPhase::Decode,
+            ExecutionShape::SingleLane,
+            None,
+            Some(&selected),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("consumed an incomplete contract set"),
+            "{error}",
+        );
+        assert!(error.to_string().contains(&format!("sha256:{}", "e".repeat(64))));
+    }
+
+    #[test]
+    fn exact_distributed_contract_components_must_match_shard_pools() {
+        let prepared_plan = fixture_prepared_plan();
+        let selected = BTreeMap::from([(
+            "different-component".to_string(),
+            BTreeSet::from([format!("sha256:{}", "a".repeat(64))]),
+        )]);
+
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+            ExecutionPhase::Decode,
+            ExecutionShape::SingleLane,
+            None,
+            Some(&selected),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("do not exactly match shard-pool components"),
+            "{error}",
         );
     }
 

@@ -188,6 +188,20 @@ impl VulkanDistributedExecutionPlan {
                 "exact distributed planning requires selected contract IDs".to_string(),
             ));
         }
+        if component_device_pools.len() != 1 {
+            return Err(VulkanDistributedPlanError(
+                "exact distributed planning with a flat contract set requires exactly one component pool"
+                    .to_string(),
+            ));
+        }
+        let component_id = component_device_pools
+            .keys()
+            .next()
+            .expect("one exact distributed component pool was validated");
+        let selected_contract_ids_by_component = BTreeMap::from([(
+            component_id.clone(),
+            selected_contract_ids.clone(),
+        )]);
         Self::from_prepared_plans_for_phase_and_resources(
             prepared_plans,
             tensor_index,
@@ -198,7 +212,7 @@ impl VulkanDistributedExecutionPlan {
             phase,
             execution_shape,
             Some((execution_scope, resource_contract)),
-            Some(selected_contract_ids),
+            Some(&selected_contract_ids_by_component),
         )
     }
 
@@ -213,7 +227,9 @@ impl VulkanDistributedExecutionPlan {
         phase: ExecutionPhase,
         execution_shape: ExecutionShape,
         resource_context: Option<(&str, &CompiledResourceResidencyContract)>,
-        selected_contract_ids: Option<&BTreeSet<String>>,
+        selected_contract_ids_by_component: Option<
+            &BTreeMap<String, BTreeSet<String>>,
+        >,
     ) -> Result<Self, VulkanDistributedPlanError> {
         if storage_buffer_offset_alignment == 0
             || !storage_buffer_offset_alignment.is_power_of_two()
@@ -237,10 +253,28 @@ impl VulkanDistributedExecutionPlan {
             }
             device_ids.extend(component_devices.iter().cloned());
         }
+        if let Some(selected) = selected_contract_ids_by_component {
+            let selected_components = selected.keys().collect::<BTreeSet<_>>();
+            let pooled_components = component_device_pools.keys().collect::<BTreeSet<_>>();
+            if selected_components != pooled_components {
+                return Err(VulkanDistributedPlanError(format!(
+                    "exact distributed contract components {selected_components:?} do not exactly match shard-pool components {pooled_components:?}",
+                )));
+            }
+            if let Some((component_id, _)) = selected
+                .iter()
+                .find(|(_, contract_ids)| contract_ids.is_empty())
+            {
+                return Err(VulkanDistributedPlanError(format!(
+                    "exact distributed contracts for component {component_id:?} are empty",
+                )));
+            }
+        }
         let mut requested_components = component_device_pools
             .keys()
             .map(|component_id| (component_id.as_str(), false))
             .collect::<BTreeMap<_, _>>();
+        let mut consumed_contract_ids_by_component = BTreeMap::<String, BTreeSet<String>>::new();
 
         for (owner_device_id, prepared_plan) in prepared_plans {
             for dispatch in &prepared_plan.dispatches {
@@ -263,7 +297,8 @@ impl VulkanDistributedExecutionPlan {
                     artifact_manifest,
                     phase,
                     execution_shape,
-                    selected_contract_ids,
+                    selected_contract_ids_by_component
+                        .and_then(|selected| selected.get(&dispatch.component_id)),
                 )?
                 else {
                     continue;
@@ -294,6 +329,10 @@ impl VulkanDistributedExecutionPlan {
                         )
                     })?;
                 dispatches.push(planned);
+                consumed_contract_ids_by_component
+                    .entry(dispatch.component_id.clone())
+                    .or_default()
+                    .insert(contract.contract_id.clone());
                 *requested_components
                     .get_mut(dispatch.component_id.as_str())
                     .expect("component device pool was selected above") = true;
@@ -322,6 +361,21 @@ impl VulkanDistributedExecutionPlan {
             return Err(VulkanDistributedPlanError(format!(
                 "requested internal sharding for component {component_id:?} has no compatible distributable dispatch; prepared dispatches for that component: {prepared_dispatches:?}"
             )));
+        }
+        if let Some(selected) = selected_contract_ids_by_component {
+            for (component_id, expected) in selected {
+                let consumed = consumed_contract_ids_by_component
+                    .get(component_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if consumed != *expected {
+                    let missing = expected.difference(&consumed).cloned().collect::<Vec<_>>();
+                    let unexpected = consumed.difference(expected).cloned().collect::<Vec<_>>();
+                    return Err(VulkanDistributedPlanError(format!(
+                        "exact distributed planning for component {component_id:?} consumed an incomplete contract set; missing={missing:?}, unexpected={unexpected:?}",
+                    )));
+                }
+            }
         }
 
         let shared_activation_route = VulkanSharedResidentBufferRoute::SharedHost;
@@ -589,21 +643,36 @@ impl VulkanDistributedExecutionPlanSet {
                 crate::vulkan_stream_circuit::VulkanPlacementExecutionCaseIdentity,
             >,
              explicit: &BTreeMap<String, BTreeSet<String>>| {
-                cases
-                .values()
-                .flat_map(|case| case.contract_ids.iter().cloned())
-                .chain(explicit.values().flatten().cloned())
-                .collect::<BTreeSet<_>>()
+                let mut selected = cases
+                    .iter()
+                    .map(|(component_id, case)| {
+                        (
+                            component_id.clone(),
+                            case.contract_ids.iter().cloned().collect::<BTreeSet<_>>(),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                for (component_id, contract_ids) in explicit {
+                    if selected
+                        .insert(component_id.clone(), contract_ids.clone())
+                        .is_some()
+                    {
+                        return Err(VulkanDistributedPlanError(format!(
+                            "component {component_id:?} has both measured and explicit distributed contracts",
+                        )));
+                    }
+                }
+                Ok(selected)
             };
-        let decode_contracts = selected_contracts(decode_cases, decode_explicit_contracts);
+        let decode_contracts = selected_contracts(decode_cases, decode_explicit_contracts)?;
         let decode_batch_contracts =
-            selected_contracts(decode_batch_cases, decode_batch_explicit_contracts);
-        let prefill_contracts = selected_contracts(prefill_cases, prefill_explicit_contracts);
+            selected_contracts(decode_batch_cases, decode_batch_explicit_contracts)?;
+        let prefill_contracts = selected_contracts(prefill_cases, prefill_explicit_contracts)?;
         let resource_context = Some((execution_scope, resource_contract));
         let build = |pools: &BTreeMap<String, Vec<String>>,
                      phase,
                      shape,
-                     contracts: &BTreeSet<String>| {
+                     contracts: &BTreeMap<String, BTreeSet<String>>| {
             VulkanDistributedExecutionPlan::from_prepared_plans_for_phase_and_resources(
                 prepared_plans,
                 tensor_index,
@@ -614,7 +683,7 @@ impl VulkanDistributedExecutionPlanSet {
                 phase,
                 shape,
                 resource_context,
-                (!pools.is_empty() && !contracts.is_empty()).then_some(contracts),
+                (!pools.is_empty()).then_some(contracts),
             )
         };
         Ok(Self {
