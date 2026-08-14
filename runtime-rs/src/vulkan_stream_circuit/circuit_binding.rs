@@ -238,6 +238,8 @@ pub struct VulkanSelectedParameterAccessBinding {
     pub component_id: String,
     pub node_id: String,
     pub selection_signal: String,
+    pub execution_signal: String,
+    pub execution_calibration_word_base: u32,
     pub layout: PlannedSelectedParameterLayout,
     pub parameter_ids: Vec<String>,
 }

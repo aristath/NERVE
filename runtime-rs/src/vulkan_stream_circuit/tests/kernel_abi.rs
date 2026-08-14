@@ -400,6 +400,8 @@ fn selected_parameters_lower_to_generic_dynamic_resource_descriptors() {
                 component_id: "component".to_string(),
                 node_id: "selected_compute".to_string(),
                 selection_signal: "selected".to_string(),
+                execution_signal: "activation".to_string(),
+                execution_calibration_word_base: 0,
                 layout: PlannedSelectedParameterLayout::Partitioned {
                     partition_axis: 0,
                 },
@@ -475,6 +477,8 @@ fn selected_parameter_tensors_cannot_alias_permanent_parameters() {
                         component_id: "component".to_string(),
                         node_id: "selected_compute".to_string(),
                         selection_signal: "selected_resources".to_string(),
+                        execution_signal: "activation".to_string(),
+                        execution_calibration_word_base: 0,
                         layout: PlannedSelectedParameterLayout::Partitioned {
                             partition_axis: 0,
                         },

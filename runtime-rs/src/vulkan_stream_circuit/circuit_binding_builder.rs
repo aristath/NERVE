@@ -432,6 +432,8 @@ fn bind_node(
                 component_id: circuit.component_id.clone(),
                 node_id: node.id.clone(),
                 selection_signal: access.selection_signal.clone(),
+                execution_signal: access.execution_signal.clone(),
+                execution_calibration_word_base: access.execution_calibration_word_base,
                 layout: access.layout.clone(),
                 parameter_ids: access.parameter_ids.clone(),
             })

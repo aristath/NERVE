@@ -536,6 +536,8 @@ pub struct PlannedSelectionEncoding {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedSelectedParameterAccess {
     pub selection_signal: String,
+    pub execution_signal: String,
+    pub execution_calibration_word_base: u32,
     pub layout: PlannedSelectedParameterLayout,
     pub parameter_ids: Vec<String>,
 }
@@ -873,12 +875,23 @@ fn planned_node_selected_parameter_accesses(
                 node.id
             ))
         })?;
-        let partitioned = access.len() == 3
-            && ["selection_signal", "partition_axis", "parameter_ids"]
+        let partitioned = access.len() == 5
+            && [
+                "selection_signal",
+                "execution_signal",
+                "execution_calibration_word_base",
+                "partition_axis",
+                "parameter_ids",
+            ]
                 .iter()
                 .all(|field| access.contains_key(*field));
-        let independent = access.len() == 2
-            && ["selection_signal", "mapping"]
+        let independent = access.len() == 4
+            && [
+                "selection_signal",
+                "execution_signal",
+                "execution_calibration_word_base",
+                "mapping",
+            ]
                 .iter()
                 .all(|field| access.contains_key(*field));
         if !partitioned && !independent {
@@ -898,6 +911,28 @@ fn planned_node_selected_parameter_accesses(
                 ))
             })?
             .to_string();
+        let execution_signal = access
+            .get("execution_signal")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .filter(|value| node.inputs.iter().any(|input| input == *value))
+            .ok_or_else(|| {
+                CircuitPlanError(format!(
+                    "{component_id} node {} selected parameter execution_signal must name a node input",
+                    node.id
+                ))
+            })?
+            .to_string();
+        let execution_calibration_word_base = access
+            .get("execution_calibration_word_base")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                CircuitPlanError(format!(
+                    "{component_id} node {} selected parameter execution_calibration_word_base must be a u32",
+                    node.id
+                ))
+            })?;
         if !seen_signals.insert(selection_signal.clone()) {
             return Err(CircuitPlanError(format!(
                 "{component_id} node {} repeats a selected parameter access signal",
@@ -990,6 +1025,8 @@ fn planned_node_selected_parameter_accesses(
         };
         planned.push(PlannedSelectedParameterAccess {
             selection_signal,
+            execution_signal,
+            execution_calibration_word_base,
             layout,
             parameter_ids,
         });
@@ -1255,6 +1292,8 @@ mod selection_domain_tests {
             attrs: serde_json::json!({
                 "selected_parameter_accesses": [{
                     "selection_signal": "selected",
+                    "execution_signal": "activation",
+                    "execution_calibration_word_base": 0,
                     "partition_axis": 0,
                     "parameter_ids": ["bank", "scale"]
                 }]
@@ -1265,6 +1304,8 @@ mod selection_domain_tests {
             planned_node_selected_parameter_accesses("component", &node).unwrap(),
             vec![PlannedSelectedParameterAccess {
                 selection_signal: "selected".to_string(),
+                execution_signal: "activation".to_string(),
+                execution_calibration_word_base: 0,
                 layout: PlannedSelectedParameterLayout::Partitioned {
                     partition_axis: 0,
                 },
@@ -1286,6 +1327,8 @@ mod selection_domain_tests {
             attrs: serde_json::json!({
                 "selected_parameter_accesses": [{
                     "selection_signal": "early_exact_selection",
+                    "execution_signal": "weighted_activation",
+                    "execution_calibration_word_base": 0x3f80_0000,
                     "partition_axis": 0,
                     "parameter_ids": ["bank"]
                 }]
@@ -1296,6 +1339,8 @@ mod selection_domain_tests {
             planned_node_selected_parameter_accesses("component", &node).unwrap(),
             vec![PlannedSelectedParameterAccess {
                 selection_signal: "early_exact_selection".to_string(),
+                execution_signal: "weighted_activation".to_string(),
+                execution_calibration_word_base: 0x3f80_0000,
                 layout: PlannedSelectedParameterLayout::Partitioned {
                     partition_axis: 0,
                 },
@@ -1322,6 +1367,8 @@ mod selection_domain_tests {
             attrs: serde_json::json!({
                 "selected_parameter_accesses": [{
                     "selection_signal": "selected",
+                    "execution_signal": "activation",
+                    "execution_calibration_word_base": 0,
                     "mapping": [
                         {"selector": 0, "parameter_ids": ["expert_0_scale", "expert_0_weight"]},
                         {"selector": 1, "parameter_ids": ["expert_1_scale", "expert_1_weight"]}
@@ -1334,6 +1381,8 @@ mod selection_domain_tests {
             planned_node_selected_parameter_accesses("component", &node).unwrap(),
             vec![PlannedSelectedParameterAccess {
                 selection_signal: "selected".to_string(),
+                execution_signal: "activation".to_string(),
+                execution_calibration_word_base: 0,
                 layout: PlannedSelectedParameterLayout::Independent {
                     resource_count: 2,
                     parameters_per_resource: 2,
@@ -1360,6 +1409,8 @@ mod selection_domain_tests {
             attrs: serde_json::json!({
                 "selected_parameter_accesses": [{
                     "selection_signal": "selected",
+                    "execution_signal": "activation",
+                    "execution_calibration_word_base": 0,
                     "mapping": [
                         {"selector": 0, "parameter_ids": ["expert_0_scale", "expert_0_weight"]},
                         {"selector": 1, "parameter_ids": ["expert_1_weight"]}
@@ -1389,6 +1440,8 @@ mod selection_domain_tests {
             attrs: serde_json::json!({
                 "selected_parameter_accesses": [{
                     "selection_signal": "selected",
+                    "execution_signal": "activation",
+                    "execution_calibration_word_base": 0,
                     "partition_axis": 0,
                     "parameter_ids": ["scale", "bank"]
                 }]
@@ -1401,6 +1454,58 @@ mod selection_domain_tests {
         assert!(error
             .to_string()
             .contains("must be non-empty, unique, and sorted"));
+    }
+
+    #[test]
+    fn selected_parameter_access_requires_exact_execution_metadata() {
+        let access = serde_json::json!({
+            "selection_signal": "selected",
+            "execution_signal": "activation",
+            "execution_calibration_word_base": 0,
+            "partition_axis": 0,
+            "parameter_ids": ["bank"]
+        });
+        let node = |access: serde_json::Value| CircuitNode {
+            id: "selected_compute".to_string(),
+            op: "generic_compute".to_string(),
+            inputs: vec!["activation".to_string()],
+            outputs: vec!["output".to_string()],
+            params: vec!["bank".to_string()],
+            state_reads: Vec::new(),
+            state_writes: Vec::new(),
+            attrs: serde_json::json!({"selected_parameter_accesses": [access]}),
+        };
+
+        let mut missing_execution = access.clone();
+        missing_execution
+            .as_object_mut()
+            .unwrap()
+            .remove("execution_signal");
+        let error = planned_node_selected_parameter_accesses(
+            "component",
+            &node(missing_execution),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ambiguous fields"));
+
+        let mut unconsumed_execution = access.clone();
+        unconsumed_execution["execution_signal"] = serde_json::json!("other");
+        let error = planned_node_selected_parameter_accesses(
+            "component",
+            &node(unconsumed_execution),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must name a node input"));
+
+        let mut excessive_word = access;
+        excessive_word["execution_calibration_word_base"] =
+            serde_json::json!(u64::from(u32::MAX) + 1);
+        let error = planned_node_selected_parameter_accesses(
+            "component",
+            &node(excessive_word),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must be a u32"));
     }
 
     #[test]
