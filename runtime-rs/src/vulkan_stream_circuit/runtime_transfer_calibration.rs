@@ -305,21 +305,22 @@ fn calibrate_vulkan_runtime_placement_transfer(
     let fixture = runtime_transfer_calibration_fixture(byte_count);
     let fixture_digest = format!("sha256:{:x}", Sha256::digest(&fixture));
     let shared = source.create_shared_resident_buffers(&[target], byte_count)?;
-    let transaction = VulkanRuntimeTransferCalibrationTransaction::new(
+    let attempt = measure_vulkan_runtime_placement_transfer(
         source,
         target,
         shared,
         byte_count,
         &fixture,
     )?;
-    let warmup_ns = transaction.measure(source, target, 1)?;
-    let measured_ns = transaction
-        .measure(source, target, 2)?
-        .min(transaction.measure(source, target, 3)?)
-        .max(1);
-    let output = transaction.read_output()?;
-    validate_runtime_transfer_calibration_output(&fixture, &output)?;
-    let output_digest = format!("sha256:{:x}", Sha256::digest(&output));
+    let attempt = validate_or_retry_vulkan_runtime_transfer(&fixture, attempt, || {
+        let shared = source.create_shared_resident_buffers_for_route(
+            &[target],
+            byte_count,
+            VulkanSharedResidentBufferRoute::SharedHost,
+        )?;
+        measure_vulkan_runtime_placement_transfer(source, target, shared, byte_count, &fixture)
+    })?;
+    let output_digest = format!("sha256:{:x}", Sha256::digest(&attempt.output));
     Ok(VulkanRuntimePlacementTransferCalibrationReport {
         source_device_id: source_device_id.to_string(),
         source_api_version: source.api_version(),
@@ -331,11 +332,64 @@ fn calibrate_vulkan_runtime_placement_transfer(
         activation_batch_width,
         frame_byte_count,
         byte_count,
+        route: attempt.route,
+        warmup_ns: attempt.warmup_ns,
+        measured_ns: attempt.measured_ns,
+        fixture_digest,
+        output_digest,
+    })
+}
+
+struct VulkanRuntimePlacementTransferCalibrationAttempt {
+    route: VulkanPlacedEdgeTransferRoute,
+    warmup_ns: u64,
+    measured_ns: u64,
+    output: Vec<u8>,
+}
+
+fn validate_or_retry_vulkan_runtime_transfer(
+    fixture: &[u8],
+    attempt: VulkanRuntimePlacementTransferCalibrationAttempt,
+    fallback: impl FnOnce() -> Result<VulkanRuntimePlacementTransferCalibrationAttempt, VulkanError>,
+) -> Result<VulkanRuntimePlacementTransferCalibrationAttempt, VulkanError> {
+    match validate_runtime_transfer_calibration_output(fixture, &attempt.output) {
+        Ok(()) => Ok(attempt),
+        Err(error) if attempt.route != VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal => {
+            Err(error)
+        }
+        Err(_) => {
+            let fallback = fallback()?;
+            validate_runtime_transfer_calibration_output(fixture, &fallback.output)?;
+            Ok(fallback)
+        }
+    }
+}
+
+fn measure_vulkan_runtime_placement_transfer(
+    source: &VulkanComputeDevice,
+    target: &VulkanComputeDevice,
+    shared: VulkanSharedResidentBufferSet,
+    byte_count: usize,
+    fixture: &[u8],
+) -> Result<VulkanRuntimePlacementTransferCalibrationAttempt, VulkanError> {
+    let transaction = VulkanRuntimeTransferCalibrationTransaction::new(
+        source,
+        target,
+        shared,
+        byte_count,
+        fixture,
+    )?;
+    let warmup_ns = transaction.measure(source, target, 1)?;
+    let measured_ns = transaction
+        .measure(source, target, 2)?
+        .min(transaction.measure(source, target, 3)?)
+        .max(1);
+    let output = transaction.read_output()?;
+    Ok(VulkanRuntimePlacementTransferCalibrationAttempt {
         route: transaction.route,
         warmup_ns,
         measured_ns,
-        fixture_digest,
-        output_digest,
+        output,
     })
 }
 
@@ -557,6 +611,88 @@ mod runtime_transfer_calibration_validation_tests {
             assert!(validate_runtime_transfer_calibration_output(&fixture, &corrupt).is_err());
         }
         assert!(validate_runtime_transfer_calibration_output(&fixture, &fixture[..256]).is_err());
+    }
+
+    fn attempt(
+        route: VulkanPlacedEdgeTransferRoute,
+        output: Vec<u8>,
+    ) -> VulkanRuntimePlacementTransferCalibrationAttempt {
+        VulkanRuntimePlacementTransferCalibrationAttempt {
+            route,
+            warmup_ns: 10,
+            measured_ns: 5,
+            output,
+        }
+    }
+
+    #[test]
+    fn invalid_external_memory_retries_one_validated_staging_route() {
+        let fixture = runtime_transfer_calibration_fixture(257);
+        let mut corrupt = fixture.clone();
+        corrupt[128] ^= 1;
+        let fallback_called = Cell::new(false);
+
+        let selected = validate_or_retry_vulkan_runtime_transfer(
+            &fixture,
+            attempt(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal, corrupt),
+            || {
+                fallback_called.set(true);
+                Ok(attempt(
+                    VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                    fixture.clone(),
+                ))
+            },
+        )
+        .unwrap();
+
+        assert!(fallback_called.get());
+        assert_eq!(
+            selected.route,
+            VulkanPlacedEdgeTransferRoute::DeviceLocalStaging
+        );
+        assert_eq!(selected.output, fixture);
+    }
+
+    #[test]
+    fn invalid_staging_or_fallback_output_fails_closed() {
+        let fixture = runtime_transfer_calibration_fixture(257);
+        let mut corrupt = fixture.clone();
+        corrupt[0] ^= 1;
+        let fallback_called = Cell::new(false);
+        assert!(
+            validate_or_retry_vulkan_runtime_transfer(
+                &fixture,
+                attempt(
+                    VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                    corrupt.clone(),
+                ),
+                || {
+                    fallback_called.set(true);
+                    Ok(attempt(
+                        VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                        fixture.clone(),
+                    ))
+                },
+            )
+            .is_err()
+        );
+        assert!(!fallback_called.get());
+        assert!(
+            validate_or_retry_vulkan_runtime_transfer(
+                &fixture,
+                attempt(
+                    VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal,
+                    corrupt.clone(),
+                ),
+                || {
+                    Ok(attempt(
+                        VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+                        corrupt,
+                    ))
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]
