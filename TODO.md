@@ -64,9 +64,13 @@ the local placement calibration, and the mounted graph.
   independent placement failure: its protected cache quotas plateaued near
   122 GiB, then a long reasoning turn thrashed below 1 tok/s while the GPUs
   remained mostly idle. Placement must prove that the expected warm expert
-  working set fits the selected cache quotas, or include additional compatible
-  targets such as the discrete Intel GPU. A paged mount being admissible is not
-  evidence that its steady-state working set is viable.
+  working set fits the selected cache quotas. The discrete Intel GPU remains a
+  valid target, but the current package's FP8 layer shaders require
+  `shader_float8`, which that target does not expose; today it can execute only
+  compatible input/output components. A structure-discovered compatible
+  representation is required before its capacity can host transformer layers.
+  A paged mount being admissible is not evidence that its steady-state working
+  set is viable.
 - That sampled hot decode path spends approximately 20.138 ms in
   hyper-connections, 19.150 ms in attention reads, 17.904 ms in expert gate/up,
   15.123 ms in state commit, 11.840 ms in attention score, 10.081 ms in expert
@@ -97,11 +101,20 @@ the local placement calibration, and the mounted graph.
   producing invalid shader results. Transport routes must be output-validated;
   shared-host transport remains a valid measured fallback.
 - The August 11 failure reached AMD TTM LRU corruption during a long,
-  near-capacity run. Do not resume live inference without explicit
-  authorization. The first authorized validation must record every selected
-  target's pre-run reservation, stop on the first kernel or driver anomaly, and
-  prove exact release of NERVE-owned capacity without disturbing pre-existing
-  allocations.
+  near-capacity run. Live validation is now explicitly authorized, but every
+  run must record each selected target's pre-run reservation, stop on the first
+  kernel or driver anomaly, and prove exact release of NERVE-owned capacity
+  without disturbing pre-existing allocations. The first August 14 attempt
+  stopped before model mounting on a process-local `SIGBUS`: placement
+  calibration directly mapped Intel device-local BAR memory after an
+  AMD-to-Intel transfer. The reusable Vulkan buffer contract now keeps
+  device-local CPU upload/readback behind transfer-buffer staging selected
+  against each allocation's actual `memoryTypeBits`; persistent host buffers
+  prefer non-device-local cached memory; and transfer calibration uses a
+  retained GPU-copy readback transaction. Exact Intel device-local readback and
+  bidirectional AMD/Intel calibration tests pass with byte-identical output,
+  complete reservation restoration, and no kernel/driver anomaly. The normal
+  DeepSeek TP gate remains the next live proof.
 - The normal production mount now derives exact selected-resource execution
   classes from the lowered decode plan, consumes only identity-matching suite
   calibration, and rebuilds activation, parameter, ownership, and physical
@@ -123,8 +136,7 @@ the local placement calibration, and the mounted graph.
   package-supported prefill. Mounted-but-unused islands, whole-expert-only
   execution, missing counters, inconsistent island classification, and
   impossible shard counts fail closed. This path is covered hardware-neutrally;
-  its first real-model proof remains blocked by the live inference quarantine
-  above.
+  its first real-model proof remains the next authorized live gate.
 - Representation and physical-island selection now terminate in the same
   production mount transaction. Auto-placement preserves the untouched exact
   model at its converged logical placement, the hybrid solver compares exact
@@ -139,7 +151,7 @@ the local placement calibration, and the mounted graph.
   islands. Hardware-neutral tests cover the complete selection, overlay mount,
   physical-plan validation, duplicate/altered/overlapping application
   rejection, and incompatible-baseline coverage. Real-model TP execution is
-  still awaiting the explicitly authorized live gate.
+  still awaiting the authorized live gate.
 - Component-region implementation overlays now use a v2 transactional ABI
   that can replace only the parameter bindings owned by the selected region,
   including adding representation-local scale bindings. Source bindings must
