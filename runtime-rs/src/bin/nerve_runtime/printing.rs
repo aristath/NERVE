@@ -482,6 +482,12 @@ fn print_runtime_feedback_stats(stats: &RuntimeFeedbackExecutionReport) {
     println!("  discarded_ticks={}", stats.discarded_tick_count);
     println!("  template_records={}", stats.template_record_count);
     println!("  template_replays={}", stats.template_replay_count);
+    println!("  queue_submissions={}", stats.queue_submission_count);
+    println!("  host_queue_submits={}", stats.host_queue_submit_count);
+    println!(
+        "  maximum_host_queue_submits_per_window={}",
+        stats.maximum_host_queue_submit_count_per_window
+    );
     println!(
         "  asynchronous_submissions={}",
         stats.asynchronous_submission_count

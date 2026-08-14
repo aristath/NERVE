@@ -3,6 +3,7 @@ struct VulkanResidentInProcessPlacedPendingFeedbackWindow {
     tick_count: usize,
     terminal_output_value: u64,
     template_replayed: bool,
+    submission_topology: VulkanResidentFeedbackSubmissionTopology,
     transport_stats: VulkanPlacedEdgeTransportStats,
     demand_resolved_checkpoints: Vec<VulkanDemandFeedbackCheckpoint>,
     demand_resolution: Option<VulkanResidentDemandFeedbackResolutionState>,
@@ -526,6 +527,10 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     .pending
                     .transport_stats
                     .accumulate(&pending.transport_stats);
+                mounted.pending.submission_topology = pending
+                    .submission_topology
+                    .merged(mounted.pending.submission_topology)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 mounted.pending.demand_resolved_checkpoints =
                     pending.demand_resolved_checkpoints;
                 mounted.pending.demand_resolution = pending.demand_resolution;
@@ -661,6 +666,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 "demand feedback continuation has no output timeline value".to_string(),
             ))
         })?;
+        let submission_topology = VulkanResidentFeedbackSubmissionTopology::new(
+            submission_template.submission_count(),
+            submission_template.host_queue_submit_count(),
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         Ok(VulkanResidentInProcessPlacedMountedFeedbackAttempt {
             submission_template,
             pending: VulkanResidentInProcessPlacedPendingFeedbackWindow {
@@ -668,6 +678,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 tick_count,
                 terminal_output_value,
                 template_replayed: false,
+                submission_topology,
                 transport_stats,
                 demand_resolved_checkpoints: Vec::new(),
                 demand_resolution: None,
@@ -782,7 +793,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         };
         let mut prepare_submission = Some(prepare_submission);
         let mut template_replayed = false;
-        let (terminal_output_value, transport_stats) =
+        let (
+            terminal_output_value,
+            submission_topology,
+            transport_stats,
+        ) =
             if let Some(replay) = template_catalog
                 .as_deref_mut()
                 .and_then(|catalog| catalog.get(&template_key))
@@ -814,7 +829,15 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                 replay
                     .submit_next(tick_count, &current_timeline_state)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                (terminal_output_value, replay.transport_stats.clone())
+                (
+                    terminal_output_value,
+                    VulkanResidentFeedbackSubmissionTopology::new(
+                        replay.template.submission_count(),
+                        replay.template.host_queue_submit_count(),
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                    replay.transport_stats.clone(),
+                )
             } else {
                 let recorded_timeline_state = self.resident_feedback_replay_timeline_state(
                     feedback_loop.feedback_synchronization.as_deref(),
@@ -840,6 +863,11 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                     .expect("resident feedback submission preparation runs exactly once")(
                     terminal_output_value,
                 )?;
+                let submission_topology = VulkanResidentFeedbackSubmissionTopology::new(
+                    submission_template.submission_count(),
+                    submission_template.host_queue_submit_count(),
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 submission_template
                     .submit_with_timeline_value_offset(0)
                     .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -855,13 +883,18 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
                     );
                 }
-                (terminal_output_value, transport_stats)
+                (
+                    terminal_output_value,
+                    submission_topology,
+                    transport_stats,
+                )
             };
         Ok(VulkanResidentInProcessPlacedPendingFeedbackWindow {
             start_stream_tick,
             tick_count,
             terminal_output_value,
             template_replayed,
+            submission_topology,
             transport_stats,
             demand_resolved_checkpoints: Vec::new(),
             demand_resolution: None,

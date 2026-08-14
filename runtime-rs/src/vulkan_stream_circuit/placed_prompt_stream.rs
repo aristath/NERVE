@@ -1263,6 +1263,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
     {
         let planned_tick_count = pending.window.tick_count;
         let start_stream_tick = pending.window.start_stream_tick;
+        let submission_topology = pending.window.submission_topology;
         let adaptive_feedback_loads_before = pending.adaptive_feedback_loads_before;
         let processor = &self.processor;
         let devices = &self.devices;
@@ -1319,7 +1320,9 @@ impl VulkanResidentInProcessPlacedPromptStream {
                 completion.executed_tick_count,
                 completion.sampled_tick_count,
                 completion.template_replayed,
-            );
+                submission_topology,
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         for _ in completion.sampled_tick_count..completion.executed_tick_count {
             let stream_tick = session.next_stream_tick;
             let active = active_input_event

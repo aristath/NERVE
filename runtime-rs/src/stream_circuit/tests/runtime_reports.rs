@@ -975,6 +975,9 @@
                 discarded_tick_count: 4,
                 template_record_count: 1,
                 template_replay_count: 0,
+                queue_submission_count: 96,
+                host_queue_submit_count: 4,
+                maximum_host_queue_submit_count_per_window: 4,
                 asynchronous_submission_count: 0,
                 completion_poll_count: 0,
                 bounded_wait_count: 0,
@@ -1107,6 +1110,19 @@
         );
         assert_eq!(placed_payload["resident_feedback"]["planned_tick_count"], 7);
         assert_eq!(placed_payload["resident_feedback"]["discarded_tick_count"], 4);
+        assert_eq!(
+            placed_payload["resident_feedback"]["queue_submission_count"],
+            96
+        );
+        assert_eq!(
+            placed_payload["resident_feedback"]["host_queue_submit_count"],
+            4
+        );
+        assert_eq!(
+            placed_payload["resident_feedback"]
+                ["maximum_host_queue_submit_count_per_window"],
+            4
+        );
         assert_eq!(placed_payload["critical_path"]["host_unattributed_duration_ns"], 10);
         assert_eq!(placed_payload["critical_path"]["phases"][0]["phase"], "host_synchronization");
         assert_eq!(

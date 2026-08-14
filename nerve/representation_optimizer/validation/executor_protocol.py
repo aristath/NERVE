@@ -14,12 +14,8 @@ from nerve.representation_optimizer.benchmarking.executor_transport import (
 )
 
 
-VALIDATION_EXECUTOR_COMMAND_SCHEMA = (
-    "nerve.optimizer.validation_executor_command.v8"
-)
-VALIDATION_EXECUTOR_RESPONSE_SCHEMA = (
-    "nerve.optimizer.validation_executor_response.v7"
-)
+VALIDATION_EXECUTOR_COMMAND_SCHEMA = "nerve.optimizer.validation_executor_command.v8"
+VALIDATION_EXECUTOR_RESPONSE_SCHEMA = "nerve.optimizer.validation_executor_response.v8"
 
 _PROGRESS_FIELDS = {
     "generation": {
@@ -78,9 +74,7 @@ def validate_validation_progress(
     phase = payload.get("phase")
     expected_fields = _PROGRESS_FIELDS.get(phase)
     if expected_fields is None or set(payload) != expected_fields:
-        raise ModelCompileError(
-            "validation executor progress payload is invalid"
-        )
+        raise ModelCompileError("validation executor progress payload is invalid")
     for field in (
         "elapsed_ns",
         "component_activations",
@@ -97,9 +91,7 @@ def validate_validation_progress(
         or not isinstance(generated_tokens, int)
         or generated_tokens < 0
     ):
-        raise ModelCompileError(
-            "validation progress generated token count is invalid"
-        )
+        raise ModelCompileError("validation progress generated token count is invalid")
     for field in ("token_id", "selected_logit_bits"):
         if field in payload:
             value = nonnegative_integer(
@@ -107,9 +99,7 @@ def validate_validation_progress(
                 f"validation progress {field}",
             )
             if value > 0xFFFF_FFFF:
-                raise ModelCompileError(
-                    f"validation progress {field} exceeds u32"
-                )
+                raise ModelCompileError(f"validation progress {field} exceeds u32")
     turn_index = payload.get("turn_index")
     if turn_index is not None and (
         isinstance(turn_index, bool)
@@ -117,9 +107,7 @@ def validate_validation_progress(
         or turn_index < 0
         or turn_index >= turn_count
     ):
-        raise ModelCompileError(
-            "validation progress turn index is invalid"
-        )
+        raise ModelCompileError("validation progress turn index is invalid")
     conversation_set_index = payload.get("conversation_set_index")
     if conversation_set_index is not None and (
         isinstance(conversation_set_index, bool)
@@ -127,9 +115,7 @@ def validate_validation_progress(
         or conversation_set_index < 0
         or conversation_set_index > 2
     ):
-        raise ModelCompileError(
-            "validation progress conversation set index is invalid"
-        )
+        raise ModelCompileError("validation progress conversation set index is invalid")
 
 
 def validated_validation_response(
@@ -144,9 +130,7 @@ def validated_validation_response(
         "status",
         "payload",
     }:
-        raise ModelCompileError(
-            "validation executor response fields are invalid"
-        )
+        raise ModelCompileError("validation executor response fields are invalid")
     if (
         response["schema"] != VALIDATION_EXECUTOR_RESPONSE_SCHEMA
         or response["request_id"] != expected_request_id
@@ -165,14 +149,10 @@ def validate_validation_mount_payload(
     candidate_id: str | None,
     physical_device_ids: tuple[str, ...],
 ) -> None:
-    if (
-        payload.get("candidate_id") != candidate_id
-        or payload.get("physical_device_ids")
-        != list(physical_device_ids)
-    ):
-        raise ModelCompileError(
-            "validation executor mounted different role conditions"
-        )
+    if payload.get("candidate_id") != candidate_id or payload.get(
+        "physical_device_ids"
+    ) != list(physical_device_ids):
+        raise ModelCompileError("validation executor mounted different role conditions")
     required_text(payload, "package_id")
     required_device_state_digest(payload, "mounted_state_digest")
     positive_integer(
@@ -204,15 +184,11 @@ def validate_validation_execution_payload(
         "conversation_sets",
     }
     if set(payload) != expected:
-        raise ModelCompileError(
-            "validation executor execution fields are invalid"
-        )
+        raise ModelCompileError("validation executor execution fields are invalid")
     required_digest(payload, "output_digest")
     required_digest(payload, "state_digest")
     if payload.get("step_unit") != expected_step_unit:
-        raise ModelCompileError(
-            "validation executor reported a different step unit"
-        )
+        raise ModelCompileError("validation executor reported a different step unit")
     positive_integer(
         payload.get("steps"),
         "validation executor component activations",
@@ -303,6 +279,9 @@ def _validate_execution_turns(
                     "discarded_tick_count",
                     "template_record_count",
                     "template_replay_count",
+                    "queue_submission_count",
+                    "host_queue_submit_count",
+                    "maximum_host_queue_submit_count_per_window",
                     "asynchronous_submission_count",
                     "completion_poll_count",
                     "bounded_wait_count",
@@ -338,12 +317,46 @@ def _validate_execution_turns(
                     raise ModelCompileError(
                         f"validation executor turn {path}.{field} is invalid"
                     )
-        if (
-            speculative["accepted_draft_tokens"]
-            > speculative["proposed_draft_tokens"]
-        ):
+        if speculative["accepted_draft_tokens"] > speculative["proposed_draft_tokens"]:
             raise ModelCompileError(
                 "validation executor accepted more draft tokens than proposed"
+            )
+        window_count = feedback["window_count"]
+        queue_submission_count = feedback["queue_submission_count"]
+        host_queue_submit_count = feedback["host_queue_submit_count"]
+        maximum_host_queue_submit_count = feedback[
+            "maximum_host_queue_submit_count_per_window"
+        ]
+        if (
+            feedback["template_record_count"] + feedback["template_replay_count"]
+            != window_count
+            or (
+                window_count == 0
+                and any(
+                    value
+                    for value in (
+                        queue_submission_count,
+                        host_queue_submit_count,
+                        maximum_host_queue_submit_count,
+                    )
+                )
+            )
+            or (
+                window_count > 0
+                and not (
+                    0
+                    < maximum_host_queue_submit_count
+                    <= host_queue_submit_count
+                    <= maximum_host_queue_submit_count * window_count
+                    and window_count
+                    <= host_queue_submit_count
+                    <= queue_submission_count
+                )
+            )
+        ):
+            raise ModelCompileError(
+                "validation executor returned incoherent resident feedback "
+                "submission evidence"
             )
 
 
@@ -354,9 +367,7 @@ def _validate_conversation_sets(
     expected_policy: Json,
 ) -> None:
     if not isinstance(value, list):
-        raise ModelCompileError(
-            "validation executor conversation sets are invalid"
-        )
+        raise ModelCompileError("validation executor conversation sets are invalid")
     minimum = nonnegative_integer(
         expected_policy.get("minimum_sets"),
         "validation conversation minimum sets",
@@ -365,9 +376,7 @@ def _validate_conversation_sets(
         expected_policy.get("maximum_sets"),
         "validation conversation maximum sets",
     )
-    repeat_loading = expected_policy.get(
-        "repeat_second_set_if_residency_loaded"
-    )
+    repeat_loading = expected_policy.get("repeat_second_set_if_residency_loaded")
     if (
         maximum < minimum
         or maximum > 3
@@ -376,9 +385,7 @@ def _validate_conversation_sets(
         or (minimum == 0 and repeat_loading)
         or (repeat_loading and (minimum != 2 or maximum != 3))
     ):
-        raise ModelCompileError(
-            "validation conversation set policy is invalid"
-        )
+        raise ModelCompileError("validation conversation set policy is invalid")
     if not (minimum <= len(value) <= maximum):
         raise ModelCompileError(
             "validation executor completed an invalid conversation set count"
@@ -394,9 +401,7 @@ def _validate_conversation_sets(
                 "validation executor conversation set fields are invalid"
             )
         expected_disposition = (
-            "measured"
-            if set_index == len(value) - 1
-            else "discarded_warmup"
+            "measured" if set_index == len(value) - 1 else "discarded_warmup"
         )
         if (
             item["set_index"] != set_index
@@ -438,8 +443,7 @@ def validate_validation_release_payload(
 ) -> None:
     if (
         payload.get("released") is not True
-        or payload.get("mounted_state_digest")
-        != mounted_state_digest
+        or payload.get("mounted_state_digest") != mounted_state_digest
         or sorted(payload.get("released_device_ids", []))
         != sorted(
             "optimizer:device:" + str(index)
@@ -477,12 +481,9 @@ def validate_validation_shutdown_payload(
         "device_releases",
         "shutdown_duration_ns",
     }:
-        raise ModelCompileError(
-            "validation executor shutdown fields are invalid"
-        )
-    if (
-        payload["released"] is not True
-        or payload["physical_device_ids"] != list(physical_device_ids)
+        raise ModelCompileError("validation executor shutdown fields are invalid")
+    if payload["released"] is not True or payload["physical_device_ids"] != list(
+        physical_device_ids
     ):
         raise ModelCompileError(
             "validation executor shut down a different device topology"
@@ -501,10 +502,7 @@ def validate_validation_shutdown_payload(
         physical_device_ids=physical_device_ids,
     )
     releases = payload["device_releases"]
-    if (
-        not isinstance(releases, list)
-        or len(releases) != len(physical_device_ids)
-    ):
+    if not isinstance(releases, list) or len(releases) != len(physical_device_ids):
         raise ModelCompileError(
             "validation executor did not release every physical device"
         )
@@ -524,8 +522,7 @@ def validate_validation_shutdown_payload(
                 "release_duration_ns",
             }
             or release["physical_device_id"] != physical_device_id
-            or release["logical_device_id"]
-            != f"optimizer:device:{index}"
+            or release["logical_device_id"] != f"optimizer:device:{index}"
             or release["quiesced"] is not True
             or release["device_context_destroyed"] is not True
         ):
@@ -537,11 +534,7 @@ def validate_validation_shutdown_payload(
             "released_buffer_bytes",
         ):
             value = release[field]
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 0
-            ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ModelCompileError(
                     f"validation executor shutdown {field} is invalid"
                 )
@@ -582,17 +575,13 @@ def _validate_engine_shutdown_payload(
         payload["complete"] is not True
         or payload["errors"] != []
         or payload["scheduler_in_flight_activation_count"] != 0
-        or payload["physical_device_count"]
-        != payload["acknowledged_device_count"]
+        or payload["physical_device_count"] != payload["acknowledged_device_count"]
     ):
         raise ModelCompileError(
             "validation executor engine shutdown proof is incomplete"
         )
     teardowns = payload["resource_teardowns"]
-    if (
-        not isinstance(teardowns, list)
-        or len(teardowns) != payload["package_count"]
-    ):
+    if not isinstance(teardowns, list) or len(teardowns) != payload["package_count"]:
         raise ModelCompileError(
             "validation executor engine shutdown package proof is invalid"
         )
@@ -610,8 +599,7 @@ def _validate_engine_shutdown_payload(
         released_payload_bytes += counts[2]
         cancelled_load_count += counts[3]
     if (
-        payload["acknowledged_device_count"]
-        != acknowledged_device_count
+        payload["acknowledged_device_count"] != acknowledged_device_count
         or payload["released_unit_count"] != released_unit_count
         or payload["released_payload_bytes"] != released_payload_bytes
         or payload["cancelled_load_count"] != cancelled_load_count
@@ -663,8 +651,7 @@ def _validate_engine_resource_teardown(
     devices = payload["devices"]
     if (
         payload["complete"] is not True
-        or payload["physical_device_count"]
-        != payload["acknowledged_device_count"]
+        or payload["physical_device_count"] != payload["acknowledged_device_count"]
         or not isinstance(devices, list)
         or len(devices) != payload["physical_device_count"]
     ):

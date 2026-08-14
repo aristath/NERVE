@@ -49,6 +49,53 @@ pub struct VulkanResidentInProcessPlacedPromptEventRun {
     pub resident_feedback: VulkanResidentFeedbackExecutionStats,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VulkanResidentFeedbackSubmissionTopology {
+    queue_submission_count: usize,
+    host_queue_submit_count: usize,
+}
+
+impl VulkanResidentFeedbackSubmissionTopology {
+    fn new(
+        queue_submission_count: usize,
+        host_queue_submit_count: usize,
+    ) -> Result<Self, VulkanError> {
+        if queue_submission_count == 0 {
+            return Err(VulkanError(
+                "resident feedback window has no queue submissions".to_string(),
+            ));
+        }
+        if host_queue_submit_count == 0 || host_queue_submit_count > queue_submission_count {
+            return Err(VulkanError(format!(
+                "resident feedback window has {host_queue_submit_count} host queue submits for {queue_submission_count} queued submissions"
+            )));
+        }
+        Ok(Self {
+            queue_submission_count,
+            host_queue_submit_count,
+        })
+    }
+
+    fn merged(self, continuation: Self) -> Result<Self, VulkanError> {
+        Self::new(
+            self.queue_submission_count
+                .checked_add(continuation.queue_submission_count)
+                .ok_or_else(|| {
+                    VulkanError(
+                        "resident feedback queue-submission count overflowed".to_string(),
+                    )
+                })?,
+            self.host_queue_submit_count
+                .checked_add(continuation.host_queue_submit_count)
+                .ok_or_else(|| {
+                    VulkanError(
+                        "resident feedback host queue-submit count overflowed".to_string(),
+                    )
+                })?,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VulkanResidentFeedbackExecutionStats {
     pub window_count: usize,
@@ -60,6 +107,9 @@ pub struct VulkanResidentFeedbackExecutionStats {
     pub discarded_tick_count: usize,
     pub template_record_count: usize,
     pub template_replay_count: usize,
+    pub queue_submission_count: usize,
+    pub host_queue_submit_count: usize,
+    pub maximum_host_queue_submit_count_per_window: usize,
     pub asynchronous_submission_count: usize,
     pub completion_poll_count: usize,
     pub bounded_wait_count: usize,
@@ -73,7 +123,24 @@ impl VulkanResidentFeedbackExecutionStats {
         executed_tick_count: usize,
         sampled_tick_count: usize,
         template_replayed: bool,
-    ) {
+        submission_topology: VulkanResidentFeedbackSubmissionTopology,
+    ) -> Result<(), VulkanError> {
+        let queue_submission_count = self
+            .queue_submission_count
+            .checked_add(submission_topology.queue_submission_count)
+            .ok_or_else(|| {
+                VulkanError(
+                    "resident feedback aggregate queue-submission count overflowed".to_string(),
+                )
+            })?;
+        let host_queue_submit_count = self
+            .host_queue_submit_count
+            .checked_add(submission_topology.host_queue_submit_count)
+            .ok_or_else(|| {
+                VulkanError(
+                    "resident feedback aggregate host queue-submit count overflowed".to_string(),
+                )
+            })?;
         self.window_count = self.window_count.saturating_add(1);
         self.planned_tick_count = self.planned_tick_count.saturating_add(planned_tick_count);
         self.submitted_tick_count = self
@@ -94,6 +161,12 @@ impl VulkanResidentFeedbackExecutionStats {
         } else {
             self.template_record_count = self.template_record_count.saturating_add(1);
         }
+        self.queue_submission_count = queue_submission_count;
+        self.host_queue_submit_count = host_queue_submit_count;
+        self.maximum_host_queue_submit_count_per_window = self
+            .maximum_host_queue_submit_count_per_window
+            .max(submission_topology.host_queue_submit_count);
+        Ok(())
     }
 
     fn record_asynchronous_submission(&mut self) {

@@ -1055,6 +1055,10 @@ fn runtime_feedback_execution_report(
         discarded_tick_count: stats.discarded_tick_count,
         template_record_count: stats.template_record_count,
         template_replay_count: stats.template_replay_count,
+        queue_submission_count: stats.queue_submission_count,
+        host_queue_submit_count: stats.host_queue_submit_count,
+        maximum_host_queue_submit_count_per_window: stats
+            .maximum_host_queue_submit_count_per_window,
         asynchronous_submission_count: stats.asynchronous_submission_count,
         completion_poll_count: stats.completion_poll_count,
         bounded_wait_count: stats.bounded_wait_count,

@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const COMMAND_SCHEMA: &str = "nerve.optimizer.validation_executor_command.v8";
-const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v7";
+const RESPONSE_SCHEMA: &str = "nerve.optimizer.validation_executor_response.v8";
 const PROGRESS_SCHEMA: &str = "nerve.optimizer.executor_progress.v1";
 const STREAM_ID: &str = "validation";
 const COMPONENT_ACTIVATIONS_STEP_UNIT: &str = "component_activations";
@@ -1222,6 +1222,9 @@ impl MountedValidation {
                     "discarded_tick_count": feedback.discarded_tick_count,
                     "template_record_count": feedback.template_record_count,
                     "template_replay_count": feedback.template_replay_count,
+                    "queue_submission_count": feedback.queue_submission_count,
+                    "host_queue_submit_count": feedback.host_queue_submit_count,
+                    "maximum_host_queue_submit_count_per_window": feedback.maximum_host_queue_submit_count_per_window,
                     "asynchronous_submission_count": feedback.asynchronous_submission_count,
                     "completion_poll_count": feedback.completion_poll_count,
                     "bounded_wait_count": feedback.bounded_wait_count,
@@ -1850,6 +1853,9 @@ fn zero_resident_feedback_statistics() -> Value {
         "discarded_tick_count": 0,
         "template_record_count": 0,
         "template_replay_count": 0,
+        "queue_submission_count": 0,
+        "host_queue_submit_count": 0,
+        "maximum_host_queue_submit_count_per_window": 0,
         "asynchronous_submission_count": 0,
         "completion_poll_count": 0,
         "bounded_wait_count": 0,
@@ -2125,6 +2131,35 @@ mod tests {
         assert_eq!(document["request_id"], "request-1");
         assert_eq!(document["sequence"], 3);
         assert_eq!(document["payload"]["generated_tokens"], 32);
+    }
+
+    #[test]
+    fn validation_response_uses_current_line_delimited_schema() {
+        let mut output = Vec::new();
+        write_response(
+            &mut output,
+            "request-1",
+            "completed",
+            json!({"resident_feedback": zero_resident_feedback_statistics()}),
+        )
+        .unwrap();
+        let document: Value = serde_json::from_slice(
+            output
+                .strip_suffix(b"\n")
+                .expect("response is newline terminated"),
+        )
+        .unwrap();
+        assert_eq!(document["schema"], RESPONSE_SCHEMA);
+        assert_eq!(
+            document["schema"],
+            "nerve.optimizer.validation_executor_response.v8"
+        );
+        assert_eq!(document["request_id"], "request-1");
+        assert_eq!(document["status"], "completed");
+        assert_eq!(
+            document["payload"]["resident_feedback"]["maximum_host_queue_submit_count_per_window"],
+            0
+        );
     }
 
     #[test]

@@ -497,24 +497,27 @@ fn placed_prompt_stream_reuses_every_recorded_feedback_window_shape() {
         .submit_input_event(VulkanResidentTokenInputEvent::new("third", vec![1], 5))
         .unwrap();
 
+    let feedback = first.session_run.run.resident_feedback;
+    assert_eq!(feedback.window_count, 2);
+    assert_eq!(feedback.planned_tick_count, 4);
+    assert_eq!(feedback.submitted_tick_count, 4);
+    assert_eq!(feedback.executed_tick_count, 4);
+    assert_eq!(feedback.retained_tick_count, 4);
+    assert_eq!(feedback.sampled_tick_count, 4);
+    assert_eq!(feedback.discarded_tick_count, 0);
+    assert_eq!(feedback.template_record_count, 1);
+    assert_eq!(feedback.template_replay_count, 1);
+    assert!(feedback.queue_submission_count > 0);
+    assert!(feedback.host_queue_submit_count > 0);
+    assert!(feedback.host_queue_submit_count <= feedback.queue_submission_count);
     assert_eq!(
-        first.session_run.run.resident_feedback,
-        VulkanResidentFeedbackExecutionStats {
-            window_count: 2,
-            planned_tick_count: 4,
-            submitted_tick_count: 4,
-            executed_tick_count: 4,
-            retained_tick_count: 4,
-            sampled_tick_count: 4,
-            discarded_tick_count: 0,
-            template_record_count: 1,
-            template_replay_count: 1,
-            asynchronous_submission_count: 0,
-            completion_poll_count: 0,
-            bounded_wait_count: 0,
-            bounded_wait_timeout_count: 0,
-        }
+        feedback.host_queue_submit_count,
+        feedback.maximum_host_queue_submit_count_per_window * feedback.window_count
     );
+    assert_eq!(feedback.asynchronous_submission_count, 0);
+    assert_eq!(feedback.completion_poll_count, 0);
+    assert_eq!(feedback.bounded_wait_count, 0);
+    assert_eq!(feedback.bounded_wait_timeout_count, 0);
     assert_eq!(second.session_run.run.resident_feedback.template_record_count, 1);
     assert_eq!(second.session_run.run.resident_feedback.template_replay_count, 0);
     assert_eq!(third.session_run.run.resident_feedback.template_record_count, 0);
@@ -605,24 +608,27 @@ fn placed_prompt_stream_device_cancel_commits_one_closing_feedback_tick() {
     assert_eq!(completed.session_run.run.stop_reason, "cancelled");
     assert_eq!(completed.generated_token_ids.len(), 2);
     assert_eq!(completed.session_run.tick_count, 3);
+    let feedback = completed.session_run.run.resident_feedback;
+    assert_eq!(feedback.window_count, 1);
+    assert_eq!(feedback.planned_tick_count, 7);
+    assert_eq!(feedback.submitted_tick_count, 7);
+    assert_eq!(feedback.executed_tick_count, 2);
+    assert_eq!(feedback.retained_tick_count, 2);
+    assert_eq!(feedback.sampled_tick_count, 1);
+    assert_eq!(feedback.discarded_tick_count, 5);
+    assert_eq!(feedback.template_record_count, 1);
+    assert_eq!(feedback.template_replay_count, 0);
+    assert!(feedback.queue_submission_count > 0);
+    assert!(feedback.host_queue_submit_count > 0);
+    assert!(feedback.host_queue_submit_count <= feedback.queue_submission_count);
     assert_eq!(
-        completed.session_run.run.resident_feedback,
-        VulkanResidentFeedbackExecutionStats {
-            window_count: 1,
-            planned_tick_count: 7,
-            submitted_tick_count: 7,
-            executed_tick_count: 2,
-            retained_tick_count: 2,
-            sampled_tick_count: 1,
-            discarded_tick_count: 5,
-            template_record_count: 1,
-            template_replay_count: 0,
-            asynchronous_submission_count: 0,
-            completion_poll_count: 0,
-            bounded_wait_count: 0,
-            bounded_wait_timeout_count: 0,
-        }
+        feedback.host_queue_submit_count,
+        feedback.maximum_host_queue_submit_count_per_window
     );
+    assert_eq!(feedback.asynchronous_submission_count, 0);
+    assert_eq!(feedback.completion_poll_count, 0);
+    assert_eq!(feedback.bounded_wait_count, 0);
+    assert_eq!(feedback.bounded_wait_timeout_count, 0);
     assert!(stream.is_idle());
 }
 

@@ -862,7 +862,14 @@ For every numbered item below:
   dispatch.
 - Prove that the fully resident hot path scales host submissions and waits with
   bounded windows and physical execution streams—not tokens, layers, selected
-  experts, shards, or graph nodes.
+  experts, shards, or graph nodes. The mounted feedback topology now counts
+  queue submission records separately from actual host `queue_submit2` calls
+  for every recorded, replayed, and demand-resumed window. Counts accumulate
+  through cold-miss continuations, impossible zero/inverted evidence fails
+  before publication, and normal chat plus validation traces expose the total
+  and maximum host submits per bounded window. Hardware-neutral schema and
+  adversarial tests are complete; the authorized live gate must show the
+  observed bound across DeepSeek TP windows and the Qwen controls.
 - Preserve bounded watchdog and failure handling outside the hot path. A failed
   worker is quarantined at the last causal checkpoint without corrupting other
   devices, streams, or the UI.

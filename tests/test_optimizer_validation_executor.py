@@ -70,13 +70,9 @@ class FixtureWholeModelExecutor:
             payload = {
                 "package_id": "package-fixture",
                 "candidate_id": document["candidate_id"],
-                "physical_device_ids": document[
-                    "physical_device_ids"
-                ],
+                "physical_device_ids": document["physical_device_ids"],
                 "context_capacity": (
-                    capacity["activations"]
-                    if capacity["kind"] == "declared"
-                    else 77
+                    capacity["activations"] if capacity["kind"] == "declared" else 77
                 ),
                 "mounted_state_digest": _device_digest(b"mounted"),
                 "mount_duration_ns": 11,
@@ -111,9 +107,7 @@ class FixtureWholeModelExecutor:
                         3,
                     ],
                     "stop_reason": "fixture_completed",
-                    "state_digest": _digest(
-                        f"turn-state-{index}".encode()
-                    ),
+                    "state_digest": _digest(f"turn-state-{index}".encode()),
                     "component_activations": 180,
                     "scheduler_steps": 8,
                     "elapsed_ns": 101,
@@ -141,6 +135,9 @@ class FixtureWholeModelExecutor:
                         "discarded_tick_count": 0,
                         "template_record_count": 0,
                         "template_replay_count": 0,
+                        "queue_submission_count": 0,
+                        "host_queue_submit_count": 0,
+                        "maximum_host_queue_submit_count_per_window": 0,
                         "asynchronous_submission_count": 0,
                         "completion_poll_count": 0,
                         "bounded_wait_count": 0,
@@ -176,10 +173,7 @@ class FixtureWholeModelExecutor:
                         "disposition": (
                             "measured"
                             if set_index
-                            == document["conversation_set_policy"][
-                                "minimum_sets"
-                            ]
-                            - 1
+                            == document["conversation_set_policy"]["minimum_sets"] - 1
                             else "discarded_warmup"
                         ),
                         "residency_activity": {
@@ -219,9 +213,7 @@ class FixtureWholeModelExecutor:
                 "physical_device_ids": physical_device_ids,
                 "pre_release_quiesce_duration_ns": 5,
                 "role_release_duration_ns": 6,
-                "engine_shutdown": _engine_shutdown_payload(
-                    tuple(physical_device_ids)
-                ),
+                "engine_shutdown": _engine_shutdown_payload(tuple(physical_device_ids)),
                 "device_releases": [
                     {
                         "physical_device_id": physical_device_id,
@@ -232,17 +224,13 @@ class FixtureWholeModelExecutor:
                         "device_context_destroyed": True,
                         "release_duration_ns": 8 + index,
                     }
-                    for index, physical_device_id in enumerate(
-                        physical_device_ids
-                    )
+                    for index, physical_device_id in enumerate(physical_device_ids)
                 ],
                 "shutdown_duration_ns": 10,
             }
             status = "shutdown_complete"
         else:
-            raise AssertionError(
-                f"unexpected command {document['command']!r}"
-            )
+            raise AssertionError(f"unexpected command {document['command']!r}")
         return {
             "schema": VALIDATION_EXECUTOR_RESPONSE_SCHEMA,
             "request_id": document["request_id"],
@@ -353,9 +341,9 @@ def test_validation_execution_rejects_malformed_discarded_warmup_turns() -> None
         },
         progress_received=lambda _event: None,
     )
-    response["payload"]["conversation_sets"][0]["turns"][0][
-        "speculative"
-    ].pop("cycle_count")
+    response["payload"]["conversation_sets"][0]["turns"][0]["speculative"].pop(
+        "cycle_count"
+    )
 
     with pytest.raises(
         ModelCompileError,
@@ -369,6 +357,124 @@ def test_validation_execution_rejects_malformed_discarded_warmup_turns() -> None
         )
 
 
+@pytest.mark.parametrize(
+    ("mutation",),
+    (
+        (lambda feedback: feedback.__setitem__("window_count", 1),),
+        (lambda feedback: feedback.__setitem__("queue_submission_count", 1),),
+        (
+            lambda feedback: (
+                feedback.__setitem__("window_count", 1),
+                feedback.__setitem__("template_record_count", 1),
+                feedback.__setitem__("queue_submission_count", 1),
+                feedback.__setitem__("host_queue_submit_count", 2),
+                feedback.__setitem__(
+                    "maximum_host_queue_submit_count_per_window",
+                    2,
+                ),
+            ),
+        ),
+        (
+            lambda feedback: (
+                feedback.__setitem__("window_count", 2),
+                feedback.__setitem__("template_record_count", 1),
+                feedback.__setitem__("template_replay_count", 1),
+                feedback.__setitem__("queue_submission_count", 2),
+                feedback.__setitem__("host_queue_submit_count", 1),
+                feedback.__setitem__(
+                    "maximum_host_queue_submit_count_per_window",
+                    1,
+                ),
+            ),
+        ),
+        (
+            lambda feedback: (
+                feedback.__setitem__("window_count", 2),
+                feedback.__setitem__("template_record_count", 1),
+                feedback.__setitem__("template_replay_count", 1),
+                feedback.__setitem__("queue_submission_count", 4),
+                feedback.__setitem__("host_queue_submit_count", 4),
+                feedback.__setitem__(
+                    "maximum_host_queue_submit_count_per_window",
+                    1,
+                ),
+            ),
+        ),
+    ),
+)
+def test_validation_execution_rejects_incoherent_feedback_submission_evidence(
+    mutation,
+) -> None:
+    policy = {
+        "minimum_sets": 2,
+        "maximum_sets": 3,
+        "repeat_second_set_if_residency_loaded": True,
+    }
+    response = FixtureWholeModelExecutor().request(
+        {
+            "command": "execute",
+            "request_id": "feedback-submission-shape",
+            "turns": ["first"],
+            "step_unit": "component_activations",
+            "conversation_set_policy": policy,
+        },
+        progress_received=lambda _event: None,
+    )
+    feedback = response["payload"]["conversation_sets"][0]["turns"][0][
+        "resident_feedback"
+    ]
+    mutation(feedback)
+
+    with pytest.raises(
+        ModelCompileError,
+        match="incoherent resident feedback submission evidence",
+    ):
+        validate_validation_execution_payload(
+            response["payload"],
+            expected_step_unit="component_activations",
+            expected_turns=("first",),
+            expected_conversation_set_policy=policy,
+        )
+
+
+def test_validation_execution_accepts_coherent_feedback_submission_evidence() -> None:
+    policy = {
+        "minimum_sets": 2,
+        "maximum_sets": 3,
+        "repeat_second_set_if_residency_loaded": True,
+    }
+    response = FixtureWholeModelExecutor().request(
+        {
+            "command": "execute",
+            "request_id": "coherent-feedback-submission-shape",
+            "turns": ["first"],
+            "step_unit": "component_activations",
+            "conversation_set_policy": policy,
+        },
+        progress_received=lambda _event: None,
+    )
+    feedback = response["payload"]["conversation_sets"][0]["turns"][0][
+        "resident_feedback"
+    ]
+    feedback.update(
+        {
+            "window_count": 2,
+            "template_record_count": 1,
+            "template_replay_count": 1,
+            "queue_submission_count": 192,
+            "host_queue_submit_count": 8,
+            "maximum_host_queue_submit_count_per_window": 4,
+        }
+    )
+
+    validate_validation_execution_payload(
+        response["payload"],
+        expected_step_unit="component_activations",
+        expected_turns=("first",),
+        expected_conversation_set_policy=policy,
+    )
+
+
 def test_validation_shutdown_requires_ordered_destroyed_device_proof() -> None:
     physical_device_ids = (
         "vulkan-uuid:" + "1" * 32,
@@ -379,9 +485,7 @@ def test_validation_shutdown_requires_ordered_destroyed_device_proof() -> None:
         "physical_device_ids": list(physical_device_ids),
         "pre_release_quiesce_duration_ns": 1,
         "role_release_duration_ns": 2,
-        "engine_shutdown": _engine_shutdown_payload(
-            physical_device_ids
-        ),
+        "engine_shutdown": _engine_shutdown_payload(physical_device_ids),
         "device_releases": [
             {
                 "physical_device_id": physical_device_id,
@@ -392,9 +496,7 @@ def test_validation_shutdown_requires_ordered_destroyed_device_proof() -> None:
                 "device_context_destroyed": True,
                 "release_duration_ns": 3,
             }
-            for index, physical_device_id in enumerate(
-                reversed(physical_device_ids)
-            )
+            for index, physical_device_id in enumerate(reversed(physical_device_ids))
         ],
         "shutdown_duration_ns": 4,
     }
@@ -419,9 +521,7 @@ def test_validation_shutdown_rejects_incomplete_engine_teardown() -> None:
         "physical_device_ids": list(physical_device_ids),
         "pre_release_quiesce_duration_ns": 1,
         "role_release_duration_ns": 2,
-        "engine_shutdown": _engine_shutdown_payload(
-            physical_device_ids
-        ),
+        "engine_shutdown": _engine_shutdown_payload(physical_device_ids),
         "device_releases": [
             {
                 "physical_device_id": physical_device_id,
@@ -432,9 +532,7 @@ def test_validation_shutdown_rejects_incomplete_engine_teardown() -> None:
                 "device_context_destroyed": True,
                 "release_duration_ns": 3,
             }
-            for index, physical_device_id in enumerate(
-                physical_device_ids
-            )
+            for index, physical_device_id in enumerate(physical_device_ids)
         ],
         "shutdown_duration_ns": 4,
     }
@@ -532,9 +630,7 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         "vulkan-uuid:" + "2" * 32,
     )
     conditions = {
-        "devices": [
-            {"device_id": device_id} for device_id in devices
-        ],
+        "devices": [{"device_id": device_id} for device_id in devices],
         "placement": {
             "block_0": devices[0],
             "block_1": devices[1],
@@ -551,11 +647,7 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         "validation_plan",
         str(tmp_path),
     )
-    implementation = {
-        "implementation_id": (
-            f"staged-representation:{candidate_id}"
-        )
-    }
+    implementation = {"implementation_id": (f"staged-representation:{candidate_id}")}
     mount_request = ValidationRoleMountRequest(
         plan_id=plan_id,
         candidate_id=candidate_id,
@@ -603,15 +695,11 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
         cancel_requested=lambda: cancel_stage,
     ):
         session = backend.open_session(mount_request)
-        mount = ValidationResidencyEvent.from_json(
-            session.mount_event
-        ).to_json()
+        mount = ValidationResidencyEvent.from_json(session.mount_event).to_json()
         result = ValidationRoleResult.from_json(
             session.execute(execution_request)
         ).to_json()
-        unmount = ValidationResidencyEvent.from_json(
-            session.close()
-        ).to_json()
+        unmount = ValidationResidencyEvent.from_json(session.close()).to_json()
         assert executor.closed is False
         second_session = backend.open_session(mount_request)
         second_session.execute(execution_request)
@@ -658,12 +746,14 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
     assert executor.commands[1]["max_output_tokens"] is None
     assert executor.commands[1]["execution_mode"] == "teacher_forced"
     assert executor.commands[1]["step_unit"] == "component_activations"
-    assert executor.commands[1][
-        "teacher_forced_assistant_turns"
-    ] == ["A model.", "Athens."]
-    assert [
-        command["command"] for command in executor.commands
-    ] == [*(["mount", "execute", "close"] * 2), "shutdown"]
+    assert executor.commands[1]["teacher_forced_assistant_turns"] == [
+        "A model.",
+        "Athens.",
+    ]
+    assert [command["command"] for command in executor.commands] == [
+        *(["mount", "execute", "close"] * 2),
+        "shutdown",
+    ]
     assert executor.request_cancellation_callbacks == [None] * 7
     # Fixture completion is semantic: a short but complete conversation must
     # not be rejected because it did not cross an unrelated activation count.
@@ -679,19 +769,15 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
     }
     assert result["default_statistics"]["scheduler_steps"] == 16
     progress_ref = next(
-        trace
-        for trace in result["traces"]
-        if trace["path"].endswith("/progress.jsonl")
+        trace for trace in result["traces"] if trace["path"].endswith("/progress.jsonl")
     )
     progress_lines = [
         json.loads(line)
-        for line in (
-            tmp_path / "traces" / progress_ref["path"]
-        ).read_text(encoding="utf-8").splitlines()
+        for line in (tmp_path / "traces" / progress_ref["path"])
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
-    assert progress_lines[0]["payload"]["phase"] == (
-        "teacher_forced_turn_completed"
-    )
+    assert progress_lines[0]["payload"]["phase"] == ("teacher_forced_turn_completed")
     assert progress_lines[-1] == {
         "schema": "nerve.optimizer.validation_progress_terminal.v1",
         "status": "completed",
@@ -702,9 +788,7 @@ def test_whole_model_validation_uses_fixture_sized_structural_replay_and_rotates
     assert executor.closed is True
     assert executor.aborted is False
     assert factory_calls == 1
-    assert captured_environment["VK_DRIVER_FILES"] == str(
-        driver.resolve()
-    )
+    assert captured_environment["VK_DRIVER_FILES"] == str(driver.resolve())
     assert "VK_ICD_FILENAMES" not in captured_environment
 
 
@@ -810,9 +894,7 @@ def test_whole_model_validation_compares_free_running_traces_semantically(
         trace_store=trace_store,
         executor_command=("unused",),
         vulkan_driver_files=(),
-        executor_factory=lambda command, environment: (
-            FixtureWholeModelExecutor()
-        ),
+        executor_factory=lambda command, environment: FixtureWholeModelExecutor(),
         staged_candidate_loader=loader,  # type: ignore[arg-type]
         run_nonce="fixture",
     )
@@ -840,10 +922,7 @@ def test_whole_model_validation_compares_free_running_traces_semantically(
     )
 
     assert comparison["diagnostics"] == []
-    assert all(
-        metric["error"] == 0.0
-        for metric in comparison["metrics"]
-    )
+    assert all(metric["error"] == 0.0 for metric in comparison["metrics"])
 
 
 def _digest(payload: bytes) -> str:
@@ -870,9 +949,7 @@ def _engine_shutdown_payload(
             "acknowledged": True,
             "error": None,
         }
-        for index, physical_device_id in enumerate(
-            physical_device_ids
-        )
+        for index, physical_device_id in enumerate(physical_device_ids)
     ]
     return {
         "stream_count": 1,
@@ -880,9 +957,7 @@ def _engine_shutdown_payload(
         "scheduler_in_flight_activation_count": 0,
         "physical_device_count": len(devices),
         "acknowledged_device_count": len(devices),
-        "released_unit_count": sum(
-            device["released_unit_count"] for device in devices
-        ),
+        "released_unit_count": sum(device["released_unit_count"] for device in devices),
         "released_payload_bytes": sum(
             device["released_payload_bytes"] for device in devices
         ),
@@ -893,12 +968,10 @@ def _engine_shutdown_payload(
                 "execution_scope": "whole_model",
                 "physical_device_count": len(devices),
                 "released_unit_count": sum(
-                    device["released_unit_count"]
-                    for device in devices
+                    device["released_unit_count"] for device in devices
                 ),
                 "released_payload_bytes": sum(
-                    device["released_payload_bytes"]
-                    for device in devices
+                    device["released_payload_bytes"] for device in devices
                 ),
                 "cancelled_load_count": 0,
                 "acknowledged_device_count": len(devices),
