@@ -62,7 +62,7 @@ _PHYSICAL_EXECUTION_SUMMARY = re.compile(
 )
 _SHUTDOWN_MARKER = re.compile(r"(?:^|\n)you> shutdown:\n")
 _DEVICE_RESTORATION_MARKER = re.compile(r"(?:^|\n)device_restoration:\n")
-_DEVICE_RESTORATION_SCHEMA = "nerve.runtime.device_local_memory_restoration.v1"
+_DEVICE_RESTORATION_SCHEMA = "nerve.runtime.physical_device_memory_restoration.v2"
 _SHUTDOWN_SUMMARY_LINE = re.compile(
     r"^  complete=(true|false) streams=(\d+) packages=(\d+) "
     r"scheduler_in_flight=(\d+)$"
@@ -190,6 +190,7 @@ class ShutdownReport:
 @dataclass(frozen=True)
 class DeviceRestorationDeviceReport:
     physical_device_id: str
+    usage_counter_tolerance_bytes: int
     before: dict[str, Any]
     after: dict[str, Any]
 
@@ -675,9 +676,12 @@ def _validated_device_restoration_snapshot(
             "pci_address",
             "api_version",
             "driver_version",
-            "memory_budget",
-            "memory_accounting",
-            "memory_pressure",
+            "heap_index",
+            "physical_heap_bytes",
+            "memory_budget_supported",
+            "budget_bytes",
+            "usage_bytes",
+            "available_bytes",
         },
         path,
     )
@@ -692,74 +696,35 @@ def _validated_device_restoration_snapshot(
         raise ConversationGateError(
             f"runtime device restoration field {path}.pci_address is invalid"
         )
-    for field in ("api_version", "driver_version"):
-        _required_nonnegative_integer(snapshot[field], f"{path}.{field}")
-
-    budget = _required_exact_object(
-        snapshot["memory_budget"],
-        {
-            "baseline_available_bytes",
-            "reservable_bytes",
-            "protected_headroom_bytes",
-            "counter_tolerance_bytes",
-        },
-        f"{path}.memory_budget",
-    )
-    accounting = _required_exact_object(
-        snapshot["memory_accounting"],
-        {
-            "baseline_available_bytes",
-            "currently_available_bytes",
-            "reservable_bytes",
-            "tracked_allocation_bytes",
-            "pending_reservation_bytes",
-            "untracked_acquired_bytes",
-            "remaining_bytes",
-            "admissible_remaining_bytes",
-        },
-        f"{path}.memory_accounting",
-    )
-    pressure = _required_exact_object(
-        snapshot["memory_pressure"],
-        {
-            "active",
-            "episode",
-            "observed_available_bytes",
-            "current_deficit_bytes",
-            "peak_deficit_bytes",
-        },
-        f"{path}.memory_pressure",
-    )
-    for field, field_value in budget.items():
-        _required_nonnegative_integer(field_value, f"{path}.memory_budget.{field}")
-    for field, field_value in accounting.items():
-        _required_nonnegative_integer(field_value, f"{path}.memory_accounting.{field}")
-    if not isinstance(pressure["active"], bool):
-        raise ConversationGateError(
-            f"runtime device restoration field {path}.memory_pressure.active must be boolean"
-        )
     for field in (
-        "episode",
-        "observed_available_bytes",
-        "current_deficit_bytes",
-        "peak_deficit_bytes",
+        "api_version",
+        "driver_version",
+        "heap_index",
+        "physical_heap_bytes",
     ):
-        _required_nonnegative_integer(
-            pressure[field], f"{path}.memory_pressure.{field}"
-        )
-    if accounting["baseline_available_bytes"] != budget["baseline_available_bytes"]:
+        _required_nonnegative_integer(snapshot[field], f"{path}.{field}")
+    if snapshot["physical_heap_bytes"] == 0:
         raise ConversationGateError(
-            f"runtime device restoration field {path} has inconsistent baseline accounting"
+            f"runtime device restoration field {path}.physical_heap_bytes must be positive"
         )
-    if accounting["reservable_bytes"] != budget["reservable_bytes"]:
+    if snapshot["memory_budget_supported"] is not True:
         raise ConversationGateError(
-            f"runtime device restoration field {path} has inconsistent reservable accounting"
+            f"runtime device restoration field {path} lacks VK_EXT_memory_budget"
+        )
+    for field in ("budget_bytes", "usage_bytes", "available_bytes"):
+        _required_nonnegative_integer(snapshot[field], f"{path}.{field}")
+    if snapshot["available_bytes"] != max(
+        0, snapshot["budget_bytes"] - snapshot["usage_bytes"]
+    ):
+        raise ConversationGateError(
+            f"runtime device restoration field {path} has inconsistent memory-budget counters"
         )
     return snapshot
 
 
 def _validate_device_restoration_pair(
     physical_device_id: str,
+    usage_counter_tolerance_bytes: int,
     before: dict[str, Any],
     after: dict[str, Any],
 ) -> None:
@@ -775,40 +740,21 @@ def _validate_device_restoration_pair(
         "pci_address",
         "api_version",
         "driver_version",
+        "heap_index",
+        "physical_heap_bytes",
+        "memory_budget_supported",
     )
     if any(before[field] != after[field] for field in identity_fields):
         raise ConversationGateError(
             f"runtime device restoration changed physical identity for {physical_device_id!r}"
         )
-    if before["memory_budget"] != after["memory_budget"]:
+    if abs(before["usage_bytes"] - after["usage_bytes"]) > (
+        usage_counter_tolerance_bytes
+    ):
         raise ConversationGateError(
-            f"runtime device restoration changed the memory budget for {physical_device_id!r}"
+            f"runtime device restoration did not restore usage_bytes for "
+            f"{physical_device_id!r}"
         )
-    tolerance = before["memory_budget"]["counter_tolerance_bytes"]
-    accounting_tolerances = {
-        "baseline_available_bytes": 0,
-        "reservable_bytes": 0,
-        "tracked_allocation_bytes": 0,
-        "pending_reservation_bytes": 0,
-        "untracked_acquired_bytes": tolerance,
-        "currently_available_bytes": tolerance,
-        "remaining_bytes": tolerance,
-        "admissible_remaining_bytes": tolerance,
-    }
-    for field, allowed_difference in accounting_tolerances.items():
-        before_value = before["memory_accounting"][field]
-        after_value = after["memory_accounting"][field]
-        if abs(before_value - after_value) > allowed_difference:
-            raise ConversationGateError(
-                f"runtime device restoration did not restore {field} for "
-                f"{physical_device_id!r}"
-            )
-    for field in ("active", "episode"):
-        if before["memory_pressure"][field] != after["memory_pressure"][field]:
-            raise ConversationGateError(
-                f"runtime device restoration changed memory pressure for "
-                f"{physical_device_id!r}"
-            )
 
 
 def parse_device_restoration_report(transcript: str) -> DeviceRestorationReport:
@@ -871,7 +817,14 @@ def parse_device_restoration_report(transcript: str) -> DeviceRestorationReport:
     for index, raw_device in enumerate(payload["devices"]):
         device = _required_exact_object(
             raw_device,
-            {"physical_device_id", "restored", "before", "after", "errors"},
+            {
+                "physical_device_id",
+                "restored",
+                "usage_counter_tolerance_bytes",
+                "before",
+                "after",
+                "errors",
+            },
             f"report.devices[{index}]",
         )
         physical_device_id = device["physical_device_id"]
@@ -883,16 +836,26 @@ def parse_device_restoration_report(transcript: str) -> DeviceRestorationReport:
             raise ConversationGateError(
                 f"runtime device restoration left {physical_device_id!r} incomplete"
             )
+        usage_counter_tolerance_bytes = _required_nonnegative_integer(
+            device["usage_counter_tolerance_bytes"],
+            f"report.devices[{index}].usage_counter_tolerance_bytes",
+        )
         before = _validated_device_restoration_snapshot(
             device["before"], f"report.devices[{index}].before"
         )
         after = _validated_device_restoration_snapshot(
             device["after"], f"report.devices[{index}].after"
         )
-        _validate_device_restoration_pair(physical_device_id, before, after)
+        _validate_device_restoration_pair(
+            physical_device_id,
+            usage_counter_tolerance_bytes,
+            before,
+            after,
+        )
         devices.append(
             DeviceRestorationDeviceReport(
                 physical_device_id=physical_device_id,
+                usage_counter_tolerance_bytes=usage_counter_tolerance_bytes,
                 before=before,
                 after=after,
             )

@@ -414,13 +414,17 @@ work, missing device acknowledgements, retained lazy-resource units or payload,
 duplicate stores, a package-identity mismatch, and disagreement between the
 last resident gauges and the resources actually released. The accepted
 shutdown evidence is retained in the JSON gate report. Normal chat then
-destroys its permanent parameter pool, quiesces every unique selected physical
-device, and emits the canonical
-`nerve.runtime.device_local_memory_restoration.v1` report. The gate independently
-revalidates physical and driver identity, the opening memory budget, exact
-tracked allocations and pending reservations, driver counters within their
-declared tolerance, unchanged pressure episodes, and inclusion of every
-lazy-resource device. The benchmark package consumes the same runtime verifier.
+destroys its permanent parameter pool and device-owned execution caches,
+rejects retained Vulkan child resources, drops every selected logical device,
+and rediscovers the physical targets before emitting the canonical
+`nerve.runtime.physical_device_memory_restoration.v2` report. The gate
+independently revalidates physical, driver, and heap identity, requires the
+process-usage estimate to return within the runtime-declared counter tolerance,
+and requires inclusion of every lazy-resource device. The report preserves the
+before/after Vulkan allocation budgets for capacity analysis but does not treat
+them as conserved counters: `VK_EXT_memory_budget` defines both budget and usage
+as non-invariant, and defines the budget only as a rough estimate. The benchmark
+package consumes the same runtime verifier.
 The gate also samples Linux DRM immediately before the runtime starts and after
 it exits. For every physical PCI device named by the runtime restoration report,
 it records current activity, requires stable DRM-card identity, no aggregate

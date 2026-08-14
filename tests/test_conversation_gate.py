@@ -102,29 +102,12 @@ def _device_restoration_snapshot(physical_device_id: str) -> dict[str, object]:
         "pci_address": _test_pci_address(physical_device_id),
         "api_version": 1,
         "driver_version": 2,
-        "memory_budget": {
-            "baseline_available_bytes": 1_000,
-            "reservable_bytes": 800,
-            "protected_headroom_bytes": 200,
-            "counter_tolerance_bytes": 16,
-        },
-        "memory_accounting": {
-            "baseline_available_bytes": 1_000,
-            "currently_available_bytes": 900,
-            "reservable_bytes": 800,
-            "tracked_allocation_bytes": 5,
-            "pending_reservation_bytes": 7,
-            "untracked_acquired_bytes": 9,
-            "remaining_bytes": 779,
-            "admissible_remaining_bytes": 795,
-        },
-        "memory_pressure": {
-            "active": False,
-            "episode": 2,
-            "observed_available_bytes": 900,
-            "current_deficit_bytes": 0,
-            "peak_deficit_bytes": 0,
-        },
+        "heap_index": 1,
+        "physical_heap_bytes": 2_000,
+        "memory_budget_supported": True,
+        "budget_bytes": 1_000,
+        "usage_bytes": 100,
+        "available_bytes": 900,
     }
 
 
@@ -138,13 +121,14 @@ def _device_restoration_payload(
             {
                 "physical_device_id": physical_device_id,
                 "restored": True,
+                "usage_counter_tolerance_bytes": 16,
                 "before": snapshot,
                 "after": json.loads(json.dumps(snapshot)),
                 "errors": [],
             }
         )
     return {
-        "schema": "nerve.runtime.device_local_memory_restoration.v1",
+        "schema": "nerve.runtime.physical_device_memory_restoration.v2",
         "complete": True,
         "physical_device_count": len(devices),
         "restored_device_count": len(devices),
@@ -395,25 +379,18 @@ def test_device_restoration_report_proves_all_selected_devices_restored() -> Non
             "reported global errors",
         ),
         (
-            lambda payload: payload["devices"][0]["after"]["memory_accounting"].update(
-                tracked_allocation_bytes=6
+            lambda payload: payload["devices"][0]["after"].update(
+                usage_bytes=117,
+                available_bytes=883,
             ),
-            "did not restore tracked_allocation_bytes",
-        ),
-        (
-            lambda payload: payload["devices"][0]["after"]["memory_accounting"].update(
-                currently_available_bytes=883
-            ),
-            "did not restore currently_available_bytes",
-        ),
-        (
-            lambda payload: payload["devices"][0]["after"]["memory_pressure"].update(
-                episode=3
-            ),
-            "changed memory pressure",
+            "did not restore usage_bytes",
         ),
         (
             lambda payload: payload["devices"][0]["after"].update(driver_version=3),
+            "changed physical identity",
+        ),
+        (
+            lambda payload: payload["devices"][0]["after"].update(heap_index=2),
             "changed physical identity",
         ),
     ),
@@ -428,6 +405,22 @@ def test_device_restoration_report_rejects_incomplete_or_false_proof(
 
     with pytest.raises(ConversationGateError, match=message):
         parse_device_restoration_report(transcript)
+
+
+def test_device_restoration_report_accepts_non_invariant_budget_drift() -> None:
+    payload = _device_restoration_payload()
+    payload["devices"][0]["after"].update(
+        budget_bytes=600,
+        available_bytes=500,
+    )
+
+    report = parse_device_restoration_report(
+        "device_restoration:\n  " + json.dumps(payload) + "\n"
+    )
+
+    assert report.complete
+    assert report.devices[0].before["budget_bytes"] == 1_000
+    assert report.devices[0].after["budget_bytes"] == 600
 
 
 def test_device_restoration_report_rejects_missing_duplicate_and_unknown_schema() -> (

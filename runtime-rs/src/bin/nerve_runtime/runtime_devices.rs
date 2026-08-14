@@ -602,6 +602,7 @@ struct RuntimePhysicalDeviceMemoryObservation {
 struct RuntimePhysicalDeviceMemoryRestorationDeviceReport {
     physical_device_id: String,
     restored: bool,
+    usage_counter_tolerance_bytes: u64,
     before: Option<RuntimePhysicalDeviceMemoryObservation>,
     after: Option<RuntimePhysicalDeviceMemoryObservation>,
     errors: Vec<String>,
@@ -701,6 +702,16 @@ fn verify_runtime_physical_device_memory_restoration(
         let before = before_by_id.get(physical_device_id).copied();
         let after = after_by_id.get(physical_device_id).copied();
         let mut device_errors = Vec::new();
+        let usage_counter_tolerance_bytes = before
+            .map(|observation| {
+                vulkan_device_local_memory_budget_from_available_bytes(
+                    observation
+                        .available_bytes
+                        .unwrap_or(observation.physical_heap_bytes),
+                )
+                .counter_tolerance_bytes
+            })
+            .unwrap_or(0);
         if let (Some(before), Some(after)) = (before, after) {
             if before.device_name != after.device_name
                 || before.pci_address != after.pci_address
@@ -718,18 +729,12 @@ fn verify_runtime_physical_device_memory_restoration(
                         .to_string(),
                 );
             }
-            let tolerance = vulkan_device_local_memory_budget_from_available_bytes(
-                before
-                    .available_bytes
-                    .unwrap_or(before.physical_heap_bytes),
-            )
-            .counter_tolerance_bytes;
             match (before.usage_bytes, after.usage_bytes) {
                 (Some(before_bytes), Some(after_bytes))
-                    if before_bytes.abs_diff(after_bytes) > tolerance =>
+                    if before_bytes.abs_diff(after_bytes) > usage_counter_tolerance_bytes =>
                 {
                     device_errors.push(format!(
-                        "did not restore usage bytes: before={before_bytes}, after={after_bytes}, tolerance={tolerance}",
+                        "did not restore usage bytes: before={before_bytes}, after={after_bytes}, tolerance={usage_counter_tolerance_bytes}",
                     ));
                 }
                 (Some(_), Some(_)) => {}
@@ -748,6 +753,7 @@ fn verify_runtime_physical_device_memory_restoration(
         devices.push(RuntimePhysicalDeviceMemoryRestorationDeviceReport {
             physical_device_id: physical_device_id.to_string(),
             restored: device_errors.is_empty(),
+            usage_counter_tolerance_bytes,
             before: before.cloned(),
             after: after.cloned(),
             errors: device_errors,
