@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v9";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v10";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -30,6 +30,7 @@ pub enum VulkanRuntimeSharedHostResidentAllocationKind {
     FeedbackControl {
         scope_id: String,
     },
+    StreamControl,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -84,9 +85,9 @@ pub struct VulkanRuntimePhysicalExecutionResidencyPlan {
     pub execution_transient_shared_host_allocations:
         Vec<VulkanRuntimeSharedHostTransientAllocation>,
     pub resident_shared_host_allocations: Vec<VulkanRuntimeSharedHostResidentAllocation>,
-    pub shared_stream_control_host_bytes_per_stream: usize,
     pub graph_edge_memory_domains_bound: bool,
     pub feedback_control_memory_domain_bound: bool,
+    pub stream_control_memory_domain_bound: bool,
 }
 
 impl VulkanRuntimePhysicalExecutionResidencyPlan {
@@ -459,9 +460,9 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             execution_transient_shared_host_bytes_per_stream: 0,
             execution_transient_shared_host_allocations: Vec::new(),
             resident_shared_host_allocations: Vec::new(),
-            shared_stream_control_host_bytes_per_stream: 0,
             graph_edge_memory_domains_bound: false,
             feedback_control_memory_domain_bound: false,
+            stream_control_memory_domain_bound: false,
         })
     }
 
@@ -1057,7 +1058,14 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 "staged graph-edge shared-host residency",
             )?;
         }
-        next.resident_shared_host_allocations = shared_host_additions;
+        next.resident_shared_host_allocations.retain(|allocation| {
+            !matches!(
+                allocation.kind,
+                VulkanRuntimeSharedHostResidentAllocationKind::EdgeStaging { .. }
+            )
+        });
+        next.resident_shared_host_allocations
+            .extend(shared_host_additions);
         next.refresh_stream_residency_totals_from_ledgers()?;
         next.graph_edge_memory_domains_bound = true;
         *self = next;
@@ -1206,6 +1214,11 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
         &mut self,
         physical_device_by_logical_device: &BTreeMap<String, String>,
     ) -> Result<(), VulkanRuntimeResidencyPlanError> {
+        if self.stream_control_memory_domain_bound {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "stream-control memory domain was bound more than once".to_string(),
+            ));
+        }
         let mut next = self.clone();
         let mut indices_by_physical_device = BTreeMap::<String, Vec<usize>>::new();
         for (index, device) in next.device_plans.iter().enumerate() {
@@ -1275,25 +1288,42 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
         }
 
         if spans_physical_devices {
-            if next.shared_stream_control_host_bytes_per_stream != 0 {
-                return Err(VulkanRuntimeResidencyPlanError(
-                    "stream-control memory domain was bound more than once".to_string(),
-                ));
-            }
-            let representative = next.device_plans.first_mut().ok_or_else(|| {
-                VulkanRuntimeResidencyPlanError(
-                    "stream-control binding has no representative device".to_string(),
-                )
-            })?;
-            representative.stream_shared_host_bytes = checked_residency_add(
-                representative.stream_shared_host_bytes,
+            let participant_device_ids = indices_by_physical_device
+                .values()
+                .map(|indices| {
+                    indices
+                        .iter()
+                        .map(|index| next.device_plans[*index].device_id.as_str())
+                        .min()
+                        .expect("physical stream-control participant set is nonempty")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            let owner_device_id = participant_device_ids
+                .first()
+                .expect("cross-device stream control has participants")
+                .clone();
+            let owner = next
+                .device_plans
+                .iter_mut()
+                .find(|device| device.device_id == owner_device_id)
+                .expect("stream-control owner is a planned device");
+            owner.stream_shared_host_bytes = checked_residency_add(
+                owner.stream_shared_host_bytes,
                 VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
-                "shared stream-control device residency",
+                "shared stream-control residency",
             )?;
-            next.shared_stream_control_host_bytes_per_stream =
-                VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+            next.resident_shared_host_allocations.push(
+                VulkanRuntimeSharedHostResidentAllocation {
+                    kind: VulkanRuntimeSharedHostResidentAllocationKind::StreamControl,
+                    owner_device_id,
+                    participant_device_ids,
+                    byte_capacity: VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+                },
+            );
         }
         next.refresh_stream_residency_totals_from_ledgers()?;
+        next.stream_control_memory_domain_bound = true;
         *self = next;
         Ok(())
     }
@@ -1413,6 +1443,89 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
         *self = next;
         Ok(())
     }
+}
+
+fn exact_stream_control_shared_host_allocation<'a>(
+    plan: &'a VulkanRuntimePhysicalExecutionResidencyPlan,
+    physical_device_by_logical_device: &BTreeMap<String, String>,
+) -> Result<Option<&'a VulkanRuntimeSharedHostResidentAllocation>, VulkanRuntimeResidencyPlanError>
+{
+    if !plan.stream_control_memory_domain_bound {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "stream-control memory domain is not bound".to_string(),
+        ));
+    }
+    let planned_logical_devices = plan
+        .device_plans
+        .iter()
+        .map(|device| device.device_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if physical_device_by_logical_device.len() != planned_logical_devices.len()
+        || planned_logical_devices.iter().any(|device_id| {
+            !physical_device_by_logical_device.contains_key(*device_id)
+        })
+    {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "stream-control allocation validation has incomplete or extra physical bindings"
+                .to_string(),
+        ));
+    }
+    let mut logical_devices_by_physical = BTreeMap::<String, BTreeSet<String>>::new();
+    for device_id in planned_logical_devices {
+        logical_devices_by_physical
+            .entry(
+                physical_device_by_logical_device
+                    .get(device_id)
+                    .expect("stream-control physical binding was validated above")
+                    .clone(),
+            )
+            .or_default()
+            .insert(device_id.to_string());
+    }
+    let expected_participant_device_ids = logical_devices_by_physical
+        .values()
+        .map(|logical_device_ids| {
+            logical_device_ids
+                .first()
+                .expect("physical stream-control participant set is nonempty")
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    let matches = plan
+        .resident_shared_host_allocations
+        .iter()
+        .filter(|allocation| {
+            allocation.kind == VulkanRuntimeSharedHostResidentAllocationKind::StreamControl
+        })
+        .collect::<Vec<_>>();
+    if logical_devices_by_physical.len() == 1 {
+        if !matches.is_empty() {
+            return Err(VulkanRuntimeResidencyPlanError(
+                "single-device stream control unexpectedly declares shared-host storage"
+                    .to_string(),
+            ));
+        }
+        return Ok(None);
+    }
+    let [allocation] = matches.as_slice() else {
+        return Err(VulkanRuntimeResidencyPlanError(format!(
+            "cross-device stream control resolves {} shared-host allocations, expected one",
+            matches.len(),
+        )));
+    };
+    let expected_owner_device_id = expected_participant_device_ids
+        .first()
+        .expect("cross-device stream control has participants");
+    if allocation.owner_device_id != *expected_owner_device_id
+        || allocation.participant_device_ids != expected_participant_device_ids
+        || allocation.byte_capacity != VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    {
+        return Err(VulkanRuntimeResidencyPlanError(
+            "cross-device stream-control allocation disagrees with its exact physical participants"
+                .to_string(),
+        ));
+    }
+    Ok(Some(*allocation))
 }
 
 fn validate_resident_stream_allocation_ledger(

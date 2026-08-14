@@ -345,6 +345,100 @@ fn produced_port_resident_route_resolution_is_exact_and_physical() {
 }
 
 #[test]
+fn exact_shared_host_mount_rejects_missing_extra_and_aliased_participants() {
+    let Some((owner, helper)) = selected_test_vulkan_device_pair() else {
+        eprintln!("skipping exact shared-host participant test without two explicit Vulkan devices");
+        return;
+    };
+    let devices = BTreeMap::from([
+        ("owner".to_string(), owner.clone()),
+        ("owner_alias".to_string(), owner),
+        ("helper".to_string(), helper),
+    ]);
+    let device_for = |device_id: &str| {
+        devices.get(device_id).map(Rc::as_ref).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                device_id: device_id.to_string(),
+            }
+        })
+    };
+    let allocation = VulkanRuntimeSharedHostResidentAllocation {
+        kind: VulkanRuntimeSharedHostResidentAllocationKind::StreamControl,
+        owner_device_id: "owner".to_string(),
+        participant_device_ids: vec!["owner".to_string(), "helper".to_string()],
+        byte_capacity: VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+    };
+    let actual = BTreeSet::from(["owner".to_string(), "helper".to_string()]);
+    let mounted = exact_physical_allocation_devices(
+        &allocation.owner_device_id,
+        &allocation.participant_device_ids,
+        allocation.byte_capacity,
+        &actual,
+        "fixture",
+        &device_for,
+    )
+    .unwrap();
+    assert_eq!(mounted.len(), 2);
+    assert!(mounted[0]
+        .0
+        .shares_logical_device_with(device_for("owner").unwrap()));
+
+    let missing = BTreeSet::from(["owner".to_string()]);
+    assert!(
+        exact_physical_allocation_devices(
+            &allocation.owner_device_id,
+            &allocation.participant_device_ids,
+            allocation.byte_capacity,
+            &missing,
+            "fixture",
+            &device_for,
+        )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("omitted a planned")
+    );
+
+    let owner_only = VulkanRuntimeSharedHostResidentAllocation {
+        participant_device_ids: vec!["owner".to_string()],
+        ..allocation.clone()
+    };
+    assert!(
+        exact_physical_allocation_devices(
+            &owner_only.owner_device_id,
+            &owner_only.participant_device_ids,
+            owner_only.byte_capacity,
+            &actual,
+            "fixture",
+            &device_for,
+        )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("introduced unplanned")
+    );
+
+    let aliased = VulkanRuntimeSharedHostResidentAllocation {
+        participant_device_ids: vec!["owner".to_string(), "owner_alias".to_string()],
+        ..allocation
+    };
+    assert!(
+        exact_physical_allocation_devices(
+            &aliased.owner_device_id,
+            &aliased.participant_device_ids,
+            aliased.byte_capacity,
+            &missing,
+            "fixture",
+            &device_for,
+        )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("repeats one physical")
+    );
+}
+
+#[test]
 fn placed_edge_allocation_aliases_mixed_local_and_remote_fanout() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let buffers = mixed_fanout_edge_plan().allocate_buffers(&device).unwrap();
@@ -509,6 +603,85 @@ fn mounted_three_device_fanout_uses_one_physical_source_and_publishes_every_edge
         .incoming_edges
         .push(second_outgoing);
     let slices = vec![Arc::new(gpu0), Arc::new(gpu1), Arc::new(gpu2)];
+    let edge_plans = slices
+        .iter()
+        .map(|slice| {
+            VulkanPlacedEdgeIoPlan::from_placed_resident_plan(
+                &slice.placed_plan.placed_resident_plan,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let fanout_groups = group_placed_edge_pairs_by_produced_port(
+        pair_placed_edge_endpoints(&edge_plans).unwrap(),
+    )
+    .unwrap();
+    assert!(fanout_groups.iter().any(|group| {
+        group
+            .edges
+            .iter()
+            .any(|(outgoing, _)| outgoing.edge_index == first_outgoing.edge_index)
+    }));
+    let mut selected_boundary_routes = BTreeMap::new();
+    let mut edge_staging_allocations = Vec::new();
+    let mut staged_edge_host_bytes = 0usize;
+    for group in &fanout_groups {
+        let (selected_outgoing, selected_incoming) = group
+            .edges
+            .first()
+            .expect("produced-port edge group is nonempty");
+        selected_boundary_routes.insert(
+            selected_outgoing.edge_index,
+            VulkanRuntimeMountedBoundaryRoute {
+                edge_index: selected_outgoing.edge_index,
+                source_device_id: selected_outgoing.local_device_id.clone(),
+                destination_device_id: selected_incoming.local_device_id.clone(),
+                frame_byte_count: group.byte_capacity,
+                route: VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+            },
+        );
+        let mut edge_indices = edge_plans
+            .iter()
+            .find(|plan| plan.device_id == group.source_device_id)
+            .into_iter()
+            .flat_map(|plan| &plan.local_edges)
+            .filter(|edge| {
+                edge.source_component_id == group.source_component_id
+                    && edge.source_port_id == group.source_port_id
+            })
+            .map(|edge| edge.edge_index)
+            .chain(
+                group
+                    .edges
+                    .iter()
+                    .map(|(outgoing, _)| outgoing.edge_index),
+            )
+            .collect::<Vec<_>>();
+        edge_indices.sort_unstable();
+        let participant_device_ids = group
+            .edges
+            .iter()
+            .flat_map(|(outgoing, incoming)| {
+                [
+                    outgoing.local_device_id.clone(),
+                    incoming.local_device_id.clone(),
+                ]
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        edge_staging_allocations.push(VulkanRuntimeSharedHostResidentAllocation {
+            kind: VulkanRuntimeSharedHostResidentAllocationKind::EdgeStaging {
+                component_id: group.source_component_id.clone(),
+                port_id: group.source_port_id.clone(),
+                edge_indices,
+            },
+            owner_device_id: group.source_device_id.clone(),
+            participant_device_ids,
+            byte_capacity: group.byte_capacity,
+        });
+        staged_edge_host_bytes += group.byte_capacity;
+    }
     let empty_plan = VulkanDistributedActivationBufferPlan {
         allocations: Vec::new(),
         reduction_allocations: Vec::new(),
@@ -527,10 +700,56 @@ fn mounted_three_device_fanout_uses_one_physical_source_and_publishes_every_edge
             .ok_or_else(|| format!("missing fixture device {device_id}"))
     })
     .unwrap();
+    let mut stream_control_participants = ["gpu0", "gpu1", "gpu2"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    stream_control_participants.sort_by_key(|device_id| {
+        devices
+            .get(device_id)
+            .expect("fixture device exists")
+            .physical_device_id()
+            .to_string()
+    });
+    let stream_control_owner = stream_control_participants[0].clone();
+    edge_staging_allocations.push(VulkanRuntimeSharedHostResidentAllocation {
+        kind: VulkanRuntimeSharedHostResidentAllocationKind::StreamControl,
+        owner_device_id: stream_control_owner,
+        participant_device_ids: stream_control_participants,
+        byte_capacity: VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+    });
+    let physical_execution_residency_plan = VulkanRuntimePhysicalExecutionResidencyPlan {
+        schema: VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA.to_string(),
+        package_id: "placed-mount-fixture".to_string(),
+        device_plans: ["gpu0", "gpu1", "gpu2"]
+            .into_iter()
+            .map(|device_id| VulkanRuntimePhysicalExecutionDeviceResidencyPlan {
+                device_id: device_id.to_string(),
+                breakdown: VulkanRuntimePhysicalExecutionResidencyBreakdown::default(),
+                mount_device_local_bytes: 0,
+                stream_device_local_bytes: 0,
+                stream_shared_host_bytes: 0,
+                resident_stream_device_allocations: Vec::new(),
+                external_device_local_resident_allocations: Vec::new(),
+                execution_transient_device_allocations: Vec::new(),
+            })
+            .collect(),
+        total_mount_device_local_bytes: 0,
+        total_stream_device_local_bytes: 0,
+        total_stream_shared_host_bytes: staged_edge_host_bytes
+            + VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+        execution_transient_shared_host_bytes_per_stream: 0,
+        execution_transient_shared_host_allocations: Vec::new(),
+        resident_shared_host_allocations: edge_staging_allocations,
+        graph_edge_memory_domains_bound: true,
+        feedback_control_memory_domain_bound: true,
+        stream_control_memory_domain_bound: true,
+    };
     let links = create_placed_device_links(
         &slices,
         &mut distributed,
-        &BTreeMap::new(),
+        &selected_boundary_routes,
+        &physical_execution_residency_plan,
         &|device_id| {
             devices.get(device_id).map(Rc::as_ref).ok_or_else(|| {
                 VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {

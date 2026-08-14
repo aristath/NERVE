@@ -1511,6 +1511,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             &self.device_slices,
             &mut distributed_activation_buffers,
             &self.mounted_boundary_routes,
+            &self.physical_execution_residency_plan,
             &device_for,
         )?;
         let mut distributed_dispatch_indices = BTreeMap::<&str, BTreeSet<usize>>::new();

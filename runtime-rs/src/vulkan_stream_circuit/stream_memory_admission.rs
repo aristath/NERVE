@@ -104,7 +104,6 @@ fn physical_execution_unclassified_shared_host_logical_bytes(
         distributed,
         resident,
         plan.execution_transient_shared_host_bytes_per_stream,
-        plan.shared_stream_control_host_bytes_per_stream,
     ]
     .into_iter()
     .try_fold(0usize, |total, bytes| total.checked_add(bytes))
@@ -120,31 +119,12 @@ fn physical_execution_unclassified_shared_host_logical_bytes(
         .ok_or_else(|| {
             VulkanResidentInProcessPlacedRuntimeError::Package(
                 VulkanResidentTokenModelPackageError::new(format!(
-                    "physical shared-host residency declares {} total bytes but its bound ledgers require {classified}: distributed={distributed}, resident={resident}, execution_transient={}, stream_control={}",
+                    "physical shared-host residency declares {} total bytes but its bound ledgers require {classified}: distributed={distributed}, resident={resident}, execution_transient={}",
                     plan.total_stream_shared_host_bytes,
                     plan.execution_transient_shared_host_bytes_per_stream,
-                    plan.shared_stream_control_host_bytes_per_stream,
                 )),
             )
         })
-}
-
-fn shared_stream_control_requirement_bytes(
-    physical_devices: &BTreeMap<String, &VulkanComputeDevice>,
-) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
-    if physical_devices.len() <= 1 {
-        return Ok(0);
-    }
-    let mut participants = physical_devices.values().copied();
-    let owner = participants
-        .next()
-        .expect("multiple physical stream devices exist");
-    owner
-        .shared_host_allocation_requirement_bytes(
-            &participants.collect::<Vec<_>>(),
-            VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
-        )
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
 }
 
 fn execution_transient_shared_host_requirement_bytes<'a, F>(
@@ -586,25 +566,17 @@ where
         )
     })?;
 
-    let expected_shared_stream_control_bytes = if physical_devices.len() > 1 {
-        VULKAN_STREAM_CONTROL_BYTE_CAPACITY
-    } else {
-        0
-    };
-    if plan.shared_stream_control_host_bytes_per_stream != expected_shared_stream_control_bytes {
-        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
-            VulkanResidentTokenModelPackageError::new(format!(
-                "physical execution stream-control memory domain declares {} shared-host bytes for {} physical device(s), expected {expected_shared_stream_control_bytes}",
-                plan.shared_stream_control_host_bytes_per_stream,
-                physical_devices.len(),
-            )),
-        ));
-    }
+    exact_stream_control_shared_host_allocation(plan, &physical_device_by_logical_device)
+        .map_err(|error| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "invalid physical stream-control allocation: {error}",
+                )),
+            )
+        })?;
 
     let unclassified_shared_host_bytes =
         physical_execution_unclassified_shared_host_logical_bytes(plan)?;
-    let shared_stream_control_requirement =
-        shared_stream_control_requirement_bytes(&physical_devices)?;
     let execution_transient_shared_host_requirement_for =
         |allocation_class: VulkanMemoryAdmissionAllocationClass| {
             execution_transient_shared_host_requirement_bytes(
@@ -628,7 +600,6 @@ where
         distributed_shared_host_requirement_bytes(&package.distributed_activation_plan, device_for)?
             .checked_add(unclassified_shared_host_bytes)
             .and_then(|bytes| bytes.checked_add(resident_shared_host_requirement))
-            .and_then(|bytes| bytes.checked_add(shared_stream_control_requirement))
             .ok_or_else(|| {
         VulkanResidentInProcessPlacedRuntimeError::Package(
             VulkanResidentTokenModelPackageError::new(

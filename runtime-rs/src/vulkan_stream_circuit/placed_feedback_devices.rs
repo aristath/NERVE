@@ -1251,10 +1251,85 @@ impl VulkanPlacedEdgeTimelineSynchronizations {
 
 }
 
+fn exact_physical_allocation_devices<'a, F>(
+    owner_device_id: &str,
+    participant_device_ids: &[String],
+    byte_capacity: usize,
+    actual_participant_device_ids: &BTreeSet<String>,
+    label: &str,
+    device_for: &F,
+) -> Result<Vec<(&'a VulkanComputeDevice, Vec<String>)>, VulkanResidentInProcessPlacedRuntimeError>
+where
+    F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    if owner_device_id.trim().is_empty()
+        || byte_capacity == 0
+        || !participant_device_ids
+            .iter()
+            .any(|device_id| device_id == owner_device_id)
+    {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!("{label} has a malformed physical allocation ledger")),
+        ));
+    }
+    let mut planned_devices = Vec::<(&VulkanComputeDevice, Vec<String>)>::new();
+    for device_id in participant_device_ids {
+        let device = device_for(device_id)?;
+        if planned_devices
+            .iter()
+            .any(|(candidate, _)| candidate.shares_logical_device_with(device))
+        {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "{label} repeats one physical allocation participant through {device_id:?}",
+                )),
+            ));
+        }
+        planned_devices.push((device, Vec::new()));
+    }
+    let owner = device_for(owner_device_id)?;
+    let owner_index = planned_devices
+        .iter()
+        .position(|(device, _)| device.shares_logical_device_with(owner))
+        .ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "{label} omits its owner from the physical allocation participants",
+            )))
+        })?;
+    planned_devices.swap(0, owner_index);
+
+    for device_id in actual_participant_device_ids {
+        let device = device_for(device_id)?;
+        let Some((_, logical_device_ids)) = planned_devices
+            .iter_mut()
+            .find(|(candidate, _)| candidate.shares_logical_device_with(device))
+        else {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "{label} mounting introduced unplanned participant {device_id:?}",
+                )),
+            ));
+        };
+        logical_device_ids.push(device_id.clone());
+    }
+    if planned_devices
+        .iter()
+        .any(|(_, logical_device_ids)| logical_device_ids.is_empty())
+    {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!(
+                "{label} mounting omitted a planned physical allocation participant",
+            )),
+        ));
+    }
+    Ok(planned_devices)
+}
+
 fn create_placed_device_links<'a, F>(
     device_slices: &[Arc<VulkanResidentModelPackageDeviceSlice>],
     distributed_activation_buffers: &mut VulkanDistributedActivationBuffers,
     selected_boundary_routes: &BTreeMap<usize, VulkanRuntimeMountedBoundaryRoute>,
+    physical_execution_residency_plan: &VulkanRuntimePhysicalExecutionResidencyPlan,
     device_for: &F,
 ) -> Result<VulkanPlacedDeviceLinks, VulkanResidentInProcessPlacedRuntimeError>
 where
@@ -1300,7 +1375,7 @@ where
                 .map(|(outgoing, _)| outgoing.edge_index)
                 .filter(|edge_index| selected_boundary_routes.contains_key(edge_index)),
         );
-        let source_device = device_for(&group.source_device_id)?;
+        let declared_source_device = device_for(&group.source_device_id)?;
         let matching_local_edges = plans
             .iter()
             .find(|plan| plan.device_id == group.source_device_id)
@@ -1382,14 +1457,9 @@ where
         }
         let owner_index = unique_devices
             .iter()
-            .position(|(device, _)| device.shares_logical_device_with(source_device))
+            .position(|(device, _)| device.shares_logical_device_with(declared_source_device))
             .expect("produced-port participants include the source device");
         unique_devices.swap(0, owner_index);
-        let peer_devices = unique_devices
-            .iter()
-            .skip(1)
-            .map(|(device, _)| *device)
-            .collect::<Vec<_>>();
         let required_route = resolve_vulkan_produced_port_resident_route(
             &group,
             selected_route,
@@ -1397,6 +1467,127 @@ where
             unique_devices.len(),
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let expected_edge_indices = produced_edge_indices.iter().copied().collect::<Vec<_>>();
+        if required_route == Some(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging) {
+            let matching_allocations = physical_execution_residency_plan
+                .resident_shared_host_allocations
+                .iter()
+                .filter(|allocation| {
+                    matches!(
+                        &allocation.kind,
+                        VulkanRuntimeSharedHostResidentAllocationKind::EdgeStaging {
+                            component_id,
+                            port_id,
+                            edge_indices,
+                        } if component_id == &group.source_component_id
+                            && port_id == &group.source_port_id
+                            && edge_indices == &expected_edge_indices
+                    )
+                })
+                .collect::<Vec<_>>();
+            let [allocation] = matching_allocations.as_slice() else {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "staged produced port {}.{} resolves {} physical allocation ledgers, expected one",
+                        group.source_component_id,
+                        group.source_port_id,
+                        matching_allocations.len(),
+                    )),
+                ));
+            };
+            if allocation.owner_device_id != group.source_device_id
+                || allocation.byte_capacity != group.byte_capacity
+            {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "staged produced port {}.{} disagrees with its physical allocation ledger",
+                        group.source_component_id, group.source_port_id,
+                    )),
+                ));
+            }
+            unique_devices = exact_physical_allocation_devices(
+                &allocation.owner_device_id,
+                &allocation.participant_device_ids,
+                allocation.byte_capacity,
+                &participant_device_ids,
+                &format!(
+                    "staged produced port {}.{}",
+                    group.source_component_id, group.source_port_id,
+                ),
+                device_for,
+            )?;
+        } else if required_route == Some(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal) {
+            let matching_allocations = physical_execution_residency_plan
+                .device_plans
+                .iter()
+                .flat_map(|device_plan| &device_plan.external_device_local_resident_allocations)
+                .filter(|allocation| {
+                    matches!(
+                        &allocation.kind,
+                        VulkanRuntimeExternalDeviceLocalResidentAllocationKind::EdgeProducedPort {
+                            component_id,
+                            port_id,
+                            edge_indices,
+                        } if component_id == &group.source_component_id
+                            && port_id == &group.source_port_id
+                            && edge_indices == &expected_edge_indices
+                    )
+                })
+                .collect::<Vec<_>>();
+            let [allocation] = matching_allocations.as_slice() else {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "external produced port {}.{} resolves {} physical allocation ledgers, expected one",
+                        group.source_component_id,
+                        group.source_port_id,
+                        matching_allocations.len(),
+                    )),
+                ));
+            };
+            if allocation.owner_device_id != group.source_device_id
+                || allocation.byte_capacity != group.byte_capacity
+            {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "external produced port {}.{} disagrees with its physical allocation ledger",
+                        group.source_component_id, group.source_port_id,
+                    )),
+                ));
+            }
+            unique_devices = exact_physical_allocation_devices(
+                &allocation.owner_device_id,
+                &allocation.participant_device_ids,
+                allocation.byte_capacity,
+                &participant_device_ids,
+                &format!(
+                    "external produced port {}.{}",
+                    group.source_component_id, group.source_port_id,
+                ),
+                device_for,
+            )?;
+        }
+        let source_device = unique_devices
+            .first()
+            .map(|(device, _)| *device)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "produced port {}.{} has no mounted allocation owner",
+                    group.source_component_id, group.source_port_id,
+                )))
+            })?;
+        if !source_device.shares_logical_device_with(declared_source_device) {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "produced port {}.{} physical allocation owner is not its source device",
+                    group.source_component_id, group.source_port_id,
+                )),
+            ));
+        }
+        let peer_devices = unique_devices
+            .iter()
+            .skip(1)
+            .map(|(device, _)| *device)
+            .collect::<Vec<_>>();
         let supports_cross_queue_timeline = peer_devices.iter().all(|destination| {
             source_device.supports_opaque_fd_timeline_semaphores()
                 && destination.supports_opaque_fd_timeline_semaphores()
@@ -1488,69 +1679,13 @@ where
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 (device_local, None, Some(staging), true)
-            } else if supports_cross_queue_timeline
-                && let Ok(shared) = source_device
-                    .create_shared_resident_buffers(&peer_devices, group.byte_capacity)
-            {
-                match shared.route {
-                    VulkanSharedResidentBufferRoute::ExternalDeviceLocal => (
-                        shared.buffers,
-                        Some(VulkanSharedResidentBufferRoute::ExternalDeviceLocal),
-                        None,
-                        true,
-                    ),
-                    VulkanSharedResidentBufferRoute::SharedHost => {
-                        let device_local = unique_devices
-                            .iter()
-                            .map(|(device, _)| {
-                                device
-                                    .create_resident_buffer(group.byte_capacity)
-                                    .map(Arc::new)
-                                    .map_err(
-                                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop,
-                                    )
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        (device_local, None, Some(shared.buffers), true)
-                    }
-                }
             } else {
-                let staging_allocation = source_device
-                    .create_shared_host_allocation(&peer_devices, group.byte_capacity)
-                    .map_err(|error| {
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                            format!(
-                                "failed to allocate fallback shared-host staging for produced port {}.{} across {} physical devices: {error}",
-                                group.source_component_id,
-                                group.source_port_id,
-                                unique_devices.len(),
-                            ),
-                        ))
-                    })?;
-                let staging = unique_devices
-                    .iter()
-                    .map(|(device, _)| {
-                        device
-                            .import_shared_host_buffer(Arc::clone(&staging_allocation))
-                            .map(Arc::new)
-                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let device_local = unique_devices
-                    .iter()
-                    .map(|(device, _)| {
-                        device
-                            .create_resident_buffer(group.byte_capacity)
-                            .map(Arc::new)
-                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                (
-                    device_local,
-                    None,
-                    Some(staging),
-                    supports_cross_queue_timeline,
-                )
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "produced port {}.{} crossed physical devices without an exact resident route",
+                        group.source_component_id, group.source_port_id,
+                    )),
+                ));
             };
         every_edge_is_resident_replayable &= group_is_resident_replayable;
         let mut group_buffers = BTreeMap::<String, Arc<VulkanResidentBuffer>>::new();
@@ -1772,28 +1907,67 @@ where
                 "failed to finalize distributed graph-edge allocations: {error}",
             )))
         })?;
-    let mut unique_devices = Vec::<(&VulkanComputeDevice, Vec<String>)>::new();
-    for slice in device_slices {
-        let device = device_for(&slice.device_id)?;
-        if let Some((_, device_ids)) = unique_devices
-            .iter_mut()
-            .find(|(candidate, _)| candidate.shares_logical_device_with(device))
-        {
-            device_ids.push(slice.device_id.clone());
-        } else {
-            unique_devices.push((device, vec![slice.device_id.clone()]));
+    let actual_stream_control_participants = device_slices
+        .iter()
+        .map(|slice| slice.device_id.clone())
+        .collect::<BTreeSet<_>>();
+    let physical_device_by_logical_device = physical_execution_residency_plan
+        .device_plans
+        .iter()
+        .map(|device_plan| {
+            device_for(&device_plan.device_id).map(|device| {
+                (
+                    device_plan.device_id.clone(),
+                    device.physical_device_id().to_string(),
+                )
+            })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let planned_stream_control = exact_stream_control_shared_host_allocation(
+        physical_execution_residency_plan,
+        &physical_device_by_logical_device,
+    )
+    .map_err(|error| {
+        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+            "invalid mounted stream-control allocation: {error}",
+        )))
+    })?;
+    let unique_devices = if let Some(allocation) = planned_stream_control {
+        exact_physical_allocation_devices(
+            &allocation.owner_device_id,
+            &allocation.participant_device_ids,
+            allocation.byte_capacity,
+            &actual_stream_control_participants,
+            "shared stream control",
+            device_for,
+        )?
+    } else {
+        let mut devices = Vec::<(&VulkanComputeDevice, Vec<String>)>::new();
+        for device_id in &actual_stream_control_participants {
+            let device = device_for(device_id)?;
+            if let Some((_, logical_device_ids)) = devices
+                .iter_mut()
+                .find(|(candidate, _)| candidate.shares_logical_device_with(device))
+            {
+                logical_device_ids.push(device_id.clone());
+            } else {
+                devices.push((device, vec![device_id.clone()]));
+            }
         }
-    }
-    // Admission keys physical devices by this stable identifier. Select the
-    // shared allocation owner in the same order because Vulkan memory-type
-    // alignment can differ by owner.
-    unique_devices.sort_by(|(left, _), (right, _)| {
-        left.physical_device_id().cmp(right.physical_device_id())
-    });
+        if devices.len() > 1 {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(
+                    "stream-control mounting spans unplanned physical allocation domains"
+                        .to_string(),
+                ),
+            ));
+        }
+        devices
+    };
     let mut stream_control_buffers = BTreeMap::new();
     let feedback_stream_control_is_resident_replayable = true;
     if let Some((owner_device, _)) = unique_devices.first() {
-        let buffers = if unique_devices.len() == 1 {
+        let buffers = if planned_stream_control.is_none() {
             let mut buffer = owner_device
                 .create_host_visible_resident_buffer(VULKAN_STREAM_CONTROL_BYTE_CAPACITY)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -1814,8 +1988,11 @@ where
             // bytes. A device-local DMA-BUF would need explicit external queue
             // ownership transfers for cross-device read-after-write; the few
             // control words cannot justify that weaker and more complex path.
+            let byte_capacity = planned_stream_control
+                .expect("cross-device stream control was validated above")
+                .byte_capacity;
             let allocation = owner_device
-                .create_shared_host_allocation(&peers, VULKAN_STREAM_CONTROL_BYTE_CAPACITY)
+                .create_shared_host_allocation(&peers, byte_capacity)
                 .map_err(|error| {
                     VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
                         "failed to allocate shared stream control across {} physical devices: {error}",

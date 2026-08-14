@@ -487,8 +487,21 @@ fn physical_execution_stream_control_moves_to_one_shared_host_allocation_across_
         plan.total_stream_shared_host_bytes,
         baseline.total_stream_shared_host_bytes + VULKAN_STREAM_CONTROL_BYTE_CAPACITY
     );
+    let stream_control_allocations = plan
+        .resident_shared_host_allocations
+        .iter()
+        .filter(|allocation| {
+            allocation.kind == VulkanRuntimeSharedHostResidentAllocationKind::StreamControl
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stream_control_allocations.len(), 1);
+    assert_eq!(stream_control_allocations[0].owner_device_id, "owner");
     assert_eq!(
-        plan.shared_stream_control_host_bytes_per_stream,
+        stream_control_allocations[0].participant_device_ids,
+        ["owner".to_string(), "helper".to_string()]
+    );
+    assert_eq!(
+        stream_control_allocations[0].byte_capacity,
         VULKAN_STREAM_CONTROL_BYTE_CAPACITY
     );
     assert_eq!(
@@ -553,7 +566,9 @@ fn aliased_logical_devices_retain_exactly_one_device_local_stream_control() {
         plan.total_stream_shared_host_bytes,
         baseline.total_stream_shared_host_bytes
     );
-    assert_eq!(plan.shared_stream_control_host_bytes_per_stream, 0);
+    assert!(plan.resident_shared_host_allocations.iter().all(|allocation| {
+        allocation.kind != VulkanRuntimeSharedHostResidentAllocationKind::StreamControl
+    }));
 }
 
 #[test]
@@ -602,6 +617,90 @@ fn stream_control_binding_rejects_incomplete_repeated_or_extra_maps_atomically()
         .unwrap_err();
     assert!(repeated.to_string().contains("bound more than once"));
     assert_eq!(plan, once_bound);
+}
+
+#[test]
+fn exact_stream_control_allocation_rejects_ledger_drift() {
+    let mut base = physical_execution_residency_base_plan(1_000, 100);
+    base.device_plans[0].breakdown.stream_control_bytes =
+        VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    add_helper_stream_control_device(&mut base);
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &physical_execution_activation_plan(VulkanSharedResidentBufferRoute::SharedHost),
+    )
+    .unwrap();
+    let binding = BTreeMap::from([
+        ("owner".to_string(), "physical-a".to_string()),
+        ("helper".to_string(), "physical-b".to_string()),
+    ]);
+    plan.bind_stream_control_memory_domain(&binding).unwrap();
+
+    assert!(
+        exact_stream_control_shared_host_allocation(&plan, &binding)
+            .unwrap()
+            .is_some()
+    );
+
+    let stream_control_index = plan
+        .resident_shared_host_allocations
+        .iter()
+        .position(|allocation| {
+            allocation.kind == VulkanRuntimeSharedHostResidentAllocationKind::StreamControl
+        })
+        .unwrap();
+    let mut missing = plan.clone();
+    missing
+        .resident_shared_host_allocations
+        .remove(stream_control_index);
+    assert!(
+        exact_stream_control_shared_host_allocation(&missing, &binding)
+            .unwrap_err()
+            .to_string()
+            .contains("expected one")
+    );
+
+    let mut wrong_owner = plan.clone();
+    wrong_owner.resident_shared_host_allocations[stream_control_index].owner_device_id =
+        "helper".to_string();
+    assert!(
+        exact_stream_control_shared_host_allocation(&wrong_owner, &binding)
+            .unwrap_err()
+            .to_string()
+            .contains("exact physical participants")
+    );
+
+    let mut reordered = plan.clone();
+    reordered.resident_shared_host_allocations[stream_control_index]
+        .participant_device_ids
+        .reverse();
+    assert!(
+        exact_stream_control_shared_host_allocation(&reordered, &binding)
+            .unwrap_err()
+            .to_string()
+            .contains("exact physical participants")
+    );
+
+    let mut wrong_capacity = plan.clone();
+    wrong_capacity.resident_shared_host_allocations[stream_control_index].byte_capacity += 1;
+    assert!(
+        exact_stream_control_shared_host_allocation(&wrong_capacity, &binding)
+            .unwrap_err()
+            .to_string()
+            .contains("exact physical participants")
+    );
+
+    let mut unbound = plan;
+    unbound.stream_control_memory_domain_bound = false;
+    assert!(
+        exact_stream_control_shared_host_allocation(&unbound, &binding)
+            .unwrap_err()
+            .to_string()
+            .contains("not bound")
+    );
 }
 
 #[test]

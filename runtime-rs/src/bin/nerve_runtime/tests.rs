@@ -1129,9 +1129,9 @@ mod tests {
                     execution_transient_shared_host_bytes_per_stream: 0,
                     execution_transient_shared_host_allocations: Vec::new(),
                     resident_shared_host_allocations: Vec::new(),
-                    shared_stream_control_host_bytes_per_stream: 0,
                     graph_edge_memory_domains_bound: true,
                     feedback_control_memory_domain_bound: true,
+                    stream_control_memory_domain_bound: true,
                 },
             exact_parameter_resources_by_component: BTreeMap::from([(
                 "layer_00".to_string(),
