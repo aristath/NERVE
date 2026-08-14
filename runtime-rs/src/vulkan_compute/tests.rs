@@ -2384,6 +2384,46 @@ mod tests {
     }
 
     #[test]
+    fn resident_buffer_fill_batch_executes_exact_validated_ranges() {
+        let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+        let buffer = device.create_resident_buffer(32).unwrap();
+        buffer.write_bytes(&[0xabu8; 32]).unwrap();
+
+        assert!(VulkanResidentBufferFillRange::new(&buffer, 1, 4, 0).is_err());
+        assert!(VulkanResidentBufferFillRange::new(&buffer, 0, 6, 0).is_err());
+        assert!(VulkanResidentBufferFillRange::new(&buffer, 28, 8, 0).is_err());
+        assert!(device.create_resident_buffer_fill_batch(&[]).is_err());
+
+        let overlapping = [
+            VulkanResidentBufferFillRange::new(&buffer, 4, 12, 0).unwrap(),
+            VulkanResidentBufferFillRange::new(&buffer, 12, 8, 0).unwrap(),
+        ];
+        let overlap_error = match device.create_resident_buffer_fill_batch(&overlapping) {
+            Ok(_) => panic!("overlapping fill ranges must be rejected"),
+            Err(error) => error,
+        };
+        assert!(overlap_error.0.contains("overlaps"));
+
+        let fills = [
+            VulkanResidentBufferFillRange::new(&buffer, 4, 12, 0).unwrap(),
+            VulkanResidentBufferFillRange::new(&buffer, 20, 8, 0x0403_0201).unwrap(),
+        ];
+        assert_eq!(device.fill_resident_buffer_ranges(&fills).unwrap(), 20);
+
+        assert_eq!(
+            buffer.read_bytes(32).unwrap(),
+            [
+                &[0xabu8; 4][..],
+                &[0u8; 12][..],
+                &[0xabu8; 4][..],
+                &[1u8, 2, 3, 4, 1, 2, 3, 4][..],
+                &[0xabu8; 4][..],
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
     fn resident_buffer_readback_binding_reuses_one_packed_transfer() {
         let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
         let first = device.create_resident_buffer(16).unwrap();

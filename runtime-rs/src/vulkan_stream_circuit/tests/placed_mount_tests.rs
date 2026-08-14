@@ -1050,6 +1050,52 @@ fn mounted_execution_graph_is_one_sequence_and_matches_component_execution() {
 }
 
 #[test]
+fn state_initialization_fills_only_the_prefix_and_uploads_the_page_table() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let manifest_dir = fixture_model_package_manifest_path()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let slice = VulkanResidentModelPackageDeviceSlice::from_runtime_model_for_device(
+        &device,
+        &manifest_dir,
+        fixture_model_runtime_model_with_colocated_three_layer_series(),
+        "gpu0",
+        Some(4),
+    )
+    .unwrap();
+    let mounted = slice.create_mounted_stream_circuit(&device).unwrap();
+    let expected_initialized = mounted
+        .buffers
+        .state_buffers
+        .iter()
+        .map(|state| state.layout.dynamic_data_offset)
+        .sum::<usize>();
+    for state in &mounted.buffers.state_buffers {
+        state
+            .buffer
+            .write_bytes(&vec![0xabu8; state.byte_capacity])
+            .unwrap();
+    }
+
+    assert_eq!(
+        mounted.buffers.initialize_state_buffers(&device).unwrap(),
+        expected_initialized
+    );
+    for state in &mounted.buffers.state_buffers {
+        let bytes = state.buffer.read_bytes(state.byte_capacity).unwrap();
+        let page_table = state.layout.initial_page_table_bytes().unwrap();
+        assert_eq!(&bytes[..page_table.len()], page_table);
+        assert!(bytes[page_table.len()..state.layout.dynamic_data_offset]
+            .iter()
+            .all(|byte| *byte == 0));
+        assert!(bytes[state.layout.dynamic_data_offset..]
+            .iter()
+            .all(|byte| *byte == 0xab));
+    }
+}
+
+#[test]
 fn mounted_placed_stream_circuit_binds_only_local_device_slice() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let (_, mounted) = mounted_remote_middle_slices(&device);

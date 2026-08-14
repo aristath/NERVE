@@ -177,26 +177,43 @@ impl VulkanStreamCircuitStreamBuffers {
         &self,
         device: &VulkanComputeDevice,
     ) -> Result<usize, VulkanError> {
-        let payloads = self
+        let initialized_byte_count = self.state_buffers.iter().try_fold(
+            0usize,
+            |total, state| {
+                total.checked_add(state.layout.dynamic_data_offset).ok_or_else(|| {
+                    VulkanError("state initialization byte count overflowed".to_string())
+                })
+            },
+        )?;
+        let fills = self
             .state_buffers
             .iter()
             .map(|state| {
-                let initialized_byte_count = state.layout.dynamic_data_offset;
-                let mut bytes = vec![0u8; initialized_byte_count];
-                let page_table = state.layout.initial_page_table_bytes()?;
-                bytes[..page_table.len()].copy_from_slice(&page_table);
-                Ok(bytes)
+                VulkanResidentBufferFillRange::new(
+                    &state.buffer,
+                    0,
+                    state.layout.dynamic_data_offset,
+                    0,
+                )
             })
+            .collect::<Result<Vec<_>, _>>()?;
+        device.fill_resident_buffer_ranges(&fills)?;
+
+        let page_tables = self
+            .state_buffers
+            .iter()
+            .map(|state| state.layout.initial_page_table_bytes())
             .collect::<Result<Vec<_>, VulkanError>>()?;
         let ranges = self
             .state_buffers
             .iter()
-            .zip(&payloads)
-            .map(|(state, bytes)| {
-                VulkanResidentBufferWriteRange::new(&state.buffer, 0, bytes)
+            .zip(&page_tables)
+            .map(|(state, page_table)| {
+                VulkanResidentBufferWriteRange::new(&state.buffer, 0, page_table)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        device.write_resident_buffer_ranges(&ranges)
+        device.write_resident_buffer_ranges(&ranges)?;
+        Ok(initialized_byte_count)
     }
 
     pub fn apply_clone_state_policies(&self) -> Result<usize, VulkanError> {
