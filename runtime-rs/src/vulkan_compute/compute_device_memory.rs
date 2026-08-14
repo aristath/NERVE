@@ -38,6 +38,7 @@ fn resident_buffer_copy_visibility() -> VulkanResidentBufferCopyVisibility {
 }
 
 impl VulkanComputeDevice {
+    #[track_caller]
     pub fn create_shared_host_allocation(
         &self,
         peer_devices: &[&VulkanComputeDevice],
@@ -50,12 +51,14 @@ impl VulkanComputeDevice {
         )
     }
 
+    #[track_caller]
     fn create_shared_host_allocation_with_usage(
         &self,
         peer_devices: &[&VulkanComputeDevice],
         byte_capacity: usize,
         usage: vk::BufferUsageFlags,
     ) -> Result<Arc<VulkanSharedHostAllocation>, VulkanError> {
+        let allocation_caller = std::panic::Location::caller();
         if byte_capacity == 0 {
             return Err(VulkanError(
                 "shared host allocation capacity must not be zero".to_string(),
@@ -67,7 +70,13 @@ impl VulkanComputeDevice {
             &self.context.host_memory_budget_tracker,
             allocation_size,
         )
-        .transpose()?;
+        .transpose()
+        .map_err(|error| {
+            VulkanError(format!(
+                "failed to admit a {byte_capacity}-byte logical shared-host allocation requiring {allocation_size} physical bytes at {}: {error}",
+                allocation_caller,
+            ))
+        })?;
         let pointer = unsafe { alloc_zeroed(layout) };
         if pointer.is_null() {
             return Err(VulkanError(format!(
@@ -300,6 +309,7 @@ impl VulkanComputeDevice {
     /// Creates one byte-identical resident buffer view on every participating
     /// logical device. Device-local DMA-BUF storage is preferred. Shared host
     /// memory is an explicit capability fallback, not the normal route.
+    #[track_caller]
     pub fn create_shared_resident_buffers(
         &self,
         peer_devices: &[&VulkanComputeDevice],
@@ -312,6 +322,7 @@ impl VulkanComputeDevice {
         )
     }
 
+    #[track_caller]
     pub fn create_shared_resident_buffers_for_route(
         &self,
         peer_devices: &[&VulkanComputeDevice],
@@ -326,6 +337,7 @@ impl VulkanComputeDevice {
         )
     }
 
+    #[track_caller]
     pub fn create_shared_conditional_resident_buffers(
         &self,
         peer_devices: &[&VulkanComputeDevice],
@@ -350,6 +362,7 @@ impl VulkanComputeDevice {
         )
     }
 
+    #[track_caller]
     fn create_shared_resident_buffers_with_usage(
         &self,
         peer_devices: &[&VulkanComputeDevice],
@@ -393,6 +406,7 @@ impl VulkanComputeDevice {
         })
     }
 
+    #[track_caller]
     fn create_shared_resident_buffers_with_usage_for_route(
         &self,
         peer_devices: &[&VulkanComputeDevice],
