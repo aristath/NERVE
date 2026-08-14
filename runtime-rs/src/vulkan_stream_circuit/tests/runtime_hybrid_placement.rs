@@ -1546,6 +1546,78 @@ fn runtime_hybrid_representation_routes_honor_stable_owner_constraints() {
 }
 
 #[test]
+fn explicit_tp_overlay_retains_exact_routes_for_serialized_outer_boundaries() {
+    let baseline = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let component_ids = baseline
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| component.component_id.clone())
+        .collect::<Vec<_>>();
+    let model = vulkan_runtime_model_with_component_placement(
+        &baseline,
+        "gpu0",
+        &BTreeMap::from([
+            (component_ids[0].clone(), "gpu0".to_string()),
+            (component_ids[1].clone(), "gpu1".to_string()),
+            (component_ids[2].clone(), "gpu1".to_string()),
+        ]),
+    )
+    .unwrap();
+    let graph_boundaries = vulkan_runtime_placement_boundaries(&model).unwrap();
+    let frame_byte_count = graph_boundaries[0].transfers[0].byte_count;
+    let digest = hybrid_test_digest('a');
+    let report = VulkanRuntimePlacementTransferCalibrationReport {
+        source_device_id: "gpu0".to_string(),
+        source_api_version: 1,
+        source_driver_version: 2,
+        target_device_id: "gpu1".to_string(),
+        target_api_version: 1,
+        target_driver_version: 2,
+        phase: nerve_execution_contracts::ExecutionPhase::Decode,
+        activation_batch_width: 1,
+        frame_byte_count,
+        byte_count: frame_byte_count,
+        route: VulkanPlacedEdgeTransferRoute::DeviceLocalStaging,
+        warmup_ns: 10,
+        measured_ns: 8,
+        fixture_digest: digest.clone(),
+        output_digest: digest,
+    };
+    let mut catalog = VulkanPlacementCalibrationCatalog::default();
+    record_vulkan_runtime_transfer_calibration_report(&mut catalog, &report).unwrap();
+    let identities = BTreeMap::from([
+        ("gpu0".to_string(), hybrid_test_device("gpu0")),
+        ("gpu1".to_string(), hybrid_test_device("gpu1")),
+    ]);
+
+    let missing_evidence = VulkanRuntimePhysicalExecutionPlan::uniform(&model)
+        .with_exact_cross_device_boundary_routes(&model, None, &identities)
+        .unwrap_err();
+    assert!(
+        missing_evidence
+            .0
+            .contains("requires exact directed-transfer calibration evidence")
+    );
+
+    let plan = VulkanRuntimePhysicalExecutionPlan::uniform(&model)
+        .with_exact_cross_device_boundary_routes(&model, Some(&catalog), &identities)
+        .unwrap();
+
+    assert_eq!(plan.decode_boundary_executions.len(), 1);
+    assert_eq!(
+        plan.decode_boundary_executions[&0].source_device_id,
+        "gpu0"
+    );
+    assert_eq!(
+        plan.decode_boundary_executions[&0].destination_device_id,
+        "gpu1"
+    );
+    plan.validate(&model).unwrap();
+}
+
+#[test]
 fn runtime_hybrid_exact_candidate_resources_prune_before_terminal_mount() {
     let model = fixture_model_runtime_model();
     let catalog = hybrid_test_catalog(&model);

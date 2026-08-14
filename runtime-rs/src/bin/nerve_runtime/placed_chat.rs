@@ -52,21 +52,30 @@ fn explicit_runtime_physical_execution_plan(
     )
 }
 
-fn overlay_explicit_runtime_physical_execution(
+fn compose_runtime_physical_execution_plan(
     args: &Args,
     runtime_model: &VulkanResidentRuntimeModel,
     automatic_plan: Option<VulkanRuntimePhysicalExecutionPlan>,
+    placement_calibration_catalog: Option<&VulkanPlacementCalibrationCatalog>,
+    device_identity_by_logical_device: &BTreeMap<
+        String,
+        VulkanPlacementDeviceExecutionIdentity,
+    >,
 ) -> Result<Option<VulkanRuntimePhysicalExecutionPlan>, Box<dyn Error>> {
-    if args.component_shard_devices.is_empty() {
-        return Ok(automatic_plan);
-    }
-    let plan = automatic_plan
-        .unwrap_or_else(|| VulkanRuntimePhysicalExecutionPlan::uniform(runtime_model))
-        .with_explicit_distributed_overrides(
+    let mut plan = automatic_plan
+        .unwrap_or_else(|| VulkanRuntimePhysicalExecutionPlan::uniform(runtime_model));
+    if !args.component_shard_devices.is_empty() {
+        plan = plan.with_explicit_distributed_overrides(
             runtime_model,
             &args.component_shard_devices,
             &args.component_physical_strategies,
         )?;
+    }
+    let plan = plan.with_exact_cross_device_boundary_routes(
+        runtime_model,
+        placement_calibration_catalog,
+        device_identity_by_logical_device,
+    )?;
     Ok(Some(plan))
 }
 
@@ -126,6 +135,43 @@ fn signal_processor_owner_constraints(
             )
         })
         .collect()
+}
+
+fn bound_device_identities(
+    bound_devices: &RuntimeBoundVulkanDevices,
+) -> BTreeMap<String, VulkanPlacementDeviceExecutionIdentity> {
+    bound_devices
+        .devices
+        .iter()
+        .map(|(logical_device_id, device)| {
+            (
+                logical_device_id.clone(),
+                VulkanPlacementDeviceExecutionIdentity {
+                    physical_device_id: device.physical_device_id().to_string(),
+                    api_version: device.api_version(),
+                    driver_version: device.driver_version(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn runtime_model_with_component_owners_from(
+    runtime_model: VulkanResidentRuntimeModel,
+    owner_source: &VulkanResidentRuntimeModel,
+) -> Result<VulkanResidentRuntimeModel, Box<dyn Error>> {
+    let owner_by_component = owner_source
+        .runtime_graph
+        .instances
+        .iter()
+        .map(|instance| (instance.instance_id.clone(), instance.device_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    vulkan_runtime_model_with_component_placement_owned(
+        runtime_model,
+        &owner_source.placement.default_device_id,
+        &owner_by_component,
+    )
+    .map_err(|error| Box::new(error) as Box<dyn Error>)
 }
 
 fn resolve_runtime_hybrid_physical_execution(
@@ -343,7 +389,7 @@ fn run_placed_chat(
         resolve_runtime_hybrid_physical_execution(
             manifest_dir,
             runtime_model,
-            execution,
+            execution.clone(),
             auto_placement.as_ref(),
             &bound_devices,
             capacity,
@@ -351,10 +397,22 @@ fn run_placed_chat(
             args.resource_residency_policy,
             required_owner_by_component.as_ref(),
         )?;
-    let physical_execution_plan = overlay_explicit_runtime_physical_execution(
+    let package_placement_calibration_catalog = if auto_placement.is_none() {
+        load_vulkan_package_placement_calibration_catalog(manifest_dir)?
+    } else {
+        None
+    };
+    let placement_calibration_catalog = auto_placement
+        .as_ref()
+        .map(|placement| &placement.calibration_catalog)
+        .or(package_placement_calibration_catalog.as_ref());
+    let device_identity_by_logical_device = bound_device_identities(&bound_devices);
+    let physical_execution_plan = compose_runtime_physical_execution_plan(
         args,
         &runtime_model,
         automatic_physical_execution_plan,
+        placement_calibration_catalog,
+        &device_identity_by_logical_device,
     )?;
     let implementation_selection = runtime_model
         .implementation_selection
@@ -375,9 +433,7 @@ fn run_placed_chat(
         capacity,
         speculative_draft_tokens,
         physical_execution_plan.clone(),
-        auto_placement
-            .as_ref()
-            .map(|placement| &placement.calibration_catalog),
+        placement_calibration_catalog,
         None,
     )?;
     let mut engine = VulkanResidentInProcessPlacedPromptEngine::new();
@@ -392,8 +448,7 @@ fn run_placed_chat(
         .package()
         .working_set_pressure_snapshot(&initial_selection)?;
     let mut mounted_runtime_model = runtime_model;
-    let mounted_physical_execution_plan = physical_execution_plan;
-    let auto_placement = auto_placement;
+    let mut mounted_physical_execution_plan = physical_execution_plan;
     let mut conversation_activation_count = 0u64;
     let mounted_device_bindings = bound_devices
         .physical_device_ids
@@ -785,7 +840,51 @@ fn run_placed_chat(
                             rebalance.estimated_remount_ns,
                             rebalance.estimated_net_benefit_ns,
                         );
-                        let new_runtime_model = rebalance.placement.runtime_model;
+                        let placement_model = rebalance.placement.runtime_model;
+                        let auto = auto_placement.as_ref().ok_or_else(|| {
+                            io::Error::other(
+                                "working-set rebalance lost its automatic placement context",
+                            )
+                        })?;
+                        let exact_rebalanced = runtime_model_with_component_owners_from(
+                            auto.exact_runtime_model.clone(),
+                            &placement_model,
+                        )?;
+                        let exact_rebalanced =
+                            runtime_model_with_explicit_shard_owners(args, exact_rebalanced)?;
+                        let new_runtime_model = exact_rebalanced
+                            .clone()
+                            .select_and_apply_runtime_implementations(
+                                manifest_dir,
+                                &bound_devices.hardware_profiles,
+                                execution.clone(),
+                            )?
+                            .0;
+                        let remount_owner_constraints =
+                            (!args.component_shard_devices.is_empty())
+                                .then(|| signal_processor_owner_constraints(&new_runtime_model));
+                        let mut remount_auto = auto.clone();
+                        remount_auto.exact_runtime_model = exact_rebalanced;
+                        let (new_runtime_model, automatic_plan) =
+                            resolve_runtime_hybrid_physical_execution(
+                                manifest_dir,
+                                new_runtime_model,
+                                execution.clone(),
+                                Some(&remount_auto),
+                                &bound_devices,
+                                capacity,
+                                speculative_draft_tokens,
+                                args.resource_residency_policy,
+                                remount_owner_constraints.as_ref(),
+                            )?;
+                        let new_physical_execution_plan =
+                            compose_runtime_physical_execution_plan(
+                                args,
+                                &new_runtime_model,
+                                automatic_plan,
+                                placement_calibration_catalog,
+                                &device_identity_by_logical_device,
+                            )?;
                         let release = engine.release_stream_for_session_remount(
                             "main",
                             &rebalance.retained_logical_device_ids,
@@ -798,13 +897,14 @@ fn run_placed_chat(
                             new_runtime_model.clone(),
                             capacity,
                             speculative_draft_tokens,
-                            None,
-                            None,
+                            new_physical_execution_plan.clone(),
+                            placement_calibration_catalog,
                             Some(&release.retained_stores),
                         )?;
                         engine.add_stream("main", stream)?;
                         parameter_pool.evict_unreferenced();
                         mounted_runtime_model = new_runtime_model;
+                        mounted_physical_execution_plan = new_physical_execution_plan;
                         let selection = engine
                             .stream("main")
                             .expect("remounted main stream is present")
