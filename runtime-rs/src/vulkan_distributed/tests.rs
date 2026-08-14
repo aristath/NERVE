@@ -55,6 +55,153 @@ mod tests {
     }
 
     #[test]
+    fn route_major_local_intermediate_excludes_routing_tail_from_tp_ranges() {
+        let mut prepared_plan = fixture_prepared_plan();
+        let dispatch = &mut prepared_plan.dispatches[0];
+        let output = dispatch
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.binding == 1)
+            .unwrap();
+        let VulkanDescriptorResourceAddress::ActivationSlot {
+            byte_capacity,
+            signal_byte_capacity,
+            ..
+        } = &mut output.resource
+        else {
+            panic!("fixture output must be an activation slot");
+        };
+        *byte_capacity = 28;
+        *signal_byte_capacity = 28;
+        let contract = &mut dispatch.physical_execution_contracts[0];
+        contract
+            .geometry
+            .dimensions
+            .insert("experts_per_token".to_string(), 1);
+        contract.local_intermediates = vec![
+            nerve_execution_contracts::LocalIntermediateContract {
+                signal: "hidden".to_string(),
+                producer_binding: 1,
+                consumer_binding: 0,
+                format: "bf16:route_major_local_rows".to_string(),
+            },
+        ];
+
+        let plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &prepared_plan)],
+            &fixture_tensor_index("row_major"),
+            &fixture_artifact_manifest(),
+            &component_device_pools("component", &["owner", "helper"]),
+            &[],
+            4,
+        )
+        .unwrap();
+        let [planned] = plan.dispatches.as_slice() else {
+            panic!("expected one distributed dispatch");
+        };
+        assert_eq!(planned.output_activation.signal_byte_capacity, 28);
+        assert_eq!(planned.output_byte_capacity, 24);
+        assert_eq!(
+            contract_activation_byte_capacity(
+                &prepared_plan.dispatches[0],
+                &prepared_plan.dispatches[0].physical_execution_contracts[0],
+                &planned.output_activation,
+                0,
+                false,
+                12,
+            )
+            .unwrap(),
+            24
+        );
+        assert_eq!(
+            planned
+                .shards
+                .iter()
+                .map(|shard| shard.output_byte_count)
+                .sum::<usize>(),
+            24
+        );
+        assert_eq!(
+            planned
+                .shards
+                .last()
+                .map(|shard| shard.output_byte_offset + shard.output_byte_count),
+            Some(24)
+        );
+    }
+
+    #[test]
+    fn route_major_local_intermediate_contract_fails_closed() {
+        let mut prepared_plan = fixture_prepared_plan();
+        let dispatch = &mut prepared_plan.dispatches[0];
+        let output = dispatch
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.binding == 1)
+            .unwrap();
+        let VulkanDescriptorResourceAddress::ActivationSlot {
+            byte_capacity,
+            signal_byte_capacity,
+            ..
+        } = &mut output.resource
+        else {
+            panic!("fixture output must be an activation slot");
+        };
+        *byte_capacity = 28;
+        *signal_byte_capacity = 28;
+        let contract = &mut dispatch.physical_execution_contracts[0];
+        contract.local_intermediates = vec![
+            nerve_execution_contracts::LocalIntermediateContract {
+                signal: "hidden".to_string(),
+                producer_binding: 1,
+                consumer_binding: 0,
+                format: "bf16:route_major_local_rows".to_string(),
+            },
+        ];
+
+        let plan = |prepared_plan: &VulkanPreparedDispatchPlan| {
+            VulkanDistributedExecutionPlan::from_prepared_plans(
+                &[("owner", prepared_plan)],
+                &fixture_tensor_index("row_major"),
+                &fixture_artifact_manifest(),
+                &component_device_pools("component", &["owner", "helper"]),
+                &[],
+                4,
+            )
+        };
+        assert!(
+            plan(&prepared_plan)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a positive experts_per_token")
+        );
+
+        prepared_plan.dispatches[0].physical_execution_contracts[0]
+            .geometry
+            .dimensions
+            .insert("experts_per_token".to_string(), 2);
+        assert!(
+            plan(&prepared_plan)
+                .unwrap_err()
+                .to_string()
+                .contains("requires 48 bytes but activation capacity is 28")
+        );
+
+        prepared_plan.dispatches[0].physical_execution_contracts[0]
+            .geometry
+            .dimensions
+            .insert("experts_per_token".to_string(), 1);
+        prepared_plan.dispatches[0].physical_execution_contracts[0].local_intermediates[0]
+            .format = "opaque".to_string();
+        assert!(
+            plan(&prepared_plan)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported physical format")
+        );
+    }
+
+    #[test]
     fn distributed_planning_selects_contracts_by_phase_and_shape() {
         let mut prepared_plan = fixture_prepared_plan();
         prepared_plan.dispatches[0].physical_execution_contracts[0].phases =

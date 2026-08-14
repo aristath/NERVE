@@ -268,19 +268,27 @@ fn plan_contract_dispatch(
                 format!("input binding {binding} cannot be distributed"),
             )
         })?;
+        let activation_byte_capacity = contract_activation_byte_capacity(
+            dispatch,
+            contract,
+            &activation,
+            input.binding,
+            false,
+            logical_extent,
+        )?;
         if input.distribution == InputDistribution::Sharded {
             logical_alignment = aligned_activation_partition(
                 dispatch,
                 logical_alignment,
                 logical_extent,
-                activation.signal_byte_capacity,
+                activation_byte_capacity,
                 storage_buffer_offset_alignment,
                 "input",
             )?;
         }
-        inputs.push((input, activation));
+        inputs.push((input, activation, activation_byte_capacity));
     }
-    let Some((_, primary_input)) = inputs.first() else {
+    let Some((_, primary_input, primary_input_byte_capacity)) = inputs.first() else {
         return Err(dispatch_error(
             dispatch,
             "distributed contract has no primary input".to_string(),
@@ -317,6 +325,14 @@ fn plan_contract_dispatch(
             format!("output binding {output_binding} cannot be distributed"),
         )
     })?;
+    let output_activation_byte_capacity = contract_activation_byte_capacity(
+        dispatch,
+        contract,
+        &output_activation,
+        output_contract.binding,
+        true,
+        logical_extent,
+    )?;
     let reduction = output_contract
         .reduction
         .as_ref()
@@ -446,7 +462,7 @@ fn plan_contract_dispatch(
             dispatch,
             logical_alignment,
             logical_extent,
-            output_activation.signal_byte_capacity,
+            output_activation_byte_capacity,
             storage_buffer_offset_alignment,
             "output",
         )?;
@@ -555,11 +571,11 @@ fn plan_contract_dispatch(
             )?;
             let input_ranges = inputs
                 .iter()
-                .map(|(input, activation)| {
+                .map(|(input, _, activation_byte_capacity)| {
                     contract_activation_range(
                         dispatch,
                         input.distribution,
-                        activation.signal_byte_capacity,
+                        *activation_byte_capacity,
                         logical_extent,
                         logical_start,
                         logical_count,
@@ -569,7 +585,7 @@ fn plan_contract_dispatch(
             let shard_output_byte_capacity = reduction
                 .as_ref()
                 .map(|reduction| reduction.partial_byte_capacity)
-                .unwrap_or(output_activation.signal_byte_capacity);
+                .unwrap_or(output_activation_byte_capacity);
             let output_range = contract_output_range(
                 dispatch,
                 output_contract.collection,
@@ -634,7 +650,7 @@ fn plan_contract_dispatch(
         })
         .collect::<Result<Vec<_>, VulkanDistributedPlanError>>()?;
 
-    let input_byte_capacity = primary_input.signal_byte_capacity;
+    let input_byte_capacity = *primary_input_byte_capacity;
     let input_width = contract
         .geometry
         .dimensions
@@ -662,7 +678,7 @@ fn plan_contract_dispatch(
             dispatch,
         )?,
         input_byte_capacity,
-        output_byte_capacity: output_activation.signal_byte_capacity,
+        output_byte_capacity: output_activation_byte_capacity,
         output_rows: logical_extent,
         input_width,
         row_alignment: logical_alignment,
@@ -671,7 +687,7 @@ fn plan_contract_dispatch(
         auxiliary_input_activations: inputs
             .into_iter()
             .skip(1)
-            .map(|(_, activation)| activation)
+            .map(|(_, activation, _)| activation)
             .collect(),
         auxiliary_input_distributions: contract
             .inputs
@@ -1544,6 +1560,95 @@ fn contract_parameter_slices<'a>(
         });
     }
     Ok(slices)
+}
+
+fn contract_activation_byte_capacity(
+    dispatch: &VulkanPreparedDispatch,
+    contract: &PhysicalExecutionContract,
+    activation: &VulkanDistributedActivationSlot,
+    binding: u32,
+    output: bool,
+    logical_extent: usize,
+) -> Result<usize, VulkanDistributedPlanError> {
+    let matching = contract
+        .local_intermediates
+        .iter()
+        .filter(|intermediate| {
+            intermediate.signal == activation.signal_id
+                && if output {
+                    intermediate.producer_binding == binding
+                } else {
+                    intermediate.consumer_binding == binding
+                }
+        })
+        .collect::<Vec<_>>();
+    let [intermediate] = matching.as_slice() else {
+        if matching.is_empty() {
+            return Ok(activation.signal_byte_capacity);
+        }
+        return Err(dispatch_error(
+            dispatch,
+            format!(
+                "{} activation {:?} binding {binding} has {} local-intermediate contracts",
+                if output { "output" } else { "input" },
+                activation.signal_id,
+                matching.len(),
+            ),
+        ));
+    };
+
+    match intermediate.format.as_str() {
+        "bf16:route_major_local_rows" => {
+            let route_count = contract
+                .geometry
+                .dimensions
+                .get("experts_per_token")
+                .copied()
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    dispatch_error(
+                        dispatch,
+                        format!(
+                            "{} local intermediate {:?} requires a positive experts_per_token geometry dimension",
+                            intermediate.format, intermediate.signal,
+                        ),
+                    )
+                })?;
+            let byte_capacity = logical_extent
+                .checked_mul(route_count)
+                .and_then(|elements| elements.checked_mul(size_of::<u16>()))
+                .ok_or_else(|| {
+                    dispatch_error(
+                        dispatch,
+                        format!(
+                            "{} local intermediate {:?} byte capacity overflowed",
+                            intermediate.format, intermediate.signal,
+                        ),
+                    )
+                })?;
+            if byte_capacity > activation.signal_byte_capacity {
+                return Err(dispatch_error(
+                    dispatch,
+                    format!(
+                        "{} local intermediate {:?} requires {byte_capacity} bytes but activation capacity is {}",
+                        intermediate.format,
+                        intermediate.signal,
+                        activation.signal_byte_capacity,
+                    ),
+                ));
+            }
+            Ok(byte_capacity)
+        }
+        "bf16" => Ok(activation.signal_byte_capacity),
+        other => Err(dispatch_error(
+            dispatch,
+            format!(
+                "local intermediate {:?} declares unsupported physical format {other:?}",
+                intermediate.signal,
+            ),
+        )),
+    }
 }
 
 fn aligned_activation_partition(
