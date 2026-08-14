@@ -12,8 +12,9 @@ from nerve.conversation_gate import (
     ConversationGateError,
     ConversationTurn,
     canonical_runtime_command,
-    parse_physical_execution_summary,
     parse_conversation_transcript,
+    parse_physical_execution_summary,
+    parse_shutdown_report,
     run_conversation_gate,
     run_resident_conversation,
     validate_conversation_turns,
@@ -63,6 +64,20 @@ def _tp_execution_counters(
         "distributed_prefill_intra_expert_tensor_parallel_island_submissions": 0,
         "distributed_prefill_hybrid_island_submissions": 0,
     }
+
+
+def _valid_shutdown_transcript() -> str:
+    return (
+        "ready\nyou> shutdown:\n"
+        "  complete=true streams=1 packages=1 scheduler_in_flight=0\n"
+        "  physical_devices_acknowledged=2/2 released_units=3 "
+        "released_payload_bytes=96 cancelled_loads=1\n"
+        "  package=fixture scope=target physical_devices_acknowledged=2/2\n"
+        "  store=store0 physical_device=gpu0 acknowledged=true "
+        "remaining_units=0 remaining_payload_bytes=0 error=None\n"
+        "  store=store1 physical_device=gpu1 acknowledged=true "
+        "remaining_units=0 remaining_payload_bytes=0 error=None\n"
+    )
 
 
 def _turn_with_execution(
@@ -150,6 +165,70 @@ def test_physical_execution_summary_rejects_malformed_or_ambiguous_proof(
             transcript,
             minimum_tensor_parallel_islands=1,
         )
+
+
+def test_shutdown_report_proves_complete_resource_release() -> None:
+    shutdown = parse_shutdown_report(_valid_shutdown_transcript())
+
+    assert shutdown.complete
+    assert shutdown.scheduler_in_flight_activation_count == 0
+    assert shutdown.acknowledged_device_count == 2
+    assert shutdown.physical_device_count == 2
+    assert shutdown.released_unit_count == 3
+    assert shutdown.released_payload_bytes == 96
+    assert shutdown.cancelled_load_count == 1
+    assert [device.physical_device_id for device in shutdown.packages[0].devices] == [
+        "gpu0",
+        "gpu1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    (
+        ("complete=true", "complete=false", "incomplete shutdown"),
+        ("scheduler_in_flight=0", "scheduler_in_flight=1", "scheduler activations"),
+        (
+            "physical_devices_acknowledged=2/2 released_units",
+            "physical_devices_acknowledged=1/2 released_units",
+            "not acknowledged by every physical",
+        ),
+        (
+            "package=fixture scope=target physical_devices_acknowledged=2/2",
+            "package=fixture scope=target physical_devices_acknowledged=1/2",
+            "package device totals",
+        ),
+        ("remaining_units=0", "remaining_units=1", "store incomplete"),
+        (
+            "remaining_payload_bytes=0",
+            "remaining_payload_bytes=1",
+            "store incomplete",
+        ),
+        ("error=None", 'error=Some("teardown failed")', "store incomplete"),
+        ("store=store1", "store=store0", "repeats a physical resource store"),
+        ("packages=1", "packages=2", "exactly one stream and one package"),
+    ),
+)
+def test_shutdown_report_rejects_incomplete_or_incoherent_teardown(
+    old: str,
+    new: str,
+    message: str,
+) -> None:
+    transcript = _valid_shutdown_transcript().replace(old, new, 1)
+
+    with pytest.raises(ConversationGateError, match=message):
+        parse_shutdown_report(transcript)
+
+
+def test_shutdown_report_rejects_missing_or_duplicate_reports() -> None:
+    with pytest.raises(
+        ConversationGateError, match="did not report structured shutdown"
+    ):
+        parse_shutdown_report("ready\nyou> ")
+
+    duplicated = _valid_shutdown_transcript() + _valid_shutdown_transcript()
+    with pytest.raises(ConversationGateError, match="more than once"):
+        parse_shutdown_report(duplicated)
 
 
 def test_transcript_parser_requires_all_completed_resident_turns() -> None:
@@ -335,6 +414,7 @@ def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
             "execution:\n"
             "resource_residency:\n"
             "  policy=demand-paged physical_stores=3\n"
+            f"  payload_bytes(initial/current/high_water/maximum)=0/{index * 10}/{index * 10}/100 units(initial/current/high_water/addressable)=0/{index}/{index}/10\n"
             f"  gpu_accesses(selections/resident_hits/misses)={index * 2}/{index}/{index}\n"
             f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={index}/{index}/0/{index}/0/0\n"
             "  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0\n"
@@ -375,6 +455,14 @@ def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
         "transfers.blocking_ms": 4.5,
     }
     assert turns[-1].residency_gauges == {
+        "payload_bytes.initial": 0,
+        "payload_bytes.current": 60,
+        "payload_bytes.high_water": 60,
+        "payload_bytes.maximum": 100,
+        "units.initial": 0,
+        "units.current": 6,
+        "units.high_water": 6,
+        "units.addressable": 10,
         "memory_tiers.device_payload": 48,
         "memory_tiers.host_visible_payload": 12,
         "memory_tiers.device_capacity": 80,
@@ -806,7 +894,7 @@ def test_gate_discards_one_complete_resident_conversation_and_measures_the_next(
     tmp_path,
 ) -> None:
     package = tmp_path / "package.json"
-    package.write_text("{}")
+    package.write_text('{"package_id":"fixture"}')
     fake_runtime = tmp_path / "two_set_runtime.py"
     fake_runtime.write_text(
         """
@@ -861,6 +949,7 @@ while True:
     print("  distributed_prefill_hybrid_island_submissions=0")
     print("resource_residency:")
     print("  policy=demand-paged physical_stores=3")
+    print(f"  payload_bytes(initial/current/high_water/maximum)=0/{misses * 10}/{misses * 10}/100 units(initial/current/high_water/addressable)=0/{misses}/{misses}/10")
     print(f"  gpu_accesses(selections/resident_hits/misses)={completed}/{completed - misses}/{misses}")
     print(f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={misses}/{misses}/0/{misses}/0/0")
     print("  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0")
@@ -870,6 +959,11 @@ while True:
     print(f"  generated_tokens=nerve.runtime.token_ids_sha256.v1:{conversation_turn:064x}")
     print(f"  selection_counters=nerve.runtime.selection_counters_sha256.v1:{conversation_turn + 100:064x}")
     print(f"  resident_state=nerve.optimizer.artifact_sha256.v1:{conversation_turn + 200:064x}", flush=True)
+print("shutdown:")
+print("  complete=true streams=1 packages=1 scheduler_in_flight=0")
+print("  physical_devices_acknowledged=1/1 released_units=6 released_payload_bytes=60 cancelled_loads=0")
+print("  package=fixture scope=target physical_devices_acknowledged=1/1")
+print("  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 remaining_payload_bytes=0 error=None", flush=True)
 """.lstrip()
     )
 
@@ -902,6 +996,14 @@ while True:
     assert run.measured_set.residency_delta["gpu_accesses.misses"] == 0
     assert run.measured_set.residency_delta["transfers.blocking_ms"] == 0.0
     assert run.measured_set.residency_gauges_start == {
+        "payload_bytes.initial": 0,
+        "payload_bytes.current": 60,
+        "payload_bytes.high_water": 60,
+        "payload_bytes.maximum": 100,
+        "units.initial": 0,
+        "units.current": 6,
+        "units.high_water": 6,
+        "units.addressable": 10,
         "memory_tiers.device_payload": 48,
         "memory_tiers.host_visible_payload": 12,
         "memory_tiers.device_capacity": 80,
@@ -916,7 +1018,7 @@ def test_gate_requires_two_consecutive_fully_warm_sets_after_recurrent_loads(
     tmp_path,
 ) -> None:
     package = tmp_path / "package.json"
-    package.write_text("{}")
+    package.write_text('{"package_id":"fixture"}')
     fake_runtime = tmp_path / "recurrent_load_runtime.py"
     fake_runtime.write_text(
         """
@@ -960,6 +1062,7 @@ while True:
     print("execution:")
     print("resource_residency:")
     print("  policy=demand-paged physical_stores=3")
+    print(f"  payload_bytes(initial/current/high_water/maximum)=0/{loads * 10}/{loads * 10}/100 units(initial/current/high_water/addressable)=0/{loads}/{loads}/10")
     print(f"  gpu_accesses(selections/resident_hits/misses)={conversation_set * 6 + conversation_turn}/{conversation_set * 6 + conversation_turn - loads}/{loads}")
     print(f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={loads}/{loads}/0/{loads}/0/0")
     print("  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0")
@@ -969,6 +1072,11 @@ while True:
     print(f"  generated_tokens=nerve.runtime.token_ids_sha256.v1:{conversation_turn:064x}")
     print(f"  selection_counters=nerve.runtime.selection_counters_sha256.v1:{conversation_turn + 100:064x}")
     print(f"  resident_state=nerve.optimizer.artifact_sha256.v1:{conversation_turn + 200:064x}", flush=True)
+print("shutdown:")
+print("  complete=true streams=1 packages=1 scheduler_in_flight=0")
+print("  physical_devices_acknowledged=1/1 released_units=7 released_payload_bytes=70 cancelled_loads=0")
+print("  package=fixture scope=target physical_devices_acknowledged=1/1")
+print("  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 remaining_payload_bytes=0 error=None", flush=True)
 """.lstrip()
     )
 
@@ -1016,16 +1124,14 @@ def _fully_warm_mock_transcript(*, mutation: str | None = None) -> str:
             response = _response(answer)
             digests = {
                 "generated_tokens": (
-                    "nerve.runtime.token_ids_sha256.v1:"
-                    f"{turn_index:064x}"
+                    f"nerve.runtime.token_ids_sha256.v1:{turn_index:064x}"
                 ),
                 "selection_counters": (
                     "nerve.runtime.selection_counters_sha256.v1:"
                     f"{turn_index + 100:064x}"
                 ),
                 "resident_state": (
-                    "nerve.optimizer.artifact_sha256.v1:"
-                    f"{turn_index + 200:064x}"
+                    f"nerve.optimizer.artifact_sha256.v1:{turn_index + 200:064x}"
                 ),
             }
             if mutated and mutation in digests:
@@ -1042,6 +1148,7 @@ def _fully_warm_mock_transcript(*, mutation: str | None = None) -> str:
                 "execution:\n"
                 "resource_residency:\n"
                 "  policy=demand-paged physical_stores=1\n"
+                "  payload_bytes(initial/current/high_water/maximum)=0/8/8/80 units(initial/current/high_water/addressable)=0/1/1/10\n"
                 f"  gpu_accesses(selections/resident_hits/misses)={turn_index}/{turn_index}/0\n"
                 "  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)=0/0/0/0/0/0\n"
                 "  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0\n"
@@ -1058,6 +1165,15 @@ def _fully_warm_mock_transcript(*, mutation: str | None = None) -> str:
                     )
                 )
     sections.append("you> ")
+    sections.extend(
+        (
+            "shutdown:\n",
+            "  complete=true streams=1 packages=1 scheduler_in_flight=0\n",
+            "  physical_devices_acknowledged=1/1 released_units=1 released_payload_bytes=8 cancelled_loads=0\n",
+            "  package=fixture scope=target physical_devices_acknowledged=1/1\n",
+            "  store=store0 physical_device=gpu0 acknowledged=true remaining_units=0 remaining_payload_bytes=0 error=None\n",
+        )
+    )
     return "".join(sections)
 
 
@@ -1065,10 +1181,7 @@ def _fully_warm_mock_transcript(*, mutation: str | None = None) -> str:
     ("replace", "message"),
     (
         (
-            (
-                "generated_tokens=nerve.runtime.token_ids_sha256.v1:"
-                f"{1:064x}"
-            ),
+            (f"generated_tokens=nerve.runtime.token_ids_sha256.v1:{1:064x}"),
             "not a canonical digest",
         ),
         ("generated_tokens=", "unknown, duplicate, or empty field"),
@@ -1119,7 +1232,7 @@ def test_gate_rejects_fully_warm_behavior_or_state_drift(
     message: str,
 ) -> None:
     package = tmp_path / "package.json"
-    package.write_text("{}")
+    package.write_text('{"package_id":"fixture"}')
     monkeypatch.setattr(
         "nerve.conversation_gate.run_resident_conversation",
         lambda command, **_kwargs: (
@@ -1131,6 +1244,77 @@ def test_gate_rejects_fully_warm_behavior_or_state_drift(
     with pytest.raises(
         ConversationGateError,
         match=message,
+    ):
+        run_conversation_gate(
+            [sys.executable, "--package", str(package), "--chat"],
+            seeds=(0,),
+            minimum_decode_tokens_per_second=20.0,
+            require_thinking=True,
+            warmup_conversation_sets=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    (
+        (
+            "released_units=1 released_payload_bytes=8",
+            "released_units=2 released_payload_bytes=8",
+            "released units do not match final residency",
+        ),
+        (
+            "released_units=1 released_payload_bytes=8",
+            "released_units=1 released_payload_bytes=9",
+            "released payload bytes do not match final residency",
+        ),
+        (
+            "package=fixture scope=target",
+            "package=another-package scope=target",
+            "package identity does not match",
+        ),
+    ),
+)
+def test_gate_reconciles_shutdown_with_package_and_final_residency(
+    monkeypatch,
+    tmp_path,
+    old: str,
+    new: str,
+    message: str,
+) -> None:
+    package = tmp_path / "package.json"
+    package.write_text('{"package_id":"fixture"}')
+    transcript = _fully_warm_mock_transcript().replace(old, new, 1)
+    monkeypatch.setattr(
+        "nerve.conversation_gate.run_resident_conversation",
+        lambda command, **_kwargs: (transcript, 0),
+    )
+
+    with pytest.raises(ConversationGateError, match=message):
+        run_conversation_gate(
+            [sys.executable, "--package", str(package), "--chat"],
+            seeds=(0,),
+            minimum_decode_tokens_per_second=20.0,
+            require_thinking=True,
+            warmup_conversation_sets=1,
+        )
+
+
+def test_gate_requires_residency_evidence_for_shutdown_reconciliation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    package = tmp_path / "package.json"
+    package.write_text('{"package_id":"fixture"}')
+    transcript = _fully_warm_mock_transcript().replace(
+        "  policy=demand-paged physical_stores=1\n", ""
+    )
+    monkeypatch.setattr(
+        "nerve.conversation_gate.run_resident_conversation",
+        lambda command, **_kwargs: (transcript, 0),
+    )
+
+    with pytest.raises(
+        ConversationGateError, match="did not report resource residency"
     ):
         run_conversation_gate(
             [sys.executable, "--package", str(package), "--chat"],

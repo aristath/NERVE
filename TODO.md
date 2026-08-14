@@ -1054,8 +1054,15 @@ For every numbered item below:
   resident-state digests plus byte-identical decoded responses; missing,
   malformed, duplicate, or drifting evidence fails closed. Run this gate on
   DeepSeek and every Qwen control once live validation is authorized.
-- Require coherent answers, package-owned thinking and sampling, and exact
-  post-run restoration of every selected target's pre-workload reservation.
+- The generic gate now requires a canonical structured shutdown after normal
+  chat exit. It proves scheduler quiescence, exact package identity, every
+  physical-store acknowledgement, zero remaining units/payload, and exact
+  agreement between final resident units/bytes and released units/bytes;
+  malformed, incomplete, duplicated, or internally inconsistent teardown
+  evidence fails closed and the accepted report is persisted. The authorized
+  live gate must additionally prove exact post-run restoration of every
+  selected target's externally sampled pre-workload reservation.
+- Require coherent answers and package-owned thinking and sampling.
 - Require at least 17 useful decode tok/s, continue optimizing toward 20 tok/s,
   and investigate any regression before accepting a milestone.
 - Run equivalent fully warmed Qwen3.6-35B-A3B, Qwen3.6-27B, and Qwen3.5-9B

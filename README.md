@@ -405,6 +405,14 @@ default), and failure to stabilize within it fails the gate instead of
 mislabeling a cache-thrashing or behaviorally drifting conversation as fully
 warm. The report records the actual number of discarded sets, every
 per-conversation residency delta, and the per-turn evidence digests.
+After the scripted `/exit`, the gate also requires the normal chat process to
+emit one complete structured shutdown report. It rejects in-flight scheduler
+work, missing device acknowledgements, retained lazy-resource units or payload,
+duplicate stores, a package-identity mismatch, and disagreement between the
+last resident gauges and the resources actually released. The accepted
+shutdown evidence is retained in the JSON gate report; an externally sampled
+pre/post device-reservation comparison remains required for a live GPU
+milestone.
 
 ```bash
 .venv/bin/python scripts/run_conversation_gate.py \

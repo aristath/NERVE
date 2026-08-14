@@ -39,11 +39,34 @@ _DETERMINISM_MARKER = "\ndeterminism:\n"
 _STAT_LINE = re.compile(r"^  ([a-z][a-z0-9_]*)=(.+)$")
 _RESIDENCY_POLICY = re.compile(r"^  policy=([^ ]+)", re.MULTILINE)
 _RESIDENCY_COUNTER_LINE = re.compile(r"^  ([a-z_]+)\(([^)]+)\)=([^\n]+)$", re.MULTILINE)
+_RESIDENCY_PAYLOAD_AND_UNITS_LINE = re.compile(
+    r"^  payload_bytes\(initial/current/high_water/maximum\)="
+    r"(\d+)/(\d+)/(\d+)/(\d+) "
+    r"units\(initial/current/high_water/addressable\)="
+    r"(\d+)/(\d+)/(\d+)/(\d+)$",
+    re.MULTILINE,
+)
 _PHYSICAL_EXECUTION_SUMMARY_START = (
     "physical_execution=VulkanMountedPhysicalExecutionSummary {"
 )
 _PHYSICAL_EXECUTION_SUMMARY = re.compile(
     re.escape(_PHYSICAL_EXECUTION_SUMMARY_START) + r"(?P<body>[^{}\n]*)}"
+)
+_SHUTDOWN_MARKER = re.compile(r"(?:^|\n)you> shutdown:\n")
+_SHUTDOWN_SUMMARY_LINE = re.compile(
+    r"^  complete=(true|false) streams=(\d+) packages=(\d+) "
+    r"scheduler_in_flight=(\d+)$"
+)
+_SHUTDOWN_TOTALS_LINE = re.compile(
+    r"^  physical_devices_acknowledged=(\d+)/(\d+) released_units=(\d+) "
+    r"released_payload_bytes=(\d+) cancelled_loads=(\d+)$"
+)
+_SHUTDOWN_PACKAGE_LINE = re.compile(
+    r"^  package=(\S+) scope=(\S+) physical_devices_acknowledged=(\d+)/(\d+)$"
+)
+_SHUTDOWN_DEVICE_LINE = re.compile(
+    r"^  store=(\S+) physical_device=(\S+) acknowledged=(true|false) "
+    r"remaining_units=(\d+) remaining_payload_bytes=(\d+) error=(.+)$"
 )
 _PHYSICAL_EXECUTION_FIELDS = (
     "tensor_parallel_island_count",
@@ -122,6 +145,39 @@ class PhysicalExecutionSummary:
 
 
 @dataclass(frozen=True)
+class ShutdownDeviceReport:
+    store_id: str
+    physical_device_id: str
+    acknowledged: bool
+    remaining_units: int
+    remaining_payload_bytes: int
+    error: str | None
+
+
+@dataclass(frozen=True)
+class ShutdownPackageReport:
+    package_id: str
+    execution_scope: str
+    acknowledged_device_count: int
+    physical_device_count: int
+    devices: list[ShutdownDeviceReport]
+
+
+@dataclass(frozen=True)
+class ShutdownReport:
+    complete: bool
+    stream_count: int
+    package_count: int
+    scheduler_in_flight_activation_count: int
+    acknowledged_device_count: int
+    physical_device_count: int
+    released_unit_count: int
+    released_payload_bytes: int
+    cancelled_load_count: int
+    packages: list[ShutdownPackageReport]
+
+
+@dataclass(frozen=True)
 class ConversationTurn:
     prompt: str
     response: str
@@ -183,6 +239,7 @@ class ConversationSeedReport:
     command: list[str]
     transcript_sha256: str
     physical_execution: PhysicalExecutionSummary | None
+    shutdown: ShutdownReport
     discarded_warmup_sets: list[ConversationSetReport]
     measured_set: ConversationSetReport
 
@@ -223,6 +280,28 @@ def _residency_metrics(
     policy_match = _RESIDENCY_POLICY.search(block)
     counters: dict[str, int | float] = {}
     gauges: dict[str, int | float] = {}
+    payload_and_units = _RESIDENCY_PAYLOAD_AND_UNITS_LINE.findall(block)
+    if len(payload_and_units) > 1:
+        raise ConversationGateError(
+            "runtime reported more than one resource payload/unit gauge line per turn"
+        )
+    if payload_and_units:
+        values = tuple(int(value) for value in payload_and_units[0])
+        for label, value in zip(
+            (
+                "payload_bytes.initial",
+                "payload_bytes.current",
+                "payload_bytes.high_water",
+                "payload_bytes.maximum",
+                "units.initial",
+                "units.current",
+                "units.high_water",
+                "units.addressable",
+            ),
+            values,
+            strict=True,
+        ):
+            gauges[label] = value
     for group, raw_labels, raw_values in _RESIDENCY_COUNTER_LINE.findall(block):
         if group not in (
             _CUMULATIVE_RESIDENCY_COUNTER_GROUPS | _RESIDENCY_GAUGE_GROUPS
@@ -377,6 +456,158 @@ def parse_physical_execution_summary(
     return summary
 
 
+def parse_shutdown_report(transcript: str) -> ShutdownReport:
+    markers = list(_SHUTDOWN_MARKER.finditer(transcript))
+    if not markers:
+        raise ConversationGateError("runtime did not report structured shutdown")
+    if len(markers) != 1:
+        raise ConversationGateError(
+            "runtime reported structured shutdown more than once"
+        )
+    lines = transcript[markers[0].end() :].splitlines()
+    while lines and not lines[-1]:
+        lines.pop()
+    if len(lines) < 2:
+        raise ConversationGateError("runtime structured shutdown report is incomplete")
+    if any(not line for line in lines):
+        raise ConversationGateError("runtime structured shutdown report is malformed")
+
+    summary = _SHUTDOWN_SUMMARY_LINE.fullmatch(lines[0])
+    totals = _SHUTDOWN_TOTALS_LINE.fullmatch(lines[1])
+    if summary is None or totals is None:
+        raise ConversationGateError("runtime structured shutdown summary is malformed")
+    complete = summary.group(1) == "true"
+    stream_count, package_count, scheduler_in_flight = (
+        int(value) for value in summary.groups()[1:]
+    )
+    (
+        acknowledged_device_count,
+        physical_device_count,
+        released_unit_count,
+        released_payload_bytes,
+        cancelled_load_count,
+    ) = (int(value) for value in totals.groups())
+
+    packages: list[ShutdownPackageReport] = []
+    current_package: tuple[str, str, int, int] | None = None
+    current_devices: list[ShutdownDeviceReport] = []
+
+    def finish_package() -> None:
+        nonlocal current_package, current_devices
+        if current_package is None:
+            return
+        package_id, execution_scope, acknowledged, physical = current_package
+        packages.append(
+            ShutdownPackageReport(
+                package_id=package_id,
+                execution_scope=execution_scope,
+                acknowledged_device_count=acknowledged,
+                physical_device_count=physical,
+                devices=current_devices,
+            )
+        )
+        current_package = None
+        current_devices = []
+
+    for line in lines[2:]:
+        package_match = _SHUTDOWN_PACKAGE_LINE.fullmatch(line)
+        if package_match is not None:
+            finish_package()
+            current_package = (
+                package_match.group(1),
+                package_match.group(2),
+                int(package_match.group(3)),
+                int(package_match.group(4)),
+            )
+            continue
+        device_match = _SHUTDOWN_DEVICE_LINE.fullmatch(line)
+        if device_match is None or current_package is None:
+            raise ConversationGateError(
+                "runtime structured shutdown package/device report is malformed"
+            )
+        raw_error = device_match.group(6)
+        current_devices.append(
+            ShutdownDeviceReport(
+                store_id=device_match.group(1),
+                physical_device_id=device_match.group(2),
+                acknowledged=device_match.group(3) == "true",
+                remaining_units=int(device_match.group(4)),
+                remaining_payload_bytes=int(device_match.group(5)),
+                error=None if raw_error == "None" else raw_error,
+            )
+        )
+    finish_package()
+
+    report = ShutdownReport(
+        complete=complete,
+        stream_count=stream_count,
+        package_count=package_count,
+        scheduler_in_flight_activation_count=scheduler_in_flight,
+        acknowledged_device_count=acknowledged_device_count,
+        physical_device_count=physical_device_count,
+        released_unit_count=released_unit_count,
+        released_payload_bytes=released_payload_bytes,
+        cancelled_load_count=cancelled_load_count,
+        packages=packages,
+    )
+    if not report.complete:
+        raise ConversationGateError("runtime reported incomplete shutdown")
+    if report.stream_count != 1 or report.package_count != 1:
+        raise ConversationGateError(
+            "conversation gate shutdown must cover exactly one stream and one package"
+        )
+    if report.scheduler_in_flight_activation_count != 0:
+        raise ConversationGateError("runtime shutdown retained scheduler activations")
+    if report.acknowledged_device_count != report.physical_device_count:
+        raise ConversationGateError(
+            "runtime shutdown was not acknowledged by every physical resource device"
+        )
+    if len(report.packages) != report.package_count:
+        raise ConversationGateError(
+            "runtime shutdown package report count does not match its summary"
+        )
+    if sum(package.physical_device_count for package in report.packages) != (
+        report.physical_device_count
+    ) or sum(package.acknowledged_device_count for package in report.packages) != (
+        report.acknowledged_device_count
+    ):
+        raise ConversationGateError(
+            "runtime shutdown package device totals do not match its summary"
+        )
+    package_identities = {
+        (package.package_id, package.execution_scope) for package in report.packages
+    }
+    if len(package_identities) != len(report.packages):
+        raise ConversationGateError("runtime shutdown repeats a package identity")
+    for package in report.packages:
+        if len(package.devices) != package.physical_device_count:
+            raise ConversationGateError(
+                "runtime shutdown package device count does not match its summary"
+            )
+        if sum(device.acknowledged for device in package.devices) != (
+            package.acknowledged_device_count
+        ):
+            raise ConversationGateError(
+                "runtime shutdown package acknowledgement count does not match its devices"
+            )
+        store_ids = {device.store_id for device in package.devices}
+        if len(store_ids) != len(package.devices):
+            raise ConversationGateError(
+                "runtime shutdown repeats a physical resource store"
+            )
+        for device in package.devices:
+            if (
+                not device.acknowledged
+                or device.remaining_units != 0
+                or device.remaining_payload_bytes != 0
+                or device.error is not None
+            ):
+                raise ConversationGateError(
+                    "runtime shutdown left a physical resource store incomplete"
+                )
+    return report
+
+
 def parse_conversation_transcript(
     transcript: str,
     *,
@@ -455,9 +686,7 @@ def _parse_all_conversation_turns(transcript: str) -> list[ConversationTurn]:
             gauges,
             execution_counters,
             determinism_digests,
-        ) in zip(
-            expected_prompts, completed_sections, strict=True
-        )
+        ) in zip(expected_prompts, completed_sections, strict=True)
     ]
 
 
@@ -501,9 +730,7 @@ def _validate_tensor_parallel_turn_execution(turn: ConversationTurn) -> None:
         intra_expert = _required_execution_counter(
             turn, f"{prefix}intra_expert_tensor_parallel_island_submissions"
         )
-        hybrid = _required_execution_counter(
-            turn, f"{prefix}hybrid_island_submissions"
-        )
+        hybrid = _required_execution_counter(turn, f"{prefix}hybrid_island_submissions")
         classified_islands = tensor_parallel + whole_expert + intra_expert + hybrid
         if island_submissions != classified_islands:
             raise ConversationGateError(
@@ -1122,12 +1349,43 @@ def run_conversation_gate(
             raise ConversationGateError(
                 "resource residency policy changed within one resident session"
             )
+        if not session_policies:
+            raise ConversationGateError(
+                "runtime did not report resource residency for shutdown reconciliation"
+            )
+        shutdown = parse_shutdown_report(transcript)
+        if shutdown.packages[0].package_id != package["package_id"]:
+            raise ConversationGateError(
+                "runtime shutdown package identity does not match the compiled package"
+            )
+        final_gauges = reports[-1].residency_gauges_end
+        required_gauges = ("payload_bytes.current", "units.current")
+        missing_gauges = [
+            key
+            for key in required_gauges
+            if final_gauges is None or key not in final_gauges
+        ]
+        if missing_gauges:
+            raise ConversationGateError(
+                "runtime cannot reconcile shutdown with final residency; missing "
+                + ", ".join(missing_gauges)
+            )
+        assert final_gauges is not None
+        if shutdown.released_payload_bytes != final_gauges["payload_bytes.current"]:
+            raise ConversationGateError(
+                "runtime shutdown released payload bytes do not match final residency"
+            )
+        if shutdown.released_unit_count != final_gauges["units.current"]:
+            raise ConversationGateError(
+                "runtime shutdown released units do not match final residency"
+            )
         runs.append(
             ConversationSeedReport(
                 seed=seed,
                 command=seeded_command,
                 transcript_sha256=hashlib.sha256(transcript.encode()).hexdigest(),
                 physical_execution=physical_execution,
+                shutdown=shutdown,
                 discarded_warmup_sets=reports[:-1],
                 measured_set=reports[-1],
             )
