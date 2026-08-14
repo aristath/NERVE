@@ -120,7 +120,19 @@ the local placement calibration, and the mounted graph.
   retained GPU-copy readback transaction. Exact Intel device-local readback and
   bidirectional AMD/Intel calibration tests pass with byte-identical output,
   complete reservation restoration, and no kernel/driver anomaly. The normal
-  DeepSeek TP gate remains the next live proof.
+  DeepSeek TP gate remains the next live proof. The corrected seven-target run
+  then completed all 42 directed route calibrations but was stopped before
+  model mount when auto-placement grew to 39.2 GiB RSS/70.6 GiB virtual memory
+  and began swapping. The exact cause was planner ownership and repeated work:
+  every subset retained a complete clone of the 736 MiB compiled manifest and
+  rebuilt the full resolved graph/execution/resource plan for each device.
+  Runtime models now share verified package, circuit, and execution artifacts
+  copy-on-write; candidate comparison retains only its current winners; and
+  one placement-invariant residency basis is reused across the complete subset
+  search. Exact sequential tests prove sharing, isolated mutation, endpoint
+  ownership, non-prefix subset selection, one basis preparation per search,
+  representation convergence, and unchanged residency accounting. The bounded
+  memory/startup result still requires the normal authorized DeepSeek gate.
 - The normal production mount now derives exact selected-resource execution
   classes from the lowered decode plan, consumes only identity-matching suite
   calibration, and rebuilds activation, parameter, ownership, and physical
