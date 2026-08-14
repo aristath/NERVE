@@ -66,9 +66,15 @@ fn runtime_model(
 fn runtime_uses_explicit_placement(args: &Args) -> bool {
     args.default_device_id.is_some()
         || !args.node_devices.is_empty()
-        || !args.component_shard_devices.is_empty()
         || !args.device_bindings.is_empty()
         || args.vulkan_device_index.is_some()
+}
+
+fn runtime_model_without_explicit_component_shards(
+    mut runtime_model: VulkanResidentRuntimeModel,
+) -> VulkanResidentRuntimeModel {
+    runtime_model.placement.component_shard_devices.clear();
+    runtime_model
 }
 
 fn rank_runtime_auto_placement_candidates_across_capability_classes(
@@ -117,6 +123,12 @@ fn runtime_capacity_packed_model(
             auto_placement: None,
         });
     }
+    // A component-local physical shard request constrains only that execution
+    // island. It must not turn the rest of the graph into a caller-placed
+    // model or influence the canonical baseline used by capacity packing and
+    // measured hybrid selection. The request is overlaid after those global
+    // decisions converge and is admitted by the ordinary exact mount planner.
+    let runtime_model = runtime_model_without_explicit_component_shards(runtime_model);
     let speculative_draft_tokens = effective_speculative_draft_tokens(args, &runtime_model)?;
     let catalog = runtime_vulkan_device_catalog(args)?;
     let available_devices = catalog.available_compute_devices();

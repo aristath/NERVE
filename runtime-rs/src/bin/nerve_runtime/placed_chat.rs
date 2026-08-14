@@ -42,11 +42,32 @@ fn explicit_runtime_physical_execution_plan(
     args: &Args,
     runtime_model: &VulkanResidentRuntimeModel,
 ) -> Result<VulkanRuntimePhysicalExecutionPlan, Box<dyn Error>> {
-    Ok(VulkanRuntimePhysicalExecutionPlan::uniform(runtime_model)
-        .with_explicit_distributed_strategies(
+    Ok(
+        VulkanRuntimePhysicalExecutionPlan::uniform(runtime_model)
+            .with_explicit_distributed_overrides(
+                runtime_model,
+                &args.component_shard_devices,
+                &args.component_physical_strategies,
+            )?,
+    )
+}
+
+fn overlay_explicit_runtime_physical_execution(
+    args: &Args,
+    runtime_model: &VulkanResidentRuntimeModel,
+    automatic_plan: Option<VulkanRuntimePhysicalExecutionPlan>,
+) -> Result<Option<VulkanRuntimePhysicalExecutionPlan>, Box<dyn Error>> {
+    if args.component_shard_devices.is_empty() {
+        return Ok(automatic_plan);
+    }
+    let plan = automatic_plan
+        .unwrap_or_else(|| VulkanRuntimePhysicalExecutionPlan::uniform(runtime_model))
+        .with_explicit_distributed_overrides(
             runtime_model,
+            &args.component_shard_devices,
             &args.component_physical_strategies,
-        )?)
+        )?;
+    Ok(Some(plan))
 }
 
 fn resolve_runtime_hybrid_physical_execution(
@@ -238,7 +259,8 @@ fn run_placed_chat(
                 )?
                 .0
         };
-    let (runtime_model, physical_execution_plan) = resolve_runtime_hybrid_physical_execution(
+    let (runtime_model, automatic_physical_execution_plan) =
+        resolve_runtime_hybrid_physical_execution(
         manifest_dir,
         runtime_model,
         execution,
@@ -247,6 +269,11 @@ fn run_placed_chat(
         capacity,
         speculative_draft_tokens,
         args.resource_residency_policy,
+    )?;
+    let physical_execution_plan = overlay_explicit_runtime_physical_execution(
+        args,
+        &runtime_model,
+        automatic_physical_execution_plan,
     )?;
     let implementation_selection = runtime_model
         .implementation_selection

@@ -121,6 +121,62 @@ impl VulkanRuntimePhysicalExecutionPlan {
         Ok(self)
     }
 
+    /// Applies caller-selected component-local distributed execution on top of
+    /// an otherwise automatic physical plan. The stable component owner must
+    /// remain the first participant so surrounding measured boundary routes
+    /// stay valid. Only the named component's measured case is replaced; all
+    /// unrelated measured local, serialized, or distributed decisions remain
+    /// intact.
+    pub fn with_explicit_distributed_overrides(
+        mut self,
+        runtime_model: &VulkanResidentRuntimeModel,
+        shard_devices_by_component: &BTreeMap<String, Vec<String>>,
+        strategy_by_component: &BTreeMap<
+            String,
+            nerve_execution_contracts::ExecutionStrategy,
+        >,
+    ) -> Result<Self, VulkanRuntimeHybridPlacementError> {
+        if let Some(component_id) = strategy_by_component
+            .keys()
+            .find(|component_id| !shard_devices_by_component.contains_key(*component_id))
+        {
+            return runtime_hybrid_error(format!(
+                "explicit physical strategy for {component_id:?} has no component shard pool"
+            ));
+        }
+
+        for (component_id, device_ids) in shard_devices_by_component {
+            let owner = runtime_model.placement.device_for_component(component_id);
+            if device_ids.first().map(String::as_str) != Some(owner) {
+                return runtime_hybrid_error(format!(
+                    "explicit shard pool for component {component_id:?} must begin with its automatically selected stable owner {owner:?}"
+                ));
+            }
+            for pools in [
+                &mut self.component_device_pools.decode,
+                &mut self.component_device_pools.decode_batch,
+                &mut self.component_device_pools.prefill,
+            ] {
+                pools.insert(component_id.clone(), device_ids.clone());
+            }
+            self.decode_execution_cases_by_component.remove(component_id);
+            self.decode_batch_execution_cases_by_component
+                .remove(component_id);
+            self.prefill_execution_cases_by_component.remove(component_id);
+            self.decode_contract_ids_by_component.remove(component_id);
+            self.decode_batch_contract_ids_by_component
+                .remove(component_id);
+            self.prefill_contract_ids_by_component.remove(component_id);
+        }
+
+        self = self.with_explicit_distributed_strategies(
+            runtime_model,
+            strategy_by_component,
+        )?;
+        self.validate(runtime_model)?;
+        Ok(self)
+    }
+
     pub fn validate(
         &self,
         runtime_model: &VulkanResidentRuntimeModel,
@@ -164,6 +220,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
             &component_ids,
             &self.component_device_pools.decode,
             &self.decode_execution_cases_by_component,
+            &self.decode_contract_ids_by_component,
         )?;
         self.validate_exact_phase_cases(
             runtime_model,
@@ -173,6 +230,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
             &component_ids,
             &self.component_device_pools.decode_batch,
             &self.decode_batch_execution_cases_by_component,
+            &self.decode_batch_contract_ids_by_component,
         )?;
         self.validate_exact_phase_cases(
             runtime_model,
@@ -182,6 +240,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
             &component_ids,
             &self.component_device_pools.prefill,
             &self.prefill_execution_cases_by_component,
+            &self.prefill_contract_ids_by_component,
         )?;
         self.validate_explicit_phase_contracts(
             runtime_model,
@@ -514,6 +573,7 @@ impl VulkanRuntimePhysicalExecutionPlan {
         component_ids: &BTreeSet<&str>,
         pools: &BTreeMap<String, Vec<String>>,
         cases: &BTreeMap<String, VulkanPlacementExecutionCaseIdentity>,
+        explicit_contracts: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
         if phase_name == "prefill"
             && self
@@ -534,12 +594,22 @@ impl VulkanRuntimePhysicalExecutionPlan {
         if cases.is_empty() {
             return Ok(());
         }
-        if cases.keys().map(String::as_str).collect::<BTreeSet<_>>() != *component_ids {
+        let covered_components = cases
+            .keys()
+            .chain(pools.keys())
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if covered_components != *component_ids {
             return runtime_hybrid_error(format!(
-                "exact physical {phase_name} plan must cover every signal processor exactly once",
+                "mixed exact and explicit physical {phase_name} plan must cover every signal processor exactly once",
             ));
         }
         for (component_id, case) in cases {
+            if explicit_contracts.contains_key(component_id) {
+                return runtime_hybrid_error(format!(
+                    "component {component_id:?} has both explicit and measured {phase_name} execution contracts"
+                ));
+            }
             let batch_width = case.behavior.shape.activation_batch_width;
             if case.behavior.phase != execution_phase
                 || exact_batch_width.is_some_and(|expected| batch_width != expected)
@@ -934,6 +1004,74 @@ mod runtime_physical_execution_plan_tests {
             )
             .unwrap_err();
         assert!(unavailable.0.contains("0 maximal complete"));
+    }
+
+    #[test]
+    fn explicit_override_adds_only_a_component_local_island_to_an_automatic_plan() {
+        let model = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let component_id = model
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.runtime_role.is_signal_processor())
+            .unwrap()
+            .component_id
+            .clone();
+        let pool = vec!["gpu0".to_string(), "gpu1".to_string()];
+        let plan = VulkanRuntimePhysicalExecutionPlan::uniform(&model)
+            .with_explicit_distributed_overrides(
+                &model,
+                &BTreeMap::from([(component_id.clone(), pool.clone())]),
+                &BTreeMap::from([(
+                    component_id.clone(),
+                    nerve_execution_contracts::ExecutionStrategy::TensorParallel,
+                )]),
+            )
+            .unwrap();
+
+        assert_eq!(plan.component_device_pools.decode[&component_id], pool);
+        assert_eq!(
+            plan.component_device_pools.decode_batch[&component_id],
+            plan.component_device_pools.decode[&component_id],
+        );
+        assert_eq!(
+            plan.component_device_pools.prefill[&component_id],
+            plan.component_device_pools.decode[&component_id],
+        );
+        assert!(!plan.decode_contract_ids_by_component[&component_id].is_empty());
+        assert_eq!(plan.device_ids(&model), ["gpu0", "gpu1"]);
+    }
+
+    #[test]
+    fn explicit_override_cannot_invalidate_automatic_boundary_ownership() {
+        let model = tests::tiny_fixture_model_runtime_model_with_placement(
+            StreamCircuitPlacementSpec::new("gpu0"),
+        );
+        let component_id = model
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.runtime_role.is_signal_processor())
+            .unwrap()
+            .component_id
+            .clone();
+        let error = VulkanRuntimePhysicalExecutionPlan::uniform(&model)
+            .with_explicit_distributed_overrides(
+                &model,
+                &BTreeMap::from([(
+                    component_id.clone(),
+                    vec!["gpu1".to_string(), "gpu0".to_string()],
+                )]),
+                &BTreeMap::from([(
+                    component_id,
+                    nerve_execution_contracts::ExecutionStrategy::TensorParallel,
+                )]),
+            )
+            .unwrap_err();
+
+        assert!(error.0.contains("automatically selected stable owner"));
     }
 
     #[test]

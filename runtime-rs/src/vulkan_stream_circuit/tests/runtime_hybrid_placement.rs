@@ -1423,6 +1423,39 @@ fn runtime_hybrid_physical_resolution_carries_measured_tp_into_normal_execution(
                 == "logical-owner")
     );
 
+    let overridden_component = resolution
+        .runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .find(|component| component.runtime_role.is_signal_processor())
+        .unwrap()
+        .component_id
+        .clone();
+    let mixed_plan = resolution
+        .physical_execution_plan
+        .clone()
+        .with_explicit_distributed_overrides(
+            &resolution.runtime_model,
+            &BTreeMap::from([(
+                overridden_component.clone(),
+                vec!["logical-owner".to_string(), "logical-helper".to_string()],
+            )]),
+            &BTreeMap::from([(
+                overridden_component.clone(),
+                nerve_execution_contracts::ExecutionStrategy::TensorParallel,
+            )]),
+        )
+        .unwrap();
+    assert_eq!(mixed_plan.decode_execution_cases_by_component.len(), 2);
+    assert!(!mixed_plan
+        .decode_execution_cases_by_component
+        .contains_key(&overridden_component));
+    assert!(mixed_plan
+        .decode_contract_ids_by_component
+        .contains_key(&overridden_component));
+    mixed_plan.validate(&resolution.runtime_model).unwrap();
+
     assert!(
         resolve_vulkan_runtime_hybrid_physical_execution(
             &model,

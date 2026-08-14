@@ -288,6 +288,16 @@ the local placement calibration, and the mounted graph.
   no logical compute device, allocates no model buffer, and submits no GPU work.
   This closes exact real-package mount/admission—not live TP inference,
   equivalence, performance, or teardown.
+  A component-local shard request no longer disables automatic capacity and
+  communication placement for the rest of the graph. After automatic
+  placement converges, the runtime overlays only the named physical island;
+  its first participant must remain the automatically selected stable owner so
+  measured surrounding boundary routes remain valid. An explicit island may
+  replace its own measured case while unrelated measured local, serialized,
+  or distributed cases remain intact. The final ordinary mount transaction
+  still performs exact whole-stream capacity admission. Hardware-neutral tests
+  cover shard-only auto-placement eligibility, mixed measured/explicit plans,
+  unavailable strategies, ambiguous contracts, and stale-owner rejection.
 - Calibration now separates a component-instance-independent compiled
   transaction signature from the exact component contracts used at replay.
   Repeated layers with identical implementation digests, artifacts, operation

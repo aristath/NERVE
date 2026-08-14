@@ -94,6 +94,20 @@ mod tests {
             .insert("vulkan-uuid:00000000030000000000000000000000".to_string());
         assert!(!runtime_uses_explicit_placement(&allowed_inventory));
 
+        let mut component_local_island = Args::default();
+        component_local_island.component_shard_devices.insert(
+            "layer_07".to_string(),
+            vec![
+                "vulkan-uuid:owner".to_string(),
+                "vulkan-uuid:helper".to_string(),
+            ],
+        );
+        component_local_island.component_physical_strategies.insert(
+            "layer_07".to_string(),
+            nerve_runtime::execution_contracts::ExecutionStrategy::TensorParallelExpert,
+        );
+        assert!(!runtime_uses_explicit_placement(&component_local_island));
+
         let mut logical = Args::default();
         logical.default_device_id = Some("chosen".to_string());
         assert!(runtime_uses_explicit_placement(&logical));
