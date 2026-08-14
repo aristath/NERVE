@@ -35,6 +35,7 @@ _NEW_CONVERSATION_COMMAND = "/new"
 _SESSION_RESET_MARKER = b"session_reset: "
 _STATS_MARKER = "\nstats:\n"
 _EXECUTION_MARKER = "\nexecution:\n"
+_DETERMINISM_MARKER = "\ndeterminism:\n"
 _STAT_LINE = re.compile(r"^  ([a-z][a-z0-9_]*)=(.+)$")
 _RESIDENCY_POLICY = re.compile(r"^  policy=([^ ]+)", re.MULTILINE)
 _RESIDENCY_COUNTER_LINE = re.compile(r"^  ([a-z_]+)\(([^)]+)\)=([^\n]+)$", re.MULTILINE)
@@ -51,6 +52,17 @@ _PHYSICAL_EXECUTION_FIELDS = (
     "hybrid_island_count",
     "selected_resource_placement_count",
 )
+_DETERMINISM_FIELDS = (
+    "generated_tokens",
+    "selection_counters",
+    "resident_state",
+)
+_DETERMINISM_DIGEST_PREFIXES = {
+    "generated_tokens": "nerve.runtime.token_ids_sha256.v1:",
+    "selection_counters": "nerve.runtime.selection_counters_sha256.v1:",
+    "resident_state": "nerve.optimizer.artifact_sha256.v1:",
+}
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 _CUMULATIVE_RESIDENCY_COUNTER_GROUPS = {
     "gpu_accesses",
@@ -118,6 +130,7 @@ class ConversationTurn:
     residency_counters: dict[str, int | float] | None = None
     residency_gauges: dict[str, int | float] | None = None
     execution_counters: dict[str, int | float | str] | None = None
+    determinism_digests: dict[str, str] | None = None
 
     @property
     def decode_tokens_per_second(self) -> float:
@@ -261,6 +274,45 @@ def _execution_metrics(report: str) -> dict[str, int | float | str] | None:
     return counters
 
 
+def _determinism_metrics(report: str) -> dict[str, str] | None:
+    marker_count = report.count(_DETERMINISM_MARKER)
+    if marker_count == 0:
+        return None
+    if marker_count != 1:
+        raise ConversationGateError(
+            "runtime reported more than one determinism evidence block for a turn"
+        )
+    block = report.split(_DETERMINISM_MARKER, 1)[1]
+    digests: dict[str, str] = {}
+    for line in block.splitlines():
+        if line and not line.startswith("  "):
+            break
+        match = _STAT_LINE.match(line)
+        if match is None:
+            if digests:
+                break
+            continue
+        key, value = match.groups()
+        if key not in _DETERMINISM_FIELDS or key in digests or not value.strip():
+            raise ConversationGateError(
+                "runtime determinism report has an unknown, duplicate, or empty field"
+            )
+        digest = value.strip()
+        prefix = _DETERMINISM_DIGEST_PREFIXES[key]
+        payload = digest.removeprefix(prefix)
+        if payload == digest or _SHA256_HEX.fullmatch(payload) is None:
+            raise ConversationGateError(
+                f"runtime determinism report field {key!r} is not a canonical digest"
+            )
+        digests[key] = digest
+    if set(digests) != set(_DETERMINISM_FIELDS):
+        raise ConversationGateError(
+            "runtime determinism report is missing field(s): "
+            + ", ".join(sorted(set(_DETERMINISM_FIELDS).difference(digests)))
+        )
+    return digests
+
+
 def parse_physical_execution_summary(
     transcript: str,
     *,
@@ -360,8 +412,17 @@ def _parse_all_conversation_turns(transcript: str) -> list[ConversationTurn]:
             stats[match.group(1)] = _parse_scalar(match.group(2))
         policy, counters, gauges = _residency_metrics(report)
         execution_counters = _execution_metrics(report)
+        determinism_digests = _determinism_metrics(report)
         completed_sections.append(
-            (response.rstrip(), stats, policy, counters, gauges, execution_counters)
+            (
+                response.rstrip(),
+                stats,
+                policy,
+                counters,
+                gauges,
+                execution_counters,
+                determinism_digests,
+            )
         )
 
     if not completed_sections or (
@@ -384,8 +445,17 @@ def _parse_all_conversation_turns(transcript: str) -> list[ConversationTurn]:
             residency_counters=counters,
             residency_gauges=gauges,
             execution_counters=execution_counters,
+            determinism_digests=determinism_digests,
         )
-        for prompt, (response, stats, policy, counters, gauges, execution_counters) in zip(
+        for prompt, (
+            response,
+            stats,
+            policy,
+            counters,
+            gauges,
+            execution_counters,
+            determinism_digests,
+        ) in zip(
             expected_prompts, completed_sections, strict=True
         )
     ]
@@ -659,6 +729,42 @@ def _conversation_set_warmth(
         ),
         residency_end,
     )
+
+
+def _validate_repeated_conversation_equivalence(
+    reference: ConversationSetReport,
+    measured: ConversationSetReport,
+) -> None:
+    reference_turns = [reference.warmup, *reference.turns]
+    measured_turns = [measured.warmup, *measured.turns]
+    if len(reference_turns) != len(measured_turns):
+        raise ConversationGateError(
+            "fully warm conversation sets have different turn counts"
+        )
+    for turn_index, (reference_turn, measured_turn) in enumerate(
+        zip(reference_turns, measured_turns, strict=True),
+        start=1,
+    ):
+        if reference_turn.prompt != measured_turn.prompt:
+            raise ConversationGateError(
+                f"fully warm conversation turn {turn_index} changed its prompt"
+            )
+        reference_digests = reference_turn.determinism_digests
+        measured_digests = measured_turn.determinism_digests
+        if reference_digests is None or measured_digests is None:
+            raise ConversationGateError(
+                f"fully warm conversation turn {turn_index} lacks determinism evidence"
+            )
+        for field in _DETERMINISM_FIELDS:
+            if reference_digests[field] != measured_digests[field]:
+                raise ConversationGateError(
+                    f"fully warm conversation turn {turn_index} changed its "
+                    f"{field.replace('_', ' ')} digest"
+                )
+        if reference_turn.response != measured_turn.response:
+            raise ConversationGateError(
+                f"fully warm conversation turn {turn_index} changed its decoded response"
+            )
 
 
 def run_resident_conversation(
@@ -1006,6 +1112,7 @@ def run_conversation_gate(
                         "measured conversation was not preceded by two consecutive "
                         "fully warm conversation sets"
                     )
+            _validate_repeated_conversation_equivalence(reports[-2], reports[-1])
         session_policies = {
             report.residency_policy
             for report in reports

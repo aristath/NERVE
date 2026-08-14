@@ -397,10 +397,14 @@ six-input conversation in one uninterrupted model process until two consecutive
 sets have zero misses, loads, evictions, reads, derivations, uploads, reloads,
 and residency blocking. The first clean set proves that the working set is
 resident; only the following clean set is measured. Any intervening load resets
-the sequence. `--maximum-conversation-sets` is a caller-visible safety bound
-(16 by default), and failure to stabilize within it fails the gate instead of
-mislabeling a cache-thrashing conversation as fully warm. The report records the
-actual number of discarded sets and every per-conversation residency delta.
+the sequence. The two accepted clean sets must also reproduce every generated
+token, decoded response, sparse-selection counter, and resident-state digest
+exactly. Determinism evidence is schema-checked rather than trusted as an opaque
+label. `--maximum-conversation-sets` is a caller-visible safety bound (16 by
+default), and failure to stabilize within it fails the gate instead of
+mislabeling a cache-thrashing or behaviorally drifting conversation as fully
+warm. The report records the actual number of discarded sets, every
+per-conversation residency delta, and the per-turn evidence digests.
 
 ```bash
 .venv/bin/python scripts/run_conversation_gate.py \

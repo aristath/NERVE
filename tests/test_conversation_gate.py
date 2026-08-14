@@ -341,6 +341,9 @@ def test_transcript_parser_extracts_cumulative_residency_counters() -> None:
             f"  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={index * 8}/{index * 2}/80/20\n"
             f"  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={index}/{index * 10}/{index * 20}/{index * 20}/{index * 0.5}/{index * 0.125}/{index * 0.25}/{index * 0.75}\n"
             "determinism:\n"
+            f"  generated_tokens=nerve.runtime.token_ids_sha256.v1:{index:064x}\n"
+            f"  selection_counters=nerve.runtime.selection_counters_sha256.v1:{index + 100:064x}\n"
+            f"  resident_state=nerve.optimizer.artifact_sha256.v1:{index + 200:064x}\n"
         )
     sections.append("you> ")
 
@@ -862,7 +865,11 @@ while True:
     print(f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={misses}/{misses}/0/{misses}/0/0")
     print("  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0")
     print(f"  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={misses * 8}/{misses * 2}/80/20")
-    print(f"  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={misses}/{misses * 10}/{misses * 20}/{misses * 20}/{misses}.0/{misses / 2}/{misses}.0/{misses}.0", flush=True)
+    print(f"  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={misses}/{misses * 10}/{misses * 20}/{misses * 20}/{misses}.0/{misses / 2}/{misses}.0/{misses}.0")
+    print("determinism:")
+    print(f"  generated_tokens=nerve.runtime.token_ids_sha256.v1:{conversation_turn:064x}")
+    print(f"  selection_counters=nerve.runtime.selection_counters_sha256.v1:{conversation_turn + 100:064x}")
+    print(f"  resident_state=nerve.optimizer.artifact_sha256.v1:{conversation_turn + 200:064x}", flush=True)
 """.lstrip()
     )
 
@@ -957,7 +964,11 @@ while True:
     print(f"  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)={loads}/{loads}/0/{loads}/0/0")
     print("  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0")
     print(f"  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)={loads * 8}/{loads * 2}/80/20")
-    print(f"  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={loads}/{loads * 10}/{loads * 20}/{loads * 20}/{loads}.0/{loads / 2}/{loads}.0/{loads}.0", flush=True)
+    print(f"  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)={loads}/{loads * 10}/{loads * 20}/{loads * 20}/{loads}.0/{loads / 2}/{loads}.0/{loads}.0")
+    print("determinism:")
+    print(f"  generated_tokens=nerve.runtime.token_ids_sha256.v1:{conversation_turn:064x}")
+    print(f"  selection_counters=nerve.runtime.selection_counters_sha256.v1:{conversation_turn + 100:064x}")
+    print(f"  resident_state=nerve.optimizer.artifact_sha256.v1:{conversation_turn + 200:064x}", flush=True)
 """.lstrip()
     )
 
@@ -987,6 +998,147 @@ while True:
     assert run.measured_set.residency_delta is not None
     assert run.measured_set.residency_delta["residency_requests.load_required"] == 0
     assert run.measured_set.mean_decode_tokens_per_second == 24.0
+
+
+def _fully_warm_mock_transcript(*, mutation: str | None = None) -> str:
+    answers = (
+        "Hello.",
+        "I am a language model.",
+        "The capital of Greece is Athens.",
+        "There are several cities named Corinth.",
+        "My knowledge cutoff is unavailable.",
+        "The country was Greece.",
+    )
+    sections = ["ready\n"]
+    for conversation_set in range(2):
+        for turn_index, answer in enumerate(answers, start=1):
+            mutated = conversation_set == 1 and turn_index == 3
+            response = _response(answer)
+            digests = {
+                "generated_tokens": (
+                    "nerve.runtime.token_ids_sha256.v1:"
+                    f"{turn_index:064x}"
+                ),
+                "selection_counters": (
+                    "nerve.runtime.selection_counters_sha256.v1:"
+                    f"{turn_index + 100:064x}"
+                ),
+                "resident_state": (
+                    "nerve.optimizer.artifact_sha256.v1:"
+                    f"{turn_index + 200:064x}"
+                ),
+            }
+            if mutated and mutation in digests:
+                prefix = digests[mutation].split(":", 1)[0]
+                digests[mutation] = f"{prefix}:{999:064x}"
+            elif mutated and mutation == "response":
+                response = _response(answer + " This wording drifted.")
+            sections.append(
+                "you> llm> "
+                f"{response}\n"
+                "stats:\n"
+                "  prefill_tokens_per_second=100.000\n"
+                "  decode_tokens_per_second=25.000\n"
+                "execution:\n"
+                "resource_residency:\n"
+                "  policy=demand-paged physical_stores=1\n"
+                f"  gpu_accesses(selections/resident_hits/misses)={turn_index}/{turn_index}/0\n"
+                "  residency_requests(directory_hits/load_required/deduplicated/succeeded/failed/cancelled)=0/0/0/0/0/0\n"
+                "  residency_eviction(cycles/units/payload_bytes/device_bytes/reloads)=0/0/0/0/0\n"
+                "  memory_tiers(device_payload/host_visible_payload/device_capacity/host_visible_capacity)=8/0/80/20\n"
+                "  transfers(reads/source_bytes/resident_bytes/uploaded_bytes/read_ms/derivation_ms/upload_ms/blocking_ms)=0/0/0/0/0/0/0/0\n"
+            )
+            if not (mutated and mutation == "missing_evidence"):
+                sections.extend(
+                    (
+                        "determinism:\n",
+                        f"  generated_tokens={digests['generated_tokens']}\n",
+                        f"  selection_counters={digests['selection_counters']}\n",
+                        f"  resident_state={digests['resident_state']}\n",
+                    )
+                )
+    sections.append("you> ")
+    return "".join(sections)
+
+
+@pytest.mark.parametrize(
+    ("replace", "message"),
+    (
+        (
+            (
+                "generated_tokens=nerve.runtime.token_ids_sha256.v1:"
+                f"{1:064x}"
+            ),
+            "not a canonical digest",
+        ),
+        ("generated_tokens=", "unknown, duplicate, or empty field"),
+    ),
+)
+def test_transcript_parser_rejects_untrusted_determinism_evidence(
+    replace: str,
+    message: str,
+) -> None:
+    transcript = _fully_warm_mock_transcript()
+    if replace == "generated_tokens=":
+        transcript = transcript.replace(replace, "unknown_digest=", 1)
+    else:
+        transcript = transcript.replace(replace, "generated_tokens=not-a-digest", 1)
+
+    with pytest.raises(ConversationGateError, match=message):
+        parse_conversation_transcript(transcript, warmup_conversation_sets=1)
+
+
+def test_transcript_parser_rejects_duplicate_determinism_evidence() -> None:
+    transcript = _fully_warm_mock_transcript()
+    evidence = (
+        "determinism:\n"
+        f"  generated_tokens=nerve.runtime.token_ids_sha256.v1:{1:064x}\n"
+        f"  selection_counters=nerve.runtime.selection_counters_sha256.v1:{101:064x}\n"
+        f"  resident_state=nerve.optimizer.artifact_sha256.v1:{201:064x}\n"
+    )
+    transcript = transcript.replace(evidence, evidence + evidence, 1)
+
+    with pytest.raises(ConversationGateError, match="more than one determinism"):
+        parse_conversation_transcript(transcript, warmup_conversation_sets=1)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("generated_tokens", "turn 3 changed its generated tokens digest"),
+        ("selection_counters", "turn 3 changed its selection counters digest"),
+        ("resident_state", "turn 3 changed its resident state digest"),
+        ("response", "turn 3 changed its decoded response"),
+        ("missing_evidence", "turn 3 lacks determinism evidence"),
+    ),
+)
+def test_gate_rejects_fully_warm_behavior_or_state_drift(
+    monkeypatch,
+    tmp_path,
+    mutation: str,
+    message: str,
+) -> None:
+    package = tmp_path / "package.json"
+    package.write_text("{}")
+    monkeypatch.setattr(
+        "nerve.conversation_gate.run_resident_conversation",
+        lambda command, **_kwargs: (
+            _fully_warm_mock_transcript(mutation=mutation),
+            0,
+        ),
+    )
+
+    with pytest.raises(
+        ConversationGateError,
+        match=message,
+    ):
+        run_conversation_gate(
+            [sys.executable, "--package", str(package), "--chat"],
+            seeds=(0,),
+            minimum_decode_tokens_per_second=20.0,
+            require_thinking=True,
+            warmup_conversation_sets=1,
+        )
 
 
 def test_resident_runner_fails_when_full_residency_never_stabilizes(tmp_path) -> None:

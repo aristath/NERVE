@@ -1049,10 +1049,12 @@ For every numbered item below:
   derivations, uploads, reloads, and residency blocking. The first clean set
   proves residency and the second is truth; any recurrent load resets the
   sequence, non-finite telemetry fails closed, and a caller-visible safety
-  bound prevents an unfit working set from looping forever. Run this gate on
+  bound prevents an unfit working set from looping forever. The final two
+  clean sets must have identical generated-token, sparse-selection, and
+  resident-state digests plus byte-identical decoded responses; missing,
+  malformed, duplicate, or drifting evidence fails closed. Run this gate on
   DeepSeek and every Qwen control once live validation is authorized.
-- Require coherent answers, package-owned thinking and sampling, identical
-  accepted behavior and state digests where exactness is required, and exact
+- Require coherent answers, package-owned thinking and sampling, and exact
   post-run restoration of every selected target's pre-workload reservation.
 - Require at least 17 useful decode tok/s, continue optimizing toward 20 tok/s,
   and investigate any regression before accepting a milestone.
