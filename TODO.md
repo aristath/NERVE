@@ -98,8 +98,14 @@ the local placement calibration, and the mounted graph.
   and formats favor serialization, and the fastest absolute group is often
   smaller than the largest available group.
 - Cross-vendor device-local external memory may allocate successfully while
-  producing invalid shader results. Transport routes must be output-validated;
-  shared-host transport remains a valid measured fallback.
+  producing invalid results. Directed route negotiation now accepts external
+  device-local transport only after exact output validation, retries the
+  explicit shared-host staging transaction on a deterministic byte mismatch,
+  and fails closed if that fallback also disagrees. Queue, device-health, and
+  allocation errors do not silently fall back. Exact R9700 `21:00.0`/Intel B60
+  hardware coverage reproduces the invalid external direction, selects the
+  validated staging route, verifies both directions, and restores both
+  reservations.
 - The August 11 failure reached AMD TTM LRU corruption during a long,
   near-capacity run. Live validation is now explicitly authorized, but every
   run must record each selected target's pre-run reservation, stop on the first
