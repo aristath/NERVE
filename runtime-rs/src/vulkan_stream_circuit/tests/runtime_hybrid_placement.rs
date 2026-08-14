@@ -1560,13 +1560,13 @@ fn explicit_tp_overlay_retains_exact_routes_for_serialized_outer_boundaries() {
         "gpu0",
         &BTreeMap::from([
             (component_ids[0].clone(), "gpu0".to_string()),
-            (component_ids[1].clone(), "gpu1".to_string()),
+            (component_ids[1].clone(), "gpu0".to_string()),
             (component_ids[2].clone(), "gpu1".to_string()),
         ]),
     )
     .unwrap();
     let graph_boundaries = vulkan_runtime_placement_boundaries(&model).unwrap();
-    let frame_byte_count = graph_boundaries[0].transfers[0].byte_count;
+    let frame_byte_count = graph_boundaries[1].transfers[0].byte_count;
     let digest = hybrid_test_digest('a');
     let report = VulkanRuntimePlacementTransferCalibrationReport {
         source_device_id: "gpu0".to_string(),
@@ -1601,20 +1601,93 @@ fn explicit_tp_overlay_retains_exact_routes_for_serialized_outer_boundaries() {
             .contains("requires exact directed-transfer calibration evidence")
     );
 
+    let tp_component_id = component_ids[0].clone();
     let plan = VulkanRuntimePhysicalExecutionPlan::uniform(&model)
+        .with_explicit_distributed_overrides(
+            &model,
+            &BTreeMap::from([(
+                tp_component_id.clone(),
+                vec!["gpu0".to_string(), "gpu1".to_string()],
+            )]),
+            &BTreeMap::from([(
+                tp_component_id.clone(),
+                nerve_execution_contracts::ExecutionStrategy::TensorParallel,
+            )]),
+        )
+        .unwrap()
         .with_exact_cross_device_boundary_routes(&model, Some(&catalog), &identities)
         .unwrap();
 
     assert_eq!(plan.decode_boundary_executions.len(), 1);
     assert_eq!(
-        plan.decode_boundary_executions[&0].source_device_id,
+        plan.decode_boundary_executions[&1].source_device_id,
         "gpu0"
     );
     assert_eq!(
-        plan.decode_boundary_executions[&0].destination_device_id,
+        plan.decode_boundary_executions[&1].destination_device_id,
         "gpu1"
     );
+    assert_eq!(
+        plan.decode_boundary_executions[&1].edge_index, 1,
+        "physical routes use the mounted signal-only graph's edge space",
+    );
+    let full_graph_edge_index = model
+        .circuit_graph
+        .edges
+        .iter()
+        .position(|edge| {
+            edge.source.component_id == component_ids[1]
+                && edge.destination.component_id == component_ids[2]
+        })
+        .unwrap();
+    assert_ne!(
+        full_graph_edge_index, plan.decode_boundary_executions[&1].edge_index,
+        "the fixture must retain a non-signal edge that exposes positional aliasing",
+    );
+    assert_eq!(
+        plan.component_device_pools.decode[&tp_component_id],
+        ["gpu0", "gpu1"]
+    );
     plan.validate(&model).unwrap();
+
+    // The fixture's tiny legacy TP contract intentionally cannot execute its
+    // residual reduction geometry. Exercise the real outer-route mount with
+    // the otherwise identical serialized plan; the TP composition above
+    // proves that adding the island preserves that route record.
+    let serialized_plan = VulkanRuntimePhysicalExecutionPlan::uniform(&model)
+        .with_exact_cross_device_boundary_routes(&model, Some(&catalog), &identities)
+        .unwrap();
+
+    let devices = [
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu0".to_string(),
+            identity: hybrid_test_device("gpu0"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+        VulkanRuntimePhysicalPlanningDevice {
+            logical_device_id: "gpu1".to_string(),
+            identity: hybrid_test_device("gpu1"),
+            safe_capacity_bytes: usize::MAX,
+            storage_buffer_offset_alignment: 8,
+        },
+    ];
+    assert!(
+        plan_vulkan_runtime_physical_mount(
+            tiny_model_dir(),
+            &model,
+            &serialized_plan,
+            Some(&catalog),
+            64,
+            0,
+            ResourceResidencyPolicy::Eager,
+            &devices,
+            usize::MAX,
+        )
+        .unwrap()
+        .is_some(),
+        "the workload-free planner must bind the exact outer route around a TP island",
+    );
 }
 
 #[test]

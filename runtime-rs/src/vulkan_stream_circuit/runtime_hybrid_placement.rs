@@ -2010,10 +2010,8 @@ pub fn lower_vulkan_runtime_hybrid_phase_placement(
                     "hybrid physical boundary {boundary_index} has no destination component",
                 ))
             })?;
-        let matching_edges = runtime_model
-            .circuit_graph
-            .edges
-            .iter()
+        let matching_edges = vulkan_runtime_mounted_signal_processor_edges(&runtime_model)
+            .into_iter()
             .enumerate()
             .filter(|(_, edge)| {
                 edge.source.component_id == source_component_id

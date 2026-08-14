@@ -286,10 +286,8 @@ impl VulkanRuntimePhysicalExecutionPlan {
                         transfer.byte_count,
                     ))
                 })?;
-            let matching_edges = runtime_model
-                .circuit_graph
-                .edges
-                .iter()
+            let matching_edges = vulkan_runtime_mounted_signal_processor_edges(runtime_model)
+                .into_iter()
                 .enumerate()
                 .filter(|(_, edge)| {
                     edge.source.component_id == *source_component_id
@@ -853,13 +851,12 @@ impl VulkanRuntimePhysicalExecutionPlan {
                     "exact physical {phase_name} boundary {boundary_index} has stale direction or frame geometry",
                 ));
             }
-            let graph_edge = runtime_model
-                .circuit_graph
-                .edges
+            let mounted_edges = vulkan_runtime_mounted_signal_processor_edges(runtime_model);
+            let graph_edge = mounted_edges
                 .get(boundary.edge_index)
                 .ok_or_else(|| {
                     VulkanRuntimeHybridPlacementError(format!(
-                        "exact physical {phase_name} boundary {boundary_index} references missing graph edge {}",
+                        "exact physical {phase_name} boundary {boundary_index} references missing mounted signal edge {}",
                         boundary.edge_index,
                     ))
                 })?;

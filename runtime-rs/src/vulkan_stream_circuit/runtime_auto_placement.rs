@@ -275,6 +275,33 @@ impl VulkanRuntimePlacementCostModel {
     }
 }
 
+/// The resident execution slices contain only instantaneous edges between
+/// signal processors. Their `edge_index` is therefore the ordinal in this
+/// filtered graph, not the ordinal in the package's full graph (which also
+/// contains transducer and state edges). Keep every physical-route identity
+/// on this exact mounted edge space.
+fn vulkan_runtime_mounted_signal_processor_edges(
+    runtime_model: &VulkanResidentRuntimeModel,
+) -> Vec<&crate::stream_circuit::StreamCircuitGraphEdge> {
+    let processor_ids = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| component.component_id.as_str())
+        .collect::<BTreeSet<_>>();
+    runtime_model
+        .circuit_graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.connection.is_instantaneous()
+                && processor_ids.contains(edge.source.component_id.as_str())
+                && processor_ids.contains(edge.destination.component_id.as_str())
+        })
+        .collect()
+}
+
 fn vulkan_runtime_placement_boundaries(
     runtime_model: &VulkanResidentRuntimeModel,
 ) -> Result<Vec<VulkanRuntimePlacementBoundary>, VulkanRuntimeResidencyPlanError> {
@@ -310,7 +337,7 @@ fn vulkan_runtime_placement_boundaries(
         .map(|component| (component.component_id.as_str(), component))
         .collect::<BTreeMap<_, _>>();
     let mut grouped = vec![BTreeSet::<(bool, String, String, usize)>::new(); signal_processors.len() - 1];
-    for edge in &runtime_model.circuit_graph.edges {
+    for edge in vulkan_runtime_mounted_signal_processor_edges(runtime_model) {
         let (Some(&source_index), Some(&destination_index)) = (
             component_index.get(edge.source.component_id.as_str()),
             component_index.get(edge.destination.component_id.as_str()),
