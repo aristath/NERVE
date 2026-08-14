@@ -33,6 +33,53 @@ impl VulkanComputeDevice {
         Ok(())
     }
 
+    /// Releases the device-owned command template and generic pipeline cache
+    /// after every workload using this logical device has been destroyed.
+    ///
+    /// Resident dispatches borrow handles from this cache, so callers must
+    /// first drop the engines, streams, and parameter pools that used the
+    /// device. Keeping the cache until `VulkanComputeDevice::drop` would make
+    /// model unload retain driver-owned VRAM for the lifetime of a UI or
+    /// server process.
+    pub fn release_cached_execution_resources_after_quiescence(
+        &self,
+    ) -> Result<usize, VulkanError> {
+        self.require_device_healthy()?;
+        self.with_quiescent_memory_reclamation(|_| {
+            let immediate_sequence = self.immediate_kernel_sequence.borrow_mut().take();
+            drop(immediate_sequence);
+            let pipelines = self
+                .generic_storage_pipelines
+                .borrow_mut()
+                .drain()
+                .map(|(_, pipeline)| pipeline)
+                .collect::<Vec<_>>();
+            let released_pipeline_count = pipelines.len();
+            unsafe {
+                for pipeline in pipelines {
+                    self.device.destroy_pipeline(pipeline.pipeline, None);
+                    self.device
+                        .destroy_shader_module(pipeline.shader_module, None);
+                    self.device
+                        .destroy_pipeline_layout(pipeline.pipeline_layout, None);
+                    self.device.destroy_descriptor_set_layout(
+                        pipeline.descriptor_set_layout,
+                        None,
+                    );
+                }
+            }
+            let retained_child_resource_count = Arc::strong_count(&self.logical_device_lifetime)
+                .saturating_sub(1);
+            if retained_child_resource_count != 0 {
+                return Err(VulkanError(format!(
+                    "Vulkan logical device {:?} still has {retained_child_resource_count} retained child resources after execution-cache release",
+                    self.physical_device_id,
+                )));
+            }
+            Ok(released_pipeline_count)
+        })
+    }
+
     /// Excludes every submission made through any logical device opened for
     /// this physical target, drains this device's queues, and keeps submission
     /// excluded until `operation` returns. The proof passed to `operation` is

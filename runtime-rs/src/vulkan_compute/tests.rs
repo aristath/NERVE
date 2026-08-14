@@ -906,6 +906,67 @@ mod tests {
     }
 
     #[test]
+    fn cached_execution_resources_release_without_dropping_the_device() {
+        let Some(spirv_words) = compile_test_shader_words() else {
+            eprintln!("skipping Vulkan cache release: no GLSL to SPIR-V compiler found");
+            return;
+        };
+        let device = match selected_test_vulkan_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!("skipping Vulkan cache release: {error}");
+                return;
+            }
+        };
+        let before = capture_vulkan_device_local_memory_restoration_snapshots([&device]).unwrap();
+        {
+            let buffer = device.create_resident_buffer(12).unwrap();
+            let binding = VulkanResidentKernelBufferBinding::new(0, &buffer, 12);
+            let dispatch = device
+                .create_resident_kernel_dispatch(&spirv_words, &[binding], 1, 64, 0)
+                .unwrap();
+            drop(dispatch);
+        }
+        assert_eq!(device.generic_storage_pipelines.borrow().len(), 1);
+
+        assert_eq!(
+            device
+                .release_cached_execution_resources_after_quiescence()
+                .unwrap(),
+            1,
+        );
+        assert!(device.generic_storage_pipelines.borrow().is_empty());
+        let restoration =
+            quiesce_and_verify_vulkan_device_local_memory_restoration([&device], &before);
+        assert!(restoration.complete, "{restoration:#?}");
+    }
+
+    #[test]
+    fn cached_execution_resource_release_rejects_a_retained_timeline_child() {
+        let device = match selected_test_vulkan_device() {
+            Ok(device) => device,
+            Err(error) => {
+                eprintln!("skipping Vulkan retained-child proof: {error}");
+                return;
+            }
+        };
+        let retained_timeline = device.create_timeline_semaphore(0).unwrap();
+
+        let error = device
+            .release_cached_execution_resources_after_quiescence()
+            .unwrap_err();
+
+        assert!(error.0.contains("1 retained child resources"), "{error}");
+        drop(retained_timeline);
+        assert_eq!(
+            device
+                .release_cached_execution_resources_after_quiescence()
+                .unwrap(),
+            0,
+        );
+    }
+
+    #[test]
     fn sparse_moe_prequant_gate_matches_internal_quantization_byte_for_byte() {
         let Some(raw_device_index) = std::env::var("NERVE_TEST_VULKAN_DEVICE_INDEX").ok() else {
             eprintln!("skipping sparse MoE prequant equivalence: explicit Vulkan device index unset");

@@ -22,10 +22,11 @@ mod tests {
     };
 
     use super::{
-        Args, RuntimeChatReplOutcome, RuntimeChatTurnOutcome, RuntimeSustainedDecodeReport,
+        Args, RuntimeChatReplOutcome, RuntimeChatTurnOutcome,
+        RuntimePhysicalDeviceMemoryObservation, RuntimeSustainedDecodeReport,
         RuntimeSustainedDecodeSample, parse_allowed_physical_device_id, parse_args_from,
         parse_chat_template_variable, parse_device_binding_assignment, parse_source_chain,
-        parse_vulkan_device_uuid_ref,
+        parse_vulkan_device_uuid_ref, verify_runtime_physical_device_memory_restoration,
         declared_runtime_logical_device_ids,
         explicit_physical_mount_report, workload_free_physical_planning_devices,
         rank_runtime_auto_placement_candidates_across_capability_classes,
@@ -38,6 +39,128 @@ mod tests {
         validate_explicit_logical_device_bindings,
         RuntimeWorkloadFreePhysicalCapacityObservation,
     };
+
+    fn physical_memory_observation(
+        physical_device_id: &str,
+        budget_bytes: u64,
+        usage_bytes: u64,
+    ) -> RuntimePhysicalDeviceMemoryObservation {
+        RuntimePhysicalDeviceMemoryObservation {
+            physical_device_id: physical_device_id.to_string(),
+            device_name: "test accelerator".to_string(),
+            pci_address: Some("0000:01:00.0".to_string()),
+            api_version: 1,
+            driver_version: 2,
+            heap_index: 0,
+            physical_heap_bytes: 32 * 1024 * 1024 * 1024,
+            memory_budget_supported: true,
+            budget_bytes: Some(budget_bytes),
+            usage_bytes: Some(usage_bytes),
+            available_bytes: Some(budget_bytes.saturating_sub(usage_bytes)),
+        }
+    }
+
+    #[test]
+    fn physical_memory_restoration_accepts_driver_counter_noise_within_tolerance() {
+        let before = physical_memory_observation(
+            "vulkan-uuid:01",
+            30 * 1024 * 1024 * 1024,
+            256 * 1024 * 1024,
+        );
+        let mut after = before.clone();
+        after.usage_bytes = Some(before.usage_bytes.unwrap() + 8 * 1024 * 1024);
+        after.available_bytes = Some(before.available_bytes.unwrap() - 8 * 1024 * 1024);
+
+        let report = verify_runtime_physical_device_memory_restoration(&[before], &[after]);
+
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(report.restored_device_count, 1);
+    }
+
+    #[test]
+    fn physical_memory_restoration_rejects_retained_device_memory() {
+        let before = physical_memory_observation(
+            "vulkan-uuid:01",
+            30 * 1024 * 1024 * 1024,
+            256 * 1024 * 1024,
+        );
+        let mut after = before.clone();
+        after.usage_bytes = Some(before.usage_bytes.unwrap() + 64 * 1024 * 1024);
+        after.available_bytes = Some(before.available_bytes.unwrap() - 64 * 1024 * 1024);
+
+        let report = verify_runtime_physical_device_memory_restoration(&[before], &[after]);
+
+        assert!(!report.complete);
+        assert_eq!(report.restored_device_count, 0);
+        assert!(report.errors.iter().any(|error| error.contains("usage")));
+    }
+
+    #[test]
+    fn physical_memory_restoration_does_not_treat_a_changed_budget_as_retained_memory() {
+        let before = physical_memory_observation(
+            "vulkan-uuid:01",
+            30 * 1024 * 1024 * 1024,
+            256 * 1024 * 1024,
+        );
+        let mut after = before.clone();
+        after.budget_bytes = Some(before.budget_bytes.unwrap() - 8 * 1024 * 1024 * 1024);
+        after.available_bytes = Some(after.budget_bytes.unwrap() - after.usage_bytes.unwrap());
+
+        let report = verify_runtime_physical_device_memory_restoration(&[before], &[after]);
+
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(report.restored_device_count, 1);
+    }
+
+    #[test]
+    fn physical_memory_restoration_rejects_changed_or_ambiguous_target_sets() {
+        let first = physical_memory_observation("vulkan-uuid:01", 1024 * 1024 * 1024, 0);
+        let second = physical_memory_observation("vulkan-uuid:02", 1024 * 1024 * 1024, 0);
+
+        let changed = verify_runtime_physical_device_memory_restoration(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&second),
+        );
+        assert!(!changed.complete);
+        assert!(
+            changed
+                .errors
+                .iter()
+                .any(|error| error.contains("set changed"))
+        );
+
+        let duplicated = verify_runtime_physical_device_memory_restoration(
+            &[first.clone(), first.clone()],
+            std::slice::from_ref(&first),
+        );
+        assert!(!duplicated.complete);
+        assert!(
+            duplicated
+                .errors
+                .iter()
+                .any(|error| error.contains("repeat a target"))
+        );
+    }
+
+    #[test]
+    fn physical_memory_restoration_requires_driver_budget_counters() {
+        let before = physical_memory_observation("vulkan-uuid:01", 1024 * 1024 * 1024, 0);
+        let mut after = before.clone();
+        after.memory_budget_supported = false;
+        after.budget_bytes = None;
+        after.usage_bytes = None;
+        after.available_bytes = None;
+
+        let report = verify_runtime_physical_device_memory_restoration(&[before], &[after]);
+
+        assert!(!report.complete);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("VK_EXT_memory_budget"))
+        );
+    }
 
     fn formatter(template_source: &str) -> RuntimeChatFormatter {
         RuntimeChatFormatter {

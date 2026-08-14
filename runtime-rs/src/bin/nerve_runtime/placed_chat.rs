@@ -419,10 +419,15 @@ fn run_placed_chat(
         .clone()
         .ok_or_else(|| io::Error::other("placed runtime has no implementation selection"))?;
     let sparse_moe_contract = runtime_model.sparse_moe_execution_contract()?;
-    let device_restoration_before =
-        capture_vulkan_device_local_memory_restoration_snapshots(
-            bound_devices.devices.values().map(Rc::as_ref),
-        )?;
+    let selected_physical_device_ids = bound_devices
+        .physical_device_ids
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let device_restoration_before = capture_runtime_physical_device_memory_observations(
+        args,
+        &selected_physical_device_ids,
+    )?;
     let parameter_pool = VulkanResidentBufferPool::default();
     let stream = mount_placed_chat_stream(
         args,
@@ -939,12 +944,33 @@ fn run_placed_chat(
     let shutdown = engine.shutdown();
     print_runtime_shutdown(&shutdown);
     drop(parameter_pool);
-    let device_restoration = quiesce_and_verify_vulkan_device_local_memory_restoration(
-        bound_devices.devices.values().map(Rc::as_ref),
+    let execution_cache_release_errors = bound_devices
+        .devices
+        .iter()
+        .filter_map(|(logical_device_id, device)| {
+            device
+                .release_cached_execution_resources_after_quiescence()
+                .err()
+                .map(|error| {
+                    format!(
+                        "logical device {logical_device_id:?} failed execution-cache release: {error}",
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    drop(bound_devices);
+    let device_restoration_after = capture_runtime_physical_device_memory_observations(
+        args,
+        &selected_physical_device_ids,
+    )?;
+    let device_restoration = verify_runtime_physical_device_memory_restoration(
         &device_restoration_before,
+        &device_restoration_after,
     );
     print_runtime_device_restoration(&device_restoration);
-    let teardown_complete = shutdown.complete && device_restoration.complete;
+    let teardown_complete = shutdown.complete
+        && execution_cache_release_errors.is_empty()
+        && device_restoration.complete;
     match (chat_result, teardown_complete) {
         (Ok(()), true) => Ok(()),
         (Err(error), true) => Err(Box::new(io::Error::other(format!(
@@ -956,12 +982,12 @@ fn run_placed_chat(
             shutdown.scheduler_in_flight_activation_count,
         )))),
         (Ok(()), false) => Err(Box::new(io::Error::other(format!(
-            "placed chat teardown failed: resource_errors={:?}, device_restoration_errors={:?}",
+            "placed chat teardown failed: resource_errors={:?}, execution_cache_release_errors={execution_cache_release_errors:?}, device_restoration_errors={:?}",
             shutdown.errors,
             device_restoration.errors,
         )))),
         (Err(error), false) => Err(Box::new(io::Error::other(format!(
-            "placed chat failed: {error}; teardown also failed: resource_errors={:?}, device_restoration_errors={:?}",
+            "placed chat failed: {error}; teardown also failed: resource_errors={:?}, execution_cache_release_errors={execution_cache_release_errors:?}, device_restoration_errors={:?}",
             shutdown.errors,
             device_restoration.errors,
         )))),
