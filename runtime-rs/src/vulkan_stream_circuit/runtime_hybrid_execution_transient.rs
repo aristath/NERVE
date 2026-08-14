@@ -436,7 +436,8 @@ fn exact_vulkan_runtime_decode_scalar_queue_groups(
         .map(|checkpoint| checkpoint.component_id.as_str())
         .filter(|component_id| !distributed_components.contains(component_id))
         .collect::<BTreeSet<_>>();
-    let mut groups = BTreeMap::new();
+    let mut segments_by_component =
+        BTreeMap::<String, BTreeSet<(String, usize)>>::new();
     for slice in slice_plans {
         let distributed_dispatch_indices = execution_plan
             .execution_islands
@@ -476,16 +477,10 @@ fn exact_vulkan_runtime_decode_scalar_queue_groups(
                 segment_open = true;
             }
             if scalar_components.contains(dispatch.component_id.as_str()) {
-                let group = format!("{}:decode-segment:{segment_index}", slice.device_id);
-                if groups
-                    .insert(dispatch.component_id.clone(), group.clone())
-                    .is_some_and(|existing| existing != group)
-                {
-                    return runtime_hybrid_error(format!(
-                        "scalar demand component {:?} crosses decode transport segments",
-                        dispatch.component_id,
-                    ));
-                }
+                segments_by_component
+                    .entry(dispatch.component_id.clone())
+                    .or_default()
+                    .insert((slice.device_id.clone(), segment_index));
             }
             let publishes_remote_output = dispatch.descriptors.iter().any(|descriptor| {
                 let VulkanDescriptorResourceAddress::BoundaryOutput { signal_id } =
@@ -506,7 +501,46 @@ fn exact_vulkan_runtime_decode_scalar_queue_groups(
             }
         }
     }
-    Ok(groups)
+    exact_vulkan_runtime_decode_scalar_queue_groups_from_segments(
+        &segments_by_component,
+    )
+}
+
+fn exact_vulkan_runtime_decode_scalar_queue_groups_from_segments(
+    segments_by_component: &BTreeMap<String, BTreeSet<(String, usize)>>,
+) -> Result<BTreeMap<String, String>, VulkanRuntimeHybridPlacementError> {
+    segments_by_component
+        .iter()
+        .map(|(component_id, segments)| {
+            let devices = segments
+                .iter()
+                .map(|(device_id, _)| device_id.as_str())
+                .collect::<BTreeSet<_>>();
+            if devices.len() != 1 {
+                return runtime_hybrid_error(format!(
+                    "scalar demand component {component_id:?} spans {} logical devices outside a distributed execution island",
+                    devices.len(),
+                ));
+            }
+            let device_id = devices
+                .first()
+                .copied()
+                .expect("one scalar demand device was validated");
+            let group = if let [(segment_device_id, segment_index)] =
+                segments.iter().collect::<Vec<_>>().as_slice()
+            {
+                format!("{segment_device_id}:decode-segment:{segment_index}")
+            } else {
+                // Several transport segments can legitimately consume one
+                // component's lazy-resource selection (for example residual
+                // reads after a remote layer boundary). Keep that component's
+                // queue private instead of either merging unrelated segments
+                // or rejecting an otherwise valid serialized placement.
+                format!("{device_id}:decode-component:{component_id}")
+            };
+            Ok((component_id.clone(), group))
+        })
+        .collect()
 }
 
 fn exact_vulkan_runtime_mounted_decode_transient_plan(

@@ -1588,6 +1588,45 @@ fn runtime_hybrid_exact_gate_plan_shares_one_miss_queue_per_dispatch_segment() {
 }
 
 #[test]
+fn decode_scalar_queue_groups_keep_cross_segment_components_private() {
+    let grouped = exact_vulkan_runtime_decode_scalar_queue_groups_from_segments(
+        &BTreeMap::from([
+            (
+                "layer_00".to_string(),
+                BTreeSet::from([("gpu0".to_string(), 1)]),
+            ),
+            (
+                "layer_10".to_string(),
+                BTreeSet::from([
+                    ("gpu1".to_string(), 1),
+                    ("gpu1".to_string(), 2),
+                ]),
+            ),
+        ]),
+    )
+    .unwrap();
+
+    assert_eq!(grouped["layer_00"], "gpu0:decode-segment:1");
+    assert_eq!(grouped["layer_10"], "gpu1:decode-component:layer_10");
+}
+
+#[test]
+fn decode_scalar_queue_groups_reject_implicit_cross_device_execution() {
+    let error = exact_vulkan_runtime_decode_scalar_queue_groups_from_segments(
+        &BTreeMap::from([(
+            "layer_10".to_string(),
+            BTreeSet::from([
+                ("gpu0".to_string(), 1),
+                ("gpu1".to_string(), 1),
+            ]),
+        )]),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("outside a distributed execution island"));
+}
+
+#[test]
 fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
     let package_root = tiny_model_dir();
     let model = fixture_model_runtime_model_with_one_dynamic_group();
