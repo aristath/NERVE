@@ -946,6 +946,80 @@ fn stream_memory_admission_does_not_reserve_deferred_edges_twice() {
 }
 
 #[test]
+fn graph_edge_binding_preserves_execution_transient_shared_host_residency() {
+    let (base, edge_plans) = physical_execution_edge_base_plan();
+    let activations = VulkanDistributedActivationBufferPlan {
+        allocations: vec![VulkanDistributedActivationBufferAllocation {
+            storage: VulkanDistributedActivationStorage::Edge {
+                edge_index: 5,
+                owner_device_id: "owner".to_string(),
+            },
+            owner_device_id: "owner".to_string(),
+            component_id: "input_adapter".to_string(),
+            slot: 5,
+            byte_capacity: 8_192,
+            signal_ids: vec!["shared_context".to_string()],
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            input_use_count: 1,
+            output_use_count: 1,
+        }],
+        reduction_allocations: Vec::new(),
+        private_intermediate_allocations: Vec::new(),
+        allocation_count: 1,
+        import_count: 1,
+        reference_count: 1,
+        total_shared_byte_capacity: 8_192,
+        total_private_byte_capacity: 0,
+        route: VulkanSharedResidentBufferRoute::SharedHost,
+    };
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string(), "helper".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &activations,
+    )
+    .unwrap();
+    plan.add_execution_transient_reservation(
+        &[],
+        &[VulkanRuntimeSharedHostTransientAllocation {
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+            byte_capacity: 19,
+            concern: "cross-device timeline".to_string(),
+            allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
+        }],
+    )
+    .unwrap();
+    assert_eq!(plan.total_stream_shared_host_bytes, 19);
+
+    plan.bind_graph_edge_memory_domains(
+        &edge_plans,
+        &activations,
+        &BTreeMap::from([(
+            5,
+            physical_execution_edge_route(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging),
+        )]),
+        &BTreeMap::from([
+            ("owner".to_string(), "physical-a".to_string()),
+            ("helper".to_string(), "physical-b".to_string()),
+        ]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.total_stream_shared_host_bytes,
+        8_192 + 19,
+        "binding an exact graph-edge route must not erase ownerless execution staging",
+    );
+    assert_eq!(
+        physical_execution_unclassified_shared_host_logical_bytes(&plan).unwrap(),
+        0,
+    );
+}
+
+#[test]
 fn stream_memory_admission_rejects_inconsistent_shared_host_ledgers() {
     let base = physical_execution_residency_base_plan(1_000, 100);
     let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
@@ -1683,6 +1757,18 @@ fn feedback_control_binding_moves_exactly_one_allocation_to_shared_host() {
         &empty_physical_execution_activation_plan(),
     )
     .unwrap();
+    plan.add_execution_transient_reservation(
+        &[],
+        &[VulkanRuntimeSharedHostTransientAllocation {
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id: "owner".to_string(),
+            participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+            byte_capacity: 19,
+            concern: "cross-device timeline".to_string(),
+            allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
+        }],
+    )
+    .unwrap();
     let original = plan.clone();
     let physical = BTreeMap::from([
         ("owner".to_string(), "physical-a".to_string()),
@@ -1696,7 +1782,11 @@ fn feedback_control_binding_moves_exactly_one_allocation_to_shared_host() {
         plan.total_stream_device_local_bytes,
         original.total_stream_device_local_bytes - 12_345
     );
-    assert_eq!(plan.total_stream_shared_host_bytes, 12_345);
+    assert_eq!(
+        plan.total_stream_shared_host_bytes,
+        original.total_stream_shared_host_bytes + 12_345,
+        "feedback binding must preserve ownerless execution staging",
+    );
     assert_eq!(plan.resident_shared_host_allocations.len(), 1);
     assert!(matches!(
         &plan.resident_shared_host_allocations[0].kind,

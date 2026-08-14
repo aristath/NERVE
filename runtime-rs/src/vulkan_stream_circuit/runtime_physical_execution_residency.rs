@@ -465,6 +465,42 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
         })
     }
 
+    fn refresh_stream_residency_totals_from_ledgers(
+        &mut self,
+    ) -> Result<(), VulkanRuntimeResidencyPlanError> {
+        let total_stream_device_local_bytes = self.device_plans.iter().try_fold(
+            0usize,
+            |total, device| {
+                checked_residency_add(
+                    total,
+                    device.stream_device_local_bytes,
+                    "physical execution total stream device residency",
+                )
+            },
+        )?;
+        let device_owned_shared_host_bytes = self.device_plans.iter().try_fold(
+            0usize,
+            |total, device| {
+                checked_residency_add(
+                    total,
+                    device.stream_shared_host_bytes,
+                    "physical execution device-owned shared-host residency",
+                )
+            },
+        )?;
+        // Cross-device execution staging is intentionally not charged to an
+        // arbitrary device. It remains a plan-level ledger and must be added
+        // exactly once whenever a later binding refreshes aggregate totals.
+        let total_stream_shared_host_bytes = checked_residency_add(
+            device_owned_shared_host_bytes,
+            self.execution_transient_shared_host_bytes_per_stream,
+            "physical execution total shared-host residency",
+        )?;
+        self.total_stream_device_local_bytes = total_stream_device_local_bytes;
+        self.total_stream_shared_host_bytes = total_stream_shared_host_bytes;
+        Ok(())
+    }
+
     fn resize_feedback_control_residency(
         &mut self,
         exact_byte_capacity: usize,
@@ -1022,26 +1058,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             )?;
         }
         next.resident_shared_host_allocations = shared_host_additions;
-        next.total_stream_device_local_bytes = next.device_plans.iter().try_fold(
-            0usize,
-            |total, device| {
-                checked_residency_add(
-                    total,
-                    device.stream_device_local_bytes,
-                    "bound graph-edge total device residency",
-                )
-            },
-        )?;
-        next.total_stream_shared_host_bytes = next.device_plans.iter().try_fold(
-            0usize,
-            |total, device| {
-                checked_residency_add(
-                    total,
-                    device.stream_shared_host_bytes,
-                    "bound graph-edge total shared-host residency",
-                )
-            },
-        )?;
+        next.refresh_stream_residency_totals_from_ledgers()?;
         next.graph_edge_memory_domains_bound = true;
         *self = next;
         Ok(())
@@ -1179,26 +1196,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 participant_device_ids,
                 byte_capacity: allocation.byte_capacity,
             });
-        next.total_stream_device_local_bytes = next.device_plans.iter().try_fold(
-            0usize,
-            |total, device| {
-                checked_residency_add(
-                    total,
-                    device.stream_device_local_bytes,
-                    "feedback-control total device residency",
-                )
-            },
-        )?;
-        next.total_stream_shared_host_bytes = next.device_plans.iter().try_fold(
-            0usize,
-            |total, device| {
-                checked_residency_add(
-                    total,
-                    device.stream_shared_host_bytes,
-                    "feedback-control total shared-host residency",
-                )
-            },
-        )?;
+        next.refresh_stream_residency_totals_from_ledgers()?;
         next.feedback_control_memory_domain_bound = true;
         *self = next;
         Ok(())
@@ -1234,7 +1232,6 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
         }
 
         let spans_physical_devices = indices_by_physical_device.len() > 1;
-        let mut removed_device_bytes = 0usize;
         for indices in indices_by_physical_device.values() {
             let retained_index = (!spans_physical_devices)
                 .then(|| {
@@ -1274,21 +1271,8 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                             device.device_id,
                         ))
                     })?;
-                removed_device_bytes = checked_residency_add(
-                    removed_device_bytes,
-                    control_bytes,
-                    "physically bound stream-control residency",
-                )?;
             }
         }
-        next.total_stream_device_local_bytes = next
-            .total_stream_device_local_bytes
-            .checked_sub(removed_device_bytes)
-            .ok_or_else(|| {
-                VulkanRuntimeResidencyPlanError(
-                    "stream-control total device residency underflowed".to_string(),
-                )
-            })?;
 
         if spans_physical_devices {
             if next.shared_stream_control_host_bytes_per_stream != 0 {
@@ -1306,14 +1290,10 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
                 "shared stream-control device residency",
             )?;
-            next.total_stream_shared_host_bytes = checked_residency_add(
-                next.total_stream_shared_host_bytes,
-                VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
-                "shared stream-control total residency",
-            )?;
             next.shared_stream_control_host_bytes_per_stream =
                 VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
         }
+        next.refresh_stream_residency_totals_from_ledgers()?;
         *self = next;
         Ok(())
     }
@@ -1376,11 +1356,6 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 allocation.byte_capacity,
                 "execution transient stream residency",
             )?;
-            next.total_stream_device_local_bytes = checked_residency_add(
-                next.total_stream_device_local_bytes,
-                allocation.byte_capacity,
-                "execution transient total stream residency",
-            )?;
             device
                 .execution_transient_device_allocations
                 .push(allocation.clone());
@@ -1433,12 +1408,8 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
             shared_host_bytes,
             "execution transient shared-host residency",
         )?;
-        next.total_stream_shared_host_bytes = checked_residency_add(
-            next.total_stream_shared_host_bytes,
-            shared_host_bytes,
-            "execution transient total shared-host residency",
-        )?;
         next.execution_transient_shared_host_allocations = shared_host_allocations.to_vec();
+        next.refresh_stream_residency_totals_from_ledgers()?;
         *self = next;
         Ok(())
     }
