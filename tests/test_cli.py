@@ -5,9 +5,11 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 from nerve.cli import (
     build_runtime_command,
+    main,
     resolve_runtime_package_manifest,
 )
 from nerve.model_package import copy_shader_templates
@@ -27,6 +29,7 @@ def runtime_args(**overrides: object) -> Namespace:
         "device": None,
         "place_node": [],
         "shard_component": [],
+        "physical_strategy": [],
         "bind_device": [],
         "allow_physical_device": [],
         "duplicate_after": [],
@@ -54,6 +57,59 @@ def runtime_args(**overrides: object) -> Namespace:
 
 
 class RuntimeCliCommandTest(unittest.TestCase):
+    def test_main_accepts_explicit_physical_strategy_for_chat(self) -> None:
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "nerve",
+                    "--run",
+                    "/tmp/model/vulkan_resident_package.json",
+                    "--chat",
+                    "--shard-component",
+                    "layer_02=gpu0,gpu1",
+                    "--physical-strategy",
+                    "layer_02=tensor_parallel",
+                ],
+            ),
+            patch("nerve.cli.run_engine") as run_engine,
+        ):
+            main()
+
+        parsed = run_engine.call_args.args[0]
+        self.assertEqual(["layer_02=gpu0,gpu1"], parsed.shard_component)
+        self.assertEqual(["layer_02=tensor_parallel"], parsed.physical_strategy)
+
+    def test_build_runtime_command_forwards_each_physical_strategy_in_order(
+        self,
+    ) -> None:
+        package = Path("compiled_models/model_x/vulkan_resident_package.json")
+        args = runtime_args(
+            chat=True,
+            shard_component=[
+                "layer_02=gpu0,gpu1",
+                "layer_07=gpu1,gpu2",
+            ],
+            physical_strategy=[
+                "layer_02=tensor_parallel",
+                "layer_07=tensor_parallel_expert",
+            ],
+        )
+
+        command = build_runtime_command(args, package)
+
+        self.assertEqual(
+            [
+                ("--physical-strategy", "layer_02=tensor_parallel"),
+                ("--physical-strategy", "layer_07=tensor_parallel_expert"),
+            ],
+            [
+                (command[index], command[index + 1])
+                for index in range(len(command) - 1)
+                if command[index] == "--physical-strategy"
+            ],
+        )
+
     def test_build_runtime_command_forwards_physical_device_allowlist(self) -> None:
         package = Path("compiled_models/model_x/vulkan_resident_package.json")
         first = "vulkan-uuid:00000000070000000000000000000000"
@@ -539,6 +595,7 @@ class RuntimeCliCommandTest(unittest.TestCase):
             device="gpu0",
             place_node=["layer_02=gpu1", "layer_07=lan:worker-a"],
             shard_component=["layer_02=gpu1,gpu0"],
+            physical_strategy=["layer_02=tensor_parallel"],
             bind_device=["gpu0=vulkan:0", "gpu1=vulkan:5"],
             duplicate_after=["layer_05=layer_05_repeat"],
             chain="layer_00,layer_01,layer_05,layer_05_repeat=layer_05,layer_06",
@@ -569,6 +626,8 @@ class RuntimeCliCommandTest(unittest.TestCase):
                 "layer_07=lan:worker-a",
                 "--shard-component",
                 "layer_02=gpu1,gpu0",
+                "--physical-strategy",
+                "layer_02=tensor_parallel",
                 "--bind-device",
                 "gpu0=vulkan:0",
                 "--bind-device",

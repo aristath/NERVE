@@ -172,6 +172,17 @@ def main() -> None:
         help="split one component's supported internal work across logical devices; may be repeated",
     )
     parser.add_argument(
+        "--physical-strategy",
+        action="append",
+        default=[],
+        metavar="COMPONENT=STRATEGY",
+        help=(
+            "select one complete compiler-declared strategy for a manually "
+            "sharded component; STRATEGY is tensor_parallel, expert_parallel, "
+            "or tensor_parallel_expert; may be repeated"
+        ),
+    )
+    parser.add_argument(
         "--bind-device",
         action="append",
         default=[],
@@ -549,6 +560,7 @@ def validate_action_options(
         ("--device", args.device is not None),
         ("--place-node", bool(args.place_node)),
         ("--shard-component", bool(args.shard_component)),
+        ("--physical-strategy", bool(args.physical_strategy)),
         ("--bind-device", bool(args.bind_device)),
         ("--duplicate-after", bool(args.duplicate_after)),
         ("--chain", args.chain is not None),
@@ -746,6 +758,8 @@ def build_runtime_command(
         runtime_args.extend(["--place-node", raw_placement])
     for raw_sharding in args.shard_component:
         runtime_args.extend(["--shard-component", raw_sharding])
+    for raw_strategy in args.physical_strategy:
+        runtime_args.extend(["--physical-strategy", raw_strategy])
     for raw_binding in args.bind_device:
         runtime_args.extend(["--bind-device", raw_binding])
     for physical_device_id in args.allow_physical_device:

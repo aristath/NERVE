@@ -228,7 +228,10 @@ the local placement calibration, and the mounted graph.
   whole-expert, or intra-expert family. The runtime resolves a unique maximal
   complete contract set independently for decode, batched decode, and prefill,
   incorporates it into the mounted execution identity, and rejects unavailable
-  or ambiguous families before model allocation. Workload-free inspection of
+  or ambiguous families before model allocation. The normal `python -m nerve`
+  frontend now transports repeated strategy assignments losslessly; legality
+  remains owned and adversarially tested by the Rust runtime so frontends do
+  not duplicate or constrain the execution-strategy vocabulary. Workload-free inspection of
   DeepSeek `layer_00` resolves exact gate/up plus down pairs for all three
   intra-expert TP phase/shape paths, and separately resolves all three
   whole-expert paths. This closes the manual-selection ambiguity but remains
