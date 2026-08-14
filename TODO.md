@@ -509,9 +509,6 @@ For every numbered item below:
   runtime candidate without inventing duplicate arithmetic or a model-specific
   execution strategy. It does not claim a single-stream speedup, and its live
   Vulkan behavior remains part of the explicitly authorized mounted proof.
-- Allow a compiler-declared predictable router dependency to trigger safe
-  prefetch or preselection without a DeepSeek-specific runtime branch.
-
 ### 6. Build the hybrid placement and scheduling optimizer
 
 - Enumerate legal single-device, serialized, expert-parallel, TP, replicated,
