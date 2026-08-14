@@ -977,41 +977,21 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 else {
                     continue;
                 };
-                let mut component_ids = distributed_selected_resource_execution_ownership_plan
-                    .device(logical_device_id)
-                    .into_iter()
-                    .flat_map(|device| device.selectors.iter())
-                    .map(|selector| selector.component_id.clone())
-                    .collect::<BTreeSet<_>>();
                 let owner_slice_index = device_slices
                     .iter()
                     .position(|slice| slice.device_id == *logical_device_id);
-                if let Some(slice_index) = owner_slice_index {
-                    let package_slice = &device_slices[slice_index];
-                    if !package_slice
-                        .placed_plan
-                        .binding_plan
-                        .selected_parameter_tensors()
-                        .map_err(|error| {
-                            VulkanResidentInProcessPlacedRuntimeError::Package(
-                                VulkanResidentTokenModelPackageError::new(format!(
-                                    "failed to inspect selected parameters for device {:?}: {error}",
-                                    package_slice.device_id
-                                )),
-                            )
-                        })?
-                        .is_empty()
-                    {
-                        component_ids.extend(
-                            package_slice
-                                .placed_plan
-                                .binding_plan
-                                .circuits
-                                .iter()
-                                .map(|circuit| circuit.component_id.clone()),
-                        );
-                    }
-                }
+                let component_ids =
+                    compiled_resource_component_ids_for_selector_ownership(
+                        &compiled_resource_contract,
+                        &execution_ownership,
+                    )
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::Package(
+                            VulkanResidentTokenModelPackageError::new(format!(
+                                "failed to resolve dynamic-resource components for device {logical_device_id:?}: {error}",
+                            )),
+                        )
+                    })?;
                 if component_ids.is_empty() {
                     continue;
                 }

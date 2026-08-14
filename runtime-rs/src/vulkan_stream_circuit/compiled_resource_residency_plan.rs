@@ -292,6 +292,28 @@ fn compiled_resource_selector_ownership_for_device_set(
     }
 }
 
+fn compiled_resource_component_ids_for_selector_ownership(
+    contract: &CompiledResourceResidencyContract,
+    ownership: &VulkanCompiledResourceSelectorOwnership,
+) -> Result<BTreeSet<String>, VulkanRuntimeResidencyPlanError> {
+    ownership
+        .selector_ids()
+        .into_iter()
+        .map(|selector_id| {
+            contract
+                .selectors
+                .iter()
+                .find(|selector| selector.id == selector_id)
+                .map(|selector| selector.component_id.clone())
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "compiled resource ownership references unknown selector {selector_id:?}",
+                    ))
+                })
+        })
+        .collect()
+}
+
 fn plan_compiled_parameter_residency_for_device_set_with_selector_ownership(
     runtime_model: &VulkanResidentRuntimeModel,
     contract: &CompiledResourceResidencyContract,

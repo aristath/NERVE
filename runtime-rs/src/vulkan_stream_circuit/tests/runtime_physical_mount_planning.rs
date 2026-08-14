@@ -98,6 +98,62 @@ fn physical_mount_plan_uses_requested_context_without_opening_vulkan() {
 }
 
 #[test]
+fn physical_mount_admits_stream_owned_dynamic_parameter_tables_once() {
+    let baseline_model = fixture_model_runtime_model();
+    let dynamic_model = fixture_model_runtime_model_with_one_dynamic_group();
+    let baseline_physical = VulkanRuntimePhysicalExecutionPlan::uniform(&baseline_model);
+    let dynamic_physical = VulkanRuntimePhysicalExecutionPlan::uniform(&dynamic_model);
+    let [logical_device_id] = dynamic_physical
+        .device_ids(&dynamic_model)
+        .try_into()
+        .unwrap();
+    let device = physical_mount_test_device(&logical_device_id);
+    let baseline = plan_vulkan_runtime_physical_mount(
+        tiny_model_dir(),
+        &baseline_model,
+        &baseline_physical,
+        None,
+        64,
+        0,
+        ResourceResidencyPolicy::Eager,
+        std::slice::from_ref(&device),
+        usize::MAX,
+    )
+    .unwrap()
+    .unwrap();
+    let dynamic = plan_vulkan_runtime_physical_mount(
+        tiny_model_dir(),
+        &dynamic_model,
+        &dynamic_physical,
+        None,
+        64,
+        0,
+        ResourceResidencyPolicy::Eager,
+        std::slice::from_ref(&device),
+        usize::MAX,
+    )
+    .unwrap()
+    .unwrap();
+    let contract = instantiate_runtime_resource_contract(&dynamic_model).unwrap();
+    let layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
+    let expected_stream_fork_bytes = layout
+        .parameter_slot_tables
+        .iter()
+        .filter(|table| table.execution_scope == dynamic_model.execution_scope)
+        .map(|table| table.slot_count().unwrap() * size_of::<u32>())
+        .sum::<usize>();
+    let baseline_stream = baseline.physical_execution_residency_plan.device_plans[0]
+        .breakdown
+        .execution_transient_device_bytes_per_stream;
+    let dynamic_stream = dynamic.physical_execution_residency_plan.device_plans[0]
+        .breakdown
+        .execution_transient_device_bytes_per_stream;
+
+    assert!(expected_stream_fork_bytes > 0);
+    assert_eq!(dynamic_stream - baseline_stream, expected_stream_fork_bytes);
+}
+
+#[test]
 fn physical_mount_plan_sizes_feedback_control_from_the_exact_dispatch_set() {
     let model = fixture_model_runtime_model();
     let package_root = tiny_model_dir();

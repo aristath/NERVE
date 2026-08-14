@@ -249,6 +249,80 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn exact_vulkan_runtime_dynamic_resource_stream_fork_transient_plan(
+    runtime_model: &VulkanResidentRuntimeModel,
+    resource_contract: &CompiledResourceResidencyContract,
+    resource_layout: &VulkanCompiledResourceAddressLayout,
+    logical_device_ids: &[String],
+    input_device_id: &str,
+    output_device_id: &str,
+    mount_speculative_decoders: bool,
+    execution_ownership_plan: &VulkanDistributedSelectedResourceStorePlan,
+) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanResidentTokenModelPackageError> {
+    let mut transient = VulkanRuntimeHybridExecutionTransientPlan::default();
+    for logical_device_id in logical_device_ids {
+        let logical_device_set = BTreeSet::from([logical_device_id.clone()]);
+        let Some(execution_ownership) =
+            compiled_resource_selector_ownership_for_device_set(
+                runtime_model,
+                resource_contract,
+                input_device_id,
+                output_device_id,
+                &logical_device_set,
+                mount_speculative_decoders,
+                execution_ownership_plan,
+            )
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to plan stream-owned dynamic resources on {logical_device_id:?}: {error}",
+                ))
+            })?
+        else {
+            continue;
+        };
+        let component_ids = compiled_resource_component_ids_for_selector_ownership(
+            resource_contract,
+            &execution_ownership,
+        )
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to resolve stream-owned dynamic-resource components on {logical_device_id:?}: {error}",
+            ))
+        })?;
+        for table in resource_layout.parameter_slot_tables.iter().filter(|table| {
+            table.execution_scope == runtime_model.execution_scope
+                && component_ids.contains(&table.key.component_id)
+        }) {
+            let byte_capacity = table
+                .slot_count()
+                .and_then(|slot_count| slot_count.checked_mul(size_of::<u32>()))
+                .filter(|byte_capacity| *byte_capacity > 0)
+                .ok_or_else(|| {
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "stream-owned dynamic-resource table {}.{} has an invalid byte capacity",
+                        table.key.component_id, table.key.node_id,
+                    ))
+                })?;
+            transient
+                .add_device_allocation(
+                    logical_device_id,
+                    byte_capacity,
+                    &format!(
+                        "stream dynamic parameter slots {}.{}:{}",
+                        table.key.component_id,
+                        table.key.node_id,
+                        table.key.selection_signal,
+                    ),
+                )
+                .map_err(|error| {
+                    VulkanResidentTokenModelPackageError::new(error.to_string())
+                })?;
+        }
+    }
+    Ok(transient)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn exact_vulkan_runtime_hybrid_prefill_runners_transient_plan(
     runtime_model: &VulkanResidentRuntimeModel,
     component_ids: &BTreeSet<String>,

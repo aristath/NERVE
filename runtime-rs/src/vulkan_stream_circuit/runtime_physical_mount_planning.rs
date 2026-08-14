@@ -78,6 +78,32 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             speculative_draft_tokens,
             residency_policy,
         )?;
+    let resource_layout = VulkanCompiledResourceAddressLayout::from_contract(resource_contract)
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to plan stream-owned dynamic-resource layout: {error}",
+            ))
+        })?;
+    let baseline_execution_ownership =
+        VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(
+            baseline_execution_plans,
+        )
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to plan baseline selected-resource execution ownership: {error}",
+            ))
+        })?;
+    let baseline_dynamic_resource_stream_fork =
+        exact_vulkan_runtime_dynamic_resource_stream_fork_transient_plan(
+            runtime_model,
+            resource_contract,
+            &resource_layout,
+            logical_device_ids,
+            input_device_id,
+            output_device_id,
+            speculative_draft_tokens > 0,
+            &baseline_execution_ownership,
+        )?;
     let mut execution_transient = exact_vulkan_runtime_mounted_prefill_transient_plan(
         runtime_model,
         slice_plans,
@@ -87,6 +113,13 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
         residency_policy,
         speculative_draft_tokens,
     )?;
+    execution_transient
+        .extend(baseline_dynamic_resource_stream_fork)
+        .map_err(|error| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "failed to attach baseline stream-owned dynamic resources: {error}",
+            ))
+        })?;
     execution_transient
         .extend(speculative_catch_up_transient.clone())
         .map_err(|error| {
@@ -143,6 +176,26 @@ fn resolve_vulkan_runtime_selected_resources_for_prefill_lane_capacity(
             residency_policy,
             speculative_draft_tokens,
         )?;
+        resolved_transient
+            .extend(
+                exact_vulkan_runtime_dynamic_resource_stream_fork_transient_plan(
+                    runtime_model,
+                    resource_contract,
+                    &resource_layout,
+                    logical_device_ids,
+                    input_device_id,
+                    output_device_id,
+                    speculative_draft_tokens > 0,
+                    &resolution
+                        .plans
+                        .selected_resource_execution_ownership_plan,
+                )?,
+            )
+            .map_err(|error| {
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "failed to attach resolved stream-owned dynamic resources: {error}",
+                ))
+            })?;
         resolved_transient
             .extend(speculative_catch_up_transient.clone())
             .map_err(|error| {

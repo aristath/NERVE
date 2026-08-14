@@ -54,6 +54,124 @@ fn runtime_hybrid_shared_host_ledger_extends_without_collapsing_allocations() {
 }
 
 #[test]
+fn stream_dynamic_resource_forks_are_admitted_as_exact_per_table_allocations() {
+    let model = fixture_model_runtime_model_with_one_dynamic_group();
+    let contract = instantiate_runtime_resource_contract(&model).unwrap();
+    let layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
+    let empty_execution = VulkanDistributedExecutionPlan {
+        device_ids: Vec::new(),
+        storage_buffer_offset_alignment: 16,
+        dispatches: Vec::new(),
+        execution_islands: Vec::new(),
+        shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+        shared_input_byte_capacity: 0,
+        shared_output_byte_capacity: 0,
+        distributed_parameter_byte_count: 0,
+    };
+    let ownership =
+        VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&empty_execution)
+            .unwrap();
+    let logical_device_id = model.placement.default_device_id.clone();
+    let planned = exact_vulkan_runtime_dynamic_resource_stream_fork_transient_plan(
+        &model,
+        &contract,
+        &layout,
+        std::slice::from_ref(&logical_device_id),
+        &logical_device_id,
+        &logical_device_id,
+        false,
+        &ownership,
+    )
+    .unwrap();
+    let expected = layout
+        .parameter_slot_tables
+        .iter()
+        .filter(|table| {
+            table.execution_scope == model.execution_scope
+                && table.key.component_id == "layer_00"
+        })
+        .map(|table| table.slot_count().unwrap() * size_of::<u32>())
+        .collect::<Vec<_>>();
+
+    assert!(!expected.is_empty());
+    assert_eq!(planned.device_allocations.len(), expected.len());
+    assert_eq!(
+        planned
+            .device_allocations
+            .iter()
+            .map(|allocation| allocation.byte_capacity)
+            .collect::<Vec<_>>(),
+        expected,
+    );
+    assert!(planned.device_allocations.iter().all(|allocation| {
+        allocation.logical_device_id == logical_device_id
+            && allocation.allocation_class
+                == VulkanRuntimeStreamAllocationClass::Permanent
+            && allocation
+                .concern
+                .starts_with("stream dynamic parameter slots layer_00.")
+    }));
+    assert_eq!(
+        planned.device_bytes_by_logical_device[&logical_device_id],
+        expected.into_iter().sum::<usize>(),
+    );
+
+    let unowned = exact_vulkan_runtime_dynamic_resource_stream_fork_transient_plan(
+        &model,
+        &contract,
+        &layout,
+        &["gpu1".to_string()],
+        &logical_device_id,
+        &logical_device_id,
+        false,
+        &ownership,
+    )
+    .unwrap();
+    assert_eq!(
+        unowned,
+        VulkanRuntimeHybridExecutionTransientPlan::default(),
+    );
+}
+
+#[test]
+fn stream_dynamic_resource_fork_planning_rejects_zero_capacity_tables() {
+    let model = fixture_model_runtime_model_with_one_dynamic_group();
+    let contract = instantiate_runtime_resource_contract(&model).unwrap();
+    let mut layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
+    layout.parameter_slot_tables[0].mapping =
+        VulkanCompiledParameterSlotMapping::Explicit {
+            parameter_slots: Vec::new(),
+        };
+    let ownership = VulkanDistributedSelectedResourceStorePlan::from_execution_plan(
+        &VulkanDistributedExecutionPlan {
+            device_ids: Vec::new(),
+            storage_buffer_offset_alignment: 16,
+            dispatches: Vec::new(),
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 0,
+            shared_output_byte_capacity: 0,
+            distributed_parameter_byte_count: 0,
+        },
+    )
+    .unwrap();
+    let logical_device_id = model.placement.default_device_id.clone();
+
+    let error = exact_vulkan_runtime_dynamic_resource_stream_fork_transient_plan(
+        &model,
+        &contract,
+        &layout,
+        std::slice::from_ref(&logical_device_id),
+        &logical_device_id,
+        &logical_device_id,
+        false,
+        &ownership,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("invalid byte capacity"));
+}
+
+#[test]
 fn exact_hybrid_snapshot_writers_deduplicate_state_aliases_and_reject_conflicts() {
     let descriptor = |binding, usage, state_id: &str, static_bytes| {
         VulkanResolvedDescriptorBinding {
