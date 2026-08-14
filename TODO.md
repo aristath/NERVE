@@ -140,6 +140,20 @@ the local placement calibration, and the mounted graph.
   physical-plan validation, duplicate/altered/overlapping application
   rejection, and incompatible-baseline coverage. Real-model TP execution is
   still awaiting the explicitly authorized live gate.
+- Component-region implementation overlays now use a v2 transactional ABI
+  that can replace only the parameter bindings owned by the selected region,
+  including adding representation-local scale bindings. Source bindings must
+  match exactly, replacement bindings cannot collide with or mutate an
+  unrelated region, both circuit parameter tables remain identical, repeated
+  graph instances remain isolated, and node/kernel/parameter changes commit
+  only after the complete resulting circuit validates. This removes the former
+  whole-component replacement requirement for per-layer native/INT4
+  alternatives without adding model- or vendor-specific runtime behavior.
+  The current DeepSeek package still passes exact two-R9700 TP contract
+  resolution and full 131,072-activation demand-paged mount admission with the
+  rebuilt runtime; the inspection submitted no work and restored the observed
+  57/88 MiB pre-existing reservations exactly. Constructing and promoting the
+  actual alternative representations remains below.
 - Hyper-connection/RMS fusion is now a structure-discovered optimizer
   implementation rather than a lowest-common-denominator compiler decision.
   On the current DeepSeek package it discovers two independent physical
@@ -968,6 +982,9 @@ For every numbered item below:
   real mounted Qwen and DeepSeek components once live validation is authorized.
 - Add alternative structured INT4, FP8, INT8, FP16, BF16, or other formats only
   through compiler-emitted legal contracts and behavioral-equivalence evidence.
+  Use the parameterized component-region v2 ABI to keep unrelated operators and
+  bindings native; do not duplicate an entire layer merely to replace one
+  parameterized region.
 - Select representation and placement together. Account for whole-island
   execution, conversion boundaries, resident footprint, lazy reload traffic,
   transient peak, and current headroom—not an isolated kernel or advertised
