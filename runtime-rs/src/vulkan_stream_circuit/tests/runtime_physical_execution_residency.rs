@@ -1182,6 +1182,61 @@ fn resident_shared_host_requirements_are_queried_per_physical_allocation() {
 }
 
 #[test]
+fn distributed_shared_host_requirement_exactly_backs_runtime_activation_allocation() {
+    let Some((owner, helper)) = selected_test_vulkan_device_pair() else {
+        eprintln!("skipping exact shared-host admission test without two explicit Vulkan devices");
+        return;
+    };
+    let byte_capacity = 32_768;
+    let requirement = owner
+        .shared_host_allocation_requirement_bytes(&[helper.as_ref()], byte_capacity)
+        .unwrap();
+    let plan = VulkanDistributedActivationBufferPlan {
+        allocations: vec![VulkanDistributedActivationBufferAllocation {
+            storage: VulkanDistributedActivationStorage::ActivationSlot,
+            owner_device_id: "owner".to_string(),
+            component_id: "component".to_string(),
+            slot: 7,
+            byte_capacity,
+            signal_ids: vec!["selection".to_string()],
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            input_use_count: 1,
+            output_use_count: 1,
+        }],
+        reduction_allocations: Vec::new(),
+        private_intermediate_allocations: Vec::new(),
+        allocation_count: 1,
+        import_count: 1,
+        reference_count: 2,
+        total_shared_byte_capacity: byte_capacity,
+        total_private_byte_capacity: 0,
+        route: VulkanSharedResidentBufferRoute::SharedHost,
+    };
+    let admission = VulkanMemoryAdmission::reserve(
+        &[],
+        Some((
+            owner.as_ref(),
+            vulkan_safe_host_available_bytes().unwrap(),
+            requirement,
+        )),
+    )
+    .unwrap();
+    let _scope = admission.enter();
+
+    let buffers = VulkanDistributedActivationBuffers::allocate(&plan, |device_id| match device_id {
+        "owner" => Ok(owner.as_ref()),
+        "helper" => Ok(helper.as_ref()),
+        other => Err(format!("unexpected fixture device {other}")),
+    })
+    .unwrap();
+
+    admission
+        .ensure_fully_consumed("distributed activation fixture")
+        .unwrap();
+    assert_eq!(buffers.total_shared_byte_capacity, byte_capacity);
+}
+
+#[test]
 fn physical_execution_residency_rejects_malformed_resident_ledgers_and_overrides() {
     let parameters = empty_physical_execution_parameter_allocations();
     let exclusions = empty_physical_execution_parameter_exclusions();

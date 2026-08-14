@@ -1459,7 +1459,16 @@ where
                 }
                 let staging_allocation = source_device
                     .create_shared_host_allocation(&peer_devices, group.byte_capacity)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            format!(
+                                "failed to allocate shared-host staging for produced port {}.{} across {} physical devices: {error}",
+                                group.source_component_id,
+                                group.source_port_id,
+                                unique_devices.len(),
+                            ),
+                        ))
+                    })?;
                 let staging = unique_devices
                     .iter()
                     .map(|(device, _)| {
@@ -1508,7 +1517,16 @@ where
             } else {
                 let staging_allocation = source_device
                     .create_shared_host_allocation(&peer_devices, group.byte_capacity)
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                    .map_err(|error| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            format!(
+                                "failed to allocate fallback shared-host staging for produced port {}.{} across {} physical devices: {error}",
+                                group.source_component_id,
+                                group.source_port_id,
+                                unique_devices.len(),
+                            ),
+                        ))
+                    })?;
                 let staging = unique_devices
                     .iter()
                     .map(|(device, _)| {
@@ -1798,7 +1816,12 @@ where
             // control words cannot justify that weaker and more complex path.
             let allocation = owner_device
                 .create_shared_host_allocation(&peers, VULKAN_STREAM_CONTROL_BYTE_CAPACITY)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                .map_err(|error| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                        "failed to allocate shared stream control across {} physical devices: {error}",
+                        unique_devices.len(),
+                    )))
+                })?;
             unique_devices
                 .iter()
                 .map(|(device, _)| {
