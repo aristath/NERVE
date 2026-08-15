@@ -1338,6 +1338,12 @@ mod exact_case_replay_tests {
             "another-component-contract-label".to_string();
         relabeled.dispatches[0].implementation_digest =
             format!("sha256:{}", "d".repeat(64));
+        relabeled.dispatches[0].input_activation.component_id = "another-layer".to_string();
+        relabeled.dispatches[0].input_activation.signal_id = "another-input".to_string();
+        relabeled.dispatches[0].input_activation.slot += 100;
+        relabeled.dispatches[0].output_activation.component_id = "another-layer".to_string();
+        relabeled.dispatches[0].output_activation.signal_id = "another-output".to_string();
+        relabeled.dispatches[0].output_activation.slot += 100;
         relabeled.execution_islands = resolved_physical_execution_islands_for_phase(
             &relabeled.dispatches,
             relabeled.shared_activation_route,
@@ -1363,7 +1369,8 @@ mod exact_case_replay_tests {
         let first = vulkan_distributed_execution_graph_digest("signature", &plan, &[0]).unwrap();
 
         let mut different_selection_storage = plan;
-        different_selection_storage.dispatches[0].selected_resource_activations[0].slot += 1;
+        different_selection_storage.dispatches[0].selected_resource_activations[0]
+            .signal_byte_capacity += 1;
         let different = vulkan_distributed_execution_graph_digest(
             "signature",
             &different_selection_storage,

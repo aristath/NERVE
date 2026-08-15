@@ -305,6 +305,7 @@ pub(crate) fn vulkan_distributed_execution_graph_digest(
         );
     }
 
+    let mut activation_aliases = BTreeMap::new();
     let dispatches = dispatch_indices
         .iter()
         .map(|dispatch_index| {
@@ -334,16 +335,16 @@ pub(crate) fn vulkan_distributed_execution_graph_digest(
                 "input_width": dispatch.input_width,
                 "row_alignment": dispatch.row_alignment,
                 "has_lazy_resource_requirements": dispatch.has_lazy_resource_requirements,
-                "input_activation": distributed_execution_activation_graph_identity(&dispatch.input_activation),
+                "input_activation": distributed_execution_activation_graph_identity(&dispatch.input_activation, &mut activation_aliases),
                 "input_distribution": distributed_input_distribution_name(dispatch.input_distribution),
                 "auxiliary_inputs": dispatch.auxiliary_input_activations.iter().zip(&dispatch.auxiliary_input_distributions).map(|(activation, distribution)| serde_json::json!({
-                    "activation": distributed_execution_activation_graph_identity(activation),
+                    "activation": distributed_execution_activation_graph_identity(activation, &mut activation_aliases),
                     "distribution": distributed_input_distribution_name(*distribution),
                 })).collect::<Vec<_>>(),
                 "selected_resource_activations": dispatch.selected_resource_activations.iter()
-                    .map(distributed_execution_activation_graph_identity)
+                    .map(|activation| distributed_execution_activation_graph_identity(activation, &mut activation_aliases))
                     .collect::<Vec<_>>(),
-                "output_activation": distributed_execution_activation_graph_identity(&dispatch.output_activation),
+                "output_activation": distributed_execution_activation_graph_identity(&dispatch.output_activation, &mut activation_aliases),
                 "output_collection": distributed_output_collection_name(dispatch.output_collection),
                 "reduction": distributed_execution_reduction_graph_identity(dispatch.reduction.as_ref()),
                 "distribution": distributed_dispatch_distribution_name(dispatch.distribution),
@@ -404,7 +405,7 @@ pub(crate) fn vulkan_distributed_execution_graph_digest(
     }
 
     let payload = serde_json::to_vec(&serde_json::json!({
-        "schema": "nerve.distributed_execution_graph.v4",
+        "schema": "nerve.distributed_execution_graph.v5",
         "compiled_execution_signature": compiled_execution_signature,
         "dispatches": dispatches,
         "islands": islands,
@@ -419,10 +420,28 @@ pub(crate) fn vulkan_distributed_execution_graph_digest(
 
 fn distributed_execution_activation_graph_identity(
     activation: &VulkanDistributedActivationSlot,
+    aliases: &mut BTreeMap<
+        (
+            String,
+            String,
+            usize,
+            VulkanDistributedActivationStorage,
+        ),
+        usize,
+    >,
 ) -> serde_json::Value {
+    let next_alias = aliases.len();
+    let allocation_alias = *aliases
+        .entry((
+            activation.component_id.clone(),
+            activation.signal_id.clone(),
+            activation.slot,
+            activation.storage.clone(),
+        ))
+        .or_insert(next_alias);
     serde_json::json!({
         "binding": activation.binding,
-        "slot": activation.slot,
+        "allocation_alias": allocation_alias,
         "byte_capacity": activation.byte_capacity,
         "signal_byte_capacity": activation.signal_byte_capacity,
         "storage": match activation.storage {
