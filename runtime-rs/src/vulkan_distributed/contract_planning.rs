@@ -339,10 +339,22 @@ fn plan_contract_dispatch(
         }
         let binding = usize::try_from(input.binding)
             .map_err(|_| dispatch_error(dispatch, "input binding exceeds usize".to_string()))?;
+        let required_byte_capacity = if input.distribution == InputDistribution::Sharded {
+            logical_extent
+                .checked_mul(activation_element_bytes)
+                .ok_or_else(|| {
+                    dispatch_error(
+                        dispatch,
+                        "partitioned input activation byte capacity overflowed".to_string(),
+                    )
+                })?
+        } else {
+            1
+        };
         let activation = distributed_activation(
             dispatch,
             binding,
-            1,
+            required_byte_capacity,
             "contract input",
             edge_placements,
             activation_element_bytes,
@@ -362,13 +374,17 @@ fn plan_contract_dispatch(
             logical_extent,
         )?;
         if input.distribution == InputDistribution::Sharded {
+            let role = format!(
+                "input binding {} signal {:?} storage {:?}",
+                input.binding, activation.signal_id, activation.storage,
+            );
             logical_alignment = aligned_activation_partition(
                 dispatch,
                 logical_alignment,
                 logical_extent,
                 activation_byte_capacity,
                 storage_buffer_offset_alignment,
-                "input",
+                &role,
             )?;
         }
         inputs.push((input, activation, activation_byte_capacity));
@@ -397,10 +413,18 @@ fn plan_contract_dispatch(
     }
     let output_binding = usize::try_from(output_contract.binding)
         .map_err(|_| dispatch_error(dispatch, "output binding exceeds usize".to_string()))?;
+    let output_required_byte_capacity = logical_extent
+        .checked_mul(activation_element_bytes)
+        .ok_or_else(|| {
+            dispatch_error(
+                dispatch,
+                "partitioned output activation byte capacity overflowed".to_string(),
+            )
+        })?;
     let output_activation = distributed_activation(
         dispatch,
         output_binding,
-        1,
+        output_required_byte_capacity,
         "contract output",
         edge_placements,
         activation_element_bytes,

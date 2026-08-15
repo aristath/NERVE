@@ -73,6 +73,19 @@ mod tests {
 
         assert_eq!(activation.byte_capacity, 10_240);
         assert_eq!(activation.signal_byte_capacity, 10_240);
+
+        let isolated = distributed_activation(
+            &dispatch,
+            0,
+            10_240,
+            "contract input",
+            &[],
+            2,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(isolated.byte_capacity, 10_240);
+        assert_eq!(isolated.signal_byte_capacity, 10_240);
     }
 
     #[test]
