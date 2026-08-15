@@ -697,6 +697,7 @@ fn exact_vulkan_runtime_mounted_decode_transient_plan(
         residency_policy,
         feedback_lane_capacity,
         Some(&scalar_queue_groups),
+        VulkanRuntimeScalarPredicateOwnership::DecodePipeline,
         Some((
             logical_device_ids.as_slice(),
             &physical_device_by_logical_device,
@@ -1668,6 +1669,7 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         residency_policy,
         1,
         Some(&scalar_queue_groups),
+        VulkanRuntimeScalarPredicateOwnership::ComponentBatchPipeline,
         None,
     )?;
     plan.extend(gates)?;
@@ -1864,9 +1866,17 @@ fn exact_vulkan_runtime_hybrid_gate_device_bytes(
         residency_policy,
         1,
         None,
+        VulkanRuntimeScalarPredicateOwnership::SegmentLocal,
         None,
     )
     .map(|plan| plan.device_bytes_by_logical_device)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanRuntimeScalarPredicateOwnership {
+    SegmentLocal,
+    ComponentBatchPipeline,
+    DecodePipeline,
 }
 
 fn exact_vulkan_runtime_scalar_selector_is_planned(
@@ -1890,11 +1900,21 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
     residency_policy: ResourceResidencyPolicy,
     scalar_gate_replica_count: usize,
     scalar_queue_group_by_selector: Option<&BTreeMap<String, String>>,
+    scalar_predicate_ownership: VulkanRuntimeScalarPredicateOwnership,
     decode_predicate_placement: Option<(&[String], &BTreeMap<String, String>)>,
 ) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanRuntimeHybridPlacementError> {
     if lane_count == 0 || scalar_gate_replica_count == 0 {
         return runtime_hybrid_error(
             "exact hybrid residency gate lane and scalar replica counts must be positive",
+        );
+    }
+    if matches!(
+        scalar_predicate_ownership,
+        VulkanRuntimeScalarPredicateOwnership::DecodePipeline,
+    ) != decode_predicate_placement.is_some()
+    {
+        return runtime_hybrid_error(
+            "decode pipeline predicate ownership requires exact logical-to-physical placement",
         );
     }
     if !residency_policy.is_demand_loaded() {
@@ -2002,7 +2022,9 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
         }
     }
 
-    if decode_predicate_placement.is_none() {
+    if scalar_predicate_ownership
+        == VulkanRuntimeScalarPredicateOwnership::SegmentLocal
+    {
         for (owner, _) in &scalar_predicate_groups {
             plan.add_conditional_device_allocation(
                 owner,

@@ -1806,6 +1806,7 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
         ResourceResidencyPolicy::DemandRetained,
         1,
         None,
+        VulkanRuntimeScalarPredicateOwnership::SegmentLocal,
         None,
     )
     .unwrap();
@@ -1819,6 +1820,7 @@ fn runtime_hybrid_exact_gate_plan_distinguishes_eager_and_demand_residency() {
         ResourceResidencyPolicy::DemandRetained,
         1,
         None,
+        VulkanRuntimeScalarPredicateOwnership::SegmentLocal,
         None,
     )
     .unwrap();
@@ -1915,6 +1917,7 @@ fn runtime_hybrid_exact_gate_plan_shares_one_miss_queue_per_dispatch_segment() {
         ResourceResidencyPolicy::DemandRetained,
         1,
         None,
+        VulkanRuntimeScalarPredicateOwnership::SegmentLocal,
         None,
     )
     .unwrap();
@@ -1931,6 +1934,7 @@ fn runtime_hybrid_exact_gate_plan_shares_one_miss_queue_per_dispatch_segment() {
             (first_selector_id, "gpu0:segment:0".to_string()),
             (second_selector_id, "gpu0:segment:0".to_string()),
         ])),
+        VulkanRuntimeScalarPredicateOwnership::SegmentLocal,
         None,
     )
     .unwrap();
@@ -2078,6 +2082,9 @@ fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
                 == VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate
             && allocation.allocation_class
                 == VulkanRuntimeStreamAllocationClass::PromptRunner
+    }));
+    assert!(prefill.device_allocations.iter().all(|allocation| {
+        allocation.concern != "scalar residency predicate"
     }));
 
     let remote_logical_device_id = "tp_remote".to_string();
