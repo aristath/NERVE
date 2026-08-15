@@ -418,6 +418,28 @@ impl VulkanDistributedSelectedResourceStorePlan {
     pub fn from_execution_plan(
         plan: &VulkanDistributedExecutionPlan,
     ) -> Result<Self, VulkanDistributedPlanError> {
+        Self::from_execution_plan_for_resources(plan, None)
+    }
+
+    pub(crate) fn from_execution_plan_for_selected_resources(
+        plan: &VulkanDistributedExecutionPlan,
+        selected_resources: &BTreeMap<String, BTreeSet<usize>>,
+    ) -> Result<Self, VulkanDistributedPlanError> {
+        if selected_resources.is_empty()
+            || selected_resources.values().any(BTreeSet::is_empty)
+        {
+            return Err(VulkanDistributedPlanError(
+                "selected-resource store projection requires a nonempty exact resource set"
+                    .to_string(),
+            ));
+        }
+        Self::from_execution_plan_for_resources(plan, Some(selected_resources))
+    }
+
+    fn from_execution_plan_for_resources(
+        plan: &VulkanDistributedExecutionPlan,
+        selected_resources: Option<&BTreeMap<String, BTreeSet<usize>>>,
+    ) -> Result<Self, VulkanDistributedPlanError> {
         let execution_devices = plan
             .device_ids
             .iter()
@@ -428,6 +450,7 @@ impl VulkanDistributedSelectedResourceStorePlan {
         let mut cohort_identities =
             BTreeMap::<(String, usize), (String, usize, Vec<String>)>::new();
         let mut group_devices = BTreeMap::<(String, String), String>::new();
+        let mut required_resources_by_selector = BTreeMap::<String, BTreeSet<usize>>::new();
         let mut resources_by_device_selector = BTreeMap::<(String, String), BTreeSet<usize>>::new();
         let mut fragments_by_device_selector_resource = BTreeMap::<
             (String, String, usize),
@@ -437,6 +460,37 @@ impl VulkanDistributedSelectedResourceStorePlan {
         for dispatch in &plan.dispatches {
             for partition in &dispatch.selected_resource_partitions {
                 validate_selected_resource_partition(dispatch, partition)?;
+                let required_resources = match selected_resources {
+                    Some(resources) => resources
+                        .get(&partition.selector_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            VulkanDistributedPlanError(format!(
+                                "selected resource selector {:?} has no exact required resource set",
+                                partition.selector_id,
+                            ))
+                        })?,
+                    None => (0..partition.resource_count).collect(),
+                };
+                if required_resources.is_empty()
+                    || required_resources
+                        .iter()
+                        .any(|resource_index| *resource_index >= partition.resource_count)
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "selected resource selector {:?} has an invalid required resource set",
+                        partition.selector_id,
+                    )));
+                }
+                if let Some(existing) = required_resources_by_selector
+                    .insert(partition.selector_id.clone(), required_resources.clone())
+                    && existing != required_resources
+                {
+                    return Err(VulkanDistributedPlanError(format!(
+                        "selected resource selector {:?} changes its required resource projection between distributed dispatches",
+                        partition.selector_id,
+                    )));
+                }
                 let identity = VulkanDistributedSelectedResourceSelectorIdentity {
                     execution_scope: partition.execution_scope.clone(),
                     component_id: dispatch.component_id.clone(),
@@ -478,6 +532,7 @@ impl VulkanDistributedSelectedResourceStorePlan {
                         dispatch,
                         partition,
                         &execution_devices,
+                        &required_resources,
                         &mut fragments_by_device_selector_resource,
                     )?;
                     continue;
@@ -535,13 +590,29 @@ impl VulkanDistributedSelectedResourceStorePlan {
                         owned.insert(*resource_index);
                     }
                 }
-                if coverage.iter().any(|count| *count != 1) {
+                if coverage.iter().enumerate().any(|(resource_index, count)| {
+                    *count
+                        != if required_resources.contains(&resource_index) {
+                            1
+                        } else {
+                            0
+                        }
+                }) {
                     return Err(VulkanDistributedPlanError(format!(
-                        "selected resource selector {:?} is not partitioned exactly once across its shards",
-                        partition.selector_id
+                        "selected resource selector {:?} is not partitioned exactly once across its shards for every required resource",
+                        partition.selector_id,
                     )));
                 }
             }
+        }
+        if let Some(selected_resources) = selected_resources
+            && selected_resources.keys().collect::<BTreeSet<_>>()
+                != required_resources_by_selector.keys().collect::<BTreeSet<_>>()
+        {
+            return Err(VulkanDistributedPlanError(
+                "selected-resource store projection does not exactly cover the plan selectors"
+                    .to_string(),
+            ));
         }
 
         let mut device_selectors =
@@ -630,14 +701,17 @@ impl VulkanDistributedSelectedResourceStorePlan {
             let identity = identities.get(&selector_id).expect(
                 "selected resource fragments were created from a validated selector identity",
             );
+            let required_resources = required_resources_by_selector
+                .get(&selector_id)
+                .expect("selected resource fragments have a required resource projection");
             fragmented_resources.sort_by_key(|fragment| fragment.resource_index);
             if fragmented_resources
                 .iter()
                 .map(|fragment| fragment.resource_index)
-                .ne(0..identity.resource_count)
+                .ne(required_resources.iter().copied())
             {
                 return Err(VulkanDistributedPlanError(format!(
-                    "fragmented selector {selector_id:?} on device {device_id:?} does not cover every logical resource",
+                    "fragmented selector {selector_id:?} on device {device_id:?} does not cover every required logical resource",
                 )));
             }
             if device_selectors.get(&device_id).is_some_and(|selectors| {
@@ -681,6 +755,7 @@ fn collect_fragmented_selected_resource_partition(
     dispatch: &VulkanDistributedDispatchPlan,
     partition: &VulkanDistributedSelectedResourcePartitionPlan,
     execution_devices: &BTreeSet<&str>,
+    required_resources: &BTreeSet<usize>,
     accumulated: &mut BTreeMap<
         (String, String, usize),
         VulkanDistributedSelectedResourceFragmentAccumulator,
@@ -722,11 +797,11 @@ fn collect_fragmented_selected_resource_partition(
                     shard.device_id, partition.selector_id,
                 ))
             })?;
-        if fragments.len() != partition.resource_count
+        if fragments.len() != required_resources.len()
             || fragments
                 .iter()
                 .map(|fragment| fragment.resource_index)
-                .ne(0..partition.resource_count)
+                .ne(required_resources.iter().copied())
         {
             return Err(VulkanDistributedPlanError(format!(
                 "selected resource shard on {:?} has incomplete fragments for selector {:?}",
@@ -816,7 +891,8 @@ fn collect_fragmented_selected_resource_partition(
         }
     }
 
-    for resource_index in 0..partition.resource_count {
+    for resource_index in required_resources {
+        let resource_index = *resource_index;
         logical_ranges[resource_index].sort_unstable();
         validate_contiguous_selected_resource_ranges(
             &logical_ranges[resource_index],

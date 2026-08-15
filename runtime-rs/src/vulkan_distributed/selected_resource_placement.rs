@@ -181,6 +181,7 @@ impl VulkanDistributedExecutionPlan {
                 "isolated selected-resource selector {selector_id:?} has no executable dispatches",
             )));
         }
+        isolate_selected_resource_transaction_boundaries(&mut dispatches);
         let distributed_parameter_byte_count = dispatches.iter().try_fold(
             0usize,
             |total, dispatch| {
@@ -214,6 +215,46 @@ impl VulkanDistributedExecutionPlan {
             shared_activation_route: self.shared_activation_route,
             distributed_parameter_byte_count,
         })
+    }
+}
+
+fn isolate_selected_resource_transaction_boundaries(
+    dispatches: &mut [VulkanDistributedDispatchPlan],
+) {
+    let signal_key = |activation: &VulkanDistributedActivationSlot| {
+        (
+            activation.component_id.clone(),
+            activation.signal_id.clone(),
+        )
+    };
+
+    let mut produced_before = BTreeSet::new();
+    for dispatch in dispatches.iter_mut() {
+        for activation in std::iter::once(&mut dispatch.input_activation)
+            .chain(dispatch.auxiliary_input_activations.iter_mut())
+            .chain(dispatch.selected_resource_activations.iter_mut())
+        {
+            if !produced_before.contains(&signal_key(activation)) {
+                activation.storage = VulkanDistributedActivationStorage::BoundaryInput;
+            }
+        }
+        produced_before.insert(signal_key(&dispatch.output_activation));
+    }
+
+    let mut consumed_after = BTreeSet::new();
+    for dispatch in dispatches.iter_mut().rev() {
+        if !consumed_after.contains(&signal_key(&dispatch.output_activation)) {
+            dispatch.output_activation.storage =
+                VulkanDistributedActivationStorage::BoundaryOutput;
+        }
+        consumed_after.insert(signal_key(&dispatch.input_activation));
+        consumed_after.extend(
+            dispatch
+                .auxiliary_input_activations
+                .iter()
+                .chain(&dispatch.selected_resource_activations)
+                .map(&signal_key),
+        );
     }
 }
 

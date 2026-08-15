@@ -2695,6 +2695,21 @@ mod tests {
         assert_eq!(isolated.dispatches.len(), 1);
         assert_eq!(isolated.execution_islands.len(), 1);
         assert_eq!(isolated.dispatches[0].owner_device_id, "calibration-device");
+        assert_eq!(
+            isolated.dispatches[0].input_activation.storage,
+            VulkanDistributedActivationStorage::BoundaryInput,
+        );
+        assert!(isolated.dispatches[0]
+            .auxiliary_input_activations
+            .iter()
+            .chain(&isolated.dispatches[0].selected_resource_activations)
+            .all(|activation| {
+                activation.storage == VulkanDistributedActivationStorage::BoundaryInput
+            }));
+        assert_eq!(
+            isolated.dispatches[0].output_activation.storage,
+            VulkanDistributedActivationStorage::BoundaryOutput,
+        );
         assert_eq!(isolated.dispatches[0].shards.len(), 1);
         assert_eq!(
             isolated.dispatches[0].shards[0].selected_resource_indices,
@@ -2705,6 +2720,33 @@ mod tests {
             .is_empty());
         assert_eq!(isolated.dispatches[0].shards[0].row_start, 0);
         assert_eq!(isolated.dispatches[0].shards[0].row_count, 8);
+        assert!(
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&isolated)
+                .unwrap_err()
+                .to_string()
+                .contains("not partitioned exactly once")
+        );
+        let isolated_store = VulkanDistributedSelectedResourceStorePlan::from_execution_plan_for_selected_resources(
+            &isolated,
+            &BTreeMap::from([("routed-experts".to_string(), BTreeSet::from([6]))]),
+        )
+        .unwrap();
+        assert_eq!(isolated_store.device_count, 1);
+        assert_eq!(isolated_store.unique_atomic_group_count, 1);
+        assert_eq!(isolated_store.total_addressable_bytes, 8);
+        assert_eq!(
+            isolated_store.devices[0].selectors[0].owned_resource_indices,
+            vec![6],
+        );
+        assert!(
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_for_selected_resources(
+                &isolated,
+                &BTreeMap::from([("unknown".to_string(), BTreeSet::from([6]))]),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("no exact required resource set")
+        );
         assert!(plan
             .isolated_selected_resource_transaction(
                 "routed-experts",
@@ -3622,8 +3664,24 @@ mod tests {
         assert_eq!(isolated.device_ids, vec!["calibration-device"]);
         assert_eq!(isolated.dispatches.len(), 2);
         assert_eq!(isolated.execution_islands.len(), 1);
+        assert_eq!(
+            isolated.dispatches[0].input_activation.storage,
+            VulkanDistributedActivationStorage::BoundaryInput,
+        );
+        assert_ne!(
+            isolated.dispatches[0].output_activation.storage,
+            VulkanDistributedActivationStorage::BoundaryOutput,
+            "the gate/up to down handoff remains internal to the isolated transaction",
+        );
+        assert_eq!(
+            isolated.dispatches[1].output_activation.storage,
+            VulkanDistributedActivationStorage::BoundaryOutput,
+        );
         for dispatch in &isolated.dispatches {
             assert_eq!(dispatch.owner_device_id, "calibration-device");
+            assert!(dispatch.selected_resource_activations.iter().all(|activation| {
+                activation.storage == VulkanDistributedActivationStorage::BoundaryInput
+            }));
             let [shard] = dispatch.shards.as_slice() else {
                 panic!("isolated expert operation must have exactly one shard")
             };
