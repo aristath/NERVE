@@ -2807,6 +2807,13 @@ mod tests {
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan_set(&plans).unwrap();
         let execution_placements =
             selected_resource_placements_from_execution_plan(&plans.decode).unwrap();
+        assert_eq!(
+            crate::vulkan_stream_circuit::independently_placeable_selected_resource_selector_ids(
+                &plans.decode,
+            )
+            .unwrap(),
+            BTreeSet::from(["routed-experts".to_string()]),
+        );
         let [execution_placement] = execution_placements.as_slice() else {
             panic!("one whole-expert selector must produce one execution placement")
         };
@@ -3587,6 +3594,14 @@ mod tests {
 
         let mut plan = fixture_plan("row_major");
         plan.dispatches = vec![gate_up, down];
+        assert!(
+            crate::vulkan_stream_circuit::independently_placeable_selected_resource_selector_ids(
+                &plan,
+            )
+            .unwrap()
+            .is_empty(),
+            "tensor-fragmented experts have compiler-fixed shard ownership and must not enter the whole-expert placement optimizer",
+        );
         let ownership =
             VulkanDistributedSelectedResourceStorePlan::from_execution_plan(&plan).unwrap();
 

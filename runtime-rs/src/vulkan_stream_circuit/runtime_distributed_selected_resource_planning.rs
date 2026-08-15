@@ -360,9 +360,18 @@ pub fn try_plan_vulkan_runtime_selected_resource_placements(
         );
     }
 
-    let mut placements = Vec::with_capacity(requirement_plans.len());
+    let independently_placeable_selectors =
+        independently_placeable_selected_resource_selector_ids(execution_plan)
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+    if independently_placeable_selectors.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    let mut placements = Vec::with_capacity(independently_placeable_selectors.len());
     let mut remaining_capacities = capacities.to_vec();
-    for requirement_plan in requirement_plans {
+    for requirement_plan in requirement_plans.iter().filter(|requirement_plan| {
+        independently_placeable_selectors.contains(requirement_plan.selector_id.as_str())
+    }) {
         let partitions = execution_plan
             .dispatches
             .iter()
@@ -484,6 +493,36 @@ pub fn try_plan_vulkan_runtime_selected_resource_placements(
         placements.push(placement);
     }
     Ok(Some(placements))
+}
+
+/// Returns selectors whose complete mounted execution chain owns whole atomic
+/// resources. Tensor-fragmented resources have compiler-fixed shard ownership:
+/// feeding them to the whole-resource optimizer would destroy the physical
+/// gate/up-to-down contract that made the fragmented execution legal.
+pub(crate) fn independently_placeable_selected_resource_selector_ids(
+    execution_plan: &VulkanDistributedExecutionPlan,
+) -> Result<BTreeSet<String>, crate::vulkan_distributed::VulkanDistributedPlanError> {
+    let fixed_selectors = execution_plan
+        .dispatches
+        .iter()
+        .flat_map(|dispatch| {
+            dispatch
+                .selected_resource_partitions
+                .iter()
+                .filter(|partition| {
+                    dispatch.distribution
+                        != crate::vulkan_distributed::VulkanDistributedDispatchDistribution::ExpertRange
+                        || !partition.parameter_partitions.is_empty()
+                        || dispatch.shards.iter().any(|shard| !shard.parameters.is_empty())
+                })
+                .map(|partition| partition.selector_id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    Ok(selected_resource_placements_from_execution_plan(execution_plan)?
+        .into_iter()
+        .map(|placement| placement.selector_id)
+        .filter(|selector_id| !fixed_selectors.contains(selector_id))
+        .collect())
 }
 
 /// Replans whole-resource ownership from one quiescent warm-session telemetry
