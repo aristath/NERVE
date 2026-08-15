@@ -201,6 +201,56 @@ fn batched_speculative_target_output_is_fully_admitted_per_lane() {
 }
 
 #[test]
+fn component_batch_signal_admission_preserves_the_runtime_memory_domain() {
+    let mut host_visible = VulkanRuntimeHybridExecutionTransientPlan::default();
+    exact_vulkan_runtime_add_component_batch_signal_allocation(
+        &mut host_visible,
+        VulkanSharedResidentBufferRoute::SharedHost,
+        "gpu0",
+        3,
+        96,
+        true,
+        None,
+    )
+    .unwrap();
+    assert!(host_visible.device_allocations.is_empty());
+    assert_eq!(host_visible.host_visible_allocations.len(), 1);
+    assert_eq!(host_visible.host_visible_allocations[0].byte_capacity, 96);
+    assert_eq!(
+        host_visible.host_visible_allocations[0].concern,
+        "component-batch host-visible signal",
+    );
+
+    let original = host_visible.clone();
+    let error = exact_vulkan_runtime_add_component_batch_signal_allocation(
+        &mut host_visible,
+        VulkanSharedResidentBufferRoute::SharedHost,
+        "gpu0",
+        3,
+        96,
+        true,
+        Some(&BTreeSet::from(["gpu0".to_string(), "gpu1".to_string()])),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("both host-visible and distributed-shared"));
+    assert_eq!(host_visible, original, "a rejected signal must not mutate admission");
+
+    let mut local = VulkanRuntimeHybridExecutionTransientPlan::default();
+    exact_vulkan_runtime_add_component_batch_signal_allocation(
+        &mut local,
+        VulkanSharedResidentBufferRoute::SharedHost,
+        "gpu0",
+        4,
+        128,
+        false,
+        None,
+    )
+    .unwrap();
+    assert_eq!(local.device_allocations.len(), 1);
+    assert!(local.host_visible_allocations.is_empty());
+}
+
+#[test]
 fn decode_pipeline_predicate_is_local_for_one_logical_device() {
     let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
     add_exact_vulkan_runtime_decode_pipeline_predicate(

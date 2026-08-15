@@ -1461,22 +1461,15 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                         "exact hybrid component-batch signal capacity overflowed".to_string(),
                     )
                 })?;
-            if let Some(shared_device_ids) = shared_device_ids_by_buffer.get(&buffer_index) {
-                add_exact_vulkan_runtime_shared_device_allocation(
-                    &mut plan,
-                    execution_plan.shared_activation_route,
-                    &slice.device_id,
-                    shared_device_ids.iter().cloned(),
-                    byte_count,
-                    "shared component-batch signal",
-                )?;
-            } else {
-                plan.add_device_allocation(
-                    &slice.device_id,
-                    byte_count,
-                    "component-batch signal",
-                )?;
-            }
+            exact_vulkan_runtime_add_component_batch_signal_allocation(
+                &mut plan,
+                execution_plan.shared_activation_route,
+                &slice.device_id,
+                buffer_index,
+                byte_count,
+                buffer.host_visible,
+                shared_device_ids_by_buffer.get(&buffer_index),
+            )?;
         }
         for _ in 0..allocation_lane_capacity {
             plan.add_host_visible_allocation(
@@ -1683,6 +1676,44 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         )?;
     }
     Ok(plan)
+}
+
+fn exact_vulkan_runtime_add_component_batch_signal_allocation(
+    plan: &mut VulkanRuntimeHybridExecutionTransientPlan,
+    shared_activation_route: VulkanSharedResidentBufferRoute,
+    logical_device_id: &str,
+    buffer_index: usize,
+    byte_count: usize,
+    host_visible: bool,
+    shared_device_ids: Option<&BTreeSet<String>>,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    if host_visible {
+        if shared_device_ids.is_some() {
+            return runtime_hybrid_error(format!(
+                "component-batch signal buffer {buffer_index} on {logical_device_id:?} is both host-visible and distributed-shared",
+            ));
+        }
+        plan.add_host_visible_allocation(
+            logical_device_id,
+            byte_count,
+            "component-batch host-visible signal",
+        )
+    } else if let Some(shared_device_ids) = shared_device_ids {
+        add_exact_vulkan_runtime_shared_device_allocation(
+            plan,
+            shared_activation_route,
+            logical_device_id,
+            shared_device_ids.iter().cloned(),
+            byte_count,
+            "shared component-batch signal",
+        )
+    } else {
+        plan.add_device_allocation(
+            logical_device_id,
+            byte_count,
+            "component-batch signal",
+        )
+    }
 }
 
 fn exact_vulkan_runtime_add_batched_output_projection_allocations(
