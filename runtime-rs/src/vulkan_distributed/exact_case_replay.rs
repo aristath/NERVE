@@ -179,6 +179,7 @@ fn exact_dispatch_subset_for_measured_case(
         ));
     }
     let mut candidates = Vec::new();
+    let mut diagnostics = ExactDispatchSubsetDiagnostics::default();
     exact_dispatch_subset_candidates(
         execution_plan,
         available_dispatch_indices,
@@ -188,17 +189,32 @@ fn exact_dispatch_subset_for_measured_case(
         0,
         &mut Vec::with_capacity(measured_dispatch_count),
         &mut candidates,
+        &mut diagnostics,
     )?;
     match candidates.as_slice() {
         [selected] => Ok(selected.clone()),
         [] => exact_case_error(format!(
-            "exact case for component {component_id:?} has no structurally matching distributed contract subset",
+            "exact case for component {component_id:?} has no structurally matching distributed contract subset: enumerated={}, operation_matches={}, artifact_matches={}, graph_matches={}, equivalence_matches={}",
+            diagnostics.enumerated,
+            diagnostics.operation_matches,
+            diagnostics.artifact_matches,
+            diagnostics.graph_matches,
+            diagnostics.equivalence_matches,
         )),
         _ => exact_case_error(format!(
             "exact case for component {component_id:?} ambiguously matches {} distributed contract subsets",
             candidates.len(),
         )),
     }
+}
+
+#[derive(Default)]
+struct ExactDispatchSubsetDiagnostics {
+    enumerated: usize,
+    operation_matches: usize,
+    artifact_matches: usize,
+    graph_matches: usize,
+    equivalence_matches: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -211,8 +227,10 @@ fn exact_dispatch_subset_candidates(
     start: usize,
     selected: &mut Vec<usize>,
     candidates: &mut Vec<Vec<usize>>,
+    diagnostics: &mut ExactDispatchSubsetDiagnostics,
 ) -> Result<(), VulkanDistributedPlanError> {
     if selected.len() == required_count {
+        diagnostics.enumerated += 1;
         let row_extents = selected
             .iter()
             .map(|index| {
@@ -230,26 +248,34 @@ fn exact_dispatch_subset_candidates(
         if !exact_operations_are_structurally_equivalent(&measured_case.operations, &operations) {
             return Ok(());
         }
+        diagnostics.operation_matches += 1;
         let artifact_digest = vulkan_distributed_execution_artifact_digest(
             loaded_manifest,
             execution_plan,
             selected,
         )
         .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+        if artifact_digest != measured_case.artifact_digest {
+            return Ok(());
+        }
+        diagnostics.artifact_matches += 1;
         let execution_graph_digest = vulkan_distributed_execution_graph_digest(
             &measured_case.behavior.compiled_execution_signature,
             execution_plan,
             selected,
         )
         .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+        if execution_graph_digest != measured_case.execution_graph_digest {
+            return Ok(());
+        }
+        diagnostics.graph_matches += 1;
         let equivalence = vulkan_distributed_execution_equivalence(execution_plan, selected)
             .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
-        if artifact_digest == measured_case.artifact_digest
-            && execution_graph_digest == measured_case.execution_graph_digest
-            && equivalence == measured_case.equivalence
-        {
-            candidates.push(selected.clone());
+        if equivalence != measured_case.equivalence {
+            return Ok(());
         }
+        diagnostics.equivalence_matches += 1;
+        candidates.push(selected.clone());
         return Ok(());
     }
     let remaining_needed = required_count - selected.len();
@@ -268,6 +294,7 @@ fn exact_dispatch_subset_candidates(
             position + 1,
             selected,
             candidates,
+            diagnostics,
         )?;
         selected.pop();
     }
