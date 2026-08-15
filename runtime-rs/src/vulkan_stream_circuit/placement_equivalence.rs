@@ -141,16 +141,111 @@ pub fn validate_vulkan_placement_output_equivalence(
     equivalence.validate()?;
     match equivalence.output {
         VulkanPlacementEquivalenceKind::BitExact => {
-            if candidate_artifact.is_some() || reference_digest != candidate_digest {
-                return Err(VulkanPlacementCalibrationCatalogError(
-                    "bit-exact placement output differs from its canonical reference".to_string(),
-                ));
+            if let Some(reference) = reference_artifact {
+                validate_output_artifact(reference)?;
+                if vulkan_placement_output_artifact_digest(reference)? != reference_digest {
+                    return Err(VulkanPlacementCalibrationCatalogError(
+                        "bit-exact canonical output artifact disagrees with its digest".to_string(),
+                    ));
+                }
             }
-            if let Some(reference) = reference_artifact
-                && vulkan_placement_output_artifact_digest(reference)? != reference_digest
-            {
+            if let Some(candidate) = candidate_artifact {
+                validate_output_artifact(candidate)?;
+                if vulkan_placement_output_artifact_digest(candidate)? != candidate_digest {
+                    return Err(VulkanPlacementCalibrationCatalogError(
+                        "bit-exact candidate output artifact disagrees with its digest".to_string(),
+                    ));
+                }
+            }
+            if reference_digest != candidate_digest {
+                if let (Some(reference), Some(candidate)) =
+                    (reference_artifact, candidate_artifact)
+                {
+                    if reference.scalar_format != candidate.scalar_format
+                        || reference.segments.len() != candidate.segments.len()
+                    {
+                        return Err(VulkanPlacementCalibrationCatalogError(
+                            "bit-exact placement output has different typed shapes".to_string(),
+                        ));
+                    }
+                    let mut compared_element_count = 0usize;
+                    let mut differing_element_count = 0usize;
+                    let mut maximum_absolute_error = 0.0f64;
+                    let mut maximum_relative_error = 0.0f64;
+                    let mut worst_difference = None;
+                    for (segment_index, (reference_segment, candidate_segment)) in reference
+                        .segments
+                        .iter()
+                        .zip(&candidate.segments)
+                        .enumerate()
+                    {
+                        if reference_segment.binding != candidate_segment.binding
+                            || reference_segment.name != candidate_segment.name
+                            || reference_segment.bytes.len() != candidate_segment.bytes.len()
+                        {
+                            return Err(VulkanPlacementCalibrationCatalogError(
+                                "bit-exact placement output has different segment shapes"
+                                    .to_string(),
+                            ));
+                        }
+                        for (element_index, (expected, actual)) in placement_output_values(
+                            reference.scalar_format,
+                            &reference_segment.bytes,
+                        )
+                        .zip(placement_output_values(
+                            candidate.scalar_format,
+                            &candidate_segment.bytes,
+                        ))
+                        .enumerate()
+                        {
+                            compared_element_count += 1;
+                            if expected.to_bits() == actual.to_bits() {
+                                continue;
+                            }
+                            differing_element_count += 1;
+                            let absolute_error = f64::from((actual - expected).abs());
+                            let relative_error = if expected == 0.0 {
+                                f64::INFINITY
+                            } else {
+                                absolute_error / f64::from(expected.abs())
+                            };
+                            maximum_relative_error =
+                                maximum_relative_error.max(relative_error);
+                            if absolute_error > maximum_absolute_error {
+                                maximum_absolute_error = absolute_error;
+                                worst_difference = Some((
+                                    segment_index,
+                                    reference_segment.binding,
+                                    reference_segment.name.clone(),
+                                    element_index,
+                                    expected,
+                                    actual,
+                                    absolute_error,
+                                    relative_error,
+                                ));
+                            }
+                        }
+                    }
+                    if let Some((
+                        segment_index,
+                        binding,
+                        name,
+                        element_index,
+                        expected,
+                        actual,
+                        absolute_error,
+                        relative_error,
+                    )) = worst_difference
+                    {
+                        return Err(VulkanPlacementCalibrationCatalogError(format!(
+                            "bit-exact placement output differs from its canonical reference: reference_digest={reference_digest:?}, candidate_digest={candidate_digest:?}, differing_element_count={differing_element_count}, compared_element_count={compared_element_count}, maximum_absolute_error={maximum_absolute_error}, maximum_relative_error={maximum_relative_error}, segment={segment_index}, binding={binding}, name={name:?}, element={element_index}, expected={expected}, actual={actual}, absolute_error={absolute_error}, relative_error={relative_error}",
+                        )));
+                    }
+                }
                 return Err(VulkanPlacementCalibrationCatalogError(
-                    "bit-exact canonical output artifact disagrees with its digest".to_string(),
+                    format!(
+                        "bit-exact placement output differs from its canonical reference: reference_digest={reference_digest:?}, candidate_digest={candidate_digest:?}"
+                    ),
                 ));
             }
             Ok(VulkanPlacementOutputEquivalenceEvidence::BitExact)
@@ -190,8 +285,14 @@ pub fn validate_vulkan_placement_output_equivalence(
             let mut compared_element_count = 0usize;
             let mut maximum_absolute_error = 0.0f64;
             let mut maximum_relative_error = 0.0f64;
-            for (reference_segment, candidate_segment) in
-                reference.segments.iter().zip(&candidate.segments)
+            let mut exceeded_element_count = 0usize;
+            let mut worst_excess_ratio = 0.0f64;
+            let mut worst_violation = None;
+            for (segment_index, (reference_segment, candidate_segment)) in reference
+                .segments
+                .iter()
+                .zip(&candidate.segments)
+                .enumerate()
             {
                 if reference_segment.binding != candidate_segment.binding
                     || reference_segment.name != candidate_segment.name
@@ -206,15 +307,20 @@ pub fn validate_vulkan_placement_output_equivalence(
                     placement_output_values(reference.scalar_format, &reference_segment.bytes);
                 let candidate_values =
                     placement_output_values(candidate.scalar_format, &candidate_segment.bytes);
-                for (expected, actual) in reference_values.zip(candidate_values) {
+                for (element_index, (expected, actual)) in
+                    reference_values.zip(candidate_values).enumerate()
+                {
                     if expected.to_bits() == actual.to_bits() {
                         compared_element_count += 1;
                         continue;
                     }
                     if !expected.is_finite() || !actual.is_finite() {
                         return Err(VulkanPlacementCalibrationCatalogError(
-                            "tolerant placement output introduced a non-finite mismatch"
-                                .to_string(),
+                            format!(
+                                "tolerant placement output introduced a non-finite mismatch: segment={segment_index}, binding={}, name={:?}, element={element_index}, expected={expected}, actual={actual}",
+                                reference_segment.binding,
+                                reference_segment.name,
+                            ),
                         ));
                     }
                     let absolute_error = f64::from((actual - expected).abs());
@@ -227,16 +333,30 @@ pub fn validate_vulkan_placement_output_equivalence(
                     } else {
                         absolute_error / f64::from(expected.abs())
                     };
+                    maximum_absolute_error = maximum_absolute_error.max(absolute_error);
+                    maximum_relative_error = maximum_relative_error.max(relative_error);
                     if absolute_error
                         > absolute_tolerance + relative_tolerance * f64::from(expected.abs())
                     {
-                        return Err(VulkanPlacementCalibrationCatalogError(
-                            "tolerant placement output exceeds its compiled absolute-relative bound"
-                                .to_string(),
-                        ));
+                        let allowed_error =
+                            absolute_tolerance + relative_tolerance * f64::from(expected.abs());
+                        exceeded_element_count += 1;
+                        let excess_ratio = absolute_error / allowed_error;
+                        if excess_ratio > worst_excess_ratio {
+                            worst_excess_ratio = excess_ratio;
+                            worst_violation = Some((
+                                segment_index,
+                                reference_segment.binding,
+                                reference_segment.name.clone(),
+                                element_index,
+                                expected,
+                                actual,
+                                absolute_error,
+                                relative_error,
+                                allowed_error,
+                            ));
+                        }
                     }
-                    maximum_absolute_error = maximum_absolute_error.max(absolute_error);
-                    maximum_relative_error = maximum_relative_error.max(relative_error);
                     compared_element_count += 1;
                 }
             }
@@ -244,6 +364,22 @@ pub fn validate_vulkan_placement_output_equivalence(
                 return Err(VulkanPlacementCalibrationCatalogError(
                     "tolerant placement output compared no values".to_string(),
                 ));
+            }
+            if let Some((
+                segment_index,
+                binding,
+                name,
+                element_index,
+                expected,
+                actual,
+                absolute_error,
+                relative_error,
+                allowed_error,
+            )) = worst_violation
+            {
+                return Err(VulkanPlacementCalibrationCatalogError(format!(
+                    "tolerant placement output exceeds its compiled absolute-relative bound: exceeded_element_count={exceeded_element_count}, compared_element_count={compared_element_count}, maximum_absolute_error={maximum_absolute_error}, maximum_relative_error={maximum_relative_error}, worst_excess_ratio={worst_excess_ratio}, segment={segment_index}, binding={binding}, name={name:?}, element={element_index}, expected={expected}, actual={actual}, absolute_error={absolute_error}, relative_error={relative_error}, allowed_error={allowed_error}",
+                )));
             }
             Ok(
                 VulkanPlacementOutputEquivalenceEvidence::AbsoluteRelativeTolerance {
@@ -325,18 +461,25 @@ mod placement_equivalence_tests {
 
         let rejected = bf16_artifact(&[1.03125, 0.0]);
         let rejected_digest = vulkan_placement_output_artifact_digest(&rejected).unwrap();
-        assert!(
-            validate_vulkan_placement_output_equivalence(
-                &tolerant(),
-                &reference_digest,
-                Some(&reference),
-                &rejected_digest,
-                Some(&rejected),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("exceeds")
-        );
+        let error = validate_vulkan_placement_output_equivalence(
+            &tolerant(),
+            &reference_digest,
+            Some(&reference),
+            &rejected_digest,
+            Some(&rejected),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("exceeds"));
+        assert!(error.contains("segment=0"));
+        assert!(error.contains("binding=1"));
+        assert!(error.contains("name=\"hidden\""));
+        assert!(error.contains("element=0"));
+        assert!(error.contains("expected=1"));
+        assert!(error.contains("actual=1.03125"));
+        assert!(error.contains("allowed_error=0.02"));
+        assert!(error.contains("exceeded_element_count=1"));
+        assert!(error.contains("compared_element_count=2"));
         assert!(
             validate_vulkan_placement_output_equivalence(
                 &tolerant(),
@@ -349,6 +492,28 @@ mod placement_equivalence_tests {
             .to_string()
             .contains("does not identify")
         );
+    }
+
+    #[test]
+    fn tolerance_failure_reports_the_worst_error_across_the_complete_output() {
+        let reference = bf16_artifact(&[1.0, 2.0, 4.0]);
+        let rejected = bf16_artifact(&[1.03125, 2.0625, 5.0]);
+        let error = validate_vulkan_placement_output_equivalence(
+            &tolerant(),
+            &vulkan_placement_output_artifact_digest(&reference).unwrap(),
+            Some(&reference),
+            &vulkan_placement_output_artifact_digest(&rejected).unwrap(),
+            Some(&rejected),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("exceeded_element_count=3"));
+        assert!(error.contains("compared_element_count=3"));
+        assert!(error.contains("element=2"));
+        assert!(error.contains("expected=4"));
+        assert!(error.contains("actual=5"));
+        assert!(error.contains("maximum_absolute_error=1"));
     }
 
     #[test]
@@ -394,15 +559,38 @@ mod placement_equivalence_tests {
             )
             .is_err()
         );
+        let reference_digest = vulkan_placement_output_artifact_digest(&reference).unwrap();
         assert!(
             validate_vulkan_placement_output_equivalence(
                 &VulkanPlacementEquivalenceIdentity::bit_exact(),
-                "same",
+                &reference_digest,
                 Some(&reference),
-                "same",
+                &reference_digest,
                 Some(&reference),
             )
-            .is_err()
+            .is_ok()
         );
+    }
+
+    #[test]
+    fn bit_exact_failure_reports_complete_typed_difference_statistics() {
+        let reference = bf16_artifact(&[1.0, 2.0, 4.0]);
+        let candidate = bf16_artifact(&[1.0, 2.5, 5.0]);
+        let error = validate_vulkan_placement_output_equivalence(
+            &VulkanPlacementEquivalenceIdentity::bit_exact(),
+            &vulkan_placement_output_artifact_digest(&reference).unwrap(),
+            Some(&reference),
+            &vulkan_placement_output_artifact_digest(&candidate).unwrap(),
+            Some(&candidate),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("differing_element_count=2"));
+        assert!(error.contains("compared_element_count=3"));
+        assert!(error.contains("maximum_absolute_error=1"));
+        assert!(error.contains("element=2"));
+        assert!(error.contains("expected=4"));
+        assert!(error.contains("actual=5"));
     }
 }

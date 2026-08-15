@@ -1094,7 +1094,6 @@ impl VulkanRuntimeRegionPlacementCalibrationSession {
     }
 
     fn state_digest(&self) -> Result<String, VulkanResidentTokenModelPackageError> {
-        let mut digest = Sha256::new();
         let mut states = Vec::new();
         for slice in &self.processor.device_slices {
             for state in &slice.mounted.buffers.state_buffers {
@@ -1110,24 +1109,7 @@ impl VulkanRuntimeRegionPlacementCalibrationSession {
                 ));
             }
         }
-        states.sort_by(|left, right| {
-            (&left.0, &left.1).cmp(&(&right.0, &right.1))
-        });
-        if states.windows(2).any(|pair| {
-            (&pair[0].0, &pair[0].1) == (&pair[1].0, &pair[1].1)
-        }) {
-            return distributed_calibration_error(
-                "runtime region state appears on more than one physical owner",
-            );
-        }
-        for (component_id, state_id, bytes) in states {
-            digest.update(component_id.as_bytes());
-            digest.update(state_id.as_bytes());
-            digest.update(bytes);
-        }
-        Ok(targeted_finalized_artifact_digest(
-            digest.finalize().as_slice(),
-        ))
+        vulkan_semantic_state_digest(states)
     }
 
     fn memory_evidence(

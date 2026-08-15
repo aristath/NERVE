@@ -271,6 +271,22 @@ fn calibrate_vulkan_runtime_canonical_component(
     }))
 }
 
+fn canonical_loaded_reusable_artifact_path<'a>(
+    loaded_manifest: &'a VulkanLoadedKernelArtifactCatalog,
+    family_id: &str,
+    component_id: &str,
+    node_id: &str,
+) -> Result<&'a str, VulkanResidentTokenModelPackageError> {
+    loaded_manifest
+        .reusable_artifact(family_id)
+        .map(|loaded| loaded.artifact.path.as_str())
+        .ok_or_else(|| {
+            canonical_calibration_error_value(format!(
+                "canonical component has no loaded reusable artifact for {component_id}.{node_id} family {family_id:?}",
+            ))
+        })
+}
+
 fn canonical_component_execution_contracts(
     cached_plan: &VulkanRuntimePlacementCalibrationCachedPlan,
     target: &VulkanRuntimePlacementCalibrationTarget,
@@ -339,13 +355,19 @@ fn canonical_component_execution_contracts(
         .into_iter()
         .map(|dispatch| match phase {
             VulkanTargetedComponentExecutionPhase::Decode => {
+                let artifact_path = canonical_loaded_reusable_artifact_path(
+                    &slice_plan.loaded_manifest,
+                    &dispatch.reusable_family_id,
+                    &dispatch.component_id,
+                    &dispatch.node_id,
+                )?;
                 canonical_single_device_contract_for_artifacts(
                     &dispatch.physical_execution_contracts,
                     &dispatch.op,
                     &dispatch.node_id,
                     nerve_execution_contracts::ExecutionPhase::Decode,
                     nerve_execution_contracts::ExecutionShape::SingleLane,
-                    &[dispatch.artifact_path.as_str()],
+                    &[artifact_path],
                 )
                 .map(|contract| vec![contract])
             }
@@ -397,11 +419,17 @@ fn canonical_component_execution_contracts(
 
                 // This is the exact component-batch fallback: execute the
                 // scalar primary dispatch once for every causal lane.
+                let artifact_path = canonical_loaded_reusable_artifact_path(
+                    &slice_plan.loaded_manifest,
+                    &dispatch.reusable_family_id,
+                    &dispatch.component_id,
+                    &dispatch.node_id,
+                )?;
                 canonical_scalar_lane_prefill_contracts(
                     &dispatch.physical_execution_contracts,
                     &dispatch.op,
                     &dispatch.node_id,
-                    dispatch.artifact_path.as_str(),
+                    artifact_path,
                     activation_batch_width,
                 )
             }
@@ -715,6 +743,52 @@ mod runtime_canonical_placement_calibration_tests {
                 &["shaders/not-the-executed-artifact.spv"],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_decode_uses_the_loaded_reusable_artifact_not_the_plan_placeholder() {
+        let loaded = VulkanLoadedKernelArtifactCatalog {
+            reusable_artifacts: vec![VulkanLoadedReusableKernelArtifact {
+                artifact: VulkanReusableKernelArtifact {
+                    family_id: "family".to_string(),
+                    op: "op".to_string(),
+                    path: "shaders/selected.spv".to_string(),
+                    entry_point: "main".to_string(),
+                    local_size_x: 64,
+                    workgroup_count_x: 1,
+                    descriptor_signature: Vec::new(),
+                    push_constants: Vec::new(),
+                    stream_control_binding: None,
+                },
+                resolved_path: PathBuf::from("/compiled/shaders/selected.spv"),
+                words: vec![0x0723_0203],
+            }],
+            physical_artifacts: Vec::new(),
+            reusable_word_count: 1,
+            physical_word_count: 0,
+        };
+
+        assert_eq!(
+            canonical_loaded_reusable_artifact_path(
+                &loaded,
+                "family",
+                "component",
+                "node",
+            )
+            .unwrap(),
+            "shaders/selected.spv",
+        );
+        assert!(
+            canonical_loaded_reusable_artifact_path(
+                &loaded,
+                "missing",
+                "component",
+                "node",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("loaded reusable artifact")
         );
     }
 

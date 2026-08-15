@@ -19,6 +19,11 @@ pub struct VulkanRuntimeDistributedPlacementCalibrationReport {
     pub resident_host_transient_bytes: usize,
     pub activation_routes: Vec<String>,
     pub dispatch_work: Vec<VulkanRuntimeDistributedPlacementDispatchWork>,
+    pub(crate) indirect_control_observations:
+        Vec<VulkanDistributedComponentBatchIndirectControlObservation>,
+    pub(crate) selected_resource_record_observations:
+        Vec<VulkanDistributedSelectedResourceRecordObservation>,
+    pub(crate) output_observations: Vec<VulkanDistributedComponentBatchOutputObservation>,
     pub execution_case: VulkanPlacementExecutionCaseIdentity,
     pub warmup_call_count: usize,
     pub measured_call_count: usize,
@@ -38,7 +43,10 @@ impl VulkanRuntimeDistributedPlacementCalibrationReport {
             duration_ns: self.measured_execution_ns,
             useful_activation_count: self.useful_activation_count,
             output_digest: self.output_digest.clone(),
-            output_artifact: self.output_artifact.clone(),
+            output_artifact: (self.execution_case.equivalence.output
+                == VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance)
+                .then(|| self.output_artifact.clone())
+                .flatten(),
             output_equivalence,
             state_digest: self.state_digest.clone(),
             resident_bytes_by_physical_device: self.resident_parameter_bytes_by_device.clone(),
@@ -55,6 +63,15 @@ pub fn record_vulkan_runtime_distributed_calibration_report(
     catalog: &mut VulkanPlacementCalibrationCatalog,
     report: &VulkanRuntimeDistributedPlacementCalibrationReport,
 ) -> Result<(), VulkanPlacementCalibrationCatalogError> {
+    let output_equivalence =
+        validate_vulkan_runtime_distributed_calibration_report(catalog, report)?;
+    catalog.record_observation(report.calibration_observation(output_equivalence))
+}
+
+fn validate_vulkan_runtime_distributed_calibration_report(
+    catalog: &VulkanPlacementCalibrationCatalog,
+    report: &VulkanRuntimeDistributedPlacementCalibrationReport,
+) -> Result<VulkanPlacementOutputEquivalenceEvidence, VulkanPlacementCalibrationCatalogError> {
     if !vulkan_runtime_distributed_calibration_report_is_complete(report) {
         return Err(VulkanPlacementCalibrationCatalogError(
             "distributed placement observation does not execute complete model work".to_string(),
@@ -65,17 +82,37 @@ pub fn record_vulkan_runtime_distributed_calibration_report(
         .ok_or_else(|| {
             VulkanPlacementCalibrationCatalogError(
                 "distributed placement candidate has no measured single-device reference"
-                    .to_string(),
+                .to_string(),
             )
         })?;
-    let output_equivalence = validate_vulkan_placement_output_equivalence(
+    if report.state_digest != reference.state_digest {
+        return Err(VulkanPlacementCalibrationCatalogError(
+            "distributed placement candidate state differs from its canonical reference"
+                .to_string(),
+        ));
+    }
+    validate_vulkan_placement_output_equivalence(
         &report.execution_case.equivalence,
         &reference.output_digest,
         reference.output_artifact.as_ref(),
         &report.output_digest,
         report.output_artifact.as_ref(),
-    )?;
-    catalog.record_observation(report.calibration_observation(output_equivalence))
+    )
+    .map_err(|error| {
+        if report.indirect_control_observations.is_empty()
+            && report.selected_resource_record_observations.is_empty()
+            && report.output_observations.is_empty()
+        {
+            error
+        } else {
+            VulkanPlacementCalibrationCatalogError(format!(
+                "{error}; distributed_indirect_controls={:?}; distributed_selected_resource_records={:?}; distributed_outputs={:?}",
+                report.indirect_control_observations,
+                report.selected_resource_record_observations,
+                report.output_observations,
+            ))
+        }
+    })
 }
 
 fn vulkan_runtime_distributed_calibration_report_is_complete(
@@ -352,6 +389,10 @@ fn calibrate_vulkan_runtime_distributed_placement_phase_candidate_with_policy(
             resident_host_transient_bytes: session.resident_host_transient_bytes,
             activation_routes: session.activation_routes.clone(),
             dispatch_work: session.dispatch_work.clone(),
+            indirect_control_observations: measured.indirect_control_observations,
+            selected_resource_record_observations: measured
+                .selected_resource_record_observations,
+            output_observations: measured.output_observations,
             execution_case: session.execution_case.clone(),
             warmup_call_count: policy.warmup_units,
             measured_call_count: policy.measured_units,
@@ -770,6 +811,11 @@ struct VulkanRuntimeDistributedPlacementExecution {
     output_digest: String,
     output_artifact: Option<VulkanPlacementOutputArtifact>,
     state_digest: String,
+    indirect_control_observations:
+        Vec<VulkanDistributedComponentBatchIndirectControlObservation>,
+    selected_resource_record_observations:
+        Vec<VulkanDistributedSelectedResourceRecordObservation>,
+    output_observations: Vec<VulkanDistributedComponentBatchOutputObservation>,
 }
 
 fn distributed_contract_phase_and_shape(
@@ -1170,6 +1216,7 @@ impl VulkanRuntimeDistributedPlacementSession {
             &logical_devices,
             remaining_dynamic_parameter_budget,
             &remaining_dynamic_parameter_bytes_by_device,
+            None,
         )?
         else {
             return Ok(None);
@@ -1370,14 +1417,32 @@ impl VulkanRuntimeDistributedPlacementSession {
                 .dispatches
                 .iter()
                 .all(|dispatch| {
-                    selected_distributed_component_batch_artifact(
+                    let path = distributed_component_batch_kernel_path(dispatch);
+                    let physical_artifact_available = matches!(
+                        path,
+                        VulkanDistributedComponentBatchKernelPath::InputColumnPhysicalArtifact
+                            | VulkanDistributedComponentBatchKernelPath::OutputRowPhysicalArtifact
+                    ) && placed_slice
+                        .package_slice
+                        .loaded_manifest
+                        .physical_artifact(&dispatch.physical_artifact_id)
+                        .is_some();
+                    let compiled_batch_artifact_available = matches!(
+                        path,
+                        VulkanDistributedComponentBatchKernelPath::CompiledBatchArtifact
+                    ) && selected_distributed_component_batch_artifact(
                         &logical_devices,
                         &placed_slice.package_slice,
                         dispatch,
                         VulkanComponentBatchExecutionMode::CausalSequence,
                         activation_batch_width,
                     )
-                    .is_some()
+                    .is_some();
+                    distributed_component_batch_kernel_path_is_available(
+                        path,
+                        physical_artifact_available,
+                        compiled_batch_artifact_available,
+                    )
                 });
             if !all_distributed_dispatches_supported {
                 return Ok(None);
@@ -1400,7 +1465,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                     Rc::new(RefCell::new(RuntimeExecutionQuantumCalibrator::default())),
                 )]);
                 Some(
-                    VulkanResidentPlacedComponentBatchRunner::new(
+                    VulkanResidentPlacedComponentBatchRunner::new_for_components(
                         &logical_devices,
                         std::slice::from_ref(&placed_slice),
                         &runtime_execution_identity,
@@ -1413,6 +1478,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                         &distributed_parameter_buffers,
                         &selected_resource_mount.dynamic_buffers,
                         &selected_resource_mount.stores,
+                        BTreeSet::from([target.component_id.clone()]),
                     )
                     .map_err(|error| distributed_calibration_error_value(error.to_string()))?,
                 )
@@ -1606,9 +1672,7 @@ impl VulkanRuntimeDistributedPlacementSession {
         )?;
         let output_digest = vulkan_placement_output_artifact_digest(&captured_output)
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let output_artifact = (self.execution_case.equivalence.output
-            == VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance)
-            .then_some(captured_output);
+        let output_artifact = Some(captured_output);
         let state_digest = distributed_calibration_state_digest(&self.placed_slice.mounted)?;
         let dispatches_per_unit = self
             .placed_slice
@@ -1625,6 +1689,9 @@ impl VulkanRuntimeDistributedPlacementSession {
             output_digest,
             output_artifact,
             state_digest,
+            indirect_control_observations: Vec::new(),
+            selected_resource_record_observations: Vec::new(),
+            output_observations: Vec::new(),
         })
     }
 
@@ -1722,10 +1789,26 @@ impl VulkanRuntimeDistributedPlacementSession {
         )?;
         let output_digest = vulkan_placement_output_artifact_digest(&captured_output)
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let output_artifact = (self.execution_case.equivalence.output
-            == VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance)
-            .then_some(captured_output);
+        let output_artifact = Some(captured_output);
         let state_digest = distributed_calibration_state_digest(&self.placed_slice.mounted)?;
+        let indirect_control_observations = runner
+            .distributed_dispatches
+            .indirect_control_observations()
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        let selected_resource_record_observations = runner
+            .distributed_dispatches
+            .selected_resource_record_observations(
+                &self._distributed_dynamic_resource_buffers,
+                activation_batch_width,
+            )
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        let batch_slice = runner
+            .slice(0)
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        let output_observations = runner
+            .distributed_dispatches
+            .output_observations(batch_slice, activation_batch_width)
+            .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         let local_dispatch_count = runner
             .slices
             .iter()
@@ -1755,6 +1838,9 @@ impl VulkanRuntimeDistributedPlacementSession {
             output_digest,
             output_artifact,
             state_digest,
+            indirect_control_observations,
+            selected_resource_record_observations,
+            output_observations,
         })
     }
 
@@ -2172,20 +2258,20 @@ fn distributed_calibration_output_artifact(
 fn distributed_calibration_state_digest(
     mounted: &VulkanMountedPlacedStreamCircuit,
 ) -> Result<String, VulkanResidentTokenModelPackageError> {
-    let mut digest = Sha256::new();
-    for state in &mounted.buffers.state_buffers {
-        digest.update(state.component_id.as_bytes());
-        digest.update(state.state_id.as_bytes());
-        digest.update(
-            state
-                .buffer
-                .read_bytes(state.buffer.byte_capacity())
-                .map_err(|error| distributed_calibration_error_value(error.to_string()))?,
-        );
-    }
-    Ok(targeted_finalized_artifact_digest(
-        digest.finalize().as_slice(),
-    ))
+    vulkan_semantic_state_digest(
+        mounted
+            .buffers
+            .state_buffers
+            .iter()
+            .map(|state| {
+                state
+                    .buffer
+                    .read_bytes(state.buffer.byte_capacity())
+                    .map(|bytes| (state.component_id.clone(), state.state_id.clone(), bytes))
+                    .map_err(|error| distributed_calibration_error_value(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    )
 }
 
 fn remaining_calibration_duration(
@@ -2257,6 +2343,9 @@ mod runtime_distributed_placement_calibration_strategy_tests {
             resident_host_transient_bytes: 0,
             activation_routes: Vec::new(),
             dispatch_work: Vec::new(),
+            indirect_control_observations: Vec::new(),
+            selected_resource_record_observations: Vec::new(),
+            output_observations: Vec::new(),
             execution_case: VulkanPlacementExecutionCaseIdentity {
                 behavior: VulkanPlacementBehaviorIdentity {
                     compiled_execution_signature: digest('a'),
@@ -2348,6 +2437,84 @@ mod runtime_distributed_placement_calibration_strategy_tests {
                 .contains("does not execute complete model work")
         );
         assert_eq!(catalog.observation_count(), 0);
+    }
+
+    #[test]
+    fn validation_only_checks_partition_output_and_state_without_recording_it() {
+        let report = recording_report();
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        catalog
+            .record_reference(VulkanPlacementCanonicalReference {
+                behavior: report.execution_case.behavior.clone(),
+                output_digest: report.output_digest.clone(),
+                output_artifact: None,
+                state_digest: report.state_digest.clone(),
+            })
+            .unwrap();
+
+        let evidence =
+            validate_vulkan_runtime_distributed_calibration_report(&catalog, &report).unwrap();
+        assert_eq!(
+            evidence,
+            VulkanPlacementOutputEquivalenceEvidence::BitExact
+        );
+        assert_eq!(catalog.observation_count(), 0);
+
+        let mut wrong_output = report.clone();
+        wrong_output.output_digest = "different-output".to_string();
+        assert!(
+            validate_vulkan_runtime_distributed_calibration_report(&catalog, &wrong_output)
+                .unwrap_err()
+                .to_string()
+                .contains("bit-exact placement output differs")
+        );
+        assert_eq!(catalog.observation_count(), 0);
+
+        let mut wrong_state = report;
+        wrong_state.state_digest = "different-state".to_string();
+        assert!(
+            validate_vulkan_runtime_distributed_calibration_report(&catalog, &wrong_state)
+                .unwrap_err()
+                .to_string()
+                .contains("state differs")
+        );
+        assert_eq!(catalog.observation_count(), 0);
+    }
+
+    #[test]
+    fn bit_exact_diagnostics_are_not_persisted_in_the_runtime_catalog() {
+        let mut report = recording_report();
+        report.output_artifact = Some(VulkanPlacementOutputArtifact {
+            scalar_format: VulkanPlacementScalarFormat::Bf16,
+            segments: vec![VulkanPlacementOutputSegment {
+                binding: 0,
+                name: "output".to_string(),
+                bytes: ((1.0f32.to_bits() >> 16) as u16)
+                    .to_le_bytes()
+                    .to_vec(),
+            }],
+        });
+
+        let bit_exact = report.calibration_observation(
+            VulkanPlacementOutputEquivalenceEvidence::BitExact,
+        );
+        assert!(bit_exact.output_artifact.is_none());
+
+        report.execution_case.equivalence = VulkanPlacementEquivalenceIdentity {
+            output: VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance,
+            state: VulkanPlacementEquivalenceKind::BitExact,
+            absolute_tolerance_bits: Some(0.01f64.to_bits()),
+            relative_tolerance_bits: Some(0.01f64.to_bits()),
+            output_scalar_format: Some(VulkanPlacementScalarFormat::Bf16),
+        };
+        let tolerant = report.calibration_observation(
+            VulkanPlacementOutputEquivalenceEvidence::AbsoluteRelativeTolerance {
+                compared_element_count: 1,
+                maximum_absolute_error_bits: 0.0f64.to_bits(),
+                maximum_relative_error_bits: 0.0f64.to_bits(),
+            },
+        );
+        assert!(tolerant.output_artifact.is_some());
     }
 
     #[test]
@@ -2533,10 +2700,20 @@ mod runtime_distributed_placement_calibration_strategy_tests {
                 participant_count: 3,
             })
         );
-        assert!(
+        assert_eq!(
             vulkan_distributed_execution_reduction_geometry("contract", Some(&reduction), 1)
-                .is_err()
+                .unwrap(),
+            Some(VulkanPlacementOperationGeometry::Reduction {
+                contract_id: "contract".to_string(),
+                element_count: 4096,
+                element_byte_count: size_of::<f32>(),
+                participant_count: 1,
+            })
         );
+        let incomplete =
+            vulkan_distributed_execution_reduction_geometry("contract", Some(&reduction), 0)
+                .unwrap_err();
+        assert!(incomplete.to_string().contains("participant_count=0"));
         assert_eq!(
             vulkan_distributed_execution_reduction_geometry("contract", None, 1).unwrap(),
             None
@@ -2567,7 +2744,7 @@ mod runtime_distributed_placement_calibration_strategy_tests {
                     },
                 ),
             ),
-        ])
+        ], false)
         .unwrap();
         assert_eq!(
             accepted.output,
@@ -2584,13 +2761,35 @@ mod runtime_distributed_placement_calibration_strategy_tests {
             vulkan_distributed_execution_equivalence_from_contracts(&[
                 (tolerant.clone(), None),
                 (exact, None),
-            ])
+            ], false)
             .unwrap_err()
             .to_string()
             .contains("tolerant intermediate")
         );
+        let accepted_local_region = vulkan_distributed_execution_equivalence_from_contracts(
+            &[
+                (tolerant.clone(), None),
+                (
+                    tolerant.clone(),
+                    Some(VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16),
+                ),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            accepted_local_region.output,
+            VulkanPlacementEquivalenceKind::AbsoluteRelativeTolerance,
+        );
+        assert_eq!(
+            accepted_local_region.output_scalar_format,
+            Some(VulkanPlacementScalarFormat::Bf16),
+        );
         assert!(
-            vulkan_distributed_execution_equivalence_from_contracts(&[(tolerant, None)])
+            vulkan_distributed_execution_equivalence_from_contracts(
+                &[(tolerant, None)],
+                false,
+            )
                 .unwrap_err()
                 .to_string()
                 .contains("typed reduction")

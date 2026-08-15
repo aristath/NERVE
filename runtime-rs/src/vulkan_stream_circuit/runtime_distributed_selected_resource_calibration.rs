@@ -18,6 +18,11 @@ impl VulkanCalibrationSelectedResourceMount {
     }
 }
 
+fn distributed_calibration_transaction_predicate_bytes(
+) -> [u8; VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY] {
+    demand_feedback_ready_predicate_bytes()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn mount_distributed_calibration_selected_resources(
     manifest_dir: &Path,
@@ -27,6 +32,7 @@ fn mount_distributed_calibration_selected_resources(
     logical_devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
     maximum_total_payload_bytes: usize,
     maximum_payload_bytes_by_device: &BTreeMap<String, usize>,
+    selected_resources: Option<&BTreeMap<String, BTreeSet<usize>>>,
 ) -> Result<Option<VulkanCalibrationSelectedResourceMount>, VulkanResidentTokenModelPackageError> {
     let has_selected_resources = execution_plan
         .dispatches
@@ -35,8 +41,16 @@ fn mount_distributed_calibration_selected_resources(
     if !has_selected_resources {
         return Ok(Some(VulkanCalibrationSelectedResourceMount::empty()));
     }
-    let store_plan = VulkanDistributedSelectedResourceStorePlan::from_execution_plan(execution_plan)
-        .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+    let store_plan = match selected_resources {
+        Some(selected_resources) => {
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_for_selected_resources(
+                execution_plan,
+                selected_resources,
+            )
+        }
+        None => VulkanDistributedSelectedResourceStorePlan::from_execution_plan(execution_plan),
+    }
+    .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
     if store_plan.devices.len() != logical_devices.len()
         || maximum_payload_bytes_by_device.len() != logical_devices.len()
         || store_plan
@@ -197,13 +211,14 @@ fn mount_distributed_calibration_selected_resources(
         store
             .mark_mount_complete()
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
+        let predicate_bytes = distributed_calibration_transaction_predicate_bytes();
         let predicate = Arc::new(
             device
-                .create_conditional_resident_buffer(size_of::<u32>())
+                .create_conditional_resident_buffer(predicate_bytes.len())
                 .map_err(|error| distributed_calibration_error_value(error.to_string()))?,
         );
         predicate
-            .write_bytes(&1u32.to_le_bytes())
+            .write_bytes(&predicate_bytes)
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         let store_report = store
             .residency_report()
@@ -538,9 +553,15 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
                 contract_phase,
             )
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        let store_plan = VulkanDistributedSelectedResourceStorePlan::from_execution_plan(
-            &execution_plan,
-        )
+        let selected_resources = BTreeMap::from([(
+            target.selector_id.clone(),
+            BTreeSet::from([target.resource_index]),
+        )]);
+        let store_plan =
+            VulkanDistributedSelectedResourceStorePlan::from_execution_plan_for_selected_resources(
+                &execution_plan,
+                &selected_resources,
+            )
         .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         if store_plan.device_count != 1
             || store_plan.unique_atomic_group_count != 1
@@ -597,6 +618,7 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
                 logical_device_id.clone(),
                 dynamic_parameter_capacity,
             )]),
+            Some(&selected_resources),
         )?
         else {
             return Ok(None);
@@ -821,14 +843,7 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
                 &[self.target.resource_index],
             )
             .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
-        if validation.resource_count != 1
-            || validation.byte_count != self.resource_payload_byte_count
-        {
-            return distributed_calibration_error(
-                "selected-resource execution preload did not publish the exact resource payload",
-            );
-        }
-        Ok(())
+        validate_selected_resource_preload(&validation, self.resource_payload_byte_count)
     }
 
     fn resident_parameter_bytes(&self) -> Result<usize, VulkanResidentTokenModelPackageError> {
@@ -1003,10 +1018,11 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
             .iter()
             .map(|dispatch| dispatch.output_activation.signal_id.as_str())
             .collect::<BTreeSet<_>>();
-        let mut fixtures_by_buffer = BTreeMap::<usize, Vec<u8>>::new();
+        let mut fixtures_by_buffer = BTreeMap::<usize, (Vec<u8>, String)>::new();
         for dispatch in &self.execution_plan.dispatches {
             for activation in std::iter::once(&dispatch.input_activation)
                 .chain(dispatch.auxiliary_input_activations.iter())
+                .chain(dispatch.selected_resource_activations.iter())
                 .filter(|activation| !produced_signals.contains(activation.signal_id.as_str()))
             {
                 let buffer = self
@@ -1021,16 +1037,31 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
                             "selected-resource input signal {:?} has no activation buffer",
                             activation.signal_id,
                         ))
-                    })?;
+                })?;
                 let fixture = self.fixture_for_activation(activation, buffer.byte_capacity())?;
                 let key = Arc::as_ptr(buffer) as usize;
-                if let Some(existing) = fixtures_by_buffer.insert(key, fixture.clone())
-                    && existing != fixture
-                {
-                    return distributed_calibration_error(format!(
-                        "selected-resource input signals alias one buffer with incompatible fixtures at {}.slot_{}",
-                        activation.component_id, activation.slot,
-                    ));
+                let description = format!(
+                    "signal={:?}, binding={}, storage={:?}, selector_role={}",
+                    activation.signal_id,
+                    activation.binding,
+                    activation.storage,
+                    if activation.signal_id == self.selector.selection_signal {
+                        "selection"
+                    } else if activation.signal_id == self.selector.execution_signal {
+                        "execution"
+                    } else {
+                        "generic"
+                    },
+                );
+                if let Some((existing, existing_description)) = fixtures_by_buffer.get(&key) {
+                    if existing != &fixture {
+                        return distributed_calibration_error(format!(
+                            "selected-resource input signals alias one buffer with incompatible fixtures at {}.slot_{}: existing {existing_description}; conflicting {description}",
+                            activation.component_id, activation.slot,
+                        ));
+                    }
+                } else {
+                    fixtures_by_buffer.insert(key, (fixture.clone(), description));
                 }
                 buffer
                     .write_bytes(&fixture)
@@ -1053,10 +1084,9 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
             None
         };
         let Some(base) = base else {
-            return Ok(targeted_fixture_bytes(
+            return Ok(generic_selected_resource_fixture_bytes(
+                activation,
                 buffer_byte_capacity,
-                0,
-                activation.binding,
             ));
         };
         let lane_count = self.target.phase.activation_batch_width();
@@ -1177,6 +1207,64 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
             ))
         }
     }
+}
+
+fn generic_selected_resource_fixture_bytes(
+    activation: &VulkanDistributedActivationSlot,
+    buffer_byte_capacity: usize,
+) -> Vec<u8> {
+    let mut identity = Sha256::new();
+    identity.update(b"nerve.selected_resource_generic_activation_fixture.v1\0");
+    match &activation.storage {
+        VulkanDistributedActivationStorage::ActivationSlot => {
+            identity.update(b"activation_slot\0");
+            identity.update(activation.component_id.as_bytes());
+            identity.update(b"\0");
+            identity.update(activation.slot.to_le_bytes());
+        }
+        VulkanDistributedActivationStorage::BoundaryInput => {
+            identity.update(b"boundary_input\0");
+            identity.update(activation.component_id.as_bytes());
+            identity.update(b"\0");
+            identity.update(activation.signal_id.as_bytes());
+        }
+        VulkanDistributedActivationStorage::BoundaryOutput => {
+            identity.update(b"boundary_output\0");
+            identity.update(activation.component_id.as_bytes());
+            identity.update(b"\0");
+            identity.update(activation.signal_id.as_bytes());
+        }
+        VulkanDistributedActivationStorage::Edge {
+            edge_index,
+            owner_device_id,
+        } => {
+            identity.update(b"edge\0");
+            identity.update(edge_index.to_le_bytes());
+            identity.update(b"\0");
+            identity.update(owner_device_id.as_bytes());
+        }
+    }
+    let digest = identity.finalize();
+    let seed = u32::from_le_bytes(digest[..size_of::<u32>()].try_into().unwrap());
+    targeted_fixture_bytes(buffer_byte_capacity, seed, 0)
+}
+
+fn validate_selected_resource_preload(
+    validation: &VulkanCompiledResourceReadbackValidation,
+    expected_payload_byte_count: usize,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    if validation.group_ids.len() != 1
+        || validation.resource_count == 0
+        || validation.byte_count != expected_payload_byte_count
+    {
+        return distributed_calibration_error(format!(
+            "selected-resource execution preload did not publish one exact atomic payload: groups={}, member_resources={}, expected_bytes={expected_payload_byte_count}, actual_bytes={}",
+            validation.group_ids.len(),
+            validation.resource_count,
+            validation.byte_count,
+        ));
+    }
+    Ok(())
 }
 
 pub fn calibrate_vulkan_runtime_selected_resource_execution(
@@ -1493,6 +1581,13 @@ fn validate_selected_resource_finite_output(
 mod runtime_selected_resource_execution_calibration_tests {
     use super::*;
 
+    #[test]
+    fn calibration_transaction_predicate_matches_distributed_fault_abi() {
+        let bytes = distributed_calibration_transaction_predicate_bytes();
+        assert_eq!(bytes.len(), VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY);
+        assert_eq!(bytes, demand_feedback_ready_predicate_bytes());
+    }
+
     fn digest(byte: char) -> String {
         format!("sha256:{}", byte.to_string().repeat(64))
     }
@@ -1667,6 +1762,56 @@ mod runtime_selected_resource_execution_calibration_tests {
     }
 
     #[test]
+    fn isolated_selected_resource_transaction_can_contain_a_local_reduction() {
+        let mut report = report();
+        report
+            .execution_case
+            .operations
+            .push(VulkanPlacementOperationGeometry::Reduction {
+                contract_id: "contract".to_string(),
+                element_count: 64,
+                element_byte_count: 4,
+                participant_count: 1,
+            });
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        record_vulkan_runtime_selected_resource_execution_calibration_report(
+            &mut catalog,
+            &report,
+        )
+        .unwrap();
+        assert!(catalog.exact_observation(&report.execution_case).is_some());
+    }
+
+    #[test]
+    fn preload_validation_counts_one_selected_atomic_group_not_its_member_tensors() {
+        let validation = VulkanCompiledResourceReadbackValidation {
+            group_ids: vec!["expert-4".to_string()],
+            resource_count: 3,
+            byte_count: 4096,
+            output_digest: digest('a'),
+        };
+        validate_selected_resource_preload(&validation, 4096).unwrap();
+
+        let mut extra_group = validation.clone();
+        extra_group.group_ids.push("expert-5".to_string());
+        assert!(
+            validate_selected_resource_preload(&extra_group, 4096)
+                .unwrap_err()
+                .to_string()
+                .contains("groups=2")
+        );
+
+        let mut wrong_payload = validation;
+        wrong_payload.byte_count -= 1;
+        assert!(
+            validate_selected_resource_preload(&wrong_payload, 4096)
+                .unwrap_err()
+                .to_string()
+                .contains("actual_bytes=4095")
+        );
+    }
+
+    #[test]
     fn fixture_preserves_real_selector_width_and_one_local_occurrence() {
         let selector = selector();
         let words = selected_resource_fixture_words(&selector, 6, 4, 0x3f80_0000).unwrap();
@@ -1697,6 +1842,37 @@ mod runtime_selected_resource_execution_calibration_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("cannot preserve selector width")
+        );
+    }
+
+    #[test]
+    fn generic_fixture_follows_physical_activation_slot_identity() {
+        let first = VulkanDistributedActivationSlot {
+            binding: 1,
+            component_id: "block".to_string(),
+            signal_id: "first-use".to_string(),
+            slot: 3,
+            byte_capacity: 128,
+            signal_byte_capacity: 128,
+            storage: VulkanDistributedActivationStorage::ActivationSlot,
+        };
+        let aliased = VulkanDistributedActivationSlot {
+            binding: 7,
+            signal_id: "later-use".to_string(),
+            ..first.clone()
+        };
+        let distinct = VulkanDistributedActivationSlot {
+            slot: 4,
+            ..first.clone()
+        };
+
+        assert_eq!(
+            generic_selected_resource_fixture_bytes(&first, 128),
+            generic_selected_resource_fixture_bytes(&aliased, 128),
+        );
+        assert_ne!(
+            generic_selected_resource_fixture_bytes(&first, 128),
+            generic_selected_resource_fixture_bytes(&distinct, 128),
         );
     }
 

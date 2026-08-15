@@ -1113,6 +1113,9 @@ mod tests {
             output_digest: "output".to_string(),
             output_values_f32_le_hex: None,
             captured_outputs: None,
+            intermediate_output_observations: None,
+            selected_resource_record_observations: None,
+            indirect_control_observation: None,
             state_digest: "state".to_string(),
             throughput_windows: vec![nerve_runtime::VulkanTargetedComponentThroughputWindow {
                 index: 0,

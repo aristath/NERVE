@@ -102,6 +102,34 @@ fn targeted_state_fixture_preserves_declared_numeric_type() {
 }
 
 #[test]
+fn semantic_state_digest_is_placement_order_independent_and_state_exact() {
+    let state_a = ("component_a".to_string(), "memory".to_string(), vec![1, 2, 3]);
+    let state_b = ("component_b".to_string(), "memory".to_string(), vec![4, 5, 6]);
+    let forward = vulkan_semantic_state_digest(vec![state_a.clone(), state_b.clone()]).unwrap();
+    let reverse = vulkan_semantic_state_digest(vec![state_b.clone(), state_a.clone()]).unwrap();
+    assert_eq!(forward, reverse);
+
+    let changed = vulkan_semantic_state_digest(vec![
+        state_a,
+        (state_b.0, state_b.1, vec![4, 5, 7]),
+    ])
+    .unwrap();
+    assert_ne!(forward, changed);
+}
+
+#[test]
+fn semantic_state_digest_rejects_duplicate_physical_owners() {
+    let state = ("component".to_string(), "memory".to_string(), vec![1, 2, 3]);
+    let error = vulkan_semantic_state_digest(vec![state.clone(), state]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("more than one physical owner"),
+        "{error}",
+    );
+}
+
+#[test]
 fn targeted_causal_fixture_uses_declared_nonempty_history() {
     assert_eq!(
         targeted_prefill_start_stream_tick(

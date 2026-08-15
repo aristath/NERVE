@@ -218,12 +218,15 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
                 &mut canonical_attempts,
             )?;
         }
-        // A one-participant execution of a partition contract is useful only
-        // for fixing the exact workload sampled by wider stages. It is not a
-        // replayable single-device case: the ordinary single-device runtime
-        // does not mount distributed shard machinery. The canonical
-        // observation recorded above is the executable one-target candidate.
-        if canonical_participant.is_none() {
+        if canonical_participant.is_some() {
+            // A one-participant execution of a partition contract is not a
+            // replayable single-device case: the ordinary single-device
+            // runtime does not mount distributed shard machinery. It must
+            // nevertheless produce the canonical component output and state
+            // before its sampled workload can define any wider stage.
+            validate_vulkan_runtime_distributed_calibration_report(catalog, &report)
+                .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+        } else {
             record_vulkan_runtime_distributed_calibration_report(catalog, &report)
                 .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
             final_report = Some(report);

@@ -741,7 +741,7 @@ fn validate_observation(
             .any(|digest| !valid_sha256_digest(digest))
         || case.operations.is_empty()
         || case.operations.iter().any(|operation| {
-            !operation.is_valid()
+            !operation_is_valid_for_strategy(operation, case.strategy)
                 || !case
                     .contract_ids
                     .iter()
@@ -888,6 +888,27 @@ fn validate_observation(
         ));
     }
     Ok(())
+}
+
+fn operation_is_valid_for_strategy(
+    operation: &VulkanPlacementOperationGeometry,
+    strategy: VulkanPlacementExecutionStrategy,
+) -> bool {
+    if operation.is_valid() {
+        return true;
+    }
+    matches!(
+        (strategy, operation),
+        (
+            VulkanPlacementExecutionStrategy::SelectedResourceTransaction,
+            VulkanPlacementOperationGeometry::Reduction {
+                contract_id,
+                element_count,
+                element_byte_count,
+                participant_count: 1,
+            },
+        ) if !contract_id.is_empty() && *element_count > 0 && *element_byte_count > 0
+    )
 }
 
 fn shard_selected_resource_partition_ordinals(shard: &VulkanPlacementShardIdentity) -> bool {

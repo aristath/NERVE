@@ -942,6 +942,16 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
                 )
             })?;
             let warmup = session.execute(&device, warmup_useful_units, 1, 0, remaining)?;
+            validate_canonical_demand_prefill_warmup(
+                phase,
+                cached_plan
+                    .plan
+                    .slice_plan
+                    .physical_residency_schedule
+                    .checkpoints
+                    .len(),
+                warmup.resource_loading,
+            )?;
             let remaining = policy
                 .maximum_duration
                 .checked_sub(case_started.elapsed())
@@ -1046,5 +1056,55 @@ fn calibrate_vulkan_runtime_placement_phase_candidate_with_policy(
             "{error}; runtime placement calibration cleanup also failed: {}",
             cleanup_errors.join("; "),
         ))),
+    }
+}
+
+fn validate_canonical_demand_prefill_warmup(
+    phase: VulkanTargetedComponentExecutionPhase,
+    checkpoint_count: usize,
+    loading: VulkanCompiledResourceLoadStatistics,
+) -> Result<(), VulkanResidentTokenModelPackageError> {
+    if matches!(phase, VulkanTargetedComponentExecutionPhase::Prefill { .. })
+        && checkpoint_count > 0
+        && loading.load_count == 0
+    {
+        return Err(VulkanResidentTokenModelPackageError::new(
+            "canonical demand-resident prefill warmup executed without loading any selected resources",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod canonical_demand_prefill_warmup_tests {
+    use super::*;
+
+    #[test]
+    fn demand_prefill_rejects_a_reference_that_skipped_selected_resources() {
+        let error = validate_canonical_demand_prefill_warmup(
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width: 1,
+            },
+            1,
+            VulkanCompiledResourceLoadStatistics::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("without loading"), "{error}");
+    }
+
+    #[test]
+    fn demand_prefill_accepts_a_warmup_that_loaded_selected_resources() {
+        validate_canonical_demand_prefill_warmup(
+            VulkanTargetedComponentExecutionPhase::Prefill {
+                activation_batch_width: 1,
+            },
+            1,
+            VulkanCompiledResourceLoadStatistics {
+                load_count: 1,
+                ..VulkanCompiledResourceLoadStatistics::default()
+            },
+        )
+        .unwrap();
     }
 }

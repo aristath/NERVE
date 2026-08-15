@@ -137,11 +137,36 @@ pub(crate) fn vulkan_distributed_execution_equivalence(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    vulkan_distributed_execution_equivalence_from_dispatches(&dispatches)
+    let tolerant_intermediates_are_compiler_local = dispatches
+        .windows(2)
+        .all(|pair| {
+            pair[0].equivalence.output == VulkanDistributedEquivalenceKind::BitExact
+                || execution_plan.execution_islands.iter().any(|island| {
+                    island.dispatches.windows(2).any(|island_pair| {
+                        distributed_dispatch_identity_matches(&island_pair[0], pair[0])
+                            && distributed_dispatch_identity_matches(&island_pair[1], pair[1])
+                    })
+                })
+        });
+    vulkan_distributed_execution_equivalence_from_dispatches(
+        &dispatches,
+        tolerant_intermediates_are_compiler_local,
+    )
+}
+
+fn distributed_dispatch_identity_matches(
+    left: &VulkanDistributedDispatchPlan,
+    right: &VulkanDistributedDispatchPlan,
+) -> bool {
+    left.dispatch_index == right.dispatch_index
+        && left.component_id == right.component_id
+        && left.node_id == right.node_id
+        && left.physical_execution_contract_id == right.physical_execution_contract_id
 }
 
 fn vulkan_distributed_execution_equivalence_from_dispatches(
     dispatches: &[&VulkanDistributedDispatchPlan],
+    tolerant_intermediates_are_compiler_local: bool,
 ) -> Result<VulkanPlacementEquivalenceIdentity, VulkanResidentTokenModelPackageError> {
     let contracts = dispatches
         .iter()
@@ -155,7 +180,10 @@ fn vulkan_distributed_execution_equivalence_from_dispatches(
             )
         })
         .collect::<Vec<_>>();
-    vulkan_distributed_execution_equivalence_from_contracts(&contracts)
+    vulkan_distributed_execution_equivalence_from_contracts(
+        &contracts,
+        tolerant_intermediates_are_compiler_local,
+    )
 }
 
 fn vulkan_distributed_execution_equivalence_from_contracts(
@@ -163,6 +191,7 @@ fn vulkan_distributed_execution_equivalence_from_contracts(
         crate::VulkanDistributedEquivalencePlan,
         Option<VulkanDistributedReductionFinalizationPlan>,
     )],
+    tolerant_intermediates_are_compiler_local: bool,
 ) -> Result<VulkanPlacementEquivalenceIdentity, VulkanResidentTokenModelPackageError> {
     let Some((tail, tail_finalization)) = contracts.last() else {
         return distributed_execution_identity_error(
@@ -172,9 +201,10 @@ fn vulkan_distributed_execution_equivalence_from_contracts(
     if contracts[..contracts.len() - 1]
         .iter()
         .any(|(equivalence, _)| equivalence.output != VulkanDistributedEquivalenceKind::BitExact)
+        && !tolerant_intermediates_are_compiler_local
     {
         return distributed_execution_identity_error(
-            "distributed execution cannot compose a tolerant intermediate without a compiler-declared region equivalence",
+            "distributed execution cannot compose a tolerant intermediate outside a compiler-declared local physical island",
         );
     }
     if contracts
@@ -230,10 +260,16 @@ pub(crate) fn vulkan_distributed_execution_reduction_geometry(
     let Some(reduction) = reduction else {
         return Ok(None);
     };
-    if contract_id.is_empty() || reduction.element_count == 0 || participant_count < 2 {
-        return distributed_execution_identity_error(
-            "distributed execution reduction geometry is incomplete",
-        );
+    // A staged calibration first executes a partition contract on one device
+    // to fix the exact workload later used by wider candidates. That
+    // degenerate finalization is executable and has complete geometry. Catalog
+    // validation separately requires at least two participants before a
+    // distributed reduction observation can be published for replay.
+    if contract_id.is_empty() || reduction.element_count == 0 || participant_count == 0 {
+        return Err(distributed_execution_identity_error_value(format!(
+            "distributed execution reduction geometry is incomplete: contract_id={contract_id:?}, element_count={}, participant_count={participant_count}",
+            reduction.element_count,
+        )));
     }
     Ok(Some(VulkanPlacementOperationGeometry::Reduction {
         contract_id: contract_id.to_string(),
