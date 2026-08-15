@@ -11,6 +11,83 @@ pub(crate) struct VulkanHybridDispatchParameterRequirements {
     pub prepared_parameter_tensors: BTreeSet<(String, String)>,
 }
 
+type VulkanHybridFixedResourceParameterIndex<'a> =
+    BTreeMap<&'a str, BTreeSet<Option<&'a str>>>;
+type VulkanHybridFixedResourceNodeIndex<'a> =
+    BTreeMap<&'a str, VulkanHybridFixedResourceParameterIndex<'a>>;
+type VulkanHybridFixedResourceComponentIndex<'a> =
+    BTreeMap<&'a str, VulkanHybridFixedResourceNodeIndex<'a>>;
+
+struct VulkanHybridFixedResourceIdentityIndex<'a> {
+    by_node: BTreeMap<&'a str, VulkanHybridFixedResourceComponentIndex<'a>>,
+    by_component:
+        BTreeMap<&'a str, BTreeMap<&'a str, VulkanHybridFixedResourceParameterIndex<'a>>>,
+}
+
+impl<'a> VulkanHybridFixedResourceIdentityIndex<'a> {
+    fn new(resource_contract: &'a CompiledResourceResidencyContract) -> Self {
+        let mut by_node: BTreeMap<&'a str, VulkanHybridFixedResourceComponentIndex<'a>> =
+            BTreeMap::new();
+        let mut by_component: BTreeMap<
+            &'a str,
+            BTreeMap<&'a str, VulkanHybridFixedResourceParameterIndex<'a>>,
+        > = BTreeMap::new();
+        for binding in &resource_contract.bindings {
+            let mapping = match &binding.mapping {
+                CompiledResourceBindingMapping::AtomicGroup { resource_id, .. } => {
+                    Some(resource_id.as_str())
+                }
+                CompiledResourceBindingMapping::SelectedAtomicGroup { .. }
+                | CompiledResourceBindingMapping::PartitionTemplateMember { .. } => None,
+            };
+            by_node
+                .entry(binding.execution_scope.as_str())
+                .or_default()
+                .entry(binding.component_id.as_str())
+                .or_default()
+                .entry(binding.node_id.as_str())
+                .or_default()
+                .entry(binding.parameter_id.as_str())
+                .or_default()
+                .insert(mapping);
+            by_component
+                .entry(binding.execution_scope.as_str())
+                .or_default()
+                .entry(binding.component_id.as_str())
+                .or_default()
+                .entry(binding.parameter_id.as_str())
+                .or_default()
+                .insert(mapping);
+        }
+        Self {
+            by_node,
+            by_component,
+        }
+    }
+
+    fn mappings(
+        &self,
+        execution_scope: &str,
+        component_id: &str,
+        node_id: Option<&str>,
+        parameter_id: &str,
+    ) -> Option<&BTreeSet<Option<&'a str>>> {
+        match node_id {
+            Some(node_id) => self
+                .by_node
+                .get(execution_scope)?
+                .get(component_id)?
+                .get(node_id)?
+                .get(parameter_id),
+            None => self
+                .by_component
+                .get(execution_scope)?
+                .get(component_id)?
+                .get(parameter_id),
+        }
+    }
+}
+
 /// Reconstructs exact immutable parameter byte ranges for every mounted
 /// component across all physical execution phases.
 ///
@@ -28,6 +105,8 @@ pub fn vulkan_runtime_hybrid_parameter_resources_by_component(
     resource_contract: &CompiledResourceResidencyContract,
     identity_by_logical_device: &BTreeMap<String, VulkanPlacementDeviceExecutionIdentity>,
 ) -> Result<BTreeMap<String, VulkanHybridCandidateResources>, VulkanHybridResourceError> {
+    let fixed_resource_identities =
+        VulkanHybridFixedResourceIdentityIndex::new(resource_contract);
     let VulkanHybridDispatchParameterRequirements {
         mut requirements_by_component,
         prepared_parameter_tensors,
@@ -39,7 +118,7 @@ pub fn vulkan_runtime_hybrid_parameter_resources_by_component(
         |prepared, parameter_id, actual_tensor| {
             exact_vulkan_hybrid_parameter_resource_identity_for_tensor(
                 runtime_model,
-                resource_contract,
+                &fixed_resource_identities,
                 tensor_index,
                 prepared,
                 parameter_id,
@@ -76,6 +155,8 @@ pub(crate) fn append_vulkan_hybrid_graph_parameter_requirements(
         Vec<VulkanHybridSharedRangeRequirement>,
     >,
 ) -> Result<(), VulkanHybridResourceError> {
+    let fixed_resource_identities =
+        VulkanHybridFixedResourceIdentityIndex::new(resource_contract);
     for component in &runtime_model.circuit_graph.components {
         if component_ids.is_some_and(|ids| !ids.contains(&component.component_id)) {
             continue;
@@ -112,7 +193,7 @@ pub(crate) fn append_vulkan_hybrid_graph_parameter_requirements(
                 .entry(component.component_id.clone())
                 .or_default()
                 .extend(exact_vulkan_hybrid_fixed_resource_identity(
-                        resource_contract,
+                        &fixed_resource_identities,
                         &runtime_model.execution_scope,
                         &component.component_id,
                         None,
@@ -133,7 +214,7 @@ pub(crate) fn append_vulkan_hybrid_graph_parameter_requirements(
 
 fn exact_vulkan_hybrid_parameter_resource_identity_for_tensor(
     runtime_model: &VulkanResidentRuntimeModel,
-    resource_contract: &CompiledResourceResidencyContract,
+    fixed_resource_identities: &VulkanHybridFixedResourceIdentityIndex<'_>,
     tensor_index: &TensorIndex,
     prepared: &VulkanPreparedDispatch,
     parameter_id: &str,
@@ -155,7 +236,7 @@ fn exact_vulkan_hybrid_parameter_resource_identity_for_tensor(
             ))
         })?;
     let Some(fixed_identity) = exact_vulkan_hybrid_fixed_resource_identity(
-        resource_contract,
+        fixed_resource_identities,
         &runtime_model.execution_scope,
         &prepared.component_id,
         Some(&prepared.node_id),
@@ -367,52 +448,38 @@ where
 }
 
 fn exact_vulkan_hybrid_fixed_resource_identity(
-    resource_contract: &CompiledResourceResidencyContract,
+    fixed_resource_identities: &VulkanHybridFixedResourceIdentityIndex<'_>,
     execution_scope: &str,
     component_id: &str,
     node_id: Option<&str>,
     parameter_id: &str,
 ) -> Result<Option<String>, VulkanHybridResourceError> {
-    let mappings = resource_contract
-        .bindings
-        .iter()
-        .filter(|binding| {
-            binding.execution_scope == execution_scope
-                && binding.component_id == component_id
-                && binding.parameter_id == parameter_id
-                && node_id.is_none_or(|node_id| binding.node_id == node_id)
-        })
-        .map(|binding| match &binding.mapping {
-            CompiledResourceBindingMapping::AtomicGroup { resource_id, .. } => {
-                Ok(Some(resource_id.clone()))
-            }
-            CompiledResourceBindingMapping::SelectedAtomicGroup { .. }
-            | CompiledResourceBindingMapping::PartitionTemplateMember { .. } => {
-                Ok(None)
-            }
-        })
-        .collect::<Result<BTreeSet<_>, VulkanHybridResourceError>>()?;
-    if mappings == BTreeSet::from([None]) {
+    let mappings = fixed_resource_identities
+        .mappings(execution_scope, component_id, node_id, parameter_id);
+    if mappings.is_some_and(|mappings| mappings.len() == 1 && mappings.contains(&None)) {
         return Ok(None);
     }
-    if mappings.contains(&None) {
+    if mappings.is_some_and(|mappings| mappings.contains(&None)) {
         return Err(VulkanHybridResourceError(format!(
             "exact parameter {}.{parameter_id} mixes fixed and selected mappings",
             component_id,
         )));
     }
-    let identities = mappings.into_iter().flatten().collect::<BTreeSet<_>>();
-    if identities.len() != 1 {
+    let identity_count = mappings.map_or(0, BTreeSet::len);
+    if identity_count != 1 {
         return Err(VulkanHybridResourceError(format!(
             "exact parameter {}.{parameter_id} resolves to {} fixed identities or mixes fixed and selected mappings",
             component_id,
-            identities.len(),
+            identity_count,
         )));
     }
-    Ok(Some(identities
-        .into_iter()
+    Ok(Some(mappings
+        .expect("one exact resource identity set was proved")
+        .iter()
         .next()
-        .expect("one exact resource identity was proved")))
+        .and_then(|mapping| *mapping)
+        .expect("one fixed resource identity was proved")
+        .to_string()))
 }
 
 fn vulkan_hybrid_tensor_byte_count(

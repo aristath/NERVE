@@ -1034,6 +1034,8 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
         decode_batch: execution_plan.clone(),
         prefill: execution_plan.clone(),
     };
+    let fixed_resource_identities =
+        VulkanHybridFixedResourceIdentityIndex::new(resource_contract);
     let mut requirements = vulkan_hybrid_dispatch_parameter_requirements_by_component(
         &[(owner_logical_device_id.as_str(), &slice_plan.prepared_plan)],
         &execution_plans,
@@ -1042,7 +1044,7 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
         |prepared, parameter_id, actual_tensor| {
             exact_vulkan_hybrid_parameter_resource_identity_for_tensor(
                 runtime_model,
-                resource_contract,
+                &fixed_resource_identities,
                 tensor_index,
                 prepared,
                 parameter_id,
