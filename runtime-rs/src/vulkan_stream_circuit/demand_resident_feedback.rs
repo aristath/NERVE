@@ -626,28 +626,41 @@ where
             )));
         }
     }
-    write_shared_device_predicate_views(predicates_by_device.values(), true)?;
+    write_demand_feedback_predicate_views(predicates_by_device.values(), true)?;
     Ok(Some(predicates_by_device))
 }
 
-fn write_shared_device_predicate_views<'a>(
+fn write_shared_resident_predicate_views<'a>(
+    predicates: impl IntoIterator<Item = &'a Arc<VulkanResidentBuffer>>,
+    value: &[u8],
+    contract: &str,
+) -> Result<(), VulkanError> {
+    let mut written_views = BTreeSet::new();
+    for predicate in predicates {
+        if written_views.insert(Arc::as_ptr(predicate) as usize) {
+            if predicate.byte_capacity() < value.len() {
+                return Err(VulkanError(format!(
+                    "{contract} predicate capacity {} cannot hold its {}-byte ABI",
+                    predicate.byte_capacity(),
+                    value.len(),
+                )));
+            }
+            predicate.write_bytes(value)?;
+        }
+    }
+    if written_views.is_empty() {
+        return Err(VulkanError(format!("{contract} predicate is absent")));
+    }
+    Ok(())
+}
+
+fn write_demand_feedback_predicate_views<'a>(
     predicates: impl IntoIterator<Item = &'a Arc<VulkanResidentBuffer>>,
     enabled: bool,
 ) -> Result<(), VulkanError> {
     let mut value = demand_feedback_ready_predicate_bytes();
     value[..size_of::<u32>()].copy_from_slice(&u32::from(enabled).to_le_bytes());
-    let mut written_views = BTreeSet::new();
-    for predicate in predicates {
-        if written_views.insert(Arc::as_ptr(predicate) as usize) {
-            predicate.write_bytes(&value)?;
-        }
-    }
-    if written_views.is_empty() {
-        return Err(VulkanError(
-            "shared device predicate is absent".to_string(),
-        ));
-    }
-    Ok(())
+    write_shared_resident_predicate_views(predicates, &value, "demand-feedback")
 }
 
 impl VulkanResidentDemandFeedbackState {
@@ -785,7 +798,7 @@ impl VulkanResidentDemandFeedbackState {
     }
 
     fn reset_pipeline_predicate(&self) -> Result<(), VulkanError> {
-        write_shared_device_predicate_views(self.predicates_by_device.values(), true)
+        write_demand_feedback_predicate_views(self.predicates_by_device.values(), true)
     }
 
     fn pipeline_predicate_diagnostic(

@@ -1,4 +1,35 @@
 #[test]
+fn component_batch_and_global_demand_predicates_keep_distinct_abis() {
+    let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
+    let continuation = Arc::new(
+        device
+            .create_conditional_resident_buffer(size_of::<u32>())
+            .unwrap(),
+    );
+
+    write_component_batch_demand_pipeline_predicate_views(
+        std::iter::once(&continuation),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        continuation.read_bytes(size_of::<u32>()).unwrap(),
+        1u32.to_le_bytes(),
+    );
+
+    let error = write_demand_feedback_predicate_views(
+        std::iter::once(&continuation),
+        true,
+    )
+    .unwrap_err();
+    assert!(
+        error.0.contains("demand-feedback predicate capacity 4")
+            && error.0.contains("8-byte ABI"),
+        "global demand feedback must reject a one-word continuation predicate: {error}",
+    );
+}
+
+#[test]
 fn demand_feedback_guards_the_entire_initial_pipeline_and_splits_after_gates() {
     let commands = [
         VulkanDemandResidencyCommand::Prefix(0),

@@ -1,3 +1,14 @@
+fn write_component_batch_demand_pipeline_predicate_views<'a>(
+    predicates: impl IntoIterator<Item = &'a Arc<VulkanResidentBuffer>>,
+    enabled: bool,
+) -> Result<(), VulkanError> {
+    write_shared_resident_predicate_views(
+        predicates,
+        &u32::from(enabled).to_le_bytes(),
+        "component-batch demand-pipeline",
+    )
+}
+
 impl VulkanResidentPlacedComponentBatchRunner {
     fn resident_transient_allocation_report(&self) -> BTreeMap<String, Vec<String>> {
         let distributed = self
@@ -502,7 +513,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     ),
                 )));
             }
-            write_shared_device_predicate_views(shared.buffers.iter(), true)
+            write_component_batch_demand_pipeline_predicate_views(shared.buffers.iter(), true)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             Some(shared.buffers)
         } else {
@@ -809,7 +820,7 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     "component batch has no shared demand-pipeline predicate".to_string(),
                 ))
             })?;
-        write_shared_device_predicate_views(predicates.iter(), true)
+        write_component_batch_demand_pipeline_predicate_views(predicates.iter(), true)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
     }
 
