@@ -8,6 +8,33 @@ mod mxfp4_tests {
     const FRAME_BYTES: usize = WIDTH * 2;
     const TEST_DEVICE_UUID_ENV: &str = "NERVE_TEST_VULKAN_DEVICE_UUID";
 
+    #[test]
+    fn expert_down_scales_once_after_tensor_parallel_reduction() {
+        let shader_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
+        for template in [
+            "independent_sparse_moe_down_mxfp4.comp.template",
+            "independent_sparse_moe_down_batch1_mxfp4.comp.template",
+        ] {
+            let source = std::fs::read_to_string(shader_dir.join(template)).unwrap();
+            assert_eq!(
+                source.matches("? value * route_weight").count(),
+                1,
+                "{template} canonical execution must scale once before its BF16 output boundary",
+            );
+            assert_eq!(
+                source
+                    .matches("output_rows[local_row] = row < HIDDEN_SIZE ? value : 0.0;")
+                    .count(),
+                1,
+                "{template} tensor-parallel execution must publish an unscaled F32 partial for post-reduction scaling",
+            );
+            assert!(
+                !source.contains("round_bf16(round_bf16(value) * route_weight)"),
+                "{template} must not introduce a canonical-only intermediate BF16 rounding boundary",
+            );
+        }
+    }
+
     fn explicitly_selected_device(test_name: &str) -> Option<VulkanComputeDevice> {
         let Ok(physical_device_id) = std::env::var(TEST_DEVICE_UUID_ENV) else {
             eprintln!("skipping {test_name}: explicit Vulkan device UUID unset");
