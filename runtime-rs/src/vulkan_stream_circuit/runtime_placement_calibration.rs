@@ -463,13 +463,9 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
             "runtime placement calibration found no {phase_name} kernel for signal processor {component_id:?}",
         ))
     })?;
-    let signature_payload = serde_json::to_vec(&(
-        phase,
-        execution.operator_type.as_str(),
-        execution.implementation.as_str(),
-        kernels
-            .iter()
-            .map(|kernel| {
+    let kernel_signatures = kernels
+        .iter()
+        .map(|kernel| {
                 let selected_batch_implementation = match phase {
                     VulkanTargetedComponentExecutionPhase::Decode => None,
                     VulkanTargetedComponentExecutionPhase::Prefill {
@@ -483,10 +479,10 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
                 let mut physical_contracts = kernel
                     .physical_execution_contracts
                     .iter()
-                    .map(|contract| contract.implementation_digest.as_str())
-                    .collect::<Vec<_>>();
+                    .map(vulkan_runtime_placement_structural_contract_fingerprint)
+                    .collect::<Result<Vec<_>, _>>()?;
                 physical_contracts.sort_unstable();
-                (
+                Ok((
                     kernel.execution_index,
                     kernel.op.as_str(),
                     &kernel.execution_domain,
@@ -498,9 +494,14 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
                     selected_batch_implementation,
                     &kernel.resource_representation_dispatch,
                     physical_contracts,
-                )
+                ))
             })
-            .collect::<Vec<_>>(),
+            .collect::<Result<Vec<_>, VulkanRuntimeResidencyPlanError>>()?;
+    let signature_payload = serde_json::to_vec(&(
+        phase,
+        execution.operator_type.as_str(),
+        execution.implementation.as_str(),
+        kernel_signatures,
     ))
     .map_err(|error| {
         VulkanRuntimeResidencyPlanError(format!(
@@ -515,6 +516,84 @@ fn vulkan_runtime_placement_calibration_target_from_execution(
         implementation: execution.implementation.clone(),
         planned_resident_parameter_bytes: 0,
     })
+}
+
+/// Produces the performance identity of a physical contract without retaining
+/// the identity of the component instance that owns it. The compiler seals
+/// exact resource and node names into `implementation_digest`; those names are
+/// required for replay, but do not change the work performed by an otherwise
+/// identical transaction. Calibration cohorts must therefore preserve the
+/// executable structure and resource relationships while replacing instance
+/// names with deterministic local aliases.
+fn vulkan_runtime_placement_structural_contract_fingerprint(
+    contract: &nerve_execution_contracts::PhysicalExecutionContract,
+) -> Result<String, VulkanRuntimeResidencyPlanError> {
+    let mut structural = contract.clone();
+    structural.contract_id.clear();
+    structural.implementation_digest.clear();
+    structural.member_node_ids = structural
+        .member_node_ids
+        .iter()
+        .enumerate()
+        .map(|(ordinal, _)| format!("member:{ordinal}"))
+        .collect();
+    for (ordinal, artifact) in structural.artifacts.iter_mut().enumerate() {
+        artifact.path = format!("artifact:{ordinal}");
+    }
+
+    let mut resource_aliases = BTreeMap::<String, String>::new();
+    for partition in &mut structural.parameter_partitions {
+        let next_alias = format!("parameter:binding:{}", partition.binding);
+        let alias = resource_aliases
+            .entry(partition.resource.clone())
+            .or_insert(next_alias)
+            .clone();
+        partition.resource = alias;
+    }
+    for (ordinal, resource) in structural.resources.iter_mut().enumerate() {
+        let next_alias = resource
+            .binding
+            .map(|binding| format!("resource:binding:{binding}"))
+            .unwrap_or_else(|| format!("resource:ordinal:{ordinal}"));
+        let alias = resource_aliases
+            .entry(resource.resource.clone())
+            .or_insert(next_alias)
+            .clone();
+        resource.resource = alias;
+    }
+
+    let mut atomic_group_aliases = BTreeMap::<String, String>::new();
+    for resource in &mut structural.resources {
+        let Some(atomic_group) = resource.atomic_group.as_ref() else {
+            continue;
+        };
+        let next_alias = format!("atomic_group:{}", atomic_group_aliases.len());
+        let alias = atomic_group_aliases
+            .entry(atomic_group.clone())
+            .or_insert(next_alias)
+            .clone();
+        resource.atomic_group = Some(alias);
+    }
+    for (ordinal, partition) in structural
+        .selected_resource_partitions
+        .iter_mut()
+        .enumerate()
+    {
+        partition.selection_signal = format!("selection_signal:{ordinal}");
+    }
+    for intermediate in &mut structural.local_intermediates {
+        intermediate.signal = format!(
+            "local_intermediate:{}:{}",
+            intermediate.producer_binding, intermediate.consumer_binding,
+        );
+    }
+
+    let payload = serde_json::to_vec(&structural).map_err(|error| {
+        VulkanRuntimeResidencyPlanError(format!(
+            "runtime placement calibration could not encode structural physical contract: {error}",
+        ))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(payload)))
 }
 
 #[cfg(test)]
@@ -561,10 +640,44 @@ mod runtime_placement_signature_tests {
     }
 
     #[test]
-    fn calibration_signature_rejects_changed_contract_implementation() {
+    fn calibration_signature_reuses_contracts_with_instance_specific_resources() {
         let first = fixture_execution();
         let mut changed = first.clone();
-        changed.kernels[0].physical_execution_contracts[0].implementation_digest =
+        let contract = &mut changed.kernels[0].physical_execution_contracts[0];
+        contract.contract_id = format!("sha256:{}", "e".repeat(64));
+        contract.implementation_digest = format!("sha256:{}", "f".repeat(64));
+        for partition in &mut contract.parameter_partitions {
+            partition.resource = format!("another.instance.{}", partition.binding);
+        }
+        for resource in &mut contract.resources {
+            resource.resource = format!("another.instance.{:?}", resource.binding);
+            resource.atomic_group = resource
+                .atomic_group
+                .as_ref()
+                .map(|_| "another.instance.atomic_group".to_string());
+        }
+
+        let first_target = vulkan_runtime_placement_calibration_target_from_execution(
+            "component-a",
+            &first,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
+        let changed_target = vulkan_runtime_placement_calibration_target_from_execution(
+            "component-b",
+            &changed,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
+
+        assert_eq!(first_target.signature_id, changed_target.signature_id);
+    }
+
+    #[test]
+    fn calibration_signature_rejects_changed_contract_artifact() {
+        let first = fixture_execution();
+        let mut changed = first.clone();
+        changed.kernels[0].physical_execution_contracts[0].artifacts[0].sha256 =
             format!("sha256:{}", "f".repeat(64));
 
         let first_target = vulkan_runtime_placement_calibration_target_from_execution(

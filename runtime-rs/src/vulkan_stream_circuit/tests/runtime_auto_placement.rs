@@ -276,7 +276,7 @@ fn runtime_placement_calibration_groups_identical_complete_decode_transactions()
 }
 
 #[test]
-fn runtime_placement_calibration_signature_includes_physical_contract_identity() {
+fn runtime_placement_calibration_signature_includes_physical_contract_artifact_identity() {
     let runtime_model = fixture_model_runtime_model();
     let component_id = runtime_model.component_executions[0].component_id.clone();
     let original = vulkan_runtime_placement_calibration_target_for_component(
@@ -287,8 +287,8 @@ fn runtime_placement_calibration_signature_includes_physical_contract_identity()
     .unwrap();
 
     let mut changed = runtime_model.clone();
-    changed.component_executions[0].kernels[0].physical_execution_contracts[0]
-        .implementation_digest = format!("sha256:{}", "f".repeat(64));
+    changed.component_executions[0].kernels[0].physical_execution_contracts[0].artifacts[0].sha256 =
+        format!("sha256:{}", "f".repeat(64));
     let changed = vulkan_runtime_placement_calibration_target_for_component(
         &changed,
         &component_id,
