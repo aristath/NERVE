@@ -1516,6 +1516,16 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         }
     }
 
+    if residency_policy.is_demand_loaded() && execution_plan.dispatches.is_empty() {
+        exact_vulkan_runtime_add_component_batch_demand_pipeline_predicate(
+            &mut plan,
+            slice_plans
+                .iter()
+                .map(|slice| slice.device_id.clone())
+                .collect(),
+        )?;
+    }
+
     for spec in private_activations.values() {
         for (logical_device_id, frame_byte_capacity) in &spec.frame_byte_capacities {
             plan.add_device_allocation(
@@ -1676,6 +1686,37 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         )?;
     }
     Ok(plan)
+}
+
+fn exact_vulkan_runtime_add_component_batch_demand_pipeline_predicate(
+    plan: &mut VulkanRuntimeHybridExecutionTransientPlan,
+    logical_device_ids: Vec<String>,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    let logical_device_ids = logical_device_ids
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let Some(owner_device_id) = logical_device_ids.first() else {
+        return runtime_hybrid_error(
+            "component-batch demand-pipeline predicate has no logical device",
+        );
+    };
+    if logical_device_ids.len() == 1 {
+        plan.add_conditional_device_allocation(
+            owner_device_id,
+            size_of::<u32>(),
+            "component-batch demand-pipeline predicate",
+        )
+    } else {
+        plan.add_shared_host_allocation(
+            VulkanRuntimeSharedHostTransientAllocationMode::ConditionalPredicate,
+            owner_device_id,
+            logical_device_ids.clone(),
+            size_of::<u32>(),
+            "component-batch demand-pipeline predicate",
+        )
+    }
 }
 
 fn exact_vulkan_runtime_add_component_batch_signal_allocation(

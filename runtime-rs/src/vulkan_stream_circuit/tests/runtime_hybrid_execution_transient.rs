@@ -251,6 +251,53 @@ fn component_batch_signal_admission_preserves_the_runtime_memory_domain() {
 }
 
 #[test]
+fn component_batch_demand_pipeline_predicate_matches_runtime_sharing() {
+    let mut local = VulkanRuntimeHybridExecutionTransientPlan::default();
+    exact_vulkan_runtime_add_component_batch_demand_pipeline_predicate(
+        &mut local,
+        vec!["gpu0".to_string()],
+    )
+    .unwrap();
+    assert_eq!(local.device_allocations.len(), 1);
+    assert_eq!(
+        local.device_allocations[0].usage,
+        VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate,
+    );
+    assert_eq!(local.device_allocations[0].byte_capacity, size_of::<u32>());
+    assert!(local.shared_host_allocations.is_empty());
+
+    let mut distributed = VulkanRuntimeHybridExecutionTransientPlan::default();
+    exact_vulkan_runtime_add_component_batch_demand_pipeline_predicate(
+        &mut distributed,
+        vec!["gpu1".to_string(), "gpu0".to_string(), "gpu1".to_string()],
+    )
+    .unwrap();
+    assert!(distributed.device_allocations.is_empty());
+    assert_eq!(distributed.shared_host_allocations.len(), 1);
+    assert_eq!(
+        distributed.shared_host_allocations[0].mode,
+        VulkanRuntimeSharedHostTransientAllocationMode::ConditionalPredicate,
+    );
+    assert_eq!(
+        distributed.shared_host_allocations[0].participant_device_ids,
+        vec!["gpu0".to_string(), "gpu1".to_string()],
+    );
+    assert_eq!(
+        distributed.shared_host_allocations[0].byte_capacity,
+        size_of::<u32>(),
+    );
+
+    let original = distributed.clone();
+    let error = exact_vulkan_runtime_add_component_batch_demand_pipeline_predicate(
+        &mut distributed,
+        Vec::new(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("has no logical device"));
+    assert_eq!(distributed, original, "a rejected predicate must not mutate admission");
+}
+
+#[test]
 fn decode_pipeline_predicate_is_local_for_one_logical_device() {
     let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
     add_exact_vulkan_runtime_decode_pipeline_predicate(
@@ -2025,6 +2072,13 @@ fn mounted_decode_demand_gates_are_permanent_beside_cached_prefill_gates() {
         allocation.concern != "scalar residency predicate"
     }));
     assert!(decode.shared_host_allocations.is_empty());
+    assert!(prefill.device_allocations.iter().any(|allocation| {
+        allocation.concern == "component-batch demand-pipeline predicate"
+            && allocation.usage
+                == VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate
+            && allocation.allocation_class
+                == VulkanRuntimeStreamAllocationClass::PromptRunner
+    }));
 
     let remote_logical_device_id = "tp_remote".to_string();
     let distributed_decode = exact_vulkan_runtime_mounted_decode_transient_plan(
