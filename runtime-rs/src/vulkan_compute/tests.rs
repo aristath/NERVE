@@ -877,7 +877,11 @@ mod tests {
         buffer.write_bytes(&[10, 20, 30]).unwrap();
         assert_eq!(buffer.read_bytes(3).unwrap(), vec![10, 20, 30]);
         assert!(buffer.read_bytes(17).is_err());
-        assert!(buffer.write_bytes(&[0; 17]).is_err());
+        let error = buffer.write_bytes(&[0; 17]).unwrap_err();
+        assert!(
+            error.0.contains("vulkan_compute/tests.rs:"),
+            "overflow diagnostic must identify the write call site: {error}",
+        );
     }
 
     #[test]

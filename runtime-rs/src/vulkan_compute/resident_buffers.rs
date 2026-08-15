@@ -103,10 +103,12 @@ impl VulkanResidentBuffer {
         })
     }
 
+    #[track_caller]
     pub fn write_bytes(&self, input: &[u8]) -> Result<(), VulkanError> {
         self.write_bytes_at(0, input)
     }
 
+    #[track_caller]
     pub fn write_bytes_at(&self, offset: usize, input: &[u8]) -> Result<(), VulkanError> {
         if input.is_empty() {
             return Err(VulkanError(
@@ -117,11 +119,14 @@ impl VulkanResidentBuffer {
             .checked_add(input.len())
             .ok_or_else(|| VulkanError("resident byte buffer write overflowed".to_string()))?;
         if end > self.byte_capacity as usize {
+            let caller = std::panic::Location::caller();
             return Err(VulkanError(format!(
-                "resident byte buffer capacity {} cannot write {} bytes at offset {}",
+                "resident byte buffer capacity {} cannot write {} bytes at offset {} (caller {}:{})",
                 self.byte_capacity,
                 input.len(),
-                offset
+                offset,
+                caller.file(),
+                caller.line(),
             )));
         }
         let byte_len = input.len() as vk::DeviceSize;
