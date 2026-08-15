@@ -1342,6 +1342,23 @@ where
             .map(|edge| edge.edge_index)
             .chain(group.edges.iter().map(|(outgoing, _)| outgoing.edge_index))
             .collect::<BTreeSet<_>>();
+        let expected_edge_indices = produced_edge_indices.iter().copied().collect::<Vec<_>>();
+        let planned_distributed_sources = physical_execution_residency_plan
+            .resident_shared_host_allocations
+            .iter()
+            .filter(|allocation| {
+                matches!(
+                    &allocation.kind,
+                    VulkanRuntimeSharedHostResidentAllocationKind::DistributedProducedPort {
+                        component_id,
+                        port_id,
+                        edge_indices,
+                    } if component_id == &group.source_component_id
+                        && port_id == &group.source_port_id
+                        && edge_indices == &expected_edge_indices
+                )
+            })
+            .collect::<Vec<_>>();
         let has_distributed_edge = distributed_activation_buffers
             .allocations
             .iter()
@@ -1352,6 +1369,45 @@ where
                         if produced_edge_indices.contains(&edge_index)
                 )
             });
+        let distributed_source_buffer = if has_distributed_edge
+            && distributed_activation_buffers.plan.route
+                == VulkanSharedResidentBufferRoute::SharedHost
+        {
+            mount_distributed_produced_port(
+                distributed_activation_buffers,
+                &group.source_device_id,
+                &group.source_component_id,
+                &group.source_port_id,
+                group.byte_capacity,
+                &produced_edge_indices,
+                &planned_distributed_sources,
+                device_for,
+            )?
+        } else {
+            if !planned_distributed_sources.is_empty() {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "distributed produced port {}.{} has a shared-host ledger for a non-shared route",
+                        group.source_component_id, group.source_port_id,
+                    )),
+                ));
+            }
+            None
+        };
+        if group.edges.is_empty()
+            && let Some(source_buffer) = distributed_source_buffer.as_ref()
+        {
+            for edge in matching_local_edges {
+                local_edge_overrides
+                    .entry(group.source_device_id.clone())
+                    .or_default()
+                    .push(VulkanPlacedLocalEdgeBufferOverride {
+                        edge_index: edge.edge_index,
+                        buffer: Arc::clone(source_buffer),
+                    });
+            }
+            continue;
+        }
         let distributed_route = has_distributed_edge.then_some(
             match distributed_activation_buffers.plan.route {
                 VulkanSharedResidentBufferRoute::ExternalDeviceLocal => {
@@ -1374,27 +1430,30 @@ where
                 ]
             }),
         );
-        for allocation in &distributed_activation_buffers.allocations {
-            if matches!(
-                allocation.planned.storage,
-                VulkanDistributedActivationStorage::Edge { edge_index, .. }
-                    if produced_edge_indices.contains(&edge_index)
-            ) {
-                if allocation.planned.byte_capacity != group.byte_capacity {
-                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                        VulkanError(format!(
-                            "distributed produced port {}.{} has capacities {} and {}",
-                            group.source_component_id,
-                            group.source_port_id,
-                            group.byte_capacity,
-                            allocation.planned.byte_capacity,
-                        )),
-                    ));
+        if has_distributed_edge
+            && distributed_activation_buffers.plan.route
+                == VulkanSharedResidentBufferRoute::ExternalDeviceLocal
+        {
+            for allocation in &distributed_activation_buffers.allocations {
+                if matches!(
+                    allocation.planned.storage,
+                    VulkanDistributedActivationStorage::Edge { edge_index, .. }
+                        if produced_edge_indices.contains(&edge_index)
+                ) {
+                    if allocation.planned.owner_device_id != group.source_device_id
+                        || allocation.planned.byte_capacity != group.byte_capacity
+                    {
+                        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                            VulkanError(format!(
+                                "distributed produced port {}.{} disagrees with an external activation allocation",
+                                group.source_component_id, group.source_port_id,
+                            )),
+                        ));
+                    }
+                    participant_device_ids.extend(allocation.planned.device_ids.iter().cloned());
                 }
-                participant_device_ids.extend(allocation.planned.device_ids.iter().cloned());
             }
         }
-
         let mut unique_devices = Vec::<(&VulkanComputeDevice, Vec<String>)>::new();
         for device_id in &participant_device_ids {
             let device = device_for(device_id)?;
@@ -1426,7 +1485,6 @@ where
             unique_devices.len(),
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let expected_edge_indices = produced_edge_indices.iter().copied().collect::<Vec<_>>();
         if required_route == Some(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging) {
             let matching_allocations = physical_execution_residency_plan
                 .resident_shared_host_allocations
@@ -1630,7 +1688,13 @@ where
                     .collect::<Result<Vec<_>, _>>()?;
                 let device_local = unique_devices
                     .iter()
-                    .map(|(device, _)| {
+                    .enumerate()
+                    .map(|(index, (device, _))| {
+                        if index == 0
+                            && let Some(source_buffer) = distributed_source_buffer.as_ref()
+                        {
+                            return Ok(Arc::clone(source_buffer));
+                        }
                         device
                             .create_resident_buffer(group.byte_capacity)
                             .map(Arc::new)
@@ -1658,34 +1722,36 @@ where
             .cloned()
             .expect("produced-port source buffer was allocated");
 
-        for allocation in &mut distributed_activation_buffers.allocations {
-            if matches!(
-                allocation.planned.storage,
-                VulkanDistributedActivationStorage::Edge { edge_index, .. }
-                    if produced_edge_indices.contains(&edge_index)
-            ) {
-                allocation.device_buffers = allocation
-                    .planned
-                    .device_ids
-                    .iter()
-                    .map(|device_id| {
-                        group_buffers
-                            .get(device_id)
-                            .cloned()
-                            .map(|buffer| (device_id.clone(), buffer))
-                            .ok_or_else(|| {
-                                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                                    VulkanError(format!(
-                                        "produced port {}.{} has no shared allocation on {device_id:?}",
-                                        group.source_component_id, group.source_port_id,
-                                    )),
-                                )
-                            })
-                    })
-                    .collect::<Result<BTreeMap<_, _>, _>>()?;
-                if let Some(route) = shared_route {
-                    allocation.route = route;
-                    allocation.external_device_local_error = None;
+        if distributed_source_buffer.is_none() {
+            for allocation in &mut distributed_activation_buffers.allocations {
+                if matches!(
+                    allocation.planned.storage,
+                    VulkanDistributedActivationStorage::Edge { edge_index, .. }
+                        if produced_edge_indices.contains(&edge_index)
+                ) {
+                    allocation.device_buffers = allocation
+                        .planned
+                        .device_ids
+                        .iter()
+                        .map(|device_id| {
+                            group_buffers
+                                .get(device_id)
+                                .cloned()
+                                .map(|buffer| (device_id.clone(), buffer))
+                                .ok_or_else(|| {
+                                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                                        VulkanError(format!(
+                                            "produced port {}.{} has no shared allocation on {device_id:?}",
+                                            group.source_component_id, group.source_port_id,
+                                        )),
+                                    )
+                                })
+                        })
+                        .collect::<Result<BTreeMap<_, _>, _>>()?;
+                    if let Some(route) = shared_route {
+                        allocation.route = route;
+                        allocation.external_device_local_error = None;
+                    }
                 }
             }
         }
@@ -1951,4 +2017,132 @@ where
         every_edge_is_resident_replayable,
         feedback_stream_control_is_resident_replayable,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mount_distributed_produced_port<'a, F>(
+    distributed_activation_buffers: &mut VulkanDistributedActivationBuffers,
+    source_device_id: &str,
+    source_component_id: &str,
+    source_port_id: &str,
+    byte_capacity: usize,
+    produced_edge_indices: &BTreeSet<usize>,
+    planned_allocations: &[&VulkanRuntimeSharedHostResidentAllocation],
+    device_for: &F,
+) -> Result<Option<Arc<VulkanResidentBuffer>>, VulkanResidentInProcessPlacedRuntimeError>
+where
+    F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    let matching_indices = distributed_activation_buffers
+        .allocations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, allocation)| {
+            matches!(
+                allocation.planned.storage,
+                VulkanDistributedActivationStorage::Edge { edge_index, .. }
+                    if produced_edge_indices.contains(&edge_index)
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if matching_indices.is_empty() {
+        if !planned_allocations.is_empty() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "distributed produced port {source_component_id}.{source_port_id} has a physical allocation ledger but no distributed activation",
+                )),
+            ));
+        }
+        return Ok(None);
+    }
+    let [planned_allocation] = planned_allocations else {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!(
+                "distributed produced port {source_component_id}.{source_port_id} resolves {} physical allocation ledgers, expected one",
+                planned_allocations.len(),
+            )),
+        ));
+    };
+    let mut participant_device_ids = BTreeSet::new();
+    for index in &matching_indices {
+        let planned = &distributed_activation_buffers.allocations[*index].planned;
+        if planned.owner_device_id != source_device_id || planned.byte_capacity != byte_capacity {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "local distributed produced port {source_component_id}.{source_port_id} disagrees with edge {} ownership or capacity",
+                    match planned.storage {
+                        VulkanDistributedActivationStorage::Edge { edge_index, .. } => edge_index,
+                        _ => unreachable!("matching distributed allocation is an edge"),
+                    },
+                )),
+            ));
+        }
+        participant_device_ids.extend(planned.device_ids.iter().cloned());
+    }
+    if !participant_device_ids.contains(source_device_id) {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!(
+                "local distributed produced port {source_component_id}.{source_port_id} omits source device {source_device_id:?}",
+            )),
+        ));
+    }
+    let mut participant_device_ids = participant_device_ids.into_iter().collect::<Vec<_>>();
+    participant_device_ids.sort();
+    if planned_allocation.owner_device_id != source_device_id
+        || planned_allocation.participant_device_ids != participant_device_ids
+        || planned_allocation.byte_capacity != byte_capacity
+    {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!(
+                "distributed produced port {source_component_id}.{source_port_id} disagrees with its physical allocation ledger",
+            )),
+        ));
+    }
+    let mut resolver = |device_id: &str| device_for(device_id);
+    let shared = allocate_distributed_shared_buffer(
+        source_device_id,
+        &participant_device_ids,
+        byte_capacity,
+        distributed_activation_buffers.plan.route,
+        &format!("local produced port {source_component_id}.{source_port_id}"),
+        &mut resolver,
+    )
+    .map_err(|error| {
+        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(error.to_string()))
+    })?;
+    let source_buffer = shared
+        .device_buffers
+        .get(source_device_id)
+        .cloned()
+        .ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                "local distributed produced port {source_component_id}.{source_port_id} mounted no source view",
+            )))
+        })?;
+    for index in matching_indices {
+        let allocation = &mut distributed_activation_buffers.allocations[index];
+        allocation.device_buffers = allocation
+            .planned
+            .device_ids
+            .iter()
+            .map(|device_id| {
+                shared
+                    .device_buffers
+                    .get(device_id)
+                    .cloned()
+                    .map(|buffer| (device_id.clone(), buffer))
+                    .ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            format!(
+                                "local distributed produced port {source_component_id}.{source_port_id} mounted no view for {device_id:?}",
+                            ),
+                        ))
+                    })
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        allocation.route = shared.route;
+        allocation.external_device_local_error = shared.external_device_local_error.clone();
+    }
+    Ok(Some(source_buffer))
 }

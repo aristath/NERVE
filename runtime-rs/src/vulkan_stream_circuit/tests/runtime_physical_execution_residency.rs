@@ -1991,7 +1991,7 @@ fn graph_edge_binding_rejects_missing_and_repeated_routes_atomically() {
 }
 
 #[test]
-fn graph_edge_binding_includes_distributed_only_staging_participants() {
+fn graph_edge_binding_excludes_distributed_only_participants_from_graph_staging() {
     let (mut base, edge_plans) = physical_execution_edge_base_plan();
     let mut shard = base.device_plans[1].clone();
     shard.device_id = "shard".to_string();
@@ -2062,21 +2062,119 @@ fn graph_edge_binding_includes_distributed_only_staging_participants() {
         .iter()
         .find(|device| device.device_id == "shard")
         .unwrap();
-    assert_eq!(shard.stream_device_local_bytes, 8_192);
-    assert!(shard.resident_stream_device_allocations.iter().any(|allocation| {
+    assert_eq!(shard.stream_device_local_bytes, 0);
+    assert!(!shard.resident_stream_device_allocations.iter().any(|allocation| {
         matches!(
             &allocation.kind,
             VulkanRuntimeResidentStreamAllocationKind::EdgeStagingReplica { .. }
         )
     }));
-    assert_eq!(plan.total_stream_device_local_bytes, original_total + 8_192);
-    assert_eq!(plan.total_stream_shared_host_bytes, 8_192);
+    assert_eq!(plan.total_stream_device_local_bytes, original_total - 8_192);
+    assert_eq!(plan.total_stream_shared_host_bytes, 2 * 8_192);
+    assert_eq!(plan.resident_shared_host_allocations.len(), 2);
     assert_eq!(
-        plan.resident_shared_host_allocations[0]
+        plan.resident_shared_host_allocations
+            .iter()
+            .find(|allocation| matches!(
+                allocation.kind,
+                VulkanRuntimeSharedHostResidentAllocationKind::EdgeStaging { .. }
+            ))
+            .unwrap()
             .participant_device_ids
             .len(),
-        3
+        2
     );
+    assert!(plan.resident_shared_host_allocations.iter().any(|allocation| {
+        matches!(
+            allocation.kind,
+            VulkanRuntimeSharedHostResidentAllocationKind::DistributedProducedPort { .. }
+        ) && allocation.participant_device_ids
+            == ["helper".to_string(), "owner".to_string(), "shard".to_string()]
+    }));
+}
+
+#[test]
+fn graph_edge_binding_keeps_external_distributed_and_graph_participants_in_one_domain() {
+    let (mut base, edge_plans) = physical_execution_edge_base_plan();
+    let mut shard = base.device_plans[1].clone();
+    shard.device_id = "shard".to_string();
+    shard.working_set = VulkanRuntimeWorkingSetBytes::default();
+    shard.breakdown = VulkanRuntimeDeviceResidencyBreakdown::default();
+    shard.resident_stream_device_allocations.clear();
+    shard.initial_device_resident_bytes = 0;
+    base.device_plans.push(shard);
+    let activations = VulkanDistributedActivationBufferPlan {
+        allocations: vec![VulkanDistributedActivationBufferAllocation {
+            storage: VulkanDistributedActivationStorage::Edge {
+                edge_index: 5,
+                owner_device_id: "owner".to_string(),
+            },
+            owner_device_id: "owner".to_string(),
+            component_id: "input_adapter".to_string(),
+            slot: 5,
+            byte_capacity: 8_192,
+            signal_ids: vec!["shared_context".to_string()],
+            device_ids: vec![
+                "helper".to_string(),
+                "owner".to_string(),
+                "shard".to_string(),
+            ],
+            input_use_count: 1,
+            output_use_count: 1,
+        }],
+        reduction_allocations: Vec::new(),
+        private_intermediate_allocations: Vec::new(),
+        allocation_count: 1,
+        import_count: 2,
+        reference_count: 2,
+        total_shared_byte_capacity: 8_192,
+        total_private_byte_capacity: 0,
+        route: VulkanSharedResidentBufferRoute::ExternalDeviceLocal,
+    };
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &[
+            "owner".to_string(),
+            "helper".to_string(),
+            "shard".to_string(),
+        ],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &activations,
+    )
+    .unwrap();
+    let original_total = plan.total_stream_device_local_bytes;
+
+    plan.bind_graph_edge_memory_domains(
+        &edge_plans,
+        &activations,
+        &BTreeMap::from([(
+            5,
+            physical_execution_edge_route(VulkanPlacedEdgeTransferRoute::ExternalDeviceLocal),
+        )]),
+        &BTreeMap::from([
+            ("owner".to_string(), "physical-a".to_string()),
+            ("helper".to_string(), "physical-b".to_string()),
+            ("shard".to_string(), "physical-c".to_string()),
+        ]),
+    )
+    .unwrap();
+
+    let owner = plan
+        .device_plans
+        .iter()
+        .find(|device| device.device_id == "owner")
+        .unwrap();
+    let [allocation] = owner.external_device_local_resident_allocations.as_slice() else {
+        panic!("external distributed produced port must use one physical allocation");
+    };
+    assert_eq!(
+        allocation.participant_device_ids,
+        ["helper".to_string(), "owner".to_string(), "shard".to_string()]
+    );
+    assert_eq!(allocation.byte_capacity, 8_192);
+    assert_eq!(plan.total_stream_device_local_bytes, original_total - 8_192);
+    assert_eq!(plan.total_stream_shared_host_bytes, 0);
 }
 
 #[test]

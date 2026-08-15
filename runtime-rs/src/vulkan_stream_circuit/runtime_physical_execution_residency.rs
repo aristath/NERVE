@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v13";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v14";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct VulkanRuntimePrivateActivationResidentAllocation {
@@ -31,6 +31,11 @@ pub struct VulkanRuntimeExternalDeviceLocalResidentAllocation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VulkanRuntimeSharedHostResidentAllocationKind {
+    DistributedProducedPort {
+        component_id: String,
+        port_id: String,
+        edge_indices: Vec<usize>,
+    },
     EdgeStaging {
         component_id: String,
         port_id: String,
@@ -68,6 +73,7 @@ pub struct VulkanRuntimePhysicalExecutionResidencyBreakdown {
     pub distributed_shared_activation_device_bytes_per_stream: usize,
     pub distributed_private_activation_device_bytes_per_stream: usize,
     pub distributed_shared_host_bytes_per_stream: usize,
+    pub distributed_produced_port_shared_host_bytes_per_stream: usize,
     pub external_edge_device_bytes_per_stream: usize,
     pub staged_edge_shared_host_bytes_per_stream: usize,
     pub feedback_control_shared_host_bytes_per_stream: usize,
@@ -792,6 +798,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                     .map(|(_, incoming)| incoming.local_device_id.clone()),
             );
             let mut has_distributed_edge = false;
+            let mut distributed_participant_device_ids = BTreeSet::new();
             for allocation in &activations.allocations {
                 if matches!(
                     allocation.storage,
@@ -807,8 +814,52 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                         )));
                     }
                     has_distributed_edge = true;
-                    participant_device_ids.extend(allocation.device_ids.iter().cloned());
+                    distributed_participant_device_ids
+                        .extend(allocation.device_ids.iter().cloned());
                 }
+            }
+            if has_distributed_edge
+                && !distributed_participant_device_ids.contains(&group.source_device_id)
+            {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "distributed graph-edge allocation omits produced-port owner {:?}",
+                    group.source_device_id,
+                )));
+            }
+            if has_distributed_edge
+                && activations.route == VulkanSharedResidentBufferRoute::SharedHost
+            {
+                shared_host_additions.push(VulkanRuntimeSharedHostResidentAllocation {
+                    kind: VulkanRuntimeSharedHostResidentAllocationKind::DistributedProducedPort {
+                        component_id: group.source_component_id.clone(),
+                        port_id: group.source_port_id.clone(),
+                        edge_indices: produced_edge_indices_vec.clone(),
+                    },
+                    owner_device_id: group.source_device_id.clone(),
+                    participant_device_ids: distributed_participant_device_ids
+                        .iter()
+                        .cloned()
+                        .collect(),
+                    byte_capacity: group.byte_capacity,
+                });
+            }
+            if has_distributed_edge
+                && activations.route == VulkanSharedResidentBufferRoute::ExternalDeviceLocal
+            {
+                participant_device_ids.extend(distributed_participant_device_ids.iter().cloned());
+            }
+            if group.edges.is_empty()
+                && has_distributed_edge
+                && activations.route == VulkanSharedResidentBufferRoute::SharedHost
+            {
+                // The distributed activation is the produced port. Keeping
+                // the original owner-only graph allocation would give the
+                // downstream local consumer a different physical signal.
+                removals.insert((
+                    group.source_device_id.clone(),
+                    produced_allocation.kind.clone(),
+                ));
+                continue;
             }
             let mut logical_devices_by_physical =
                 BTreeMap::<String, BTreeSet<String>>::new();
@@ -941,6 +992,15 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                         });
                 }
                 Some(VulkanPlacedEdgeTransferRoute::DeviceLocalStaging) => {
+                    if has_distributed_edge {
+                        // The shard-visible activation owns the source side;
+                        // the graph route only needs destination-local storage
+                        // and its source-to-destination staging allocation.
+                        removals.insert((
+                            group.source_device_id.clone(),
+                            produced_kind.clone(),
+                        ));
+                    }
                     for (physical_device_id, logical_device_ids) in
                         &logical_devices_by_physical
                     {
@@ -1098,11 +1158,36 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 .iter_mut()
                 .find(|device| device.device_id == allocation.owner_device_id)
                 .expect("graph-edge shared-host owner was validated above");
-            owner.breakdown.staged_edge_shared_host_bytes_per_stream = checked_residency_add(
-                owner.breakdown.staged_edge_shared_host_bytes_per_stream,
-                allocation.byte_capacity,
-                "staged graph-edge shared-host breakdown",
-            )?;
+            match allocation.kind {
+                VulkanRuntimeSharedHostResidentAllocationKind::DistributedProducedPort {
+                    ..
+                } => {
+                    owner
+                        .breakdown
+                        .distributed_produced_port_shared_host_bytes_per_stream =
+                        checked_residency_add(
+                            owner
+                                .breakdown
+                                .distributed_produced_port_shared_host_bytes_per_stream,
+                            allocation.byte_capacity,
+                            "distributed produced-port shared-host breakdown",
+                        )?;
+                }
+                VulkanRuntimeSharedHostResidentAllocationKind::EdgeStaging { .. } => {
+                    owner.breakdown.staged_edge_shared_host_bytes_per_stream =
+                        checked_residency_add(
+                            owner.breakdown.staged_edge_shared_host_bytes_per_stream,
+                            allocation.byte_capacity,
+                            "staged graph-edge shared-host breakdown",
+                        )?;
+                }
+                _ => {
+                    return Err(VulkanRuntimeResidencyPlanError(
+                        "graph-edge binding created an unrelated shared-host allocation"
+                            .to_string(),
+                    ));
+                }
+            }
             owner.stream_shared_host_bytes = checked_residency_add(
                 owner.stream_shared_host_bytes,
                 allocation.byte_capacity,
@@ -1112,7 +1197,8 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
         next.resident_shared_host_allocations.retain(|allocation| {
             !matches!(
                 allocation.kind,
-                VulkanRuntimeSharedHostResidentAllocationKind::EdgeStaging { .. }
+                VulkanRuntimeSharedHostResidentAllocationKind::DistributedProducedPort { .. }
+                    | VulkanRuntimeSharedHostResidentAllocationKind::EdgeStaging { .. }
             )
         });
         next.resident_shared_host_allocations

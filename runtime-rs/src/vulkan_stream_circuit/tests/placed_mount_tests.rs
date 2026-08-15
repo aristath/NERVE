@@ -616,6 +616,120 @@ fn exact_shared_host_mount_rejects_missing_extra_and_aliased_participants() {
 }
 
 #[test]
+fn local_distributed_produced_port_keeps_one_aliasing_signal_domain() {
+    let Some((owner, helper)) = selected_test_vulkan_device_pair() else {
+        eprintln!(
+            "skipping local distributed produced-port test without two explicit Vulkan devices"
+        );
+        return;
+    };
+    let byte_capacity = 4096;
+    let requirement = owner
+        .shared_host_allocation_requirement_bytes(&[helper.as_ref()], byte_capacity)
+        .unwrap();
+    let admission = VulkanMemoryAdmission::reserve(
+        &[],
+        Some((
+            owner.as_ref(),
+            vulkan_safe_host_available_bytes().unwrap(),
+            requirement,
+        )),
+    )
+    .unwrap();
+    let _scope = admission.enter();
+    let planned_allocation = |edge_index| VulkanDistributedActivationBufferAllocation {
+        storage: VulkanDistributedActivationStorage::Edge {
+            edge_index,
+            owner_device_id: "owner".to_string(),
+        },
+        owner_device_id: "owner".to_string(),
+        component_id: "component".to_string(),
+        slot: 0,
+        byte_capacity,
+        signal_ids: vec!["output".to_string()],
+        device_ids: vec!["owner".to_string(), "helper".to_string()],
+        input_use_count: 0,
+        output_use_count: 1,
+    };
+    let plan = VulkanDistributedActivationBufferPlan {
+        allocations: vec![planned_allocation(4), planned_allocation(5)],
+        reduction_allocations: Vec::new(),
+        private_intermediate_allocations: Vec::new(),
+        allocation_count: 2,
+        import_count: 4,
+        reference_count: 6,
+        total_shared_byte_capacity: 2 * byte_capacity,
+        total_private_byte_capacity: 0,
+        route: VulkanSharedResidentBufferRoute::SharedHost,
+    };
+    let mut buffers = VulkanDistributedActivationBuffers {
+        plan: plan.clone(),
+        lane_capacity: 1,
+        allocations: plan
+            .allocations
+            .iter()
+            .cloned()
+            .map(|planned| crate::VulkanDistributedActivationBuffer {
+                planned,
+                route: VulkanSharedResidentBufferRoute::SharedHost,
+                external_device_local_error: None,
+                device_buffers: BTreeMap::new(),
+            })
+            .collect(),
+        reduction_allocations: Vec::new(),
+        private_intermediate_allocations: Vec::new(),
+        allocation_count: 2,
+        import_count: 0,
+        total_shared_byte_capacity: 2 * byte_capacity,
+        total_private_byte_capacity: 0,
+    };
+    let devices = BTreeMap::from([
+        ("owner".to_string(), owner),
+        ("helper".to_string(), helper),
+    ]);
+    let planned = VulkanRuntimeSharedHostResidentAllocation {
+        kind: VulkanRuntimeSharedHostResidentAllocationKind::DistributedProducedPort {
+            component_id: "component".to_string(),
+            port_id: "output".to_string(),
+            edge_indices: vec![4, 5],
+        },
+        owner_device_id: "owner".to_string(),
+        participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+        byte_capacity,
+    };
+    let source = mount_distributed_produced_port(
+        &mut buffers,
+        "owner",
+        "component",
+        "output",
+        byte_capacity,
+        &BTreeSet::from([4, 5]),
+        &[&planned],
+        &|device_id| {
+            devices.get(device_id).map(Rc::as_ref).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
+                    device_id: device_id.to_string(),
+                }
+            })
+        },
+    )
+    .unwrap()
+    .expect("distributed produced port must mount");
+    admission
+        .ensure_fully_consumed("local distributed produced port")
+        .unwrap();
+
+    assert!(Arc::ptr_eq(
+        &buffers.allocations[0].device_buffers["owner"],
+        &buffers.allocations[1].device_buffers["owner"],
+    ));
+    buffers.allocations[0].device_buffers["helper"]
+        .write_bytes(&vec![0xa5; byte_capacity])
+        .unwrap();
+    assert_eq!(source.read_bytes(byte_capacity).unwrap(), vec![0xa5; byte_capacity]);
+}
+
+#[test]
 fn placed_edge_allocation_aliases_mixed_local_and_remote_fanout() {
     let device = selected_test_vulkan_device().expect("selected Vulkan test device must open");
     let buffers = mixed_fanout_edge_plan().allocate_buffers(&device).unwrap();
