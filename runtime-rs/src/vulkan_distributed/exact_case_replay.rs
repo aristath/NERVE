@@ -1341,9 +1341,15 @@ mod exact_case_replay_tests {
         relabeled.dispatches[0].input_activation.component_id = "another-layer".to_string();
         relabeled.dispatches[0].input_activation.signal_id = "another-input".to_string();
         relabeled.dispatches[0].input_activation.slot += 100;
+        relabeled.dispatches[0].input_activation.byte_capacity += 1024;
+        relabeled.dispatches[0].input_activation.storage =
+            VulkanDistributedActivationStorage::BoundaryInput;
         relabeled.dispatches[0].output_activation.component_id = "another-layer".to_string();
         relabeled.dispatches[0].output_activation.signal_id = "another-output".to_string();
         relabeled.dispatches[0].output_activation.slot += 100;
+        relabeled.dispatches[0].output_activation.byte_capacity += 1024;
+        relabeled.dispatches[0].output_activation.storage =
+            VulkanDistributedActivationStorage::BoundaryOutput;
         relabeled.execution_islands = resolved_physical_execution_islands_for_phase(
             &relabeled.dispatches,
             relabeled.shared_activation_route,

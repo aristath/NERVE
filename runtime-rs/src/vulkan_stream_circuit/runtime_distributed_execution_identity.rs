@@ -405,7 +405,7 @@ pub(crate) fn vulkan_distributed_execution_graph_digest(
     }
 
     let payload = serde_json::to_vec(&serde_json::json!({
-        "schema": "nerve.distributed_execution_graph.v5",
+        "schema": "nerve.distributed_execution_graph.v6",
         "compiled_execution_signature": compiled_execution_signature,
         "dispatches": dispatches,
         "islands": islands,
@@ -442,14 +442,7 @@ fn distributed_execution_activation_graph_identity(
     serde_json::json!({
         "binding": activation.binding,
         "allocation_alias": allocation_alias,
-        "byte_capacity": activation.byte_capacity,
         "signal_byte_capacity": activation.signal_byte_capacity,
-        "storage": match activation.storage {
-            VulkanDistributedActivationStorage::ActivationSlot => "activation_slot",
-            VulkanDistributedActivationStorage::BoundaryInput => "boundary_input",
-            VulkanDistributedActivationStorage::BoundaryOutput => "boundary_output",
-            VulkanDistributedActivationStorage::Edge { .. } => "edge",
-        },
     })
 }
 
