@@ -13,20 +13,22 @@ mod tests {
     use nerve_runtime::{
         ResourceResidencyPolicy, RuntimeChatFormatter, RuntimeChatMessage, RuntimeChatSession,
         RuntimePreparedChatTurn, RuntimeRecoverableChatTurnError, VulkanComputeDeviceInfo,
+        VulkanPhysicalDeviceMemoryObservation,
         VulkanResidentDistributedExecutionPhaseCounters,
         VulkanResidentHfTokenizerTextCodec, VulkanResidentTokenTextCodec,
         VulkanResidentTokenTextCodecError, assistant_content_token_ids,
         canonical_assistant_generation_prefix_len, chat_transcript_codec,
         model_owned_assistant_turn_stop_token_id, normalize_chat_template_for_runtime,
         normalize_generated_tokens_at_protocol_boundary,
+        verify_vulkan_physical_device_memory_restoration,
     };
 
     use super::{
         Args, RuntimeChatReplOutcome, RuntimeChatTurnOutcome,
-        RuntimePhysicalDeviceMemoryObservation, RuntimeSustainedDecodeReport,
-        RuntimeSustainedDecodeSample, parse_allowed_physical_device_id, parse_args_from,
+        RuntimeSustainedDecodeReport, RuntimeSustainedDecodeSample,
+        parse_allowed_physical_device_id, parse_args_from,
         parse_chat_template_variable, parse_device_binding_assignment, parse_source_chain,
-        parse_vulkan_device_uuid_ref, verify_runtime_physical_device_memory_restoration,
+        parse_vulkan_device_uuid_ref,
         declared_runtime_logical_device_ids,
         explicit_physical_mount_report, workload_free_physical_planning_devices,
         rank_runtime_auto_placement_candidates_across_capability_classes,
@@ -44,8 +46,8 @@ mod tests {
         physical_device_id: &str,
         budget_bytes: u64,
         usage_bytes: u64,
-    ) -> RuntimePhysicalDeviceMemoryObservation {
-        RuntimePhysicalDeviceMemoryObservation {
+    ) -> VulkanPhysicalDeviceMemoryObservation {
+        VulkanPhysicalDeviceMemoryObservation {
             physical_device_id: physical_device_id.to_string(),
             device_name: "test accelerator".to_string(),
             pci_address: Some("0000:01:00.0".to_string()),
@@ -71,7 +73,7 @@ mod tests {
         after.usage_bytes = Some(before.usage_bytes.unwrap() + 8 * 1024 * 1024);
         after.available_bytes = Some(before.available_bytes.unwrap() - 8 * 1024 * 1024);
 
-        let report = verify_runtime_physical_device_memory_restoration(&[before], &[after]);
+        let report = verify_vulkan_physical_device_memory_restoration(&[before], &[after]);
 
         assert!(report.complete, "{report:#?}");
         assert_eq!(report.restored_device_count, 1);
@@ -88,7 +90,7 @@ mod tests {
         after.usage_bytes = Some(before.usage_bytes.unwrap() + 64 * 1024 * 1024);
         after.available_bytes = Some(before.available_bytes.unwrap() - 64 * 1024 * 1024);
 
-        let report = verify_runtime_physical_device_memory_restoration(&[before], &[after]);
+        let report = verify_vulkan_physical_device_memory_restoration(&[before], &[after]);
 
         assert!(!report.complete);
         assert_eq!(report.restored_device_count, 0);
@@ -106,7 +108,7 @@ mod tests {
         after.budget_bytes = Some(before.budget_bytes.unwrap() - 8 * 1024 * 1024 * 1024);
         after.available_bytes = Some(after.budget_bytes.unwrap() - after.usage_bytes.unwrap());
 
-        let report = verify_runtime_physical_device_memory_restoration(&[before], &[after]);
+        let report = verify_vulkan_physical_device_memory_restoration(&[before], &[after]);
 
         assert!(report.complete, "{report:#?}");
         assert_eq!(report.restored_device_count, 1);
@@ -117,7 +119,7 @@ mod tests {
         let first = physical_memory_observation("vulkan-uuid:01", 1024 * 1024 * 1024, 0);
         let second = physical_memory_observation("vulkan-uuid:02", 1024 * 1024 * 1024, 0);
 
-        let changed = verify_runtime_physical_device_memory_restoration(
+        let changed = verify_vulkan_physical_device_memory_restoration(
             std::slice::from_ref(&first),
             std::slice::from_ref(&second),
         );
@@ -129,7 +131,7 @@ mod tests {
                 .any(|error| error.contains("set changed"))
         );
 
-        let duplicated = verify_runtime_physical_device_memory_restoration(
+        let duplicated = verify_vulkan_physical_device_memory_restoration(
             &[first.clone(), first.clone()],
             std::slice::from_ref(&first),
         );
@@ -151,7 +153,7 @@ mod tests {
         after.usage_bytes = None;
         after.available_bytes = None;
 
-        let report = verify_runtime_physical_device_memory_restoration(&[before], &[after]);
+        let report = verify_vulkan_physical_device_memory_restoration(&[before], &[after]);
 
         assert!(!report.complete);
         assert!(

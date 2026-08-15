@@ -963,7 +963,7 @@ fn run_placed_chat(
         args,
         &selected_physical_device_ids,
     )?;
-    let device_restoration = verify_runtime_physical_device_memory_restoration(
+    let device_restoration = verify_vulkan_physical_device_memory_restoration(
         &device_restoration_before,
         &device_restoration_after,
     );

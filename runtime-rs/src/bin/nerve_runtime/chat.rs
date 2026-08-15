@@ -497,7 +497,7 @@ fn print_runtime_shutdown(
 }
 
 fn print_runtime_device_restoration(
-    report: &RuntimePhysicalDeviceMemoryRestorationReport,
+    report: &VulkanPhysicalDeviceMemoryRestorationReport,
 ) {
     println!("device_restoration:");
     println!(

@@ -26,6 +26,7 @@ include!("vulkan_compute/resident_transfer_stream.rs");
 include!("vulkan_compute/stable_resource_address_space.rs");
 include!("vulkan_compute/gpu_residency_gate.rs");
 include!("vulkan_compute/device_catalog.rs");
+include!("vulkan_compute/physical_device_memory_restoration.rs");
 include!("vulkan_compute/compute_device_construction.rs");
 include!("vulkan_compute/compute_device_memory.rs");
 include!("vulkan_compute/shared_device_memory_requirements.rs");
