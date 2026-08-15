@@ -276,11 +276,9 @@ fn inspect_device_capabilities(args: &Args) -> Result<(), Box<dyn Error>> {
     let catalog = runtime_vulkan_device_catalog(args)?;
     if args.initialize_device_contexts {
         for device in catalog.available_compute_devices() {
-            drop(
-                catalog.open_physical_device_index(
-                    device.physical_device_index,
-                )?,
-            );
+            let opened = catalog.open_physical_device_index(device.physical_device_index)?;
+            opened.initialize_execution_context_memory_floor()?;
+            drop(opened);
         }
     }
     let mut profiles = catalog.available_hardware_profiles()?;

@@ -33,6 +33,43 @@ impl VulkanComputeDevice {
         Ok(())
     }
 
+    /// Forces the Vulkan driver's lazy queue/context allocation before a
+    /// caller records the reusable logical device's steady-state memory floor.
+    ///
+    /// Opening a logical device is not sufficient on every driver: RADV, for
+    /// example, acquires additional device-local memory on the first queue
+    /// submission and retains it until the logical device is destroyed. That
+    /// context-owned memory is not a model allocation and must be present in
+    /// both the pre-workload and post-workload snapshots.
+    pub fn initialize_execution_context_memory_floor(&self) -> Result<(), VulkanError> {
+        {
+            let buffer = self.create_resident_buffer(std::mem::size_of::<u32>())?;
+            buffer.write_bytes(&0u32.to_le_bytes())?;
+            let binding = VulkanResidentKernelBufferBinding::new(
+                0,
+                &buffer,
+                std::mem::size_of::<u32>(),
+            )
+            .with_access(VulkanResidentKernelBufferAccess::ReadWrite);
+            let dispatch = self.create_resident_kernel_dispatch(
+                &execution_context_initialize_spirv_words()?,
+                &[binding],
+                1,
+                1,
+                0,
+            )?;
+            self.run_resident_kernel_dispatch(&dispatch, &[])?;
+            if buffer.read_bytes(std::mem::size_of::<u32>())? != 1u32.to_le_bytes() {
+                return Err(VulkanError(
+                    "execution-context initialization shader did not complete".to_string(),
+                ));
+            }
+        }
+        self.quiesce()?;
+        self.release_cached_execution_resources_after_quiescence()?;
+        Ok(())
+    }
+
     /// Releases the device-owned command template and generic pipeline cache
     /// after every workload using this logical device has been destroyed.
     ///
@@ -109,6 +146,22 @@ impl VulkanComputeDevice {
             _memory_lifecycle: guard,
         })
     }
+}
+
+fn execution_context_initialize_spirv_words() -> Result<Vec<u32>, VulkanError> {
+    let bytes = include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/execution_context_initialize.spv"
+    ));
+    if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<u32>()) {
+        return Err(VulkanError(
+            "embedded execution-context initializer SPIR-V is empty or misaligned".to_string(),
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|word| u32::from_le_bytes(word.try_into().expect("SPIR-V word is four bytes")))
+        .collect())
 }
 
 impl Drop for VulkanComputeDevice {

@@ -138,6 +138,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn embedded_execution_context_initializer_is_valid_spirv() {
+        let words = execution_context_initialize_spirv_words().unwrap();
+        assert_eq!(words.first().copied(), Some(0x0723_0203));
+    }
+
+    #[test]
     fn resident_buffer_copy_visibility_covers_every_supported_producer_and_consumer() {
         let visibility = resident_buffer_copy_visibility();
 
