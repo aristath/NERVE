@@ -435,15 +435,11 @@ fn replay_exact_distributed_component_case(
                 "exact case for component {component_id:?} has an unbound physical output endpoint",
             ))
         })?;
-    let runtime_input_byte_capacity = first_island.leader().input_byte_capacity;
-    let runtime_output_byte_capacity = last_island.tail().output_byte_capacity;
     if input_identity.physical_device_id != case.input_physical_device_id
         || output_identity.physical_device_id != case.output_physical_device_id
-        || runtime_input_byte_capacity != case.behavior.shape.input_byte_capacity
-        || runtime_output_byte_capacity != case.behavior.shape.output_byte_capacity
     {
         return exact_case_error(format!(
-            "exact case for component {component_id:?} was measured with different physical endpoints or activation shape",
+            "exact case for component {component_id:?} was measured with different physical endpoints",
         ));
     }
     validate_exact_case_transport(
@@ -1611,17 +1607,11 @@ mod exact_case_replay_tests {
     }
 
     #[test]
-    fn exact_plan_set_replay_rejects_stale_activation_shape() {
-        let mut stale = tensor_parallel_exact_case();
-        stale.behavior.shape.output_byte_capacity += 2;
+    fn exact_plan_set_replay_does_not_confuse_logical_boundary_with_island_shape() {
+        let mut logical_component_shape = tensor_parallel_exact_case();
+        logical_component_shape.behavior.shape.output_byte_capacity += 2;
 
-        let error = replay_tensor_parallel_case(stale, &loaded_manifest()).unwrap_err();
-
-        assert!(
-            error
-                .0
-                .contains("different physical endpoints or activation shape")
-        );
+        replay_tensor_parallel_case(logical_component_shape, &loaded_manifest()).unwrap();
     }
 
     #[test]
@@ -1635,11 +1625,7 @@ mod exact_case_replay_tests {
         stale_endpoint.output_physical_device_id = "physical-helper".to_string();
         let endpoint_error =
             replay_tensor_parallel_case(stale_endpoint, &loaded_manifest()).unwrap_err();
-        assert!(
-            endpoint_error
-                .0
-                .contains("different physical endpoints or activation shape")
-        );
+        assert!(endpoint_error.0.contains("different physical endpoints"));
     }
 
     #[test]

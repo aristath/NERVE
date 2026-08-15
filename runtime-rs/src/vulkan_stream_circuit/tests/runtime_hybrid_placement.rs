@@ -99,7 +99,7 @@ fn record_hybrid_phase_candidates(
             nerve_execution_contracts::ExecutionPhase::Prefill
         }
     };
-    let mut signatures = model
+    let mut targets = model
         .circuit_graph
         .components
         .iter()
@@ -111,17 +111,13 @@ fn record_hybrid_phase_candidates(
                 phase,
             )
             .unwrap()
-            .signature_id
         })
         .collect::<Vec<_>>();
-    signatures.sort();
-    signatures.dedup();
-    for signature in signatures {
-        let behavior = hybrid_test_behavior_for_phase(
-            &signature,
-            execution_phase,
-            phase.activation_batch_width(),
-        );
+    targets.sort_by(|left, right| left.signature_id.cmp(&right.signature_id));
+    targets.dedup_by(|left, right| left.signature_id == right.signature_id);
+    for target in targets {
+        let behavior = canonical_component_boundary_behavior(model, &target, phase).unwrap();
+        assert_eq!(behavior.phase, execution_phase);
         catalog
             .record_reference(VulkanPlacementCanonicalReference {
                 behavior: behavior.clone(),
@@ -492,7 +488,7 @@ fn record_hybrid_test_serialized_region(
 
 fn hybrid_test_catalog(model: &VulkanResidentRuntimeModel) -> VulkanPlacementCalibrationCatalog {
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
-    let mut signatures = model
+    let mut targets = model
         .circuit_graph
         .components
         .iter()
@@ -504,13 +500,17 @@ fn hybrid_test_catalog(model: &VulkanResidentRuntimeModel) -> VulkanPlacementCal
                 VulkanTargetedComponentExecutionPhase::Decode,
             )
             .unwrap()
-            .signature_id
         })
         .collect::<Vec<_>>();
-    signatures.sort();
-    signatures.dedup();
-    for signature in signatures {
-        let behavior = hybrid_test_behavior(&signature);
+    targets.sort_by(|left, right| left.signature_id.cmp(&right.signature_id));
+    targets.dedup_by(|left, right| left.signature_id == right.signature_id);
+    for target in targets {
+        let behavior = canonical_component_boundary_behavior(
+            model,
+            &target,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
         catalog
             .record_reference(VulkanPlacementCanonicalReference {
                 behavior: behavior.clone(),
@@ -851,7 +851,7 @@ fn hybrid_test_distributed_catalog_with_strategy(
     strategy: VulkanPlacementExecutionStrategy,
 ) -> VulkanPlacementCalibrationCatalog {
     let mut catalog = VulkanPlacementCalibrationCatalog::default();
-    let mut signatures = model
+    let mut targets = model
         .circuit_graph
         .components
         .iter()
@@ -863,13 +863,17 @@ fn hybrid_test_distributed_catalog_with_strategy(
                 VulkanTargetedComponentExecutionPhase::Decode,
             )
             .unwrap()
-            .signature_id
         })
         .collect::<Vec<_>>();
-    signatures.sort();
-    signatures.dedup();
-    for signature in signatures {
-        let behavior = hybrid_test_behavior(&signature);
+    targets.sort_by(|left, right| left.signature_id.cmp(&right.signature_id));
+    targets.dedup_by(|left, right| left.signature_id == right.signature_id);
+    for target in targets {
+        let behavior = canonical_component_boundary_behavior(
+            model,
+            &target,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )
+        .unwrap();
         catalog
             .record_reference(VulkanPlacementCanonicalReference {
                 behavior: behavior.clone(),

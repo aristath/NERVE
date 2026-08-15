@@ -2126,11 +2126,18 @@ fn validate_runtime_hybrid_case_for_component(
         target_phase,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    if execution_case.behavior.compiled_execution_signature != target.signature_id
+    let expected_behavior = canonical_component_boundary_behavior(
+        runtime_model,
+        &target,
+        target_phase,
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    if execution_case.behavior.compiled_execution_signature
+        != expected_behavior.compiled_execution_signature
         || execution_case.behavior.runtime_implementation_fingerprint
-            != crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
-        || execution_case.behavior.phase != execution_phase
-        || execution_case.behavior.shape.activation_batch_width != activation_batch_width
+            != expected_behavior.runtime_implementation_fingerprint
+        || execution_case.behavior.phase != expected_behavior.phase
+        || execution_case.behavior.shape != expected_behavior.shape
     {
         return runtime_hybrid_error(format!(
             "hybrid physical case does not match compiled component {component_id:?} and its exact phase geometry",
