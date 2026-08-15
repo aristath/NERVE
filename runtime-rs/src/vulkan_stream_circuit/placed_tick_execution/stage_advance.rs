@@ -345,7 +345,10 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                                     VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
                                 )?;
                         }
-                    } else {
+                    } else if !compact_distributed_stage_is_terminal(
+                        slice.execution_plan,
+                        slice.cursor.next_stage_index,
+                    ) {
                         distributed_runners
                             .wait_dispatch(
                                 slice.device_id(),
@@ -763,4 +766,59 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
         );
     }
     Ok(slice.cursor.completed_stage_count - completed_before)
+}
+
+/// Terminal work is waited by `wait_for_compact_slice_terminal_work` after
+/// every slice has advanced. Consuming a distributed sequence's completion
+/// here as well would turn that mandatory terminal barrier into a second wait
+/// on an already-completed timeline value.
+fn compact_distributed_stage_is_terminal(
+    execution_plan: &VulkanMountedPlacedResidentStreamTickExecutionPlan,
+    stage_index: usize,
+) -> bool {
+    compact_distributed_stage_is_terminal_relative_to(
+        stage_index,
+        execution_plan
+            .distributed_dispatch_stages
+            .keys()
+            .next_back()
+            .copied(),
+        execution_plan
+        .dispatch_segments
+        .last()
+            .map(|segment| segment.end_stage_index),
+    )
+}
+
+fn compact_distributed_stage_is_terminal_relative_to(
+    stage_index: usize,
+    terminal_distributed_stage_index: Option<usize>,
+    terminal_local_segment_end_stage_index: Option<usize>,
+) -> bool {
+    terminal_distributed_stage_index == Some(stage_index)
+        && terminal_local_segment_end_stage_index.is_none_or(|end| stage_index >= end)
+}
+
+#[cfg(test)]
+mod compact_distributed_terminal_tests {
+    use super::compact_distributed_stage_is_terminal_relative_to;
+
+    #[test]
+    fn only_the_last_physical_stage_owns_the_terminal_wait() {
+        assert!(compact_distributed_stage_is_terminal_relative_to(
+            8,
+            Some(8),
+            Some(5),
+        ));
+        assert!(!compact_distributed_stage_is_terminal_relative_to(
+            5,
+            Some(8),
+            Some(4),
+        ));
+        assert!(!compact_distributed_stage_is_terminal_relative_to(
+            5,
+            Some(5),
+            Some(8),
+        ));
+    }
 }
