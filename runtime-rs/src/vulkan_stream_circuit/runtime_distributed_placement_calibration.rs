@@ -917,15 +917,6 @@ impl VulkanRuntimeDistributedPlacementSession {
                 .map(|artifact| artifact.artifact.clone())
                 .collect(),
         );
-        let graph = placed_model.executable_circuit_graph()?;
-        let (_, placement_plan, _) = plan_resident_package_placed_stream_circuit_with_tensor_index(
-            &owner_device_id,
-            &placed_model.placement,
-            &graph,
-            manifest_dir,
-            &tensor_index,
-            placed_model.package.activation_element_bytes,
-        )?;
         let alignment = logical_devices
             .values()
             .map(|device| device.min_storage_buffer_offset_alignment())
@@ -943,7 +934,10 @@ impl VulkanRuntimeDistributedPlacementSession {
                 &tensor_index,
                 &artifact_manifest,
                 &BTreeMap::from([(target.component_id.clone(), planning_device_ids)]),
-                &placement_plan.edges,
+                // Component calibration is an isolated boundary transaction.
+                // Full-graph neighbours intentionally remain unmounted and
+                // must not become activation owners in the candidate plan.
+                &[],
                 alignment,
                 contract_phase,
                 execution_shape,
@@ -960,7 +954,9 @@ impl VulkanRuntimeDistributedPlacementSession {
                 &tensor_index,
                 &artifact_manifest,
                 &BTreeMap::from([(target.component_id.clone(), planning_device_ids)]),
-                &placement_plan.edges,
+                // See the contract-selected path above: target boundaries are
+                // calibration fixtures, not aliases of unmounted graph edges.
+                &[],
                 alignment,
                 contract_phase,
                 execution_shape,
