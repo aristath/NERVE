@@ -557,6 +557,32 @@ fn demand_feedback_resume_plan_handles_a_causal_device_revisit() {
 }
 
 #[test]
+fn demand_feedback_resume_treats_a_physical_execution_island_as_atomic() {
+    let gpu0 = demand_feedback_test_plan(
+        "gpu0",
+        vec![
+            demand_feedback_test_dispatch(0, "gpu0"),
+            demand_feedback_test_dispatch(1, "gpu0"),
+            demand_feedback_test_publish(2, 0, "gpu0", "gpu1"),
+        ],
+    );
+    let gpu1 = demand_feedback_test_plan(
+        "gpu1",
+        vec![
+            demand_feedback_test_receive(0, 0, "gpu0", "gpu1"),
+            demand_feedback_test_dispatch(1, "gpu1"),
+        ],
+    );
+    let plans = [&gpu0, &gpu1];
+
+    let resume = demand_feedback_resume_plan_after_dispatch_stage_range(&plans, 0, 0..2)
+        .unwrap();
+    assert_eq!(resume.next_stage_indices, [2, 0]);
+    assert!(demand_feedback_resume_plan_after_dispatch_stage_range(&plans, 0, 1..1).is_err());
+    assert!(demand_feedback_resume_plan_after_dispatch_stage_range(&plans, 0, 1..3).is_err());
+}
+
+#[test]
 fn demand_feedback_resume_rejects_an_independent_parallel_branch() {
     let gpu0 = demand_feedback_test_plan("gpu0", vec![demand_feedback_test_dispatch(0, "gpu0")]);
     let gpu1 = demand_feedback_test_plan("gpu1", vec![demand_feedback_test_dispatch(0, "gpu1")]);

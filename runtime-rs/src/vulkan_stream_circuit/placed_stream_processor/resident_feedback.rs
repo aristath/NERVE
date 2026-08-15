@@ -604,7 +604,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                         "distributed demand feedback checkpoint slice {slice_index} is out of bounds"
                     )))
                 })?;
-                let (distributed_stage_index, _) = target_slice
+                let (distributed_stage_start, distributed_stage_end) = target_slice
                     .resident_execution_plan
                     .distributed_dispatch_stage_range(dispatch_index)
                     .ok_or_else(|| {
@@ -613,15 +613,15 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
                             target_slice.device_id
                         )))
                     })?;
-                let plan = demand_feedback_resume_plan_after_stage(
+                let plan = demand_feedback_resume_plan_after_dispatch_stage_range(
                     &tick_plans,
                     slice_index,
-                    distributed_stage_index,
+                    distributed_stage_start..distributed_stage_end,
                 )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
                 (
                     slice_index,
-                    distributed_stage_index + 1,
+                    distributed_stage_end,
                     None,
                     plan,
                 )

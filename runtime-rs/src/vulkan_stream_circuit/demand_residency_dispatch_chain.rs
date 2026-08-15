@@ -756,8 +756,13 @@ impl VulkanDemandResidencyDispatchChain {
             .map(|gate| gate.selection_count)
             .max()
             .expect("demand segment gates are non-empty");
-        let missing_queue = VulkanGpuResidencyMissQueue::new(device, missing_capacity)
-            .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
+        let missing_queue = VulkanGpuResidencyMissQueue::new(device, missing_capacity).map_err(
+            |error| {
+                VulkanMountedPlacedResidentKernelDispatchError::Vulkan(VulkanError(format!(
+                    "scalar demand segment miss queue with capacity {missing_capacity} failed: {error}",
+                )))
+            },
+        )?;
         let gate_shader = vulkan_gpu_residency_gate_spirv_words()
             .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?;
         let mut gates = Vec::with_capacity(gate_specs.len());

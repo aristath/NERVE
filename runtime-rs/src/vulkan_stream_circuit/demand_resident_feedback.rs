@@ -378,6 +378,41 @@ fn demand_feedback_resume_plan_after_stage(
     )
 }
 
+fn demand_feedback_resume_plan_after_dispatch_stage_range(
+    tick_plans: &[&VulkanMountedPlacedStreamTickPlan],
+    target_device_index: usize,
+    target_stage_range: std::ops::Range<usize>,
+) -> Result<VulkanDemandFeedbackResumePlan, VulkanError> {
+    let target_plan = tick_plans.get(target_device_index).ok_or_else(|| {
+        VulkanError(format!(
+            "demand feedback resume device {target_device_index} is out of bounds"
+        ))
+    })?;
+    if target_stage_range.is_empty()
+        || target_stage_range.end > target_plan.stages.len()
+        || target_plan.stages[target_stage_range.clone()]
+            .iter()
+            .any(|stage| !matches!(stage, VulkanMountedPlacedStreamTickStage::Dispatch { .. }))
+    {
+        return Err(VulkanError(format!(
+            "demand feedback physical execution range {:?} is not a non-empty dispatch range on device {target_device_index}",
+            target_stage_range,
+        )));
+    }
+    let plan = demand_feedback_resume_plan_after_stage(
+        tick_plans,
+        target_device_index,
+        target_stage_range.end - 1,
+    )?;
+    if plan.next_stage_indices[target_device_index] != target_stage_range.end {
+        return Err(VulkanError(
+            "demand feedback physical execution range is not the target device causal frontier"
+                .to_string(),
+        ));
+    }
+    Ok(plan)
+}
+
 fn demand_feedback_resume_plan_at_stage(
     tick_plans: &[&VulkanMountedPlacedStreamTickPlan],
     target_device_index: usize,
@@ -566,9 +601,10 @@ where
             )]
         } else {
             owner
-                .create_shared_conditional_resident_buffers(
+                .create_shared_conditional_resident_buffers_for_route(
                     peers,
                     VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+                    VulkanSharedResidentBufferRoute::SharedHost,
                 )?
                 .buffers
         }
