@@ -199,7 +199,8 @@ fn vulkan_distributed_execution_equivalence_from_contracts(
             }
             Some(
                 VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16
-                | VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. },
+                | VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { .. }
+                | VulkanDistributedReductionFinalizationPlan::ScaleByPackedBf16InputToBf16 { .. },
             ) => Some(VulkanPlacementScalarFormat::Bf16),
             None => {
                 return distributed_execution_identity_error(
@@ -416,6 +417,16 @@ fn distributed_execution_reduction_graph_identity(
             VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 { residual_input_index } => serde_json::json!({
                 "kind": "add_bf16_residual_to_bf16",
                 "residual_input_index": residual_input_index,
+            }),
+            VulkanDistributedReductionFinalizationPlan::ScaleByPackedBf16InputToBf16 {
+                scale_input_index,
+                elements_per_scale,
+                scale_bit_offset,
+            } => serde_json::json!({
+                "kind": "scale_by_packed_bf16_input_to_bf16",
+                "scale_input_index": scale_input_index,
+                "elements_per_scale": elements_per_scale,
+                "scale_bit_offset": scale_bit_offset,
             }),
         },
     })

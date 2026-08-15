@@ -137,8 +137,12 @@ class ReductionFinalization(TypedDict, total=False):
         "store_f32",
         "store_f32_to_bf16",
         "add_bf16_residual_to_bf16",
+        "scale_by_packed_bf16_input_to_bf16",
     ]
     residual_binding: int
+    scale_binding: int
+    elements_per_scale: int
+    scale_bit_offset: int
 
 
 class LocalIntermediateContract(TypedDict):
@@ -1639,18 +1643,26 @@ def _validate_outputs(
                     "store_f32",
                     "store_f32_to_bf16",
                     "add_bf16_residual_to_bf16",
+                    "scale_by_packed_bf16_input_to_bf16",
                 },
                 f"{path}.reduction.finalization.kind",
             )
-            required = (
-                {"kind", "residual_binding"}
-                if kind == "add_bf16_residual_to_bf16"
-                else {"kind"}
-            )
+            if kind == "add_bf16_residual_to_bf16":
+                required = {"kind", "residual_binding"}
+            elif kind == "scale_by_packed_bf16_input_to_bf16":
+                required = {
+                    "kind",
+                    "scale_binding",
+                    "elements_per_scale",
+                    "scale_bit_offset",
+                }
+            else:
+                required = {"kind"}
             _keys(finalization, required, required, f"{path}.reduction.finalization")
             if kind in {
                 "store_f32_to_bf16",
                 "add_bf16_residual_to_bf16",
+                "scale_by_packed_bf16_input_to_bf16",
             } and int(dimensions[dimension_name]) % 2:
                 _invalid("BF16 finalization requires an even element count")
             if kind == "add_bf16_residual_to_bf16":
@@ -1673,6 +1685,44 @@ def _validate_outputs(
                     )
                 if residual["distribution"] != "replicated":
                     _invalid("BF16 residual finalization input must be replicated")
+            if kind == "scale_by_packed_bf16_input_to_bf16":
+                scale_binding = _non_negative_int(
+                    finalization["scale_binding"],
+                    f"{path}.reduction.finalization.scale_binding",
+                )
+                elements_per_scale = _positive_int(
+                    finalization["elements_per_scale"],
+                    f"{path}.reduction.finalization.elements_per_scale",
+                )
+                scale_bit_offset = _non_negative_int(
+                    finalization["scale_bit_offset"],
+                    f"{path}.reduction.finalization.scale_bit_offset",
+                )
+                if int(dimensions[dimension_name]) % elements_per_scale:
+                    _invalid(
+                        "packed BF16 scale finalization must divide the reduction elements exactly"
+                    )
+                if scale_bit_offset not in {0, 16}:
+                    _invalid(
+                        "packed BF16 scale finalization bit offset must be 0 or 16"
+                    )
+                scale = next(
+                    (
+                        _mapping(value, "contract input")
+                        for value in inputs
+                        if _mapping(value, "contract input").get("binding")
+                        == scale_binding
+                    ),
+                    None,
+                )
+                if scale is None:
+                    _invalid(
+                        "packed BF16 scale finalization binding must name a contract input"
+                    )
+                if scale["distribution"] not in {"replicated", "routed"}:
+                    _invalid(
+                        "packed BF16 scale finalization input must be replicated or routed"
+                    )
 
 
 def _validate_intermediates(values: list[object]) -> None:

@@ -113,7 +113,14 @@ pub enum ReductionOperation {
 pub enum ReductionFinalization {
     StoreF32,
     StoreF32ToBf16,
-    AddBf16ResidualToBf16 { residual_binding: u32 },
+    AddBf16ResidualToBf16 {
+        residual_binding: u32,
+    },
+    ScaleByPackedBf16InputToBf16 {
+        scale_binding: u32,
+        elements_per_scale: u32,
+        scale_bit_offset: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -639,6 +646,7 @@ fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), Contrac
                 reduction.finalization,
                 ReductionFinalization::StoreF32ToBf16
                     | ReductionFinalization::AddBf16ResidualToBf16 { .. }
+                    | ReductionFinalization::ScaleByPackedBf16InputToBf16 { .. }
             ) && !contract.geometry.dimensions[&reduction.dimension_name].is_multiple_of(2)
             {
                 return invalid("BF16 finalization requires an even element count");
@@ -660,6 +668,42 @@ fn validate_bindings(contract: &PhysicalExecutionContract) -> Result<(), Contrac
                     })?;
                 if residual.distribution != InputDistribution::Replicated {
                     return invalid("BF16 residual finalization input must be replicated");
+                }
+            }
+            if let ReductionFinalization::ScaleByPackedBf16InputToBf16 {
+                scale_binding,
+                elements_per_scale,
+                scale_bit_offset,
+            } = &reduction.finalization
+            {
+                let elements = contract.geometry.dimensions[&reduction.dimension_name];
+                if *elements_per_scale == 0
+                    || !elements.is_multiple_of(u64::from(*elements_per_scale))
+                {
+                    return invalid(
+                        "packed BF16 scale finalization must divide the reduction elements exactly",
+                    );
+                }
+                if *scale_bit_offset > 16 || !scale_bit_offset.is_multiple_of(16) {
+                    return invalid("packed BF16 scale finalization bit offset must be 0 or 16");
+                }
+                let scale = contract
+                    .inputs
+                    .iter()
+                    .find(|input| input.binding == *scale_binding)
+                    .ok_or_else(|| {
+                        ContractError(
+                            "packed BF16 scale finalization binding must name a contract input"
+                                .to_string(),
+                        )
+                    })?;
+                if !matches!(
+                    scale.distribution,
+                    InputDistribution::Replicated | InputDistribution::Routed
+                ) {
+                    return invalid(
+                        "packed BF16 scale finalization input must be replicated or routed",
+                    );
                 }
             }
         }
@@ -1346,6 +1390,60 @@ mod tests {
             };
         contract.validate().unwrap();
 
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::ScaleByPackedBf16InputToBf16 {
+                scale_binding: 3,
+                elements_per_scale: 11_008,
+                scale_bit_offset: 16,
+            };
+        contract.validate().unwrap();
+
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::ScaleByPackedBf16InputToBf16 {
+                scale_binding: 3,
+                elements_per_scale: 0,
+                scale_bit_offset: 16,
+            };
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("divide the reduction elements exactly")
+        );
+
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::ScaleByPackedBf16InputToBf16 {
+                scale_binding: 3,
+                elements_per_scale: 11_008,
+                scale_bit_offset: 8,
+            };
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("bit offset must be 0 or 16")
+        );
+
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::ScaleByPackedBf16InputToBf16 {
+                scale_binding: 99,
+                elements_per_scale: 11_008,
+                scale_bit_offset: 16,
+            };
+        assert!(
+            contract
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("must name a contract input")
+        );
+
+        contract.outputs[0].reduction.as_mut().unwrap().finalization =
+            ReductionFinalization::AddBf16ResidualToBf16 {
+                residual_binding: 3,
+            };
         contract.inputs[1].distribution = InputDistribution::Sharded;
         contract.inputs[1].dimension = Some(0);
         contract.inputs[1].alignment_elements = Some(128);

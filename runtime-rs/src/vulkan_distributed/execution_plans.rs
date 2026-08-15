@@ -2265,6 +2265,11 @@ pub enum VulkanDistributedReductionFinalizationPlan {
     StoreF32,
     StoreF32ToBf16,
     AddBf16ResidualToBf16 { residual_input_index: usize },
+    ScaleByPackedBf16InputToBf16 {
+        scale_input_index: usize,
+        elements_per_scale: usize,
+        scale_bit_offset: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

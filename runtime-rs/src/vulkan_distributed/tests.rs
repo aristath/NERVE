@@ -1377,6 +1377,9 @@ mod tests {
         assert_eq!(bf16_words.first().copied(), Some(0x0723_0203));
         let store_bf16_words = distributed_sum_f32_to_bf16_spirv_words().unwrap();
         assert_eq!(store_bf16_words.first().copied(), Some(0x0723_0203));
+        let scaled_bf16_words =
+            distributed_sum_f32_scale_packed_bf16_to_bf16_spirv_words().unwrap();
+        assert_eq!(scaled_bf16_words.first().copied(), Some(0x0723_0203));
         let predicate_words = distributed_commit_residency_fault_spirv_words().unwrap();
         assert_eq!(predicate_words.first().copied(), Some(0x0723_0203));
         let reduction = VulkanDistributedReductionPlan {
@@ -1390,6 +1393,20 @@ mod tests {
         assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 4096);
         assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 5);
         assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 3);
+
+        let scaled = VulkanDistributedReductionPlan {
+            finalization:
+                VulkanDistributedReductionFinalizationPlan::ScaleByPackedBf16InputToBf16 {
+                    scale_input_index: 1,
+                    elements_per_scale: 1_024,
+                    scale_bit_offset: 16,
+                },
+            ..reduction
+        };
+        let bytes = distributed_sum_f32_push_constants(&scaled, 2, 4).unwrap();
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 1_024);
+        assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 16);
     }
 
     #[test]
@@ -1421,6 +1438,19 @@ mod tests {
         };
         assert_eq!(
             distributed_reduction_buffer_capacities(&store_bf16, 5, 3).unwrap(),
+            (4_096 * 4 * 5 * 3, 4_096 * 2 * 3)
+        );
+        let scaled_bf16 = VulkanDistributedReductionPlan {
+            finalization:
+                VulkanDistributedReductionFinalizationPlan::ScaleByPackedBf16InputToBf16 {
+                    scale_input_index: 1,
+                    elements_per_scale: 1_024,
+                    scale_bit_offset: 16,
+                },
+            ..store_bf16
+        };
+        assert_eq!(
+            distributed_reduction_buffer_capacities(&scaled_bf16, 5, 3).unwrap(),
             (4_096 * 4 * 5 * 3, 4_096 * 2 * 3)
         );
     }
@@ -1730,6 +1760,92 @@ mod tests {
             residual_plan.dispatches[0].equivalence.relative_tolerance(),
             Some(0.02),
         );
+
+        let mut scale_finalized = prepared.clone();
+        let scale_contract = &mut scale_finalized.dispatches[0].physical_execution_contracts[0];
+        scale_contract
+            .inputs
+            .push(test_input(3, InputDistribution::Routed, Some(1)));
+        scale_contract.outputs[0]
+            .reduction
+            .as_mut()
+            .unwrap()
+            .finalization = ReductionFinalization::ScaleByPackedBf16InputToBf16 {
+            scale_binding: 3,
+            elements_per_scale: 4,
+            scale_bit_offset: 16,
+        };
+        let VulkanDescriptorResourceAddress::ActivationSlot {
+            byte_capacity,
+            signal_byte_capacity,
+            ..
+        } = &mut scale_finalized.dispatches[0].descriptors[1].resource
+        else {
+            panic!("fixture output is an activation slot");
+        };
+        *byte_capacity = 8;
+        *signal_byte_capacity = 8;
+        scale_finalized.dispatches[0].descriptors.push(activation(
+            3,
+            VulkanKernelDescriptorUsage::InputSignal,
+            "packed-scale",
+            4,
+        ));
+        scale_finalized.total_descriptor_count = 4;
+        let scale_plan = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &scale_finalized)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a"]),
+            &[],
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            scale_plan.dispatches[0].reduction,
+            Some(VulkanDistributedReductionPlan {
+                operation: ReductionOperation::SumF32,
+                element_count: 4,
+                partial_byte_capacity: 16,
+                finalization:
+                    VulkanDistributedReductionFinalizationPlan::ScaleByPackedBf16InputToBf16 {
+                        scale_input_index: 1,
+                        elements_per_scale: 4,
+                        scale_bit_offset: 16,
+                    },
+            })
+        );
+        assert_eq!(
+            scale_plan.dispatches[0].auxiliary_input_activations[0].signal_id,
+            "packed-scale"
+        );
+
+        let mut wrong_scale_capacity = scale_finalized.clone();
+        let scale_descriptor = wrong_scale_capacity.dispatches[0]
+            .descriptors
+            .iter_mut()
+            .find(|descriptor| descriptor.name == "packed-scale")
+            .unwrap();
+        let VulkanDescriptorResourceAddress::ActivationSlot {
+            byte_capacity,
+            signal_byte_capacity,
+            ..
+        } = &mut scale_descriptor.resource
+        else {
+            panic!("fixture scale is an activation slot");
+        };
+        *byte_capacity = 8;
+        *signal_byte_capacity = 8;
+        let error = VulkanDistributedExecutionPlan::from_prepared_plans(
+            &[("owner", &wrong_scale_capacity)],
+            &tensor_index,
+            &artifacts,
+            &component_device_pools("component", &["owner", "helper-a"]),
+            &[],
+            4,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires 4 scale bytes"));
 
         let mut odd_residual = residual_finalized.clone();
         odd_residual.dispatches[0].physical_execution_contracts[0]

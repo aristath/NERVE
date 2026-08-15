@@ -531,6 +531,83 @@ fn plan_contract_dispatch(
                         residual_input_index,
                     }
                 }
+                ReductionFinalization::ScaleByPackedBf16InputToBf16 {
+                    scale_binding,
+                    elements_per_scale,
+                    scale_bit_offset,
+                } => {
+                    if !element_count.is_multiple_of(2) {
+                        return Err(dispatch_error(
+                            dispatch,
+                            "BF16 reduction finalization requires an even element count"
+                                .to_string(),
+                        ));
+                    }
+                    let elements_per_scale = usize::try_from(*elements_per_scale).map_err(|_| {
+                        dispatch_error(
+                            dispatch,
+                            "packed BF16 reduction scale stride exceeds usize".to_string(),
+                        )
+                    })?;
+                    if elements_per_scale == 0
+                        || !element_count.is_multiple_of(elements_per_scale)
+                    {
+                        return Err(dispatch_error(
+                            dispatch,
+                            "packed BF16 reduction scale stride must divide the element count exactly"
+                                .to_string(),
+                        ));
+                    }
+                    if !matches!(*scale_bit_offset, 0 | 16) {
+                        return Err(dispatch_error(
+                            dispatch,
+                            "packed BF16 reduction scale bit offset must be 0 or 16".to_string(),
+                        ));
+                    }
+                    let scale_input_index = contract
+                        .inputs
+                        .iter()
+                        .position(|input| input.binding == *scale_binding)
+                        .ok_or_else(|| {
+                            dispatch_error(
+                                dispatch,
+                                "packed BF16 reduction scale binding is absent".to_string(),
+                            )
+                        })?;
+                    let bf16_byte_capacity = element_count.checked_mul(2).ok_or_else(|| {
+                        dispatch_error(
+                            dispatch,
+                            "BF16 reduction output capacity overflowed".to_string(),
+                        )
+                    })?;
+                    let scale_byte_capacity = element_count
+                        .checked_div(elements_per_scale)
+                        .and_then(|scales| scales.checked_mul(size_of::<u32>()))
+                        .ok_or_else(|| {
+                            dispatch_error(
+                                dispatch,
+                                "packed BF16 reduction scale capacity overflowed".to_string(),
+                            )
+                        })?;
+                    let scale_activation = &inputs[scale_input_index].1;
+                    if scale_activation.signal_byte_capacity != scale_byte_capacity
+                        || output_activation.signal_byte_capacity != bf16_byte_capacity
+                    {
+                        return Err(dispatch_error(
+                            dispatch,
+                            format!(
+                                "packed BF16 reduction finalization requires {scale_byte_capacity} scale bytes and {bf16_byte_capacity} output bytes, found {} and {}",
+                                scale_activation.signal_byte_capacity,
+                                output_activation.signal_byte_capacity,
+                            ),
+                        ));
+                    }
+                    VulkanDistributedReductionFinalizationPlan::ScaleByPackedBf16InputToBf16 {
+                        scale_input_index,
+                        elements_per_scale,
+                        scale_bit_offset: *scale_bit_offset,
+                    }
+                }
             };
             Ok(VulkanDistributedReductionPlan {
                 operation: reduction.operation,

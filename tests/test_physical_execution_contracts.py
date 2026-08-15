@@ -158,6 +158,53 @@ def test_bf16_residual_reduction_finalization_is_typed_and_replicated() -> None:
         validate_physical_execution_contract(contract)
 
 
+def test_packed_bf16_scale_reduction_finalization_fails_closed() -> None:
+    contract = partial_output_contract()
+    contract["inputs"].append(
+        {
+            "binding": 3,
+            "distribution": "routed",
+            "dimension": 0,
+            "alignment_elements": 1,
+        }
+    )
+    output_rows = contract["geometry"]["dimensions"]["output_rows"]
+    contract["outputs"][0]["reduction"]["finalization"] = {
+        "kind": "scale_by_packed_bf16_input_to_bf16",
+        "scale_binding": 3,
+        "elements_per_scale": output_rows,
+        "scale_bit_offset": 16,
+    }
+    validate_physical_execution_contract(contract)
+
+    contract["outputs"][0]["reduction"]["finalization"]["elements_per_scale"] = 0
+    with pytest.raises(PhysicalExecutionContractError, match="positive"):
+        validate_physical_execution_contract(contract)
+
+    contract["outputs"][0]["reduction"]["finalization"]["elements_per_scale"] = (
+        output_rows - 1
+    )
+    with pytest.raises(PhysicalExecutionContractError, match="divide"):
+        validate_physical_execution_contract(contract)
+
+    contract["outputs"][0]["reduction"]["finalization"]["elements_per_scale"] = (
+        output_rows
+    )
+    contract["outputs"][0]["reduction"]["finalization"]["scale_bit_offset"] = 8
+    with pytest.raises(PhysicalExecutionContractError, match="0 or 16"):
+        validate_physical_execution_contract(contract)
+
+    contract["outputs"][0]["reduction"]["finalization"]["scale_bit_offset"] = 16
+    contract["inputs"][1] = {
+        "binding": 3,
+        "distribution": "sharded",
+        "dimension": 0,
+        "alignment_elements": 128,
+    }
+    with pytest.raises(PhysicalExecutionContractError, match="replicated or routed"):
+        validate_physical_execution_contract(contract)
+
+
 def test_reduced_output_and_partial_output_form_are_bidirectional() -> None:
     reduced_with_wrong_form = partial_output_contract()
     reduced_with_wrong_form["execution_form"] = (

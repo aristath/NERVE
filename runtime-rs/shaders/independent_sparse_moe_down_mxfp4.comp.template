@@ -412,7 +412,6 @@ void main() {
         DynamicU32Buffer down_scale = dynamic_parameter(expert, 1u);
         bool down_preexpanded = dynamic_weight_is_preexpanded(expert, 0u);
         bool native_fp8 = expert_uses_native_fp8(expert);
-        float route_weight = bf16_to_f32(packed_route >> 16u);
 
         quantize_intermediate(lane, route);
         barrier();
@@ -499,9 +498,7 @@ void main() {
             }
             value = subgroupAdd(value);
             if (gl_SubgroupInvocationID == 0u) {
-                output_rows[local_row] = row < HIDDEN_SIZE
-                    ? value * route_weight
-                    : 0.0;
+                output_rows[local_row] = row < HIDDEN_SIZE ? value : 0.0;
             }
         }
         barrier();
@@ -581,7 +578,7 @@ void main() {
         value = subgroupAdd(value);
         if (gl_SubgroupInvocationID == 0u) {
             output_rows[local_row] = row < HIDDEN_SIZE
-                ? round_bf16(round_bf16(value) * route_weight)
+                ? value * route_weight
                 : 0.0;
         }
     }

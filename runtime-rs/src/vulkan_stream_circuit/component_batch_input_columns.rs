@@ -108,31 +108,40 @@ fn create_distributed_input_column_component_batch_dispatch(
             )))
         })?;
     let output = &batch_slice.signal_buffer(&output_key)?.buffer;
-    let residual = match &reduction.finalization {
+    let finalization_input_index = match &reduction.finalization {
         VulkanDistributedReductionFinalizationPlan::StoreF32
         | VulkanDistributedReductionFinalizationPlan::StoreF32ToBf16 => None,
         VulkanDistributedReductionFinalizationPlan::AddBf16ResidualToBf16 {
             residual_input_index,
-        } => {
-            let key = if *residual_input_index == 0 {
+        } => Some(*residual_input_index),
+        VulkanDistributedReductionFinalizationPlan::ScaleByPackedBf16InputToBf16 {
+            scale_input_index,
+            ..
+        } => Some(*scale_input_index),
+    };
+    let finalization_input = finalization_input_index
+        .map(|input_index| {
+            let key = if input_index == 0 {
                 &input_key
             } else {
                 auxiliary_input_keys
-                    .get(*residual_input_index - 1)
+                    .get(input_index - 1)
                     .ok_or_else(|| {
                         VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
                             format!(
-                                "distributed input-column batch {}.{} has no residual input {}",
+                                "distributed input-column batch {}.{} has no reduction-finalization input {}",
                                 planned.component_id,
                                 planned.node_id,
-                                residual_input_index
+                                input_index
                             ),
                         ))
                     })?
             };
-            Some(&batch_slice.signal_buffer(key)?.buffer)
-        }
-    };
+            Ok::<_, VulkanResidentInProcessPlacedRuntimeError>(
+                &batch_slice.signal_buffer(key)?.buffer,
+            )
+        })
+        .transpose()?;
     let owner_device = devices.get(&planned.owner_device_id).ok_or_else(|| {
         VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
             device_id: planned.owner_device_id.clone(),
@@ -144,7 +153,7 @@ fn create_distributed_input_column_component_batch_dispatch(
         lane_capacity,
         reduction_owner,
         output,
-        residual,
+        finalization_input,
         None,
         &[],
     )

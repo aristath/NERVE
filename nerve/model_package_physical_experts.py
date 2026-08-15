@@ -296,7 +296,12 @@ def independent_expert_physical_implementations(
                 "reduction": {
                     "operation": "sum_f32",
                     "dimension_name": "expert_output_elements",
-                    "finalization": {"kind": "store_f32_to_bf16"},
+                    "finalization": {
+                        "kind": "scale_by_packed_bf16_input_to_bf16",
+                        "scale_binding": 1,
+                        "elements_per_scale": hidden_size,
+                        "scale_bit_offset": 16,
+                    },
                 },
             }
         ],

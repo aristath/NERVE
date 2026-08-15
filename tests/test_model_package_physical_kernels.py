@@ -1251,7 +1251,12 @@ def test_compiler_derives_fragmentable_independent_expert_down_resources(
     assert down_implementation["outputs"][0]["reduction"] == {
         "operation": "sum_f32",
         "dimension_name": "expert_output_elements",
-        "finalization": {"kind": "store_f32_to_bf16"},
+        "finalization": {
+            "kind": "scale_by_packed_bf16_input_to_bf16",
+            "scale_binding": 1,
+            "elements_per_scale": 128,
+            "scale_bit_offset": 16,
+        },
     }
     batch_shader_file = frame_parallel_batch_shader_file(shader_file)
     assert batch_shader_file is not None
