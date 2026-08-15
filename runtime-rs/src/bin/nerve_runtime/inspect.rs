@@ -673,12 +673,23 @@ fn inspect_graph(
 ) -> Result<(), Box<dyn Error>> {
     let device_catalog = runtime_vulkan_device_catalog(args)?;
     let compute_devices = device_catalog.available_compute_devices().to_vec();
+    let package_id = manifest.package_id.clone();
+    let max_context_activations = manifest.max_context_activations;
+    let source_graph = manifest.resolved_source_graph(manifest_dir.to_path_buf())?;
+    let runtime_graph = manifest.runtime_graph_from_controls(
+        args.default_device_id.as_deref(),
+        &args.node_devices,
+        &args.duplicate_after,
+        args.source_chain.as_deref(),
+    )?;
+    let effective_graph = source_graph.instantiate_runtime_graph(&runtime_graph)?;
+    let placement = effective_graph.placement_plan(&runtime_graph.placement_spec())?;
     let mut physical_execution_device_ids = Vec::new();
     let mut explicit_physical_mount = None;
     let explicit_physical_execution = if args.component_shard_devices.is_empty() {
         None
     } else {
-        let mut runtime_model = manifest.clone().mount_runtime_graph_controls(
+        let mut runtime_model = manifest.mount_runtime_graph_controls(
             args.default_device_id.as_deref(),
             &args.node_devices,
             &args.duplicate_after,
@@ -709,8 +720,10 @@ fn inspect_graph(
                     &hardware_profiles,
                     &memory_snapshots,
                 )?;
-            let context_capacity_activations =
-                choose_chat_runtime_context_size(package_manifest, args.context_size)?;
+            let context_capacity_activations = choose_chat_runtime_context_size(
+                max_context_activations,
+                args.context_size,
+            )?;
             let speculative_draft_tokens =
                 effective_speculative_draft_tokens(args, &runtime_model)?;
             let host_safe_capacity_bytes = vulkan_safe_host_available_bytes()?;
@@ -748,15 +761,6 @@ fn inspect_graph(
             })
         }
     };
-    let source_graph = manifest.resolved_source_graph(manifest_dir.to_path_buf())?;
-    let runtime_graph = manifest.runtime_graph_from_controls(
-        args.default_device_id.as_deref(),
-        &args.node_devices,
-        &args.duplicate_after,
-        args.source_chain.as_deref(),
-    )?;
-    let effective_graph = source_graph.instantiate_runtime_graph(&runtime_graph)?;
-    let placement = effective_graph.placement_plan(&runtime_graph.placement_spec())?;
     let mut placement_device_ids = placement_device_ids(&placement.components);
     placement_device_ids.extend(physical_execution_device_ids);
     placement_device_ids.sort();
@@ -767,7 +771,7 @@ fn inspect_graph(
         ok: true,
         package_manifest: package_manifest.to_path_buf(),
         package_root: manifest_dir.to_path_buf(),
-        package_id: manifest.package_id.clone(),
+        package_id,
         compiled_source_component_count: source_graph.circuits.len(),
         runtime_graph_controls: runtime_graph_report(args),
         runtime_graph: runtime_graph,
@@ -833,7 +837,11 @@ fn inspect_device_slice(
     runtime_model: VulkanResidentRuntimeModel,
     device_id: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let capacity = choose_runtime_context_size(package_manifest, args.context_size, 1)?;
+    let capacity = choose_runtime_context_size(
+        runtime_model.package.max_context_activations,
+        args.context_size,
+        1,
+    )?;
     let logical_device_ids = vec![device_id.to_string()];
     let bound_devices = runtime_bound_vulkan_devices(args, &logical_device_ids)?;
     let device = bound_devices.devices.get(device_id).ok_or_else(|| {
@@ -876,7 +884,11 @@ fn inspect_placement(
     manifest_dir: &Path,
     runtime_model: VulkanResidentRuntimeModel,
 ) -> Result<(), Box<dyn Error>> {
-    let capacity = choose_runtime_context_size(package_manifest, args.context_size, 1)?;
+    let capacity = choose_runtime_context_size(
+        runtime_model.package.max_context_activations,
+        args.context_size,
+        1,
+    )?;
     let speculative_draft_tokens = effective_speculative_draft_tokens(args, &runtime_model)?;
     let device_ids = runtime_model.placement_device_ids();
     let bound_devices = runtime_bound_vulkan_devices(args, &device_ids)?;

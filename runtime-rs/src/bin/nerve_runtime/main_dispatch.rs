@@ -45,19 +45,19 @@ fn run() -> Result<(), Box<dyn Error>> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
+    let manifest = VulkanResidentModelPackageManifest::from_json_file(package_manifest)?;
     if args.inspect_runtime {
-        let manifest = VulkanResidentModelPackageManifest::from_json_file(package_manifest)?;
         return inspect_runtime_topology(&args, package_manifest, &manifest_dir, manifest);
     }
     if args.inspect_package {
-        let manifest = VulkanResidentModelPackageManifest::from_json_file(package_manifest)?;
         return inspect_package(&args, package_manifest, &manifest_dir, manifest);
     }
     if args.inspect_graph {
-        let manifest = VulkanResidentModelPackageManifest::from_json_file(package_manifest)?;
         return inspect_graph(&args, package_manifest, &manifest_dir, manifest);
     }
-    let runtime_model = runtime_model(&args, package_manifest)?;
+    let max_context_activations = manifest.max_context_activations;
+    let tokenizer_dir = tokenizer_dir_from_manifest(&manifest_dir, &manifest)?;
+    let runtime_model = runtime_model_from_manifest(&args, manifest)?;
     if args.inspect_placement {
         return inspect_placement(&args, package_manifest, &manifest_dir, runtime_model);
     }
@@ -70,12 +70,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             device_id,
         );
     }
-    let tokenizer_dir = tokenizer_dir_from_package(package_manifest)?;
     let codec = VulkanResidentHfTokenizerTextCodec::from_model_dir(&tokenizer_dir)?
         .with_add_special_tokens(args.add_special_tokens)
         .with_skip_special_tokens(args.skip_special_tokens);
     if args.chat {
-        let capacity = choose_chat_runtime_context_size(package_manifest, args.context_size)?;
+        let capacity =
+            choose_chat_runtime_context_size(max_context_activations, args.context_size)?;
         let prepared = runtime_capacity_packed_model(
             &args,
             &manifest_dir,
@@ -107,8 +107,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                 "prompt token count plus --max-new-tokens overflowed usize",
             )
         })?;
-    let capacity =
-        choose_runtime_context_size(package_manifest, args.context_size, prompt_ids.len())?;
+    let capacity = choose_runtime_context_size(
+        max_context_activations,
+        args.context_size,
+        prompt_ids.len(),
+    )?;
     let prepared = runtime_capacity_packed_model(
         &args,
         &manifest_dir,

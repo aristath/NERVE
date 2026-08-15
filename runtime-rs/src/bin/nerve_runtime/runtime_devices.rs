@@ -18,12 +18,10 @@ fn runtime_model_placement(
         .map_err(|error| Box::new(error) as Box<dyn Error>)
 }
 
-fn tokenizer_dir_from_package(package_manifest: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    let manifest = VulkanResidentModelPackageManifest::from_json_file(package_manifest)?;
-    let manifest_dir = package_manifest
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+fn tokenizer_dir_from_manifest(
+    manifest_dir: &Path,
+    manifest: &VulkanResidentModelPackageManifest,
+) -> Result<PathBuf, Box<dyn Error>> {
     let tokenizer_dir = resolve_package_path(&manifest_dir, &manifest.tokenizer.path);
     if !tokenizer_dir.join("tokenizer.json").is_file() {
         return Err(Box::new(io::Error::new(
@@ -46,11 +44,10 @@ fn resolve_package_path(manifest_dir: &Path, raw_path: &str) -> PathBuf {
     }
 }
 
-fn runtime_model(
+fn runtime_model_from_manifest(
     args: &Args,
-    package_manifest: &Path,
+    manifest: VulkanResidentModelPackageManifest,
 ) -> Result<VulkanResidentRuntimeModel, Box<dyn Error>> {
-    let manifest = VulkanResidentModelPackageManifest::from_json_file(package_manifest)?;
     let mut model = manifest.mount_runtime_graph_controls(
         args.default_device_id.as_deref(),
         &args.node_devices,
@@ -67,6 +64,17 @@ fn runtime_model(
         }
     }
     Ok(model)
+}
+
+#[cfg(test)]
+fn runtime_model(
+    args: &Args,
+    package_manifest: &Path,
+) -> Result<VulkanResidentRuntimeModel, Box<dyn Error>> {
+    runtime_model_from_manifest(
+        args,
+        VulkanResidentModelPackageManifest::from_json_file(package_manifest)?,
+    )
 }
 
 fn runtime_uses_explicit_placement(args: &Args) -> bool {

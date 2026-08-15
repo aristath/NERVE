@@ -145,13 +145,12 @@ fn runtime_device_bindings_report(
 }
 
 fn choose_runtime_context_size(
-    package_manifest: &Path,
+    max_context_size: usize,
     requested_context_size: Option<usize>,
     minimum_context_size: usize,
 ) -> Result<usize, Box<dyn Error>> {
-    let manifest = VulkanResidentModelPackageManifest::from_json_file(package_manifest)?;
     Ok(resolve_runtime_context_size(
-        manifest.max_context_activations,
+        max_context_size,
         requested_context_size,
         minimum_context_size,
     )?)
@@ -191,8 +190,8 @@ fn resolve_runtime_context_size(
 }
 
 fn choose_chat_runtime_context_size(
-    package_manifest: &Path,
+    max_context_size: usize,
     requested_context_size: Option<usize>,
 ) -> Result<usize, Box<dyn Error>> {
-    choose_runtime_context_size(package_manifest, requested_context_size, 0)
+    choose_runtime_context_size(max_context_size, requested_context_size, 0)
 }
