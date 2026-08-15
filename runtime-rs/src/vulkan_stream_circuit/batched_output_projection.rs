@@ -5,6 +5,42 @@ struct VulkanResidentBatchedOutputNormRunner {
     sequence_catalog: RefCell<BTreeMap<usize, VulkanResidentKernelSequence>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VulkanResidentBatchedOutputProjectionAllocationPlan {
+    normalized_frames_device_bytes: usize,
+    logits_device_bytes: usize,
+}
+
+impl VulkanResidentBatchedOutputProjectionAllocationPlan {
+    fn from_spec(
+        output_spec: &VulkanResidentOutputTransducerSpec,
+        batch_capacity: usize,
+    ) -> Result<Self, VulkanError> {
+        if batch_capacity == 0 {
+            return Err(VulkanError(
+                "batched output projection allocation capacity is zero".to_string(),
+            ));
+        }
+        let normalized_frames_device_bytes = output_spec
+            .normalized_frame_byte_capacity
+            .checked_mul(batch_capacity)
+            .ok_or_else(|| VulkanError("batched normalized frame capacity overflowed".to_string()))?;
+        let logits_device_bytes = output_spec
+            .logits_byte_capacity
+            .checked_mul(batch_capacity)
+            .ok_or_else(|| VulkanError("batched logits capacity overflowed".to_string()))?;
+        if normalized_frames_device_bytes == 0 || logits_device_bytes == 0 {
+            return Err(VulkanError(
+                "batched output projection allocation capacities must be positive".to_string(),
+            ));
+        }
+        Ok(Self {
+            normalized_frames_device_bytes,
+            logits_device_bytes,
+        })
+    }
+}
+
 impl VulkanResidentBatchedOutputNormRunner {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -31,14 +67,12 @@ impl VulkanResidentBatchedOutputNormRunner {
         }
         validate_output_embedding_norm_weight(norm_weight, output_spec)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
-        let normalized_frames_byte_capacity = output_spec
-            .normalized_frame_byte_capacity
-            .checked_mul(batch_capacity)
-            .ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                    "batched normalized frame capacity overflowed".to_string(),
-                ))
-            })?;
+        let allocation_plan = VulkanResidentBatchedOutputProjectionAllocationPlan::from_spec(
+            output_spec,
+            batch_capacity,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let normalized_frames_byte_capacity = allocation_plan.normalized_frames_device_bytes;
         if raw_frames_buffer.byte_capacity() < normalized_frames_byte_capacity {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
                 VulkanError(format!(
@@ -193,6 +227,11 @@ impl VulkanResidentBatchedOutputProjectionKernelRunner {
             .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
         validate_output_projection_scale(projection_scale, output_spec)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
+        let allocation_plan = VulkanResidentBatchedOutputProjectionAllocationPlan::from_spec(
+            output_spec,
+            batch_capacity,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let norm = VulkanResidentBatchedOutputNormRunner::new(
             device,
             batch_capacity,
@@ -203,14 +242,7 @@ impl VulkanResidentBatchedOutputProjectionKernelRunner {
             output_spec,
         )?;
         let normalized_frames_byte_capacity = norm.normalized_frames_buffer.byte_capacity();
-        let batched_logits_byte_capacity = output_spec
-            .logits_byte_capacity
-            .checked_mul(batch_capacity)
-            .ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                    "batched logits capacity overflowed".to_string(),
-                ))
-            })?;
+        let batched_logits_byte_capacity = allocation_plan.logits_device_bytes;
         let batched_logits_buffer = device
             .create_resident_buffer(batched_logits_byte_capacity)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;

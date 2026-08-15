@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_PHYSICAL_EXECUTION_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_physical_execution_residency_plan.v12";
+    "nerve.vulkan_runtime_physical_execution_residency_plan.v13";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct VulkanRuntimePrivateActivationResidentAllocation {
@@ -1279,7 +1279,7 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                     .iter()
                     .enumerate()
                     .filter_map(move |(allocation_index, allocation)| {
-                        target_sampler_buffer_is_host_visible(allocation)
+                        runtime_buffer_is_host_visible(allocation)
                             .then_some((device_index, allocation_index, allocation.clone()))
                     })
             })
@@ -1512,10 +1512,40 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 "execution transient reservation was already attached".to_string(),
             ));
         }
+        let admitted_logical_devices = next
+            .device_plans
+            .iter()
+            .map(|device| device.device_id.clone())
+            .collect::<BTreeSet<_>>();
         for allocation in device_allocations {
+            let participant_identity_is_valid = !allocation.participant_device_ids.is_empty()
+                && allocation
+                    .participant_device_ids
+                    .iter()
+                    .all(|device_id| admitted_logical_devices.contains(device_id))
+                && allocation
+                    .participant_device_ids
+                    .iter()
+                    .any(|device_id| device_id == &allocation.logical_device_id)
+                && allocation
+                    .participant_device_ids
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                && match allocation.usage {
+                    VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage => {
+                        true
+                    }
+                    VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage
+                    | VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate => {
+                        allocation.participant_device_ids.len() == 1
+                            && allocation.participant_device_ids[0]
+                                == allocation.logical_device_id
+                    }
+                };
             if allocation.logical_device_id.trim().is_empty()
                 || allocation.concern.trim().is_empty()
                 || allocation.byte_capacity == 0
+                || !participant_identity_is_valid
             {
                 return Err(VulkanRuntimeResidencyPlanError(format!(
                     "execution transient device allocation {:?} is malformed",
@@ -1549,11 +1579,6 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                 .execution_transient_device_allocations
                 .push(allocation.clone());
         }
-        let admitted_logical_devices = next
-            .device_plans
-            .iter()
-            .map(|device| device.device_id.clone())
-            .collect::<BTreeSet<_>>();
         for allocation in host_visible_allocations {
             if allocation.logical_device_id.trim().is_empty()
                 || allocation.concern.trim().is_empty()
@@ -1706,23 +1731,31 @@ fn exact_stream_control_shared_host_allocation<'a>(
     Ok(*allocation)
 }
 
-fn target_sampler_buffer_is_host_visible(
+fn runtime_buffer_is_host_visible(
     allocation: &VulkanRuntimeResidentStreamAllocation,
 ) -> bool {
-    matches!(
-        (&allocation.scope, &allocation.kind),
+    match (&allocation.scope, &allocation.kind) {
         (
             VulkanRuntimeResidentStreamAllocationScope::Target,
             VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
                 class: VulkanRuntimeResidentBufferClass::SamplerWorkspace,
                 buffer_id,
                 ..
-            }
-        ) if matches!(
+            },
+        ) => matches!(
             buffer_id.as_str(),
             "history_and_output" | "random_seed" | "seen_token_batch"
-        )
-    )
+        ),
+        (
+            VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { decoder_id },
+            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
+                scope_id,
+                buffer_id,
+            },
+        ) => scope_id == decoder_id && buffer_id == "stream_control",
+        _ => false,
+    }
 }
 
 fn validate_resident_stream_allocation_ledger(

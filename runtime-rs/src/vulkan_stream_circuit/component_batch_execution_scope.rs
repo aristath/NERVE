@@ -47,6 +47,10 @@ impl VulkanComponentBatchExecutionScope {
         }
     }
 
+    fn allows_open_boundaries(&self) -> bool {
+        !matches!(self, Self::All)
+    }
+
     fn includes_dispatch(&self, component_id: &str, node_id: &str) -> bool {
         match self {
             Self::All => true,

@@ -41,6 +41,9 @@ impl VulkanResidentPlacedComponentBatchRunner {
                     "causal_snapshots:{}",
                     slice.causal_state_snapshots.total_byte_capacity(),
                 ));
+                allocations.extend(slice.demand_residency_allocations().map(|allocation| {
+                    format!("demand_{:?}:{}", allocation.kind, allocation.byte_capacity)
+                }));
                 if let Some(predicate) = self
                     .demand_pipeline_predicates
                     .as_ref()
@@ -79,6 +82,13 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 device_id,
                 slice.causal_state_snapshots.total_byte_capacity(),
             )?;
+            for allocation in slice.demand_residency_allocations() {
+                checked_add_device_bytes(
+                    &mut totals,
+                    device_id,
+                    allocation.byte_capacity,
+                )?;
+            }
         }
         if let (Some(predicates), Some(owner_device_id)) =
             (&self.demand_pipeline_predicates, self.device_ids.first())
@@ -143,7 +153,13 @@ impl VulkanResidentPlacedComponentBatchRunner {
             &execution_scope,
             &BTreeSet::new(),
             false,
-            slice.demand_residency_context.is_some(),
+            slice.demand_residency_context.as_ref().map(|context| {
+                VulkanComponentBatchDemandResidencyPlanContext {
+                    schedule: slice.package_slice.physical_residency_schedule(),
+                    contract: &context.contract,
+                    layout: &context.layout,
+                }
+            }),
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let devices = BTreeMap::new();
@@ -172,7 +188,10 @@ impl VulkanResidentPlacedComponentBatchRunner {
         let lane_mounteds = vec![&slice.mounted; lane_capacity];
         let pipeline_continuation_predicate = if execution_mode
             == VulkanComponentBatchExecutionMode::CausalSequence
-            && slice.demand_residency_context.is_some()
+            && expected_residency.allocations.iter().any(|allocation| {
+                allocation.kind
+                    == VulkanComponentBatchResidentAllocationKind::DemandPipelinePredicate
+            })
         {
             let predicate = Arc::new(
                 device
@@ -468,7 +487,11 @@ impl VulkanResidentPlacedComponentBatchRunner {
                 .split_first()
                 .expect("non-empty placed slices contain an owner device");
             let shared = owner
-                .create_shared_conditional_resident_buffers(peers, size_of::<u32>())
+                .create_shared_conditional_resident_buffers_for_route(
+                    peers,
+                    size_of::<u32>(),
+                    VulkanSharedResidentBufferRoute::SharedHost,
+                )
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             if shared.buffers.len() != placed_slices.len() {
                 return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
@@ -550,15 +573,18 @@ impl VulkanResidentPlacedComponentBatchRunner {
                                 .edge_io
                                 .incoming_buffer(outgoing.endpoint.edge_index)
                                 .is_some()
-                    })
-                    .ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                            format!(
-                                "component batch edge {} has no destination device {:?}",
-                                outgoing.endpoint.edge_index, outgoing.endpoint.remote_device_id
-                            ),
-                        ))
-                    })?;
+                    });
+                let Some(destination_device_index) = destination_device_index else {
+                    if execution_scope.allows_open_boundaries() {
+                        continue;
+                    }
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "component batch edge {} has no destination device {:?}",
+                            outgoing.endpoint.edge_index, outgoing.endpoint.remote_device_id
+                        )),
+                    ));
+                };
                 let source = slices[source_device_index].signal_buffer(
                     &VulkanComponentBatchSignalKey::OutgoingEdge(outgoing.endpoint.edge_index),
                 );

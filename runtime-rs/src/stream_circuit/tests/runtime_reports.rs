@@ -509,7 +509,7 @@
             explicit_physical_mount: Some(RuntimeExplicitPhysicalMountReport {
                 schema: RUNTIME_EXPLICIT_PHYSICAL_MOUNT_REPORT_SCHEMA.to_string(),
                 residency_plan_schema:
-                    "nerve.vulkan_runtime_physical_execution_residency_plan.v12".to_string(),
+                    "nerve.vulkan_runtime_physical_execution_residency_plan.v13".to_string(),
                 context_capacity_activations: 131_072,
                 speculative_draft_tokens: 2,
                 resource_residency_policy: "demand-paged".to_string(),

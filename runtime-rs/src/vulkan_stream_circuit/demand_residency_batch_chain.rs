@@ -34,42 +34,115 @@ fn demand_batch_commands_are_replay_stable(
         })
 }
 
+fn demand_batch_snapshot_sequence_step_index(
+    commands: &[VulkanDemandResidencyBatchCommand],
+    start_command_index: usize,
+    after_step_index: usize,
+) -> Option<usize> {
+    commands
+        .get(start_command_index..)?
+        .iter()
+        .position(|command| {
+            *command == VulkanDemandResidencyBatchCommand::Step(after_step_index)
+        })
+}
+
 struct VulkanDemandResidencyBatchGateRuntime {
-    checkpoint_id: String,
-    selector_id: String,
     command_index: usize,
     checkpoint_tag: u32,
     selection_count: usize,
+}
+
+#[derive(Clone)]
+struct VulkanDemandResidencyBatchSnapshot {
+    after_step_index: usize,
+    source: Arc<VulkanResidentBuffer>,
+    destination: Arc<VulkanResidentBuffer>,
+    byte_count: usize,
+}
+
+struct VulkanDemandResidencyBatchGateResource {
+    checkpoint_id: String,
+    selector_id: String,
     gate: VulkanGpuResidencyGate,
+}
+
+struct VulkanDemandResidencyBatchResources {
+    continuation_predicate: Arc<VulkanResidentBuffer>,
+    continuation_enabled: Cell<bool>,
+    missing_queue: VulkanGpuResidencyMissQueue,
+    gates: Vec<VulkanDemandResidencyBatchGateResource>,
+    observed_notification_epoch: Cell<u32>,
+    shared_pipeline_guard: bool,
+    resident_allocations: Vec<VulkanComponentBatchResidentAllocation>,
 }
 
 struct VulkanDemandResidencyBatchChain {
     commands: Vec<VulkanDemandResidencyBatchCommand>,
     first_gate_command_index: usize,
-    continuation_predicate: Arc<VulkanResidentBuffer>,
-    continuation_enabled: Cell<bool>,
-    missing_queue: VulkanGpuResidencyMissQueue,
+    resources: Rc<VulkanDemandResidencyBatchResources>,
     gates: Vec<VulkanDemandResidencyBatchGateRuntime>,
+    snapshots: Vec<VulkanDemandResidencyBatchSnapshot>,
     full_sequence: VulkanResidentKernelSequence,
     resume_sequences: Vec<VulkanResidentKernelSequence>,
-    observed_notification_epoch: Cell<u32>,
-    shared_pipeline_guard: bool,
     initial_submission_pending: Cell<bool>,
 }
 
 struct VulkanDemandResidencyBatchSegment {
     context: VulkanDemandResidencyExecutionContext,
     gate_specs: Vec<VulkanDemandResidencyBatchGateSpec>,
-    address_table: Arc<VulkanResidentBuffer>,
-    address_table_slot_count: usize,
     step_start: usize,
     step_end: usize,
     lane_capacity: usize,
-    pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
+    resources: Rc<VulkanDemandResidencyBatchResources>,
+    snapshots: Vec<VulkanDemandResidencyBatchSnapshot>,
     chains: RefCell<BTreeMap<usize, VulkanDemandResidencyBatchChain>>,
 }
 
 impl VulkanDemandResidencyBatchSegment {
+    fn resident_allocations(&self) -> &[VulkanComponentBatchResidentAllocation] {
+        &self.resources.resident_allocations
+    }
+
+    fn selected_resource_indices(
+        &self,
+        batch_width: usize,
+    ) -> Result<BTreeMap<String, BTreeSet<usize>>, VulkanError> {
+        if batch_width == 0 || batch_width > self.lane_capacity {
+            return Err(VulkanError(format!(
+                "demand batch selected-resource width {batch_width} is outside 1..={}",
+                self.lane_capacity,
+            )));
+        }
+        if self.gate_specs.len() != self.resources.gates.len() {
+            return Err(VulkanError(
+                "demand batch selected-resource gates disagree with their specifications"
+                    .to_string(),
+            ));
+        }
+        let mut selected_by_selector = BTreeMap::<String, BTreeSet<usize>>::new();
+        for (spec, resource) in self.gate_specs.iter().zip(&self.resources.gates) {
+            if spec.selector_id != resource.selector_id {
+                return Err(VulkanError(
+                    "demand batch selected-resource gate order is inconsistent".to_string(),
+                ));
+            }
+            let selection_count = spec
+                .selection_count_per_activation
+                .checked_mul(batch_width)
+                .ok_or_else(|| {
+                    VulkanError(
+                        "demand batch selected-resource count overflowed".to_string(),
+                    )
+                })?;
+            selected_by_selector
+                .entry(spec.selector_id.clone())
+                .or_default()
+                .extend(resource.gate.selected_resource_indices(selection_count)?);
+        }
+        Ok(selected_by_selector)
+    }
+
     fn prepare(
         &self,
         device: &VulkanComputeDevice,
@@ -90,9 +163,8 @@ impl VulkanDemandResidencyBatchSegment {
                 self.step_end,
                 batch_width,
                 &self.gate_specs,
-                Arc::clone(&self.address_table),
-                self.address_table_slot_count,
-                self.pipeline_continuation_predicate.clone(),
+                &self.snapshots,
+                Rc::clone(&self.resources),
             )?;
             self.chains.borrow_mut().insert(batch_width, chain);
         }
@@ -113,6 +185,7 @@ impl VulkanDemandResidencyBatchSegment {
 
     #[allow(clippy::too_many_arguments)]
     fn from_slice_steps(
+        device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
         schedule: &VulkanPhysicalResidencySchedule,
         dispatch_spans: &[VulkanComponentBatchDispatchSpan],
@@ -122,6 +195,7 @@ impl VulkanDemandResidencyBatchSegment {
         step_start: usize,
         step_end: usize,
         lane_capacity: usize,
+        snapshots: Vec<VulkanDemandResidencyBatchSnapshot>,
         pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
         context: VulkanDemandResidencyExecutionContext,
     ) -> Result<Option<Self>, VulkanResidentInProcessPlacedRuntimeError> {
@@ -135,6 +209,18 @@ impl VulkanDemandResidencyBatchSegment {
             return Err(demand_batch_error(
                 "demand-resident batch segment has no executable steps",
             ));
+        }
+        for snapshot in &snapshots {
+            if snapshot.after_step_index < step_start
+                || snapshot.after_step_index >= step_end
+                || snapshot.byte_count == 0
+                || snapshot.byte_count > snapshot.source.byte_capacity()
+                || snapshot.byte_count > snapshot.destination.byte_capacity()
+            {
+                return Err(demand_batch_error(
+                    "demand-resident batch snapshot lies outside its execution segment",
+                ));
+            }
         }
         let spans_by_dispatch = dispatch_spans
             .iter()
@@ -304,15 +390,24 @@ impl VulkanDemandResidencyBatchSegment {
                 "demand-resident component batch has no dynamic-resource buffers",
             )
         })?;
+        let address_table = dynamic_resources.shared_address_table();
+        let address_table_slot_count = dynamic_resources.address_table_slot_count();
+        let resources = Rc::new(VulkanDemandResidencyBatchResources::new(
+            device,
+            lane_capacity,
+            &gate_specs,
+            Arc::clone(&address_table),
+            address_table_slot_count,
+            pipeline_continuation_predicate,
+        )?);
         Ok(Some(Self {
             context,
             gate_specs,
-            address_table: dynamic_resources.shared_address_table(),
-            address_table_slot_count: dynamic_resources.address_table_slot_count(),
             step_start,
             step_end,
             lane_capacity,
-            pipeline_continuation_predicate,
+            resources,
+            snapshots,
             chains: RefCell::new(BTreeMap::new()),
         }))
     }
@@ -470,6 +565,139 @@ impl VulkanDemandResidencyBatchSegment {
     }
 }
 
+impl VulkanDemandResidencyBatchResources {
+    fn new(
+        device: &VulkanComputeDevice,
+        lane_capacity: usize,
+        gate_specs: &[VulkanDemandResidencyBatchGateSpec],
+        address_table: Arc<VulkanResidentBuffer>,
+        address_table_slot_count: usize,
+        pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
+    ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
+        let shared_pipeline_guard = pipeline_continuation_predicate.is_some();
+        let gate_geometries = gate_specs
+            .iter()
+            .map(|spec| VulkanComponentBatchDemandGateGeometry {
+                checkpoint_id: spec.checkpoint_id.clone(),
+                selector_id: spec.selector_id.clone(),
+                selection_count_per_activation: spec.selection_count_per_activation,
+                selection_index_shift: spec.selection_index_shift,
+                selection_index_mask: spec.selection_index_mask,
+                address_mapping: spec.address_mapping.clone(),
+            })
+            .collect::<Vec<_>>();
+        let resident_allocations = component_batch_demand_segment_allocations(
+            &gate_geometries,
+            lane_capacity,
+            !shared_pipeline_guard,
+        )
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let continuation_predicate = match pipeline_continuation_predicate {
+            Some(predicate) => predicate,
+            None => {
+                let predicate = Arc::new(
+                    device
+                        .create_conditional_resident_buffer(size_of::<u32>())
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
+                );
+                predicate
+                    .write_bytes(&1u32.to_le_bytes())
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                predicate
+            }
+        };
+        let missing_capacity = gate_specs
+            .iter()
+            .map(|gate| {
+                gate.selection_count_per_activation
+                    .checked_mul(lane_capacity)
+                    .ok_or_else(|| {
+                        demand_batch_error(
+                            "demand batch missing-queue capacity overflowed",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max()
+            .expect("demand batch gates are non-empty");
+        let missing_queue = VulkanGpuResidencyMissQueue::new(device, missing_capacity).map_err(
+            |error| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "component-batch demand segment miss queue with capacity {missing_capacity} and lane capacity {lane_capacity} failed: {error}",
+                )))
+            },
+        )?;
+        let observed_notification_epoch = missing_queue
+            .notification_epoch()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let gate_shader = vulkan_gpu_residency_gate_spirv_words()
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let mut gates = Vec::with_capacity(gate_specs.len());
+        for spec in gate_specs {
+            let maximum_selection_count = spec
+                .selection_count_per_activation
+                .checked_mul(lane_capacity)
+                .ok_or_else(|| {
+                    demand_batch_error(
+                        "demand batch maximum selection count overflowed",
+                    )
+                })?;
+            let address_mapping = match &spec.address_mapping {
+                VulkanCompiledSelectorAddressMapping::GroupTable {
+                    resource_address_slots,
+                    resource_address_slot_offsets,
+                } => VulkanGpuResidencyAddressMapping::GroupTable {
+                    resource_address_slots: resource_address_slots.clone(),
+                    resource_address_slot_offsets: resource_address_slot_offsets.clone(),
+                },
+                VulkanCompiledSelectorAddressMapping::PartitionTemplate {
+                    member_slot_bases,
+                    resource_count,
+                    ..
+                } => VulkanGpuResidencyAddressMapping::Partitioned {
+                    member_slot_bases: member_slot_bases.clone(),
+                    resource_count: *resource_count,
+                },
+            };
+            let gate = VulkanGpuResidencyGate::new(
+                device,
+                &gate_shader,
+                Arc::clone(&spec.selection_buffer),
+                Arc::clone(&address_table),
+                address_table_slot_count,
+                missing_queue.clone(),
+                Arc::clone(&continuation_predicate),
+                None,
+                VulkanGpuResidencyGateConfig {
+                    maximum_selection_count,
+                    selection_count_per_lane: spec.selection_count_per_activation,
+                    selection_lane_stride_words: spec.selection_lane_stride_words,
+                    selection_index_shift: spec.selection_index_shift,
+                    selection_index_mask: spec.selection_index_mask,
+                    address_mapping,
+                    owned_resource_indices: None,
+                },
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+            gates.push(VulkanDemandResidencyBatchGateResource {
+                checkpoint_id: spec.checkpoint_id.clone(),
+                selector_id: spec.selector_id.clone(),
+                gate,
+            });
+        }
+        Ok(Self {
+            continuation_predicate,
+            continuation_enabled: Cell::new(true),
+            missing_queue,
+            gates,
+            observed_notification_epoch: Cell::new(observed_notification_epoch),
+            shared_pipeline_guard,
+            resident_allocations,
+        })
+    }
+}
+
 impl VulkanDemandResidencyBatchChain {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -479,9 +707,8 @@ impl VulkanDemandResidencyBatchChain {
         step_end: usize,
         batch_width: usize,
         gate_specs: &[VulkanDemandResidencyBatchGateSpec],
-        address_table: Arc<VulkanResidentBuffer>,
-        address_table_slot_count: usize,
-        pipeline_continuation_predicate: Option<Arc<VulkanResidentBuffer>>,
+        snapshots: &[VulkanDemandResidencyBatchSnapshot],
+        resources: Rc<VulkanDemandResidencyBatchResources>,
     ) -> Result<Self, VulkanResidentInProcessPlacedRuntimeError> {
         let mut gates_before_step = BTreeMap::<usize, Vec<usize>>::new();
         for (gate_index, gate) in gate_specs.iter().enumerate() {
@@ -536,41 +763,6 @@ impl VulkanDemandResidencyBatchChain {
                 "demand batch gate has no selected computation after it",
             ));
         }
-        let shared_pipeline_guard = pipeline_continuation_predicate.is_some();
-        let continuation_predicate = match pipeline_continuation_predicate {
-            Some(predicate) => predicate,
-            None => {
-                let predicate = Arc::new(
-                    device
-                        .create_conditional_resident_buffer(size_of::<u32>())
-                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-                );
-                predicate
-                    .write_bytes(&1u32.to_le_bytes())
-                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-                predicate
-            }
-        };
-        let missing_capacity = gate_specs
-            .iter()
-            .map(|gate| {
-                gate.selection_count_per_activation
-                    .checked_mul(batch_width)
-                    .ok_or_else(|| {
-                        demand_batch_error(
-                            "demand batch missing-queue capacity overflowed",
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .max()
-            .expect("demand batch gates are non-empty");
-        let missing_queue =
-            VulkanGpuResidencyMissQueue::new(device, missing_capacity)
-                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-        let gate_shader = vulkan_gpu_residency_gate_spirv_words()
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let mut gates = Vec::with_capacity(gate_specs.len());
         for (gate_index, spec) in gate_specs.iter().enumerate() {
             let command_index = commands
@@ -591,51 +783,10 @@ impl VulkanDemandResidencyBatchChain {
                         "demand batch active selection count overflowed",
                     )
                 })?;
-            let address_mapping = match &spec.address_mapping {
-                VulkanCompiledSelectorAddressMapping::GroupTable {
-                    resource_address_slots,
-                    resource_address_slot_offsets,
-                } => VulkanGpuResidencyAddressMapping::GroupTable {
-                    resource_address_slots: resource_address_slots.clone(),
-                    resource_address_slot_offsets:
-                        resource_address_slot_offsets.clone(),
-                },
-                VulkanCompiledSelectorAddressMapping::PartitionTemplate {
-                    member_slot_bases,
-                    resource_count,
-                    ..
-                } => VulkanGpuResidencyAddressMapping::Partitioned {
-                    member_slot_bases: member_slot_bases.clone(),
-                    resource_count: *resource_count,
-                },
-            };
-            let gate = VulkanGpuResidencyGate::new(
-                device,
-                &gate_shader,
-                Arc::clone(&spec.selection_buffer),
-                Arc::clone(&address_table),
-                address_table_slot_count,
-                missing_queue.clone(),
-                Arc::clone(&continuation_predicate),
-                None,
-                VulkanGpuResidencyGateConfig {
-                    maximum_selection_count: selection_count,
-                    selection_count_per_lane: spec.selection_count_per_activation,
-                    selection_lane_stride_words: spec.selection_lane_stride_words,
-                    selection_index_shift: spec.selection_index_shift,
-                    selection_index_mask: spec.selection_index_mask,
-                    address_mapping,
-                    owned_resource_indices: None,
-                },
-            )
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             gates.push(VulkanDemandResidencyBatchGateRuntime {
-                checkpoint_id: spec.checkpoint_id.clone(),
-                selector_id: spec.selector_id.clone(),
                 command_index,
                 checkpoint_tag,
                 selection_count,
-                gate,
             });
         }
         let full_sequence = device
@@ -649,14 +800,11 @@ impl VulkanDemandResidencyBatchChain {
         Ok(Self {
             commands,
             first_gate_command_index,
-            continuation_predicate,
-            continuation_enabled: Cell::new(true),
-            missing_queue,
+            resources,
             gates,
+            snapshots: snapshots.to_vec(),
             full_sequence,
             resume_sequences,
-            observed_notification_epoch: Cell::new(0),
-            shared_pipeline_guard,
             initial_submission_pending: Cell::new(false),
         })
     }
@@ -675,11 +823,12 @@ impl VulkanDemandResidencyBatchChain {
         context: &VulkanDemandResidencyExecutionContext,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
         let _residency = runtime_critical_path_span(RuntimeCriticalPathPhase::ResidencyGate);
-        if !self.continuation_enabled.get() {
-            self.continuation_predicate
+        if !self.resources.continuation_enabled.get() {
+            self.resources
+                .continuation_predicate
                 .write_bytes(&1u32.to_le_bytes())
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            self.continuation_enabled.set(true);
+            self.resources.continuation_enabled.set(true);
         }
         context
             .store
@@ -842,16 +991,18 @@ impl VulkanDemandResidencyBatchChain {
         let mut resume_count = 0usize;
         loop {
             let notification_epoch = self
+                .resources
                 .missing_queue
                 .notification_epoch()
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            if notification_epoch == self.observed_notification_epoch.get() {
-                self.continuation_enabled.set(true);
+            if notification_epoch == self.resources.observed_notification_epoch.get() {
+                self.resources.continuation_enabled.set(true);
                 return Ok(observed_miss);
             }
             observed_miss = true;
-            self.continuation_enabled.set(false);
+            self.resources.continuation_enabled.set(false);
             let missing = self
+                .resources
                 .missing_queue
                 .snapshot()
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
@@ -884,7 +1035,7 @@ impl VulkanDemandResidencyBatchChain {
                         "GPU batch residency miss references unknown checkpoint tag {checkpoint_tag}"
                     ))
                 })?;
-            let gate = &self.gates[gate_index];
+            let gate = &self.resources.gates[gate_index];
             context
                 .store
                 .record_gpu_gate_misses(
@@ -913,10 +1064,12 @@ impl VulkanDemandResidencyBatchChain {
                         gate.selector_id, gate.checkpoint_id
                     ))
                 })?;
-            self.missing_queue
+            self.resources
+                .missing_queue
                 .acknowledge_through(missing.published_count)
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
-            self.observed_notification_epoch
+            self.resources
+                .observed_notification_epoch
                 .set(missing.notification_epoch);
             resume_count = resume_count.checked_add(1).ok_or_else(|| {
                 demand_batch_error(
@@ -1069,13 +1222,15 @@ impl VulkanDemandResidencyBatchChain {
         let gate_push_constants = self
             .gates
             .iter()
-            .map(|gate| {
-                gate.gate
+            .zip(&self.resources.gates)
+            .map(|(runtime, resource)| {
+                resource
+                    .gate
                     .push_constants(
-                        gate.selection_count,
-                        gate.checkpoint_tag,
-                        gate.command_index == direct_gate_command_index,
-                        gate.command_index == direct_gate_command_index,
+                        runtime.selection_count,
+                        runtime.checkpoint_tag,
+                        runtime.command_index == direct_gate_command_index,
+                        runtime.command_index == direct_gate_command_index,
                         0,
                     )
             })
@@ -1085,7 +1240,7 @@ impl VulkanDemandResidencyBatchChain {
             &self.commands,
             start_command_index,
             direct_gate_command_index,
-            self.shared_pipeline_guard,
+            self.resources.shared_pipeline_guard,
             resume_gate_index.is_some(),
         )?;
         let mut sequence_steps = Vec::with_capacity(self.commands.len() - start_command_index);
@@ -1122,9 +1277,14 @@ impl VulkanDemandResidencyBatchChain {
                         )
                     }
                     VulkanDemandResidencyBatchCommand::Gate(gate_index) => {
-                        let gate = self.gates.get(gate_index).ok_or_else(|| {
+                        self.gates.get(gate_index).ok_or_else(|| {
                             demand_batch_error(format!(
                                 "demand batch gate {gate_index} disappeared"
+                            ))
+                        })?;
+                        let gate = self.resources.gates.get(gate_index).ok_or_else(|| {
+                            demand_batch_error(format!(
+                                "demand batch gate resource {gate_index} disappeared"
                             ))
                         })?;
                         (
@@ -1181,7 +1341,7 @@ impl VulkanDemandResidencyBatchChain {
                 sequence_steps.push(
                     sequence_step
                         .with_condition(
-                            &self.continuation_predicate,
+                            &self.resources.continuation_predicate,
                             0,
                             false,
                             region_id,
@@ -1192,9 +1352,60 @@ impl VulkanDemandResidencyBatchChain {
                 sequence_steps.push(sequence_step);
             }
         }
-        device
-            .record_resident_kernel_sequence(sequence, &sequence_steps)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let snapshot_copies = self
+            .snapshots
+            .iter()
+            .filter_map(|snapshot| {
+                let relative_command_index = demand_batch_snapshot_sequence_step_index(
+                    &self.commands,
+                    start_command_index,
+                    snapshot.after_step_index,
+                )?;
+                Some((snapshot, relative_command_index))
+            })
+            .map(|(snapshot, relative_command_index)| {
+                let copy = VulkanResidentBufferRangeCopy::new(
+                    &snapshot.source,
+                    &snapshot.destination,
+                    0,
+                    0,
+                    snapshot.byte_count,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+                if conditional_regions[relative_command_index].is_some() {
+                    Ok(
+                        VulkanResidentKernelSequenceSnapshotCopy::
+                            unconditional_from_range_after_conditional_step(
+                                relative_command_index,
+                                copy,
+                            ),
+                    )
+                } else {
+                    VulkanResidentKernelSequenceSnapshotCopy::new(
+                        relative_command_index,
+                        &snapshot.source,
+                        &snapshot.destination,
+                        0,
+                        0,
+                        snapshot.byte_count,
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if snapshot_copies.is_empty() {
+            device
+                .record_resident_kernel_sequence(sequence, &sequence_steps)
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        } else {
+            device
+                .record_resident_kernel_sequence_with_snapshot_copies(
+                    sequence,
+                    &sequence_steps,
+                    &snapshot_copies,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        }
         Ok(sequence)
     }
 }

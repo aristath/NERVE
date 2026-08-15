@@ -18,9 +18,20 @@ pub enum VulkanRuntimeStreamAllocationClass {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeDeviceLocalTransientAllocation {
     pub logical_device_id: String,
+    pub participant_device_ids: Vec<String>,
     pub byte_capacity: usize,
     pub concern: String,
+    pub usage: VulkanRuntimeDeviceLocalTransientAllocationUsage,
     pub allocation_class: VulkanRuntimeStreamAllocationClass,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VulkanRuntimeDeviceLocalTransientAllocationUsage {
+    #[default]
+    Storage,
+    ConditionalPredicate,
+    ExternalSharedStorage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -46,6 +57,7 @@ pub struct VulkanRuntimeSharedHostTransientAllocation {
 pub enum VulkanRuntimeSharedHostTransientAllocationMode {
     Always,
     CrossDeviceTimelineStaging,
+    ConditionalPredicate,
 }
 
 impl VulkanRuntimeHybridExecutionTransientPlan {
@@ -68,10 +80,12 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
         let mut next = self.clone();
         for allocation in other.device_allocations {
-            next.add_device_allocation_with_class(
+            next.add_device_allocation_with_usage_and_class(
                 &allocation.logical_device_id,
+                allocation.participant_device_ids,
                 allocation.byte_capacity,
                 &allocation.concern,
+                allocation.usage,
                 allocation.allocation_class,
             )?;
         }
@@ -103,24 +117,87 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         byte_count: usize,
         concern: &str,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
-        self.add_device_allocation_with_class(
+        self.add_device_allocation_with_usage_and_class(
             logical_device_id,
+            [logical_device_id.to_string()],
             byte_count,
             concern,
+            VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
             VulkanRuntimeStreamAllocationClass::Permanent,
         )
     }
 
-    fn add_device_allocation_with_class(
+    fn add_conditional_device_allocation(
         &mut self,
         logical_device_id: &str,
         byte_count: usize,
         concern: &str,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        self.add_device_allocation_with_usage_and_class(
+            logical_device_id,
+            [logical_device_id.to_string()],
+            byte_count,
+            concern,
+            VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate,
+            VulkanRuntimeStreamAllocationClass::Permanent,
+        )
+    }
+
+    fn add_external_shared_device_allocation(
+        &mut self,
+        logical_device_id: &str,
+        participant_device_ids: impl IntoIterator<Item = String>,
+        byte_count: usize,
+        concern: &str,
+    ) -> Result<(), VulkanRuntimeHybridPlacementError> {
+        self.add_device_allocation_with_usage_and_class(
+            logical_device_id,
+            participant_device_ids,
+            byte_count,
+            concern,
+            VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage,
+            VulkanRuntimeStreamAllocationClass::Permanent,
+        )
+    }
+
+    fn add_device_allocation_with_usage_and_class(
+        &mut self,
+        logical_device_id: &str,
+        participant_device_ids: impl IntoIterator<Item = String>,
+        byte_count: usize,
+        concern: &str,
+        usage: VulkanRuntimeDeviceLocalTransientAllocationUsage,
         allocation_class: VulkanRuntimeStreamAllocationClass,
     ) -> Result<(), VulkanRuntimeHybridPlacementError> {
-        if logical_device_id.trim().is_empty() || byte_count == 0 || concern.trim().is_empty() {
+        let participant_device_ids = participant_device_ids
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let participant_identity_is_valid = !participant_device_ids.is_empty()
+            && participant_device_ids
+                .iter()
+                .all(|device_id| !device_id.trim().is_empty())
+            && participant_device_ids
+                .iter()
+                .any(|device_id| device_id == logical_device_id)
+            && match usage {
+                VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage => {
+                    true
+                }
+                VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage
+                | VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate => {
+                    participant_device_ids.len() == 1
+                        && participant_device_ids[0] == logical_device_id
+                }
+            };
+        if logical_device_id.trim().is_empty()
+            || byte_count == 0
+            || concern.trim().is_empty()
+            || !participant_identity_is_valid
+        {
             return Err(VulkanRuntimeHybridPlacementError(
-                "exact hybrid device transient allocation requires a device, positive capacity, and concern"
+                "exact hybrid device transient allocation requires a device, positive capacity, concern, and a canonical participant identity matching its usage"
                     .to_string(),
             ));
         }
@@ -136,8 +213,10 @@ impl VulkanRuntimeHybridExecutionTransientPlan {
         self.device_allocations
             .push(VulkanRuntimeDeviceLocalTransientAllocation {
                 logical_device_id: logical_device_id.to_string(),
+                participant_device_ids,
                 byte_capacity: byte_count,
                 concern: concern.to_string(),
+                usage,
                 allocation_class,
             });
         Ok(())
@@ -351,7 +430,7 @@ fn exact_vulkan_runtime_hybrid_prefill_runners_transient_plan(
         false,
     )?
     .into_allocation_class(VulkanRuntimeStreamAllocationClass::PromptRunner);
-    if retain_speculative_source_taps {
+    if retain_speculative_source_taps && !runtime_model.package.speculative_decoders.is_empty() {
         let verification_width = causal_component_block_lane_capacity(
             speculative_draft_tokens.checked_add(1).ok_or_else(|| {
                 VulkanRuntimeHybridPlacementError(
@@ -423,31 +502,30 @@ fn exact_vulkan_runtime_mounted_prefill_transient_plan(
 fn exact_vulkan_runtime_decode_scalar_queue_groups(
     slice_plans: &[VulkanResidentModelPackageDeviceSlicePlan],
     execution_plan: &VulkanDistributedExecutionPlan,
-    resource_contract: &CompiledResourceResidencyContract,
 ) -> Result<BTreeMap<String, String>, VulkanRuntimeHybridPlacementError> {
-    let distributed_components = execution_plan
-        .dispatches
-        .iter()
-        .map(|dispatch| dispatch.component_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let scalar_components = resource_contract
-        .checkpoints
-        .iter()
-        .map(|checkpoint| checkpoint.component_id.as_str())
-        .filter(|component_id| !distributed_components.contains(component_id))
-        .collect::<BTreeSet<_>>();
-    let mut segments_by_component =
-        BTreeMap::<String, BTreeSet<(String, usize)>>::new();
+    let mut segments_by_selector = BTreeMap::<String, BTreeSet<(String, usize)>>::new();
     for slice in slice_plans {
-        let distributed_dispatch_indices = execution_plan
+        let physical_execution_islands = execution_plan
             .execution_islands
             .iter()
             .filter(|island| island.owner_device_id == slice.device_id)
-            .flat_map(|island| island.dispatch_indices())
+            .map(|island| island.dispatch_indices())
+            .collect::<Vec<_>>();
+        let distributed_owned_checkpoint_ids =
+            distributed_owned_physical_residency_checkpoint_ids(
+                &slice.physical_residency_schedule,
+                &physical_execution_islands,
+            )
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let distributed_dispatch_indices = physical_execution_islands
+            .iter()
+            .flatten()
+            .copied()
             .collect::<BTreeSet<_>>();
         let resident = &slice.placed_plan.placed_resident_plan;
         let mut segment_open = false;
         let mut segment_index = 0usize;
+        let mut segment_by_dispatch = BTreeMap::new();
         for dispatch in &slice.prepared_plan.dispatches {
             let receives_remote_input = dispatch.descriptors.iter().any(|descriptor| {
                 let VulkanDescriptorResourceAddress::BoundaryInput { signal_id } =
@@ -476,12 +554,7 @@ fn exact_vulkan_runtime_decode_scalar_queue_groups(
                 })?;
                 segment_open = true;
             }
-            if scalar_components.contains(dispatch.component_id.as_str()) {
-                segments_by_component
-                    .entry(dispatch.component_id.clone())
-                    .or_default()
-                    .insert((slice.device_id.clone(), segment_index));
-            }
+            segment_by_dispatch.insert(dispatch.dispatch_index, segment_index);
             let publishes_remote_output = dispatch.descriptors.iter().any(|descriptor| {
                 let VulkanDescriptorResourceAddress::BoundaryOutput { signal_id } =
                     &descriptor.resource
@@ -500,45 +573,64 @@ fn exact_vulkan_runtime_decode_scalar_queue_groups(
                 segment_open = false;
             }
         }
+        for checkpoint in slice
+            .physical_residency_schedule
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| !distributed_owned_checkpoint_ids.contains(&checkpoint.id))
+        {
+            let selection_segment = segment_by_dispatch
+                .get(&checkpoint.selection_dispatch_index)
+                .copied()
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(format!(
+                        "scalar residency checkpoint {:?} selection dispatch {} has no local decode segment on {:?}",
+                        checkpoint.id, checkpoint.selection_dispatch_index, slice.device_id,
+                    ))
+                })?;
+            let checkpoint_dispatches = checkpoint
+                .selected_computation_dispatch_indices
+                .iter()
+                .copied()
+                .chain(checkpoint.selected_result_continuation_dispatch_index);
+            for dispatch_index in checkpoint_dispatches {
+                if segment_by_dispatch.get(&dispatch_index).copied() != Some(selection_segment) {
+                    return runtime_hybrid_error(format!(
+                        "scalar residency checkpoint {:?} crosses a local decode segment boundary on {:?}",
+                        checkpoint.id, slice.device_id,
+                    ));
+                }
+            }
+            for selector_id in &checkpoint.selector_ids {
+                segments_by_selector
+                    .entry(selector_id.clone())
+                    .or_default()
+                    .insert((slice.device_id.clone(), selection_segment));
+            }
+        }
     }
     exact_vulkan_runtime_decode_scalar_queue_groups_from_segments(
-        &segments_by_component,
+        &segments_by_selector,
     )
 }
 
 fn exact_vulkan_runtime_decode_scalar_queue_groups_from_segments(
-    segments_by_component: &BTreeMap<String, BTreeSet<(String, usize)>>,
+    segments_by_selector: &BTreeMap<String, BTreeSet<(String, usize)>>,
 ) -> Result<BTreeMap<String, String>, VulkanRuntimeHybridPlacementError> {
-    segments_by_component
+    segments_by_selector
         .iter()
-        .map(|(component_id, segments)| {
-            let devices = segments
-                .iter()
-                .map(|(device_id, _)| device_id.as_str())
-                .collect::<BTreeSet<_>>();
-            if devices.len() != 1 {
+        .map(|(selector_id, segments)| {
+            let [(device_id, segment_index)] = segments.iter().collect::<Vec<_>>().as_slice()
+            else {
                 return runtime_hybrid_error(format!(
-                    "scalar demand component {component_id:?} spans {} logical devices outside a distributed execution island",
-                    devices.len(),
+                    "scalar demand selector {selector_id:?} maps to {} local decode segments",
+                    segments.len(),
                 ));
-            }
-            let device_id = devices
-                .first()
-                .copied()
-                .expect("one scalar demand device was validated");
-            let group = if let [(segment_device_id, segment_index)] =
-                segments.iter().collect::<Vec<_>>().as_slice()
-            {
-                format!("{segment_device_id}:decode-segment:{segment_index}")
-            } else {
-                // Several transport segments can legitimately consume one
-                // component's lazy-resource selection (for example residual
-                // reads after a remote layer boundary). Keep that component's
-                // queue private instead of either merging unrelated segments
-                // or rejecting an otherwise valid serialized placement.
-                format!("{device_id}:decode-component:{component_id}")
             };
-            Ok((component_id.clone(), group))
+            Ok((
+                selector_id.clone(),
+                format!("{device_id}:decode-segment:{segment_index}"),
+            ))
         })
         .collect()
 }
@@ -593,7 +685,6 @@ fn exact_vulkan_runtime_mounted_decode_transient_plan(
     let scalar_queue_groups = exact_vulkan_runtime_decode_scalar_queue_groups(
         slice_plans,
         execution_plan,
-        resource_contract,
     )
     .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
     exact_vulkan_runtime_hybrid_gate_device_plan(
@@ -670,7 +761,7 @@ fn exact_vulkan_runtime_speculative_catch_up_transient_plan(
             &VulkanComponentBatchExecutionScope::all(),
             &BTreeSet::new(),
             false,
-            false,
+            None,
         )
         .map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(
@@ -845,7 +936,7 @@ fn exact_vulkan_runtime_add_speculative_source_tap_staging(
             (slice.device_id.as_str(), "destination staging"),
         ] {
             transient
-                .add_device_allocation(
+                .add_host_visible_allocation(
                     logical_device_id,
                     byte_capacity,
                     &format!(
@@ -875,6 +966,14 @@ fn exact_vulkan_runtime_add_component_batch_allocations(
         );
         let result = if allocation.host_visible {
             transient.add_host_visible_allocation(
+                logical_device_id,
+                allocation.byte_capacity,
+                &concern,
+            )
+        } else if allocation.kind
+            == VulkanComponentBatchResidentAllocationKind::DemandPipelinePredicate
+        {
+            transient.add_conditional_device_allocation(
                 logical_device_id,
                 allocation.byte_capacity,
                 &concern,
@@ -929,6 +1028,30 @@ fn exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
                 decoder.id,
             ))
         })?;
+        let demand_contract = if residency_policy.is_demand_loaded() {
+            Some(
+                instantiate_runtime_resource_contract(&speculative_decoder_runtime_model(
+                    runtime_model,
+                    decoder,
+                    &slice.device_id,
+                ))
+                .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let demand_layout = demand_contract
+            .as_ref()
+            .map(VulkanCompiledResourceAddressLayout::from_contract)
+            .transpose()
+            .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+        let demand_context = demand_contract.as_ref().zip(demand_layout.as_ref()).map(
+            |(contract, layout)| VulkanComponentBatchDemandResidencyPlanContext {
+                schedule: &slice.physical_residency_schedule,
+                contract,
+                layout,
+            },
+        );
         let scopes = parallel_speculative_execution_scopes(decoder)?;
         let proposal_scope = VulkanComponentBatchExecutionScope::nodes(
             scopes.proposal_node_ids_by_component.clone(),
@@ -943,7 +1066,7 @@ fn exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
             &proposal_scope,
             &BTreeSet::new(),
             false,
-            residency_policy.is_demand_loaded(),
+            demand_context,
         )
         .map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(
@@ -959,17 +1082,6 @@ fn exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
             proposal,
         )?;
 
-        transient
-            .add_host_visible_allocation(
-                &slice.device_id,
-                VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
-                &format!(
-                    "speculative decoder {} mounted stream control",
-                    decoder.id,
-                ),
-            )
-            .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
-
         let committed_context_scope = VulkanComponentBatchExecutionScope::nodes(
             scopes.state_node_ids_by_component,
         )
@@ -983,7 +1095,7 @@ fn exact_vulkan_runtime_parallel_speculative_processor_transient_plan(
             &committed_context_scope,
             &BTreeSet::new(),
             false,
-            residency_policy.is_demand_loaded(),
+            demand_context,
         )
         .map_err(|error| {
             VulkanResidentTokenModelPackageError::new(format!(
@@ -1075,6 +1187,30 @@ fn exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
                 decoder.id,
             ))
         })?;
+        let demand_contract = if residency_policy.is_demand_loaded() {
+            Some(
+                instantiate_runtime_resource_contract(&speculative_decoder_runtime_model(
+                    runtime_model,
+                    decoder,
+                    &slice.device_id,
+                ))
+                .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let demand_layout = demand_contract
+            .as_ref()
+            .map(VulkanCompiledResourceAddressLayout::from_contract)
+            .transpose()
+            .map_err(|error| VulkanResidentTokenModelPackageError::new(error.to_string()))?;
+        let demand_context = demand_contract.as_ref().zip(demand_layout.as_ref()).map(
+            |(contract, layout)| VulkanComponentBatchDemandResidencyPlanContext {
+                schedule: &slice.physical_residency_schedule,
+                contract,
+                layout,
+            },
+        );
         let scopes = parallel_speculative_execution_scopes(decoder)?;
         let state_input_signal_ids = scopes.state_input_signal_ids;
         let execution_scope = VulkanComponentBatchExecutionScope::nodes(
@@ -1103,7 +1239,7 @@ fn exact_vulkan_runtime_parallel_speculative_state_ingestion_transient_plan(
                 &execution_scope,
                 &BTreeSet::new(),
                 false,
-                residency_policy.is_demand_loaded(),
+                demand_context,
             )
             .map_err(|error| {
                 VulkanResidentTokenModelPackageError::new(format!(
@@ -1282,36 +1418,24 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                 slice.device_id,
             ));
         }
-        let (signal_buffer_indices, signal_buffers) = exact_vulkan_component_batch_signal_buffers(
+        let (signal_buffer_indices, signal_buffers) =
+            component_batch_signal_buffer_plan_from_prepared_dispatches_retaining(
             &slice.placed_plan,
-            &selected_dispatches,
+            selected_dispatches.iter().copied(),
             retained_signal_keys_by_device
                 .get(&slice.device_id)
                 .unwrap_or(&no_retained_signal_keys),
-        )?;
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         let mut shared_device_ids_by_buffer = BTreeMap::<usize, BTreeSet<String>>::new();
         for dispatch in execution_plan
             .dispatches
             .iter()
             .filter(|dispatch| dispatch.owner_device_id == slice.device_id)
         {
-            for activation in std::iter::once(&dispatch.input_activation)
-                .chain(&dispatch.auxiliary_input_activations)
-                .chain(
-                    dispatch
-                        .reduction
-                        .is_none()
-                        .then_some(&dispatch.output_activation),
-                )
+            for activation in
+                distributed_component_batch_shared_activations(dispatch, &private_activations)
             {
-                if private_activations.contains_key(
-                    &distributed_component_batch_activation_key(
-                        &dispatch.owner_device_id,
-                        activation,
-                    ),
-                ) {
-                    continue;
-                }
                 let key = distributed_component_batch_signal_key(
                     activation,
                     &signal_buffer_indices,
@@ -1337,12 +1461,10 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                         "exact hybrid component-batch signal capacity overflowed".to_string(),
                     )
                 })?;
-            if let Some(shared_device_ids) = shared_device_ids_by_buffer.get(&buffer_index)
-                && execution_plan.shared_activation_route
-                    == VulkanSharedResidentBufferRoute::SharedHost
-            {
-                plan.add_shared_host_allocation(
-                    VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            if let Some(shared_device_ids) = shared_device_ids_by_buffer.get(&buffer_index) {
+                add_exact_vulkan_runtime_shared_device_allocation(
+                    &mut plan,
+                    execution_plan.shared_activation_route,
                     &slice.device_id,
                     shared_device_ids.iter().cloned(),
                     byte_count,
@@ -1428,22 +1550,14 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                     "exact hybrid batch reduction capacity overflowed".to_string(),
                 )
             })?;
-        match execution_plan.shared_activation_route {
-            VulkanSharedResidentBufferRoute::ExternalDeviceLocal => plan.add_device_allocation(
-                &reduction.owner_device_id,
-                byte_count,
-                "batch reduction",
-            )?,
-            VulkanSharedResidentBufferRoute::SharedHost => {
-                plan.add_shared_host_allocation(
-                    VulkanRuntimeSharedHostTransientAllocationMode::Always,
-                    &reduction.owner_device_id,
-                    reduction.device_ids.iter().cloned(),
-                    byte_count,
-                    "shared batch reduction",
-                )?
-            }
-        }
+        add_exact_vulkan_runtime_shared_device_allocation(
+            &mut plan,
+            execution_plan.shared_activation_route,
+            &reduction.owner_device_id,
+            reduction.device_ids.iter().cloned(),
+            byte_count,
+            "shared batch reduction",
+        )?;
     }
     for dispatch in &execution_plan.dispatches {
         if distributed_component_batch_kernel_path(dispatch)
@@ -1504,6 +1618,8 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
                 .map(|component_id| (component_id.clone(), slice.device_id.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    let scalar_queue_groups =
+        exact_vulkan_runtime_decode_scalar_queue_groups(slice_plans, execution_plan)?;
     let mut staged_edges = BTreeSet::new();
     for slice in slice_plans {
         let edge_plan = VulkanPlacedEdgeIoPlan::from_placed_resident_plan(
@@ -1548,11 +1664,113 @@ fn exact_vulkan_runtime_hybrid_prefill_transient_plan(
         resource_layout,
         residency_policy,
         1,
-        None,
+        Some(&scalar_queue_groups),
         None,
     )?;
     plan.extend(gates)?;
+    if retain_speculative_source_taps && !runtime_model.package.speculative_decoders.is_empty() {
+        let output_component_id = runtime_model
+            .circuit_graph
+            .signal_processor_endpoint_component_ids()
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
+            .1;
+        exact_vulkan_runtime_add_batched_output_projection_allocations(
+            &mut plan,
+            runtime_model.placement.device_for_component(&output_component_id),
+            allocation_lane_capacity,
+            &runtime_model.package.output_transducer.spec,
+            &runtime_model.package.sampler.spec,
+        )?;
+    }
     Ok(plan)
+}
+
+fn exact_vulkan_runtime_add_batched_output_projection_allocations(
+    plan: &mut VulkanRuntimeHybridExecutionTransientPlan,
+    logical_device_id: &str,
+    lane_capacity: usize,
+    output_spec: &VulkanResidentOutputTransducerSpec,
+    sampler_spec: &VulkanResidentSamplerSpec,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    let output = VulkanResidentBatchedOutputProjectionAllocationPlan::from_spec(
+        output_spec,
+        lane_capacity,
+    )
+    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    plan.add_device_allocation(
+        logical_device_id,
+        output.normalized_frames_device_bytes,
+        "batched output projection normalized frames",
+    )?;
+    plan.add_device_allocation(
+        logical_device_id,
+        output.logits_device_bytes,
+        "batched output projection logits",
+    )?;
+
+    let sampler = VulkanResidentSamplerLogitsViewAllocationPlan::from_spec(sampler_spec)
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    for _ in 0..lane_capacity {
+        if let Some(byte_capacity) = sampler.scratch_device_bytes {
+            plan.add_device_allocation(
+                logical_device_id,
+                byte_capacity,
+                "batched sampler scratch",
+            )?;
+        }
+        plan.add_host_visible_allocation(
+            logical_device_id,
+            sampler.stream_control_host_bytes,
+            "batched sampler stream control",
+        )?;
+        if let Some(byte_capacity) = sampler.seen_token_device_bytes {
+            plan.add_device_allocation(
+                logical_device_id,
+                byte_capacity,
+                "batched sampler seen-token state",
+            )?;
+        }
+        if let Some(byte_capacity) = sampler.seen_token_batch_host_bytes {
+            plan.add_host_visible_allocation(
+                logical_device_id,
+                byte_capacity,
+                "batched sampler token batch",
+            )?;
+        }
+        plan.add_device_allocation(
+            logical_device_id,
+            sampler.feedback_control_device_bytes,
+            "batched sampler feedback control",
+        )?;
+    }
+    Ok(())
+}
+
+fn add_exact_vulkan_runtime_shared_device_allocation(
+    plan: &mut VulkanRuntimeHybridExecutionTransientPlan,
+    route: VulkanSharedResidentBufferRoute,
+    owner_device_id: &str,
+    participant_device_ids: impl IntoIterator<Item = String>,
+    byte_count: usize,
+    concern: &str,
+) -> Result<(), VulkanRuntimeHybridPlacementError> {
+    let participant_device_ids = participant_device_ids.into_iter().collect::<Vec<_>>();
+    match route {
+        VulkanSharedResidentBufferRoute::ExternalDeviceLocal => plan
+            .add_external_shared_device_allocation(
+                owner_device_id,
+                participant_device_ids,
+                byte_count,
+                concern,
+            ),
+        VulkanSharedResidentBufferRoute::SharedHost => plan.add_shared_host_allocation(
+            VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            owner_device_id,
+            participant_device_ids,
+            byte_count,
+            concern,
+        ),
+    }
 }
 
 fn exact_vulkan_runtime_hybrid_gate_device_bytes(
@@ -1579,6 +1797,17 @@ fn exact_vulkan_runtime_hybrid_gate_device_bytes(
     .map(|plan| plan.device_bytes_by_logical_device)
 }
 
+fn exact_vulkan_runtime_scalar_selector_is_planned(
+    component_has_distributed_dispatch: bool,
+    scalar_queue_group_by_selector: Option<&BTreeMap<String, String>>,
+    selector_id: &str,
+) -> bool {
+    if let Some(groups) = scalar_queue_group_by_selector {
+        return groups.contains_key(selector_id);
+    }
+    !component_has_distributed_dispatch
+}
+
 fn exact_vulkan_runtime_hybrid_gate_device_plan(
     component_ids: &BTreeSet<String>,
     component_owner_logical_device_ids: &BTreeMap<String, String>,
@@ -1588,7 +1817,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
     resource_layout: &VulkanCompiledResourceAddressLayout,
     residency_policy: ResourceResidencyPolicy,
     scalar_gate_replica_count: usize,
-    scalar_queue_group_by_component: Option<&BTreeMap<String, String>>,
+    scalar_queue_group_by_selector: Option<&BTreeMap<String, String>>,
     decode_predicate_placement: Option<(&[String], &BTreeMap<String, String>)>,
 ) -> Result<VulkanRuntimeHybridExecutionTransientPlan, VulkanRuntimeHybridPlacementError> {
     if lane_count == 0 || scalar_gate_replica_count == 0 {
@@ -1602,15 +1831,15 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
     let mut plan = VulkanRuntimeHybridExecutionTransientPlan::default();
     let mut has_residency_gate = false;
     let mut scalar_missing_queues = BTreeMap::<String, (String, usize)>::new();
+    let mut scalar_predicate_groups = BTreeSet::<(String, String)>::new();
     let distributed_components = execution_plan
         .dispatches
         .iter()
         .map(|dispatch| dispatch.component_id.clone())
         .collect::<BTreeSet<_>>();
     for component_id in component_ids {
-        if distributed_components.contains(component_id) {
-            continue;
-        }
+        let component_has_distributed_dispatch =
+            distributed_components.contains(component_id);
         let owner = component_owner_logical_device_ids.get(component_id).ok_or_else(|| {
             VulkanRuntimeHybridPlacementError(format!(
                 "exact hybrid scalar residency gate has no owner for {component_id:?}",
@@ -1621,12 +1850,18 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
             .iter()
             .filter(|checkpoint| checkpoint.component_id == *component_id)
             .flat_map(|checkpoint| checkpoint.selector_ids.iter().cloned())
+            .filter(|selector_id| {
+                exact_vulkan_runtime_scalar_selector_is_planned(
+                    component_has_distributed_dispatch,
+                    scalar_queue_group_by_selector,
+                    selector_id,
+                )
+            })
             .collect::<BTreeSet<_>>();
         if selector_ids.is_empty() {
             continue;
         }
         has_residency_gate = true;
-        let mut missing_capacity = 0usize;
         for selector_id in selector_ids {
             let selector = exact_vulkan_runtime_hybrid_selector(
                 resource_contract,
@@ -1642,7 +1877,6 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                         "exact hybrid scalar gate selection capacity overflowed".to_string(),
                     )
                 })?;
-            missing_capacity = missing_capacity.max(selection_count);
             let config = VulkanGpuResidencyGateConfig {
                 maximum_selection_count: selection_count,
                 selection_count_per_lane: selector.encoding.selection_count_per_activation,
@@ -1668,30 +1902,37 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                     plan.add_device_allocation(owner, byte_capacity, "scalar residency gate")?;
                 }
             }
-        }
-        let queue_group = match scalar_queue_group_by_component {
-            Some(groups) => groups.get(component_id).cloned().ok_or_else(|| {
-                VulkanRuntimeHybridPlacementError(format!(
-                    "exact hybrid scalar residency queue has no decode segment for {component_id:?}",
-                ))
-            })?,
-            None => component_id.clone(),
-        };
-        match scalar_missing_queues.get_mut(&queue_group) {
-            Some((group_owner, group_capacity)) => {
-                if group_owner != owner {
-                    return runtime_hybrid_error(format!(
-                        "scalar residency queue group {queue_group:?} spans owners {group_owner:?} and {owner:?}",
-                    ));
+            let queue_group = match scalar_queue_group_by_selector {
+                Some(groups) => groups.get(&selector_id).cloned().ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(format!(
+                        "exact hybrid scalar residency queue has no decode segment for selector {selector_id:?}",
+                    ))
+                })?,
+                None => component_id.clone(),
+            };
+            match scalar_missing_queues.get_mut(&queue_group) {
+                Some((group_owner, group_capacity)) => {
+                    if group_owner != owner {
+                        return runtime_hybrid_error(format!(
+                            "scalar residency queue group {queue_group:?} spans owners {group_owner:?} and {owner:?}",
+                        ));
+                    }
+                    *group_capacity = (*group_capacity).max(selection_count);
                 }
-                *group_capacity = (*group_capacity).max(missing_capacity);
+                None => {
+                    scalar_missing_queues.insert(
+                        queue_group.clone(),
+                        (owner.clone(), selection_count),
+                    );
+                }
             }
-            None => {
-                scalar_missing_queues.insert(queue_group, (owner.clone(), missing_capacity));
-            }
+            scalar_predicate_groups.insert((owner.clone(), queue_group));
         }
-        if decode_predicate_placement.is_none() {
-            plan.add_device_allocation(
+    }
+
+    if decode_predicate_placement.is_none() {
+        for (owner, _) in &scalar_predicate_groups {
+            plan.add_conditional_device_allocation(
                 owner,
                 size_of::<u32>(),
                 "scalar residency predicate",
@@ -1811,7 +2052,7 @@ fn exact_vulkan_runtime_hybrid_gate_device_plan(
                             physical_device_by_logical_device,
                         )?;
                     }
-                    None => plan.add_device_allocation(
+                    None => plan.add_conditional_device_allocation(
                         &shard.device_id,
                         VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
                         "distributed shard residency predicate",
@@ -1852,14 +2093,14 @@ fn add_exact_vulkan_runtime_decode_pipeline_predicate(
         );
     }
     if logical_device_ids.len() == 1 {
-        plan.add_device_allocation(
+        plan.add_conditional_device_allocation(
             owner_device_id,
             VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
             "decode demand-feedback pipeline predicate",
         )
     } else {
         plan.add_shared_host_allocation(
-            VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            VulkanRuntimeSharedHostTransientAllocationMode::ConditionalPredicate,
             owner_device_id,
             logical_device_ids.iter().cloned(),
             VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
@@ -1889,14 +2130,14 @@ fn add_exact_vulkan_runtime_decode_shard_predicate(
             ))
         })?;
     if owner_physical_device_id == shard_physical_device_id {
-        plan.add_device_allocation(
+        plan.add_conditional_device_allocation(
             owner_device_id,
             VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
             "decode local shard residency predicate",
         )
     } else {
         plan.add_shared_host_allocation(
-            VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            VulkanRuntimeSharedHostTransientAllocationMode::ConditionalPredicate,
             owner_device_id,
             [owner_device_id.to_string(), shard_device_id.to_string()],
             VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
@@ -2268,13 +2509,14 @@ fn exact_vulkan_speculative_source_tap_signal_keys_by_device(
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         let boundary_plan = VulkanModelBoundaryBufferPlan::from_placed_plan(&slice.placed_plan)
             .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-        let (key, _) = exact_vulkan_component_batch_signal_target(
+        let (key, _) = component_batch_prepared_signal_target(
             &slice.placed_plan,
-            &edge_plan,
             &boundary_plan,
+            &edge_plan,
             dispatch,
             descriptor,
-        )?
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
         .ok_or_else(|| {
             VulkanRuntimeHybridPlacementError(format!(
                 "exact hybrid speculative source tap {instance_id:?}.{:?} is not batch-addressable",
@@ -2284,316 +2526,6 @@ fn exact_vulkan_speculative_source_tap_signal_keys_by_device(
         retained.entry(slice.device_id.clone()).or_default().insert(key);
     }
     Ok(retained)
-}
-
-fn exact_vulkan_component_batch_signal_buffers(
-    placed_plan: &VulkanPlacedStreamCircuitPlan,
-    dispatches: &[&VulkanPreparedDispatch],
-    retained_signal_keys: &BTreeSet<VulkanComponentBatchSignalKey>,
-) -> Result<
-    (
-        BTreeMap<VulkanComponentBatchSignalKey, usize>,
-        Vec<VulkanComponentBatchSignalBufferPlan>,
-    ),
-    VulkanRuntimeHybridPlacementError,
-> {
-    let edge_plan = VulkanPlacedEdgeIoPlan::from_placed_resident_plan(
-        &placed_plan.placed_resident_plan,
-    )
-    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    let boundary_plan = VulkanModelBoundaryBufferPlan::from_placed_plan(placed_plan)
-        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    let dispatch_count = dispatches.len();
-    let mut lifetimes = BTreeMap::<VulkanComponentBatchSignalKey, (usize, usize, usize)>::new();
-    for (dispatch_index, dispatch) in dispatches.iter().enumerate() {
-        for descriptor in &dispatch.descriptors {
-            let Some((key, frame_byte_capacity)) = exact_vulkan_component_batch_signal_target(
-                placed_plan,
-                &edge_plan,
-                &boundary_plan,
-                dispatch,
-                descriptor,
-            )?
-            else {
-                continue;
-            };
-            let external_source = matches!(
-                key,
-                VulkanComponentBatchSignalKey::ModelInput(_)
-                    | VulkanComponentBatchSignalKey::IncomingEdge(_)
-            );
-            let external_sink = exact_vulkan_component_batch_signal_is_external_sink(
-                placed_plan,
-                &key,
-            );
-            let first_dispatch = if external_source { 0 } else { dispatch_index };
-            let last_dispatch = if external_sink {
-                dispatch_count
-            } else {
-                dispatch_index
-            };
-            match lifetimes.entry(key.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert((frame_byte_capacity, first_dispatch, last_dispatch));
-                }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let (existing_capacity, first, last) = entry.get_mut();
-                    if *existing_capacity != frame_byte_capacity {
-                        return runtime_hybrid_error(format!(
-                            "exact hybrid component-batch signal {key:?} has incompatible capacities",
-                        ));
-                    }
-                    *first = (*first).min(first_dispatch);
-                    *last = (*last).max(last_dispatch);
-                }
-            }
-        }
-    }
-    let mut lifetimes = lifetimes
-        .into_iter()
-        .map(|(key, (frame_byte_capacity, first_dispatch, last_dispatch))| {
-            VulkanComponentBatchSignalLifetime {
-                key,
-                frame_byte_capacity,
-                host_visible: false,
-                first_dispatch,
-                last_dispatch,
-            }
-        })
-        .collect::<Vec<_>>();
-    retain_component_batch_signal_lifetimes(
-        &mut lifetimes,
-        retained_signal_keys,
-        dispatch_count,
-    )
-    .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    let (mut signal_buffer_indices, signal_buffers) =
-        allocate_component_batch_signal_lifetimes(lifetimes);
-    exact_vulkan_component_batch_install_edge_aliases(
-        placed_plan,
-        &mut signal_buffer_indices,
-    )?;
-    Ok((signal_buffer_indices, signal_buffers))
-}
-
-fn exact_vulkan_component_batch_install_edge_aliases(
-    placed_plan: &VulkanPlacedStreamCircuitPlan,
-    signal_buffer_indices: &mut BTreeMap<VulkanComponentBatchSignalKey, usize>,
-) -> Result<(), VulkanRuntimeHybridPlacementError> {
-    let resident = &placed_plan.placed_resident_plan;
-    let aliases = resident
-        .local_edges
-        .iter()
-        .map(|edge| {
-            (
-                VulkanComponentBatchSignalKey::LocalEdge(edge.edge_index),
-                produced_port_signal_key(&edge.source_component_id, &edge.source_port_id),
-            )
-        })
-        .chain(resident.outgoing_edges.iter().map(|edge| {
-            (
-                VulkanComponentBatchSignalKey::OutgoingEdge(edge.edge_index),
-                produced_port_signal_key(&edge.source_component_id, &edge.source_port_id),
-            )
-        }));
-    for (alias, canonical) in aliases {
-        let Some(buffer_index) = signal_buffer_indices.get(&canonical).copied() else {
-            continue;
-        };
-        if signal_buffer_indices
-            .insert(alias.clone(), buffer_index)
-            .is_some_and(|existing| existing != buffer_index)
-        {
-            return runtime_hybrid_error(format!(
-                "exact hybrid component-batch alias {alias:?} has conflicting buffers",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn exact_vulkan_component_batch_signal_target(
-    placed_plan: &VulkanPlacedStreamCircuitPlan,
-    edge_plan: &VulkanPlacedEdgeIoPlan,
-    boundary_plan: &VulkanModelBoundaryBufferPlan,
-    dispatch: &VulkanPreparedDispatch,
-    descriptor: &VulkanResolvedDescriptorBinding,
-) -> Result<Option<(VulkanComponentBatchSignalKey, usize)>, VulkanRuntimeHybridPlacementError> {
-    match &descriptor.resource {
-        VulkanDescriptorResourceAddress::ActivationSlot {
-            component_id,
-            signal_id,
-            signal_byte_capacity,
-            ..
-        } => Ok(Some((
-            VulkanComponentBatchSignalKey::Activation {
-                component_id: component_id.clone(),
-                signal_id: signal_id.clone(),
-            },
-            *signal_byte_capacity,
-        ))),
-        VulkanDescriptorResourceAddress::BoundaryInput { signal_id } => {
-            let target = classify_boundary_input(
-                &dispatch.component_id,
-                signal_id,
-                &placed_plan.placed_resident_plan,
-            );
-            match target {
-                VulkanPlacedBoundDescriptorTarget::LocalEdgeInput { edge } => {
-                    let local = edge_plan
-                        .local_edges
-                        .iter()
-                        .find(|candidate| candidate.edge_index == edge.edge_index)
-                        .ok_or_else(|| {
-                            VulkanRuntimeHybridPlacementError(format!(
-                                "exact hybrid batch input references absent local edge {}",
-                                edge.edge_index,
-                            ))
-                        })?;
-                    Ok(Some((
-                        produced_port_signal_key(
-                            &edge.source_component_id,
-                            &edge.source_port_id,
-                        ),
-                        exact_vulkan_component_batch_edge_frame_bytes(
-                            &local.connection,
-                            local.byte_capacity,
-                        )?,
-                    )))
-                }
-                VulkanPlacedBoundDescriptorTarget::IncomingEdge { edge } => {
-                    let endpoint = edge_plan
-                        .endpoint(VulkanPlacedEdgeDirection::Incoming, edge.edge_index)
-                        .ok_or_else(|| {
-                            VulkanRuntimeHybridPlacementError(format!(
-                                "exact hybrid batch input references absent incoming edge {}",
-                                edge.edge_index,
-                            ))
-                        })?;
-                    Ok(Some((
-                        VulkanComponentBatchSignalKey::IncomingEdge(edge.edge_index),
-                        endpoint.byte_capacity.ok_or_else(|| {
-                            VulkanRuntimeHybridPlacementError(
-                                "exact hybrid batch incoming edge has unknown capacity".to_string(),
-                            )
-                        })?,
-                    )))
-                }
-                VulkanPlacedBoundDescriptorTarget::ModelInput { signal_id } => {
-                    let boundary = boundary_plan
-                        .inputs
-                        .iter()
-                        .find(|boundary| {
-                            boundary.component_id == dispatch.component_id
-                                && boundary.signal_id == signal_id
-                        })
-                        .ok_or_else(|| {
-                            VulkanRuntimeHybridPlacementError(format!(
-                                "exact hybrid batch has no model input {:?}.{:?}",
-                                dispatch.component_id, signal_id,
-                            ))
-                        })?;
-                    Ok(Some((
-                        VulkanComponentBatchSignalKey::ModelInput(signal_id),
-                        boundary.byte_capacity.ok_or_else(|| {
-                            VulkanRuntimeHybridPlacementError(
-                                "exact hybrid batch model input has unknown capacity".to_string(),
-                            )
-                        })?,
-                    )))
-                }
-                _ => runtime_hybrid_error(
-                    "exact hybrid batch classified an input as a non-input target",
-                ),
-            }
-        }
-        VulkanDescriptorResourceAddress::BoundaryOutput { signal_id } => {
-            let target = classify_boundary_output(
-                &dispatch.component_id,
-                signal_id,
-                &placed_plan.placed_resident_plan,
-            );
-            match target {
-                VulkanPlacedBoundDescriptorTarget::ProducedPort {
-                    local_edges,
-                    outgoing_edges,
-                } => {
-                    let mut capacities = Vec::new();
-                    for edge in local_edges {
-                        let local = edge_plan
-                            .local_edges
-                            .iter()
-                            .find(|candidate| candidate.edge_index == edge.edge_index)
-                            .ok_or_else(|| {
-                                VulkanRuntimeHybridPlacementError(format!(
-                                    "exact hybrid batch output references absent local edge {}",
-                                    edge.edge_index,
-                                ))
-                            })?;
-                        capacities.push(exact_vulkan_component_batch_edge_frame_bytes(
-                            &local.connection,
-                            local.byte_capacity,
-                        )?);
-                    }
-                    for edge in outgoing_edges {
-                        let endpoint = edge_plan
-                            .endpoint(VulkanPlacedEdgeDirection::Outgoing, edge.edge_index)
-                            .ok_or_else(|| {
-                                VulkanRuntimeHybridPlacementError(format!(
-                                    "exact hybrid batch output references absent outgoing edge {}",
-                                    edge.edge_index,
-                                ))
-                            })?;
-                        capacities.push(exact_vulkan_component_batch_edge_frame_bytes(
-                            &endpoint.connection,
-                            endpoint.byte_capacity,
-                        )?);
-                    }
-                    let Some(frame_byte_capacity) = capacities.first().copied() else {
-                        return runtime_hybrid_error(
-                            "exact hybrid batch encountered an empty produced port",
-                        );
-                    };
-                    if capacities.iter().any(|capacity| *capacity != frame_byte_capacity) {
-                        return runtime_hybrid_error(
-                            "exact hybrid batch produced-port consumers have incompatible capacities",
-                        );
-                    }
-                    Ok(Some((
-                        produced_port_signal_key(&dispatch.component_id, signal_id),
-                        frame_byte_capacity,
-                    )))
-                }
-                VulkanPlacedBoundDescriptorTarget::ModelOutput { signal_id } => {
-                    let boundary = boundary_plan
-                        .outputs
-                        .iter()
-                        .find(|boundary| {
-                            boundary.component_id == dispatch.component_id
-                                && boundary.signal_id == signal_id
-                        })
-                        .ok_or_else(|| {
-                            VulkanRuntimeHybridPlacementError(format!(
-                                "exact hybrid batch has no model output {:?}.{:?}",
-                                dispatch.component_id, signal_id,
-                            ))
-                        })?;
-                    Ok(Some((
-                        VulkanComponentBatchSignalKey::ModelOutput(signal_id),
-                        boundary.byte_capacity.ok_or_else(|| {
-                            VulkanRuntimeHybridPlacementError(
-                                "exact hybrid batch model output has unknown capacity".to_string(),
-                            )
-                        })?,
-                    )))
-                }
-                _ => runtime_hybrid_error(
-                    "exact hybrid batch classified an output as a non-output target",
-                ),
-            }
-        }
-        _ => Ok(None),
-    }
 }
 
 fn exact_vulkan_component_batch_edge_frame_bytes(
@@ -2607,24 +2539,4 @@ fn exact_vulkan_component_batch_edge_frame_bytes(
     })?;
     component_batch_edge_frame_byte_capacity(connection, byte_capacity)
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))
-}
-
-fn exact_vulkan_component_batch_signal_is_external_sink(
-    placed_plan: &VulkanPlacedStreamCircuitPlan,
-    key: &VulkanComponentBatchSignalKey,
-) -> bool {
-    match key {
-        VulkanComponentBatchSignalKey::ModelOutput(_) => true,
-        VulkanComponentBatchSignalKey::ProducedPort {
-            component_id,
-            port_id,
-        } => placed_plan
-            .placed_resident_plan
-            .outgoing_edges
-            .iter()
-            .any(|edge| {
-                edge.source_component_id == *component_id && edge.source_port_id == *port_id
-            }),
-        _ => false,
-    }
 }

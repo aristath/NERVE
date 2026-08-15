@@ -164,12 +164,32 @@ where
                 return Ok(0);
             }
         }
-        shared_host_allocation_requirement_for_logical_devices(
-            &allocation.owner_device_id,
-            &allocation.participant_device_ids,
-            allocation.byte_capacity,
-            device_for,
-        )
+        if allocation.mode
+            == VulkanRuntimeSharedHostTransientAllocationMode::ConditionalPredicate
+        {
+            let owner = device_for(&allocation.owner_device_id)?;
+            let peers = allocation
+                .participant_device_ids
+                .iter()
+                .map(|device_id| device_for(device_id))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|device| !device.shares_logical_device_with(owner))
+                .collect::<Vec<_>>();
+            owner
+                .shared_conditional_host_allocation_requirement_bytes(
+                    &peers,
+                    allocation.byte_capacity,
+                )
+                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+        } else {
+            shared_host_allocation_requirement_for_logical_devices(
+                &allocation.owner_device_id,
+                &allocation.participant_device_ids,
+                allocation.byte_capacity,
+                device_for,
+            )
+        }
     })
 }
 
@@ -577,11 +597,33 @@ where
                             .cloned()
                             .collect::<Vec<_>>(),
                         |allocation| {
-                            device
-                                .resident_buffer_memory_requirement_bytes(
-                                    allocation.byte_capacity,
-                                )
-                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                            match allocation.usage {
+                                VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage => device
+                                    .resident_buffer_memory_requirement_bytes(
+                                        allocation.byte_capacity,
+                                    ),
+                                VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate => device
+                                    .conditional_resident_buffer_memory_requirement_bytes(
+                                        allocation.byte_capacity,
+                                    ),
+                                VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage => {
+                                    let peer_devices = allocation
+                                        .participant_device_ids
+                                        .iter()
+                                        .map(|device_id| device_for(device_id))
+                                        .collect::<Result<Vec<_>, _>>()?
+                                        .into_iter()
+                                        .filter(|candidate| {
+                                            !candidate.shares_logical_device_with(device)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    device.shared_device_resident_buffer_memory_requirement_bytes(
+                                        &peer_devices,
+                                        allocation.byte_capacity,
+                                    )
+                                }
+                            }
+                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
                         },
                     )
                 };

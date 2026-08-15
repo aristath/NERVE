@@ -695,6 +695,37 @@ fn shared_demand_batch_resume_executes_its_gate_before_guarding_the_suffix() {
 }
 
 #[test]
+fn demand_batch_snapshots_rebind_to_full_and_resumed_sequence_indices() {
+    let commands = vec![
+        VulkanDemandResidencyBatchCommand::Step(10),
+        VulkanDemandResidencyBatchCommand::Gate(0),
+        VulkanDemandResidencyBatchCommand::Step(11),
+        VulkanDemandResidencyBatchCommand::Step(12),
+    ];
+
+    assert_eq!(
+        demand_batch_snapshot_sequence_step_index(&commands, 0, 10),
+        Some(0),
+    );
+    assert_eq!(
+        demand_batch_snapshot_sequence_step_index(&commands, 0, 12),
+        Some(3),
+    );
+    assert_eq!(
+        demand_batch_snapshot_sequence_step_index(&commands, 1, 10),
+        None,
+    );
+    assert_eq!(
+        demand_batch_snapshot_sequence_step_index(&commands, 1, 11),
+        Some(1),
+    );
+    assert_eq!(
+        demand_batch_snapshot_sequence_step_index(&commands, commands.len() + 1, 12),
+        None,
+    );
+}
+
+#[test]
 fn demand_batch_conditional_layout_rejects_an_invalid_direct_gate() {
     let commands = vec![
         VulkanDemandResidencyBatchCommand::Step(0),
@@ -1967,6 +1998,26 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
 }
 
 #[test]
+fn distributed_indirect_control_requires_and_decodes_its_exact_typed_payload() {
+    let bytes = [1u32, 64, 128, 6, 384, 1, 1]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        component_batch_indirect_control_words(&bytes).unwrap(),
+        [1, 64, 128, 6, 384, 1, 1],
+    );
+    assert!(component_batch_indirect_control_words(&bytes[..24]).is_err());
+    assert!(
+        component_batch_indirect_control_words(&[0; 32])
+            .unwrap_err()
+            .to_string()
+            .contains("expected 28")
+    );
+}
+
+#[test]
 fn distributed_batch_island_retains_every_members_control_buffer_set() {
     let shard = |expert_start| VulkanDistributedComponentBatchShardRunner {
         device_id: "gpu0".to_string(),
@@ -2216,6 +2267,12 @@ fn distributed_batch_keeps_island_internal_activations_private_to_each_shard() {
 
 #[test]
 fn distributed_batch_private_intermediate_uses_each_local_shard_stride() {
+    assert!(!VulkanComponentBatchExecutionScope::all().allows_open_boundaries());
+    assert!(
+        VulkanComponentBatchExecutionScope::components(BTreeSet::from(["layer".to_string()]))
+            .unwrap()
+            .allows_open_boundaries()
+    );
     let activation = |binding, signal: &str, slot| VulkanDistributedActivationSlot {
         binding,
         component_id: "layer".to_string(),
@@ -2325,6 +2382,9 @@ fn distributed_batch_private_intermediate_uses_each_local_shard_stride() {
         activation(2, "expert_outputs", 2),
         down_shards,
     );
+    let resource_routes = activation(7, "resource_routes", 3);
+    gate.selected_resource_activations = vec![resource_routes.clone()];
+    down.selected_resource_activations = vec![resource_routes];
     down.distribution = VulkanDistributedDispatchDistribution::InputColumns;
     down.input_activation.binding = 0;
     down.input_distribution = nerve_execution_contracts::InputDistribution::Sharded;
@@ -2372,6 +2432,21 @@ fn distributed_batch_private_intermediate_uses_each_local_shard_stride() {
         distributed_component_batch_kernel_path(&whole_expert),
         VulkanDistributedComponentBatchKernelPath::CompiledBatchArtifact,
     );
+    assert!(distributed_component_batch_kernel_path_is_available(
+        distributed_component_batch_kernel_path(&gate),
+        true,
+        false,
+    ));
+    assert!(distributed_component_batch_kernel_path_is_available(
+        distributed_component_batch_kernel_path(&down),
+        true,
+        false,
+    ));
+    assert!(!distributed_component_batch_kernel_path_is_available(
+        distributed_component_batch_kernel_path(&whole_expert),
+        true,
+        false,
+    ));
     let plan = VulkanDistributedExecutionPlan {
         device_ids: vec!["gpu0".to_string(), "gpu1".to_string()],
         storage_buffer_offset_alignment: 256,
@@ -2392,6 +2467,72 @@ fn distributed_batch_private_intermediate_uses_each_local_shard_stride() {
             ("gpu1".to_string(), 16_384),
         ])
     );
+    let gate = &plan.dispatches[0];
+    assert_eq!(
+        distributed_component_batch_shared_activations(gate, &specs)
+            .into_iter()
+            .map(|activation| activation.signal_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["hidden", "resource_routes"],
+        "selected-resource routes must be shared with every shard while the private gate/down handoff stays private",
+    );
+    assert!(
+        validate_distributed_component_batch_activation_storage(
+            gate,
+            &gate.output_activation,
+            98_304,
+            gate.output_byte_capacity,
+            BTreeMap::from([
+                ("gpu0".to_string(), 8_192),
+                ("gpu1".to_string(), 16_384),
+            ]),
+            &specs,
+            "output",
+        )
+        .unwrap(),
+        "a private local handoff must not be rejected because its unused public signal uses the logical activation capacity",
+    );
+    let down = &plan.dispatches[1];
+    assert_eq!(
+        distributed_component_batch_shared_activations(down, &specs)
+            .into_iter()
+            .map(|activation| activation.signal_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["resource_routes"],
+        "a reduced consumer shares its selected-resource route but neither its private input nor owner-only output",
+    );
+    assert!(
+        validate_distributed_component_batch_activation_storage(
+            down,
+            &down.input_activation,
+            98_304,
+            down.input_byte_capacity,
+            BTreeMap::from([
+                ("gpu0".to_string(), 8_192),
+                ("gpu1".to_string(), 16_384),
+            ]),
+            &specs,
+            "input",
+        )
+        .unwrap(),
+        "the consumer must bind the same private local handoff",
+    );
+    let public_error = validate_distributed_component_batch_activation_storage(
+        gate,
+        &gate.input_activation,
+        98_304,
+        gate.input_byte_capacity,
+        BTreeMap::from([
+            ("gpu0".to_string(), 24_576),
+            ("gpu1".to_string(), 24_576),
+        ]),
+        &specs,
+        "input",
+    )
+    .unwrap_err();
+    assert!(public_error.to_string().contains(
+        "input public signal capacity 98304 differs from planned capacity 24576"
+    ));
     assert_eq!(
         local_distributed_component_batch_binding_range(8_192, 3, "output").unwrap(),
         (0, 24_576),

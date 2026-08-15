@@ -62,8 +62,16 @@ impl VulkanParallelSpeculativeFeedbackAllocationPlan {
                 } else {
                     device_allocations.push(VulkanRuntimeDeviceLocalTransientAllocation {
                         logical_device_id: device_id.clone(),
+                        participant_device_ids: vec![device_id.clone()],
                         byte_capacity: allocation.byte_capacity,
                         concern,
+                        usage: if allocation.kind
+                            == VulkanComponentBatchResidentAllocationKind::DemandPipelinePredicate
+                        {
+                            VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate
+                        } else {
+                            VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage
+                        },
                         allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
                     });
                 }
@@ -79,10 +87,12 @@ impl VulkanParallelSpeculativeFeedbackAllocationPlan {
                 }
                 device_allocations.push(VulkanRuntimeDeviceLocalTransientAllocation {
                     logical_device_id: device_id.clone(),
+                    participant_device_ids: vec![device_id.clone()],
                     byte_capacity,
                     concern: format!(
                         "speculative decoder {decoder_id} resident feedback source history {destination_signal_id}",
                     ),
+                    usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
                     allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
                 });
             }
@@ -125,7 +135,18 @@ impl VulkanParallelSpeculativeFeedbackAllocationPlan {
                 &execution_scope,
                 &BTreeSet::new(),
                 false,
-                processor.device_slice.demand_residency_context.is_some(),
+                processor
+                    .device_slice
+                    .demand_residency_context
+                    .as_ref()
+                    .map(|context| VulkanComponentBatchDemandResidencyPlanContext {
+                        schedule: processor
+                            .device_slice
+                            .package_slice
+                            .physical_residency_schedule(),
+                        contract: &context.contract,
+                        layout: &context.layout,
+                    }),
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
             let histories = processor
@@ -215,8 +236,26 @@ where
     let mut requirement_bytes_by_device = BTreeMap::<String, usize>::new();
     for allocation in &allocation_plan.device_allocations {
         let device = device_for(&allocation.logical_device_id)?;
-        let required = device
-            .resident_buffer_memory_requirement_bytes(allocation.byte_capacity)
+        let required = match allocation.usage {
+            VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage => device
+                .resident_buffer_memory_requirement_bytes(allocation.byte_capacity),
+            VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate => device
+                .conditional_resident_buffer_memory_requirement_bytes(allocation.byte_capacity),
+            VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage => {
+                let peers = allocation
+                    .participant_device_ids
+                    .iter()
+                    .map(|device_id| device_for(device_id))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .filter(|candidate| !candidate.shares_logical_device_with(device))
+                    .collect::<Vec<_>>();
+                device.shared_device_resident_buffer_memory_requirement_bytes(
+                    &peers,
+                    allocation.byte_capacity,
+                )
+            }
+        }
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let total = requirement_bytes_by_device
             .entry(allocation.logical_device_id.clone())

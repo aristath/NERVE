@@ -12,6 +12,23 @@ enum VulkanComponentBatchResidentAllocationKind {
         state_id: String,
     },
     DemandPipelinePredicate,
+    DemandMissQueue,
+    DemandGateConfiguration {
+        checkpoint_id: String,
+        selector_id: String,
+    },
+    DemandGateResourceGroups {
+        checkpoint_id: String,
+        selector_id: String,
+    },
+    DemandGateAddressSlots {
+        checkpoint_id: String,
+        selector_id: String,
+    },
+    DemandGateResolvedAddresses {
+        checkpoint_id: String,
+        selector_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -29,6 +46,23 @@ struct VulkanComponentBatchResidentAllocationPlan {
     total_byte_capacity: usize,
 }
 
+#[derive(Clone, Debug)]
+struct VulkanComponentBatchDemandGateGeometry {
+    checkpoint_id: String,
+    selector_id: String,
+    selection_count_per_activation: usize,
+    selection_index_shift: u32,
+    selection_index_mask: u32,
+    address_mapping: VulkanCompiledSelectorAddressMapping,
+}
+
+#[derive(Clone, Copy)]
+struct VulkanComponentBatchDemandResidencyPlanContext<'a> {
+    schedule: &'a VulkanPhysicalResidencySchedule,
+    contract: &'a CompiledResourceResidencyContract,
+    layout: &'a VulkanCompiledResourceAddressLayout,
+}
+
 impl VulkanComponentBatchResidentAllocationPlan {
     #[allow(clippy::too_many_arguments)]
     fn for_single_device(
@@ -40,7 +74,7 @@ impl VulkanComponentBatchResidentAllocationPlan {
         execution_scope: &VulkanComponentBatchExecutionScope,
         retained_signal_keys: &BTreeSet<VulkanComponentBatchSignalKey>,
         capture_causal_state_snapshots: bool,
-        uses_demand_residency: bool,
+        demand_residency: Option<VulkanComponentBatchDemandResidencyPlanContext<'_>>,
     ) -> Result<Self, VulkanError> {
         if lane_capacity == 0 {
             return Err(VulkanError(
@@ -113,14 +147,17 @@ impl VulkanComponentBatchResidentAllocationPlan {
             execution_mode,
             capture_causal_state_snapshots,
         )?);
-        if execution_mode == VulkanComponentBatchExecutionMode::CausalSequence
-            && uses_demand_residency
-        {
-            allocations.push(VulkanComponentBatchResidentAllocation {
-                kind: VulkanComponentBatchResidentAllocationKind::DemandPipelinePredicate,
-                byte_capacity: size_of::<u32>(),
-                host_visible: false,
-            });
+        if let Some(demand_residency) = demand_residency {
+            let gate_geometries = component_batch_single_device_demand_gate_geometries(
+                prepared_plan,
+                execution_scope,
+                demand_residency,
+            )?;
+            allocations.extend(component_batch_demand_segment_allocations(
+                &gate_geometries,
+                lane_capacity,
+                true,
+            )?);
         }
         allocations.sort();
         if allocations
@@ -147,6 +184,197 @@ impl VulkanComponentBatchResidentAllocationPlan {
             allocations,
             total_byte_capacity,
         })
+    }
+}
+
+fn component_batch_single_device_demand_gate_geometries(
+    prepared_plan: &VulkanPreparedDispatchPlan,
+    execution_scope: &VulkanComponentBatchExecutionScope,
+    demand_residency: VulkanComponentBatchDemandResidencyPlanContext<'_>,
+) -> Result<Vec<VulkanComponentBatchDemandGateGeometry>, VulkanError> {
+    let selected_dispatch_indices = prepared_plan
+        .dispatches
+        .iter()
+        .filter(|dispatch| {
+            execution_scope.includes_dispatch(&dispatch.component_id, &dispatch.node_id)
+        })
+        .map(|dispatch| dispatch.dispatch_index)
+        .collect::<BTreeSet<_>>();
+    let mut geometries = Vec::new();
+    for checkpoint in &demand_residency.schedule.checkpoints {
+        if !selected_dispatch_indices.contains(&checkpoint.selection_dispatch_index) {
+            continue;
+        }
+        let selected_computation_is_complete = checkpoint
+            .selected_computation_dispatch_indices
+            .iter()
+            .copied()
+            .chain(checkpoint.selected_result_continuation_dispatch_index)
+            .all(|dispatch_index| selected_dispatch_indices.contains(&dispatch_index));
+        if !selected_computation_is_complete {
+            return Err(VulkanError(format!(
+                "component batch demand checkpoint {:?} selects inside the execution scope but its selected computation crosses the scope boundary",
+                checkpoint.id,
+            )));
+        }
+        for selector_id in &checkpoint.selector_ids {
+            let selector = demand_residency
+                .contract
+                .selectors
+                .iter()
+                .find(|selector| selector.id == *selector_id)
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "component batch demand checkpoint {:?} references unknown selector {selector_id:?}",
+                        checkpoint.id,
+                    ))
+                })?;
+            if selector.execution_scope != demand_residency.schedule.execution_scope
+                || selector.component_id != checkpoint.component_id
+            {
+                return Err(VulkanError(format!(
+                    "component batch demand selector {selector_id:?} does not belong to checkpoint {:?}",
+                    checkpoint.id,
+                )));
+            }
+            let address_mapping = demand_residency
+                .layout
+                .selectors
+                .iter()
+                .find(|layout| layout.selector_id == *selector_id)
+                .map(|layout| layout.mapping.clone())
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "component batch demand selector {selector_id:?} has no stable-address layout",
+                    ))
+                })?;
+            geometries.push(VulkanComponentBatchDemandGateGeometry {
+                checkpoint_id: checkpoint.id.clone(),
+                selector_id: selector.id.clone(),
+                selection_count_per_activation: selector.encoding.selection_count_per_activation,
+                selection_index_shift: selector.encoding.index_shift,
+                selection_index_mask: selector.encoding.index_mask,
+                address_mapping,
+            });
+        }
+    }
+    Ok(geometries)
+}
+
+fn component_batch_demand_segment_allocations(
+    gate_geometries: &[VulkanComponentBatchDemandGateGeometry],
+    lane_capacity: usize,
+    owns_continuation_predicate: bool,
+) -> Result<Vec<VulkanComponentBatchResidentAllocation>, VulkanError> {
+    if gate_geometries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut allocations = Vec::new();
+    if owns_continuation_predicate {
+        allocations.push(VulkanComponentBatchResidentAllocation {
+            kind: VulkanComponentBatchResidentAllocationKind::DemandPipelinePredicate,
+            byte_capacity: size_of::<u32>(),
+            host_visible: false,
+        });
+    }
+    let missing_capacity = gate_geometries
+        .iter()
+        .map(|geometry| {
+            geometry
+                .selection_count_per_activation
+                .checked_mul(lane_capacity)
+                .ok_or_else(|| {
+                    VulkanError("component batch demand queue capacity overflowed".to_string())
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .max()
+        .expect("component batch demand geometries are non-empty");
+    allocations.push(VulkanComponentBatchResidentAllocation {
+        kind: VulkanComponentBatchResidentAllocationKind::DemandMissQueue,
+        byte_capacity: VulkanGpuResidencyMissQueue::device_bytes_for_capacity(missing_capacity)?
+            .byte_count,
+        host_visible: true,
+    });
+    for geometry in gate_geometries {
+        let selection_count = geometry
+            .selection_count_per_activation
+            .checked_mul(lane_capacity)
+            .ok_or_else(|| {
+                VulkanError("component batch demand gate capacity overflowed".to_string())
+            })?;
+        let private = VulkanGpuResidencyGateConfig {
+            maximum_selection_count: selection_count,
+            selection_count_per_lane: geometry.selection_count_per_activation,
+            selection_lane_stride_words: geometry.selection_count_per_activation,
+            selection_index_shift: geometry.selection_index_shift,
+            selection_index_mask: geometry.selection_index_mask,
+            address_mapping: vulkan_gpu_residency_address_mapping_from_compiled(
+                &geometry.address_mapping,
+            ),
+            owned_resource_indices: None,
+        }
+        .private_device_bytes()?;
+        for (kind, byte_capacity) in [
+            (
+                VulkanComponentBatchResidentAllocationKind::DemandGateConfiguration {
+                    checkpoint_id: geometry.checkpoint_id.clone(),
+                    selector_id: geometry.selector_id.clone(),
+                },
+                private.configuration_bytes,
+            ),
+            (
+                VulkanComponentBatchResidentAllocationKind::DemandGateResourceGroups {
+                    checkpoint_id: geometry.checkpoint_id.clone(),
+                    selector_id: geometry.selector_id.clone(),
+                },
+                private.resource_group_record_bytes,
+            ),
+            (
+                VulkanComponentBatchResidentAllocationKind::DemandGateAddressSlots {
+                    checkpoint_id: geometry.checkpoint_id.clone(),
+                    selector_id: geometry.selector_id.clone(),
+                },
+                private.resource_address_slot_bytes,
+            ),
+            (
+                VulkanComponentBatchResidentAllocationKind::DemandGateResolvedAddresses {
+                    checkpoint_id: geometry.checkpoint_id.clone(),
+                    selector_id: geometry.selector_id.clone(),
+                },
+                private.resolved_address_bytes,
+            ),
+        ] {
+            allocations.push(VulkanComponentBatchResidentAllocation {
+                kind,
+                byte_capacity,
+                host_visible: false,
+            });
+        }
+    }
+    Ok(allocations)
+}
+
+fn vulkan_gpu_residency_address_mapping_from_compiled(
+    mapping: &VulkanCompiledSelectorAddressMapping,
+) -> VulkanGpuResidencyAddressMapping {
+    match mapping {
+        VulkanCompiledSelectorAddressMapping::GroupTable {
+            resource_address_slots,
+            resource_address_slot_offsets,
+        } => VulkanGpuResidencyAddressMapping::GroupTable {
+            resource_address_slots: resource_address_slots.clone(),
+            resource_address_slot_offsets: resource_address_slot_offsets.clone(),
+        },
+        VulkanCompiledSelectorAddressMapping::PartitionTemplate {
+            member_slot_bases,
+            resource_count,
+            ..
+        } => VulkanGpuResidencyAddressMapping::Partitioned {
+            member_slot_bases: member_slot_bases.clone(),
+            resource_count: *resource_count,
+        },
     }
 }
 

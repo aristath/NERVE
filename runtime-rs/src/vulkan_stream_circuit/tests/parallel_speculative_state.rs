@@ -222,14 +222,19 @@ fn parallel_feedback_allocation_plan_preserves_every_runner_and_history_allocati
                 byte_capacity: 4,
                 host_visible: false,
             },
+            VulkanComponentBatchResidentAllocation {
+                kind: VulkanComponentBatchResidentAllocationKind::DemandPipelinePredicate,
+                byte_capacity: 4,
+                host_visible: false,
+            },
         ],
         vec![("context".to_string(), 128), ("hidden".to_string(), 256)],
     )])
     .unwrap();
 
-    assert_eq!(plan.device_allocations.len(), 3);
+    assert_eq!(plan.device_allocations.len(), 4);
     assert_eq!(plan.host_visible_allocations.len(), 1);
-    assert_eq!(plan.logical_bytes_by_device().unwrap()["gpu0"], 420);
+    assert_eq!(plan.logical_bytes_by_device().unwrap()["gpu0"], 424);
     assert_eq!(
         plan.device_allocations
             .iter()
@@ -237,9 +242,20 @@ fn parallel_feedback_allocation_plan_preserves_every_runner_and_history_allocati
             .collect::<Vec<_>>(),
         vec![
             "speculative decoder draft resident feedback state ingestion CausalStateSnapshotDummy",
+            "speculative decoder draft resident feedback state ingestion DemandPipelinePredicate",
             "speculative decoder draft resident feedback source history context",
             "speculative decoder draft resident feedback source history hidden",
         ],
+    );
+    assert_eq!(
+        plan.device_allocations
+            .iter()
+            .filter(|allocation| {
+                allocation.usage
+                    == VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate
+            })
+            .count(),
+        1,
     );
     assert_eq!(
         plan.host_visible_allocations[0].concern,

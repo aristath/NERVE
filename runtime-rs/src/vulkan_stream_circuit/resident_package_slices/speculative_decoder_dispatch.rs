@@ -3,6 +3,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
     fn from_model<'a, F>(
         device: &VulkanComputeDevice,
         model: &VulkanResidentSpeculativeDecoderModelPackage,
+        planned_stream_control: &VulkanRuntimeSharedHostResidentAllocation,
         target_model: &VulkanResidentInProcessPlacedModelPackage,
         target_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
         target_hidden: &VulkanResidentBuffer,
@@ -21,6 +22,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     VulkanResidentAutoregressiveSpeculativeDecoderProcessor::from_model(
                         device,
                         model,
+                        planned_stream_control,
                         target_model.normal_prefill_lane_capacity,
                         target_model.speculative_draft_tokens,
                         target_hidden,
@@ -36,6 +38,7 @@ impl VulkanResidentSpeculativeDecoderProcessor {
                     VulkanResidentParallelBlockSpeculativeDecoderProcessor::from_model(
                         device,
                         model,
+                        planned_stream_control,
                         target_model,
                         target_slices,
                         device_for,

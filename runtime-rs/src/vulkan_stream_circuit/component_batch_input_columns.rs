@@ -11,6 +11,10 @@ fn create_distributed_input_column_component_batch_dispatch(
         VulkanDistributedComponentBatchPrivateActivationBufferKey,
         Arc<VulkanResidentBuffer>,
     >,
+    private_activation_specs: &BTreeMap<
+        VulkanDistributedComponentBatchPrivateActivationKey,
+        VulkanDistributedComponentBatchPrivateActivationSpec,
+    >,
     lane_capacity: usize,
     shared_activation_route: VulkanSharedResidentBufferRoute,
 ) -> Result<
@@ -58,15 +62,29 @@ fn create_distributed_input_column_component_batch_dispatch(
         &planned.output_activation,
         &batch_slice.signal_buffer_indices,
     )?;
-    if batch_slice.signal_buffer(&input_key)?.frame_byte_capacity
-        != planned.input_byte_capacity
-        || batch_slice.signal_buffer(&output_key)?.frame_byte_capacity
-            != planned.output_byte_capacity
+    let input_is_private = validate_distributed_component_batch_activation_storage(
+        planned,
+        &planned.input_activation,
+        batch_slice.signal_buffer(&input_key)?.frame_byte_capacity,
+        planned.input_byte_capacity,
+        planned
+            .shards
+            .iter()
+            .map(|shard| (shard.device_id.clone(), shard.input_range.byte_count))
+            .collect(),
+        private_activation_specs,
+        "input",
+    )?;
+    if batch_slice.signal_buffer(&output_key)?.frame_byte_capacity
+        != planned.output_byte_capacity
     {
         return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
             VulkanError(format!(
-                "distributed input-column batch {}.{} signal capacities differ from its physical plan",
-                planned.component_id, planned.node_id
+                "distributed input-column batch {}.{} output public signal capacity {} differs from planned capacity {}",
+                planned.component_id,
+                planned.node_id,
+                batch_slice.signal_buffer(&output_key)?.frame_byte_capacity,
+                planned.output_byte_capacity,
             )),
         ));
     }
@@ -187,7 +205,16 @@ fn create_distributed_input_column_component_batch_dispatch(
             ),
             device_id: shard.device_id.clone(),
         };
-        let private_input = private_activation_buffers.get(&input_private_key);
+        let private_input = if input_is_private {
+            Some(private_activation_buffers.get(&input_private_key).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "distributed input-column batch {}.{} is missing its private input allocation on {:?}",
+                    planned.component_id, planned.node_id, shard.device_id,
+                )))
+            })?)
+        } else {
+            None
+        };
         let input = if let Some(buffer) = private_input {
             buffer
         } else {

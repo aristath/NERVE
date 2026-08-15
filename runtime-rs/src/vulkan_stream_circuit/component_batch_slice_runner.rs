@@ -462,6 +462,14 @@ fn component_batch_state_buffer_index_at_binding(
 }
 
 impl VulkanResidentComponentBatchSliceRunner {
+    fn demand_residency_allocations(
+        &self,
+    ) -> impl Iterator<Item = &VulkanComponentBatchResidentAllocation> {
+        self.demand_residency
+            .values()
+            .flat_map(|segment| segment.segment.resident_allocations())
+    }
+
     fn has_pipeline_deferred_demand_segment(&self) -> bool {
         self.pipeline_continuation_predicate.is_some()
             && self.demand_residency.len() == 1
@@ -675,23 +683,10 @@ impl VulkanResidentComponentBatchSliceRunner {
             .iter()
             .filter(|dispatch| dispatch.owner_device_id == slice.device_id)
         {
-            for activation in std::iter::once(&dispatch.input_activation)
-                .chain(&dispatch.auxiliary_input_activations)
-                .chain(
-                    dispatch
-                        .reduction
-                        .is_none()
-                        .then_some(&dispatch.output_activation),
-                )
-            {
-                if private_distributed_activations.contains_key(
-                    &distributed_component_batch_activation_key(
-                        &dispatch.owner_device_id,
-                        activation,
-                    ),
-                ) {
-                    continue;
-                }
+            for activation in distributed_component_batch_shared_activations(
+                dispatch,
+                &private_distributed_activations,
+            ) {
                 let key = distributed_component_batch_signal_key(
                     activation,
                     &signal_buffer_indices,
@@ -1159,6 +1154,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                     };
                     if let Some(segment) =
                         VulkanDemandResidencyBatchSegment::from_slice_steps(
+                            device,
                             &slice.mounted,
                             slice.package_slice.physical_residency_schedule(),
                             &dispatch_spans,
@@ -1168,6 +1164,7 @@ impl VulkanResidentComponentBatchSliceRunner {
                             *step_start,
                             *step_end,
                             lane_capacity,
+                            Vec::new(),
                             pipeline_continuation_predicate.clone(),
                             context.clone(),
                         )?
@@ -1312,12 +1309,15 @@ impl VulkanResidentComponentBatchSliceRunner {
         device: &VulkanComputeDevice,
         owner_device_id: &str,
         distributed_dispatches: &VulkanDistributedComponentBatchRunners,
-        _mounted: &VulkanMountedPlacedStreamCircuit,
+        mounted: &VulkanMountedPlacedStreamCircuit,
         input_token_ids: &[u32],
         start_stream_tick: u64,
         dynamic_state_capacity_activations: u32,
         completion_mode: VulkanComponentBatchCompletionMode,
     ) -> Result<(), VulkanResidentInProcessPlacedRuntimeError> {
+        self.causal_state_snapshots
+            .initialize_from_state_buffers(&mounted.buffers)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         let stream_ticks = consecutive_component_batch_stream_ticks(
             start_stream_tick,
             input_token_ids.len(),

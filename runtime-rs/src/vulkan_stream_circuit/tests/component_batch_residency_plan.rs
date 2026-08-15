@@ -19,6 +19,38 @@ fn fixture_component_batch_residency_plans(
     (placed_plan, prepared_plan)
 }
 
+fn fixture_component_batch_demand_residency_plans() -> (
+    VulkanPlacedStreamCircuitPlan,
+    VulkanPreparedDispatchPlan,
+    CompiledResourceResidencyContract,
+    VulkanCompiledResourceAddressLayout,
+    VulkanPhysicalResidencySchedule,
+) {
+    let runtime_model = fixture_model_runtime_model_with_one_dynamic_group();
+    let contract = instantiate_runtime_resource_contract(&runtime_model).unwrap();
+    let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
+    let device_id = runtime_model.placement.default_device_id.clone();
+    let (_, _, placed_plan) = plan_resident_package_placed_stream_circuit_with_tensor_index(
+        &device_id,
+        &runtime_model.placement,
+        &runtime_model.circuit_graph,
+        &tiny_model_dir(),
+        &tensor_index,
+        runtime_model.package.activation_element_bytes,
+    )
+    .unwrap();
+    let manifest = resident_package_reusable_kernel_manifest(&placed_plan);
+    let prepared_plan = placed_plan.prepared_dispatch_plan(&manifest, 128).unwrap();
+    let layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
+    let schedule = VulkanPhysicalResidencySchedule::from_prepared_dispatch_plan(
+        &contract,
+        runtime_model.execution_scope,
+        &prepared_plan,
+    )
+    .unwrap();
+    (placed_plan, prepared_plan, contract, layout, schedule)
+}
+
 #[test]
 fn component_batch_residency_plan_names_every_scalar_fallback_allocation() {
     let (placed_plan, prepared_plan) = fixture_component_batch_residency_plans();
@@ -32,7 +64,7 @@ fn component_batch_residency_plan_names_every_scalar_fallback_allocation() {
         &VulkanComponentBatchExecutionScope::all(),
         &BTreeSet::new(),
         false,
-        false,
+        None,
     )
     .unwrap();
 
@@ -171,7 +203,7 @@ fn component_batch_residency_plan_tracks_selected_snapshot_state_exactly() {
         &scope,
         &BTreeSet::new(),
         false,
-        true,
+        None,
     )
     .unwrap();
 
@@ -188,10 +220,129 @@ fn component_batch_residency_plan_tracks_selected_snapshot_state_exactly() {
         snapshots[0].byte_capacity,
         static_byte_capacity * lane_capacity
     );
-    assert!(plan.allocations.iter().any(|allocation| matches!(
+    assert!(!plan.allocations.iter().any(|allocation| matches!(
         allocation.kind,
         VulkanComponentBatchResidentAllocationKind::DemandPipelinePredicate
     )));
+}
+
+#[test]
+fn component_batch_demand_segment_plan_accounts_exact_dspark_gate_geometry() {
+    let lane_capacity = 7;
+    let geometries = vec![VulkanComponentBatchDemandGateGeometry {
+        checkpoint_id: "draft_state_ingestion".to_string(),
+        selector_id: "expert_selector".to_string(),
+        selection_count_per_activation: 6,
+        selection_index_shift: 0,
+        selection_index_mask: 0xffff,
+        address_mapping: VulkanCompiledSelectorAddressMapping::GroupTable {
+            resource_address_slots: vec![0, 1, 2, 3],
+            resource_address_slot_offsets: vec![0, 2, 4],
+        },
+    }];
+
+    let owned = component_batch_demand_segment_allocations(
+        &geometries,
+        lane_capacity,
+        true,
+    )
+    .unwrap();
+    let miss_queue = owned
+        .iter()
+        .find(|allocation| {
+            allocation.kind == VulkanComponentBatchResidentAllocationKind::DemandMissQueue
+        })
+        .unwrap();
+    assert_eq!(miss_queue.byte_capacity, 352);
+    assert!(miss_queue.host_visible);
+    assert_eq!(
+        owned
+            .iter()
+            .filter(|allocation| matches!(
+                allocation.kind,
+                VulkanComponentBatchResidentAllocationKind::DemandPipelinePredicate
+            ))
+            .count(),
+        1,
+    );
+    assert_eq!(
+        owned
+            .iter()
+            .filter(|allocation| matches!(
+                allocation.kind,
+                VulkanComponentBatchResidentAllocationKind::DemandGateConfiguration { .. }
+                    | VulkanComponentBatchResidentAllocationKind::DemandGateResourceGroups { .. }
+                    | VulkanComponentBatchResidentAllocationKind::DemandGateAddressSlots { .. }
+                    | VulkanComponentBatchResidentAllocationKind::DemandGateResolvedAddresses { .. }
+            ))
+            .count(),
+        4,
+    );
+
+    let shared_predicate = component_batch_demand_segment_allocations(
+        &geometries,
+        lane_capacity,
+        false,
+    )
+    .unwrap();
+    assert_eq!(shared_predicate.len() + 1, owned.len());
+    assert_eq!(
+        shared_predicate.iter().map(|allocation| allocation.byte_capacity).sum::<usize>()
+            + size_of::<u32>(),
+        owned.iter().map(|allocation| allocation.byte_capacity).sum::<usize>(),
+    );
+}
+
+#[test]
+fn component_batch_demand_plan_rejects_checkpoint_crossing_selected_scope() {
+    let (placed_plan, prepared_plan, contract, layout, schedule) =
+        fixture_component_batch_demand_residency_plans();
+    let selector = contract.selectors.first().unwrap();
+    let demand_context = VulkanComponentBatchDemandResidencyPlanContext {
+        schedule: &schedule,
+        contract: &contract,
+        layout: &layout,
+    };
+    let complete = VulkanComponentBatchResidentAllocationPlan::for_single_device(
+        &placed_plan,
+        &prepared_plan,
+        &[],
+        7,
+        VulkanComponentBatchExecutionMode::CausalSequence,
+        &VulkanComponentBatchExecutionScope::all(),
+        &BTreeSet::new(),
+        false,
+        Some(demand_context),
+    )
+    .unwrap();
+    assert!(complete.allocations.iter().any(|allocation| matches!(
+        allocation.kind,
+        VulkanComponentBatchResidentAllocationKind::DemandMissQueue
+    )));
+    assert!(complete.allocations.iter().any(|allocation| matches!(
+        allocation.kind,
+        VulkanComponentBatchResidentAllocationKind::DemandGateResolvedAddresses { .. }
+    )));
+    let selection_only_scope = VulkanComponentBatchExecutionScope::nodes(BTreeMap::from([(
+        selector.component_id.clone(),
+        BTreeSet::from([selector.node_id.clone()]),
+    )]))
+    .unwrap();
+
+    let error = VulkanComponentBatchResidentAllocationPlan::for_single_device(
+        &placed_plan,
+        &prepared_plan,
+        &[],
+        7,
+        VulkanComponentBatchExecutionMode::CausalSequence,
+        &selection_only_scope,
+        &BTreeSet::new(),
+        false,
+        Some(demand_context),
+    )
+    .unwrap_err();
+
+    assert!(error.0.contains("selected computation crosses the scope boundary"));
 }
 
 #[test]
@@ -247,7 +398,7 @@ fn component_batch_residency_plan_rejects_missing_snapshot_source_binding() {
         &scope,
         &BTreeSet::new(),
         false,
-        false,
+        None,
     )
     .unwrap_err();
 

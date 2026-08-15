@@ -1,13 +1,60 @@
 fn mount_speculative_decoder_device_slice(
     device: &VulkanComputeDevice,
     model: &VulkanResidentSpeculativeDecoderModelPackage,
+    planned_stream_control: &VulkanRuntimeSharedHostResidentAllocation,
 ) -> Result<
     VulkanResidentInProcessPlacedStreamProcessorDevice,
     VulkanResidentInProcessPlacedRuntimeError,
 > {
+    let VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+        scope:
+            VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { decoder_id },
+        class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
+        scope_id,
+        buffer_id,
+    } = &planned_stream_control.kind
+    else {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} received a non-control host-visible allocation ledger",
+                model.id,
+            )),
+        ));
+    };
+    if decoder_id != &model.id
+        || scope_id != &model.id
+        || buffer_id != "stream_control"
+        || planned_stream_control.owner_device_id != model.device_id
+        || planned_stream_control.participant_device_ids != [model.device_id.clone()]
+        || planned_stream_control.byte_capacity != VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} stream-control allocation ledger disagrees with its exact mount",
+                model.id,
+            )),
+        ));
+    }
+    let stream_control_allocation = device
+        .create_shared_host_allocation(&[], planned_stream_control.byte_capacity)
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+    let mut stream_control_buffer = device
+        .import_shared_host_buffer(stream_control_allocation)
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+    stream_control_buffer
+        .persistently_map()
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+    stream_control_buffer
+        .write_bytes(&[0; VULKAN_STREAM_CONTROL_BYTE_CAPACITY])
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
     let mounted = model
         .device_slice
-        .create_mounted_stream_circuit(device)
+        .create_mounted_stream_circuit_with_buffer_overrides(
+            device,
+            &[],
+            &[],
+            Some(Arc::new(stream_control_buffer)),
+        )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
     mounted
         .buffers
@@ -122,6 +169,7 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
     fn from_model(
         device: &VulkanComputeDevice,
         model: &VulkanResidentSpeculativeDecoderModelPackage,
+        planned_stream_control: &VulkanRuntimeSharedHostResidentAllocation,
         normal_prefill_lane_capacity: usize,
         speculative_draft_tokens: usize,
         target_hidden: &VulkanResidentBuffer,
@@ -147,7 +195,8 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
                 )),
             ));
         };
-        let device_slice = mount_speculative_decoder_device_slice(device, model)?;
+        let device_slice =
+            mount_speculative_decoder_device_slice(device, model, planned_stream_control)?;
         let mounted = &device_slice.mounted;
 
         let adapter = model.package.dedicated_input_adapter().ok_or_else(|| {

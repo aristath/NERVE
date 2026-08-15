@@ -331,6 +331,7 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
     fn from_model<'a, F>(
         device: &VulkanComputeDevice,
         model: &VulkanResidentSpeculativeDecoderModelPackage,
+        planned_stream_control: &VulkanRuntimeSharedHostResidentAllocation,
         target_model: &VulkanResidentInProcessPlacedModelPackage,
         target_slices: &[VulkanResidentInProcessPlacedStreamProcessorDevice],
         device_for: &F,
@@ -350,7 +351,8 @@ impl VulkanResidentParallelBlockSpeculativeDecoderProcessor {
                 )),
             ));
         };
-        let device_slice = mount_speculative_decoder_device_slice(device, model)?;
+        let device_slice =
+            mount_speculative_decoder_device_slice(device, model, planned_stream_control)?;
         let graph = &model.package.circuit_graph;
         let scopes = parallel_speculative_execution_scopes(&model.package)
             .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;

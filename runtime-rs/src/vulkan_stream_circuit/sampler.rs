@@ -193,6 +193,66 @@ fn sampler_method_uses_randomness(method: &str) -> bool {
     matches!(method, "temperature_top_k_top_p" | "temperature_top_p")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VulkanResidentSamplerLogitsViewAllocationPlan {
+    scratch_device_bytes: Option<usize>,
+    stream_control_host_bytes: usize,
+    seen_token_device_bytes: Option<usize>,
+    seen_token_batch_host_bytes: Option<usize>,
+    feedback_control_device_bytes: usize,
+}
+
+impl VulkanResidentSamplerLogitsViewAllocationPlan {
+    fn from_spec(spec: &VulkanResidentSamplerSpec) -> Result<Self, VulkanError> {
+        if spec.logits_byte_capacity == 0
+            || !spec
+                .logits_byte_capacity
+                .is_multiple_of(std::mem::size_of::<f32>())
+        {
+            return Err(VulkanError(format!(
+                "sampler {:?} logits-view planning requires a positive whole-f32 logits capacity",
+                spec.sampler_id,
+            )));
+        }
+        let scratch_device_bytes = sampler_method_uses_randomness(&spec.method)
+            .then_some(spec.scratch_byte_capacity)
+            .filter(|byte_capacity| *byte_capacity > 0);
+        if sampler_method_uses_randomness(&spec.method) && scratch_device_bytes.is_none() {
+            return Err(VulkanError(format!(
+                "sampler {:?} logits-view planning requires nonzero random-sampling scratch",
+                spec.sampler_id,
+            )));
+        }
+        let token_state_is_active =
+            spec.repetition_penalty != 1.0 || spec.presence_penalty != 0.0;
+        let seen_token_device_bytes = if token_state_is_active || spec.runtime_parameterized {
+            Some(
+                (spec.logits_byte_capacity / std::mem::size_of::<f32>())
+                    .div_ceil(u32::BITS as usize)
+                    .checked_mul(std::mem::size_of::<u32>())
+                    .ok_or_else(|| {
+                        VulkanError(format!(
+                            "sampler {:?} logits-view token-state capacity overflowed",
+                            spec.sampler_id,
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            scratch_device_bytes,
+            stream_control_host_bytes: VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+            seen_token_device_bytes,
+            seen_token_batch_host_bytes: token_state_is_active.then_some(
+                VULKAN_BACKEND_LOOP_MAX_WINDOW * std::mem::size_of::<u32>(),
+            ),
+            feedback_control_device_bytes:
+                (VULKAN_FEEDBACK_CONTROL_HEADER_WORD_COUNT + 1) * std::mem::size_of::<u32>(),
+        })
+    }
+}
+
 pub struct VulkanResidentSamplerKernelArtifact {
     pub role: String,
     pub spirv_words: Vec<u32>,
@@ -1191,20 +1251,35 @@ impl VulkanResidentSamplerRunner {
         kernels: &[VulkanResidentSamplerKernelArtifact],
         spec: &VulkanResidentSamplerSpec,
     ) -> Result<VulkanResidentSamplerLogitsView, VulkanResidentSamplerRunnerError> {
-        let scratch_buffer = sampler_method_uses_randomness(&spec.method)
-            .then(|| device.create_resident_buffer(spec.scratch_byte_capacity))
+        let allocation_plan = VulkanResidentSamplerLogitsViewAllocationPlan::from_spec(spec)?;
+        let scratch_buffer = allocation_plan
+            .scratch_device_bytes
+            .map(|byte_capacity| device.create_resident_buffer(byte_capacity))
             .transpose()?;
-        let mut stream_control_buffer =
-            device.create_host_visible_resident_buffer(VULKAN_STREAM_CONTROL_BYTE_CAPACITY)?;
+        let mut stream_control_buffer = device.create_host_visible_resident_buffer(
+            allocation_plan.stream_control_host_bytes,
+        )?;
         stream_control_buffer.persistently_map()?;
-        stream_control_buffer.write_bytes(&[0; VULKAN_STREAM_CONTROL_BYTE_CAPACITY])?;
+        stream_control_buffer.write_bytes(&vec![0; allocation_plan.stream_control_host_bytes])?;
         let runtime_parameterized = spec.runtime_parameterized;
-        let seen_token_buffer = self
-            ._seen_token_buffer
-            .as_ref()
-            .map(|source| {
-                let destination = device.create_resident_buffer(source.byte_capacity())?;
-                destination.write_bytes(&vec![0; source.byte_capacity()])?;
+        let seen_token_buffer = allocation_plan
+            .seen_token_device_bytes
+            .map(|byte_capacity| {
+                let source = self._seen_token_buffer.as_ref().ok_or_else(|| {
+                    VulkanError(format!(
+                        "sampler {:?} logits-view plan requires absent token state",
+                        spec.sampler_id,
+                    ))
+                })?;
+                if source.byte_capacity() != byte_capacity {
+                    return Err(VulkanError(format!(
+                        "sampler {:?} logits-view token state has {} bytes, planned {byte_capacity}",
+                        spec.sampler_id,
+                        source.byte_capacity(),
+                    )));
+                }
+                let destination = device.create_resident_buffer(byte_capacity)?;
+                destination.write_bytes(&vec![0; byte_capacity])?;
                 Ok::<_, VulkanError>(destination)
             })
             .transpose()?;
@@ -1229,15 +1304,20 @@ impl VulkanResidentSamplerRunner {
                     .find(|kernel| kernel.role == token_batch_role)
             })
             .flatten();
-        let seen_token_batch_buffer = if token_batch_kernel.is_some() {
-            let mut buffer = device.create_host_visible_resident_buffer(
-                VULKAN_BACKEND_LOOP_MAX_WINDOW * std::mem::size_of::<u32>(),
-            )?;
-            buffer.persistently_map()?;
-            Some(buffer)
-        } else {
-            None
-        };
+        let seen_token_batch_buffer = allocation_plan
+            .seen_token_batch_host_bytes
+            .map(|byte_capacity| {
+                if token_batch_kernel.is_none() {
+                    return Err(VulkanError(format!(
+                        "sampler {:?} logits-view plan requires an absent token-batch kernel",
+                        spec.sampler_id,
+                    )));
+                }
+                let mut buffer = device.create_host_visible_resident_buffer(byte_capacity)?;
+                buffer.persistently_map()?;
+                Ok::<_, VulkanError>(buffer)
+            })
+            .transpose()?;
         let seen_token_batch_dispatch = token_batch_kernel
             .map(|kernel| {
                 device.create_resident_kernel_dispatch(
@@ -1276,8 +1356,7 @@ impl VulkanResidentSamplerRunner {
                 spec.method.as_str(),
             )
         });
-        let feedback_control_byte_capacity =
-            (VULKAN_FEEDBACK_CONTROL_HEADER_WORD_COUNT + 1) * size_of::<u32>();
+        let feedback_control_byte_capacity = allocation_plan.feedback_control_device_bytes;
         let feedback_control_buffer =
             Arc::new(device.create_resident_buffer(feedback_control_byte_capacity)?);
         feedback_control_buffer.write_bytes(&vec![0; feedback_control_byte_capacity])?;

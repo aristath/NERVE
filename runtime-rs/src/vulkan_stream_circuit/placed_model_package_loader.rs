@@ -1999,9 +1999,37 @@ impl VulkanResidentInProcessPlacedModelPackage {
         let mut speculative_decoders = Vec::with_capacity(self.speculative_decoders.len());
         for decoder in &self.speculative_decoders {
             let draft_device = device_for(&decoder.device_id)?;
+            let planned_stream_controls = self
+                .physical_execution_residency_plan
+                .resident_shared_host_allocations
+                .iter()
+                .filter(|allocation| {
+                    matches!(
+                        &allocation.kind,
+                        VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+                            scope: VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
+                                decoder_id,
+                            },
+                            class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
+                            buffer_id,
+                            ..
+                        } if decoder_id == &decoder.id && buffer_id == "stream_control"
+                    )
+                })
+                .collect::<Vec<_>>();
+            let [planned_stream_control] = planned_stream_controls.as_slice() else {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "speculative decoder {:?} resolves {} host-visible stream-control ledgers, expected one",
+                        decoder.id,
+                        planned_stream_controls.len(),
+                    )),
+                ));
+            };
             speculative_decoders.push(VulkanResidentSpeculativeDecoderProcessor::from_model(
                 draft_device,
                 decoder,
+                planned_stream_control,
                 self,
                 &devices,
                 output_transducer.normalized_frame_buffer(),

@@ -241,14 +241,18 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
     let device_transients = vec![
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "owner".to_string(),
+            participant_device_ids: vec!["owner".to_string()],
             byte_capacity: 33,
             concern: "owner test allocation".to_string(),
+            usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
             allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
         },
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "helper".to_string(),
+            participant_device_ids: vec!["helper".to_string()],
             byte_capacity: 17,
             concern: "helper test allocation".to_string(),
+            usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
             allocation_class: VulkanRuntimeStreamAllocationClass::PromptRunner,
         },
     ];
@@ -335,14 +339,18 @@ fn physical_execution_residency_admits_exact_execution_transients_atomically() {
             &[
                 VulkanRuntimeDeviceLocalTransientAllocation {
                     logical_device_id: "owner".to_string(),
+                    participant_device_ids: vec!["owner".to_string()],
                     byte_capacity: 1,
                     concern: "valid prefix".to_string(),
+                    usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
                     allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
                 },
                 VulkanRuntimeDeviceLocalTransientAllocation {
                     logical_device_id: "absent".to_string(),
+                    participant_device_ids: vec!["absent".to_string()],
                     byte_capacity: 1,
                     concern: "invalid suffix".to_string(),
+                    usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
                     allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
                 },
             ],
@@ -882,20 +890,34 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
     for malformed in [
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "".to_string(),
+            participant_device_ids: Vec::new(),
             byte_capacity: 19,
             concern: "missing device".to_string(),
+            usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
             allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
         },
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "owner".to_string(),
+            participant_device_ids: vec!["owner".to_string()],
             byte_capacity: 0,
             concern: "zero capacity".to_string(),
+            usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
             allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
         },
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "owner".to_string(),
+            participant_device_ids: vec!["owner".to_string()],
             byte_capacity: 19,
             concern: "".to_string(),
+            usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
+            allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
+        },
+        VulkanRuntimeDeviceLocalTransientAllocation {
+            logical_device_id: "owner".to_string(),
+            participant_device_ids: vec!["helper".to_string()],
+            byte_capacity: 19,
+            concern: "external allocation missing its owner".to_string(),
+            usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage,
             allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
         },
     ] {
@@ -938,7 +960,7 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
 
     for malformed in [
         VulkanRuntimeSharedHostTransientAllocation {
-            mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::ConditionalPredicate,
             owner_device_id: "owner".to_string(),
             participant_device_ids: vec!["helper".to_string()],
             byte_capacity: 19,
@@ -990,7 +1012,7 @@ fn execution_transient_ledgers_reject_malformed_allocations_atomically() {
 fn execution_transient_host_requirements_are_queried_and_aligned_per_allocation() {
     let allocations = vec![
         VulkanRuntimeSharedHostTransientAllocation {
-            mode: VulkanRuntimeSharedHostTransientAllocationMode::Always,
+            mode: VulkanRuntimeSharedHostTransientAllocationMode::ConditionalPredicate,
             owner_device_id: "owner".to_string(),
             participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
             byte_capacity: 17,
@@ -1011,13 +1033,25 @@ fn execution_transient_host_requirements_are_queried_and_aligned_per_allocation(
     let exact = execution_transient_shared_host_requirement_bytes_with(
         &allocations,
         |allocation| {
-            queried.push(allocation.concern.clone());
+            queried.push((allocation.concern.clone(), allocation.mode));
             Ok(allocation.byte_capacity.next_multiple_of(64))
         },
     )
     .unwrap();
 
-    assert_eq!(queried, vec!["signal", "edge"]);
+    assert_eq!(
+        queried,
+        vec![
+            (
+                "signal".to_string(),
+                VulkanRuntimeSharedHostTransientAllocationMode::ConditionalPredicate,
+            ),
+            (
+                "edge".to_string(),
+                VulkanRuntimeSharedHostTransientAllocationMode::CrossDeviceTimelineStaging,
+            ),
+        ],
+    );
     assert_eq!(exact, 128);
     assert_ne!(exact, (17usize + 29).next_multiple_of(64));
 
@@ -1040,28 +1074,63 @@ fn execution_transient_device_requirements_are_queried_and_aligned_per_allocatio
     let allocations = vec![
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "owner".to_string(),
+            participant_device_ids: vec!["owner".to_string()],
             byte_capacity: 17,
             concern: "signal".to_string(),
+            usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
             allocation_class: VulkanRuntimeStreamAllocationClass::Permanent,
         },
         VulkanRuntimeDeviceLocalTransientAllocation {
             logical_device_id: "owner".to_string(),
+            participant_device_ids: vec!["owner".to_string()],
             byte_capacity: 29,
             concern: "control".to_string(),
+            usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate,
+            allocation_class: VulkanRuntimeStreamAllocationClass::PromptRunner,
+        },
+        VulkanRuntimeDeviceLocalTransientAllocation {
+            logical_device_id: "owner".to_string(),
+            participant_device_ids: vec!["helper".to_string(), "owner".to_string()],
+            byte_capacity: 33,
+            concern: "external signal".to_string(),
+            usage: VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage,
             allocation_class: VulkanRuntimeStreamAllocationClass::PromptRunner,
         },
     ];
     let mut queried = Vec::new();
 
     let exact = execution_transient_device_requirement_bytes_with(&allocations, |allocation| {
-        queried.push(allocation.concern.clone());
+        queried.push((
+            allocation.concern.clone(),
+            allocation.usage,
+            allocation.participant_device_ids.clone(),
+        ));
         Ok(allocation.byte_capacity.next_multiple_of(64))
     })
     .unwrap();
 
-    assert_eq!(queried, vec!["signal", "control"]);
-    assert_eq!(exact, 128);
-    assert_ne!(exact, (17usize + 29).next_multiple_of(64));
+    assert_eq!(
+        queried,
+        vec![
+            (
+                "signal".to_string(),
+                VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage,
+                vec!["owner".to_string()],
+            ),
+            (
+                "control".to_string(),
+                VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate,
+                vec!["owner".to_string()],
+            ),
+            (
+                "external signal".to_string(),
+                VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage,
+                vec!["helper".to_string(), "owner".to_string()],
+            ),
+        ],
+    );
+    assert_eq!(exact, 192);
+    assert_ne!(exact, (17usize + 29 + 33).next_multiple_of(64));
 
     let overflow =
         execution_transient_device_requirement_bytes_with(&allocations, |allocation| {
@@ -2237,6 +2306,87 @@ fn host_visible_sampler_buffers_move_to_typed_host_allocations() {
             .collect::<Vec<_>>(),
         vec![("scratch", 1_024)]
     );
+}
+
+#[test]
+fn speculative_decoder_stream_control_moves_to_typed_host_allocation() {
+    let mut base = physical_execution_residency_base_plan(1_000, 100);
+    let owner = &mut base.device_plans[0];
+    owner
+        .resident_stream_device_allocations
+        .push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::Target,
+            kind: VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                class: VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+                scope_id: "sampler".to_string(),
+                buffer_id: "history_and_output".to_string(),
+            },
+            byte_capacity: 144,
+        });
+    owner.breakdown.sampler_workspace_bytes += 144;
+    owner.working_set.activation_headroom_bytes += 144;
+    owner.initial_device_resident_bytes += 144;
+    base.total_initial_device_resident_bytes += 144;
+    owner
+        .resident_stream_device_allocations
+        .push(VulkanRuntimeResidentStreamAllocation {
+            scope: VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
+                decoder_id: "draft".to_string(),
+            },
+            kind: VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
+                scope_id: "draft".to_string(),
+                buffer_id: "stream_control".to_string(),
+            },
+            byte_capacity: VULKAN_STREAM_CONTROL_BYTE_CAPACITY,
+        });
+    owner.breakdown.speculative_decoder_state_bytes += VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    owner.working_set.activation_headroom_bytes += VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    owner.initial_device_resident_bytes += VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    base.total_initial_device_resident_bytes += VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
+        &base,
+        &["owner".to_string()],
+        &empty_physical_execution_parameter_allocations(),
+        &empty_physical_execution_parameter_exclusions(),
+        &empty_physical_execution_activation_plan(),
+    )
+    .unwrap();
+    let original_device_bytes = plan.total_stream_device_local_bytes;
+
+    plan.bind_host_visible_runtime_buffer_memory_domains()
+        .unwrap();
+
+    assert_eq!(
+        plan.total_stream_device_local_bytes,
+        original_device_bytes - 144 - VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    );
+    assert!(plan.resident_shared_host_allocations.iter().any(|allocation| {
+        matches!(
+            &allocation.kind,
+            VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+                scope: VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
+                    decoder_id
+                },
+                class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
+                scope_id,
+                buffer_id,
+            } if decoder_id == "draft" && scope_id == "draft" && buffer_id == "stream_control"
+        ) && allocation.owner_device_id == "owner"
+            && allocation.participant_device_ids == ["owner".to_string()]
+            && allocation.byte_capacity == VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+    }));
+    assert!(!plan.device_plans[0]
+        .resident_stream_device_allocations
+        .iter()
+        .any(|allocation| matches!(
+            &allocation.kind,
+            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
+                buffer_id,
+                ..
+            } if buffer_id == "stream_control"
+        )));
 }
 
 #[test]

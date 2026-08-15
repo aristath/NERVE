@@ -45,6 +45,22 @@ fn distributed_component_batch_kernel_path(
     }
 }
 
+fn distributed_component_batch_kernel_path_is_available(
+    path: VulkanDistributedComponentBatchKernelPath,
+    physical_artifact_available: bool,
+    compiled_batch_artifact_available: bool,
+) -> bool {
+    match path {
+        VulkanDistributedComponentBatchKernelPath::InputColumnPhysicalArtifact
+        | VulkanDistributedComponentBatchKernelPath::OutputRowPhysicalArtifact => {
+            physical_artifact_available
+        }
+        VulkanDistributedComponentBatchKernelPath::CompiledBatchArtifact => {
+            compiled_batch_artifact_available
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct VulkanDistributedComponentBatchPrivateActivationKey {
     owner_device_id: String,
@@ -63,6 +79,76 @@ struct VulkanDistributedComponentBatchPrivateActivationBufferKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanDistributedComponentBatchPrivateActivationSpec {
     frame_byte_capacities: BTreeMap<String, usize>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_distributed_component_batch_activation_storage(
+    planned: &VulkanDistributedDispatchPlan,
+    activation: &VulkanDistributedActivationSlot,
+    public_frame_byte_capacity: usize,
+    planned_frame_byte_capacity: usize,
+    expected_private_frame_byte_capacities: BTreeMap<String, usize>,
+    private_activation_specs: &BTreeMap<
+        VulkanDistributedComponentBatchPrivateActivationKey,
+        VulkanDistributedComponentBatchPrivateActivationSpec,
+    >,
+    role: &str,
+) -> Result<bool, VulkanResidentInProcessPlacedRuntimeError> {
+    let activation_key =
+        distributed_component_batch_activation_key(&planned.owner_device_id, activation);
+    let Some(private_spec) = private_activation_specs.get(&activation_key) else {
+        if public_frame_byte_capacity != planned_frame_byte_capacity {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "distributed component batch {}.{} {role} public signal capacity {} differs from planned capacity {}",
+                    planned.component_id,
+                    planned.node_id,
+                    public_frame_byte_capacity,
+                    planned_frame_byte_capacity,
+                )),
+            ));
+        }
+        return Ok(false);
+    };
+    if private_spec.frame_byte_capacities != expected_private_frame_byte_capacities {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+            VulkanError(format!(
+                "distributed component batch {}.{} {role} private signal geometry {:?} differs from planned shard geometry {:?}",
+                planned.component_id,
+                planned.node_id,
+                private_spec.frame_byte_capacities,
+                expected_private_frame_byte_capacities,
+            )),
+        ));
+    }
+    Ok(true)
+}
+
+fn distributed_component_batch_shared_activations<'a>(
+    dispatch: &'a VulkanDistributedDispatchPlan,
+    private_activation_specs: &BTreeMap<
+        VulkanDistributedComponentBatchPrivateActivationKey,
+        VulkanDistributedComponentBatchPrivateActivationSpec,
+    >,
+) -> Vec<&'a VulkanDistributedActivationSlot> {
+    std::iter::once(&dispatch.input_activation)
+        .chain(&dispatch.auxiliary_input_activations)
+        .chain(&dispatch.selected_resource_activations)
+        .chain(
+            dispatch
+                .reduction
+                .is_none()
+                .then_some(&dispatch.output_activation),
+        )
+        .filter(|activation| {
+            !private_activation_specs.contains_key(
+                &distributed_component_batch_activation_key(
+                    &dispatch.owner_device_id,
+                    activation,
+                ),
+            )
+        })
+        .collect()
 }
 
 fn distributed_component_batch_activation_key(
@@ -203,6 +289,44 @@ struct VulkanDistributedComponentBatchDispatchRunner {
     reduction: Option<VulkanDistributedReductionRunner>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VulkanDistributedComponentBatchIndirectControlObservation {
+    pub component_id: String,
+    pub node_id: String,
+    pub device_id: String,
+    pub batch_width: u32,
+    pub expert_start: u32,
+    pub expert_count: u32,
+    pub owned_route_count: u32,
+    pub dispatch_x: u32,
+    pub dispatch_y: u32,
+    pub dispatch_z: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VulkanDistributedSelectedResourceRecordObservation {
+    pub component_id: String,
+    pub node_id: String,
+    pub selector_id: String,
+    pub device_id: String,
+    pub resource_index: usize,
+    pub parameter_slots: Vec<u32>,
+    pub record_byte_counts: Vec<u64>,
+    pub record_representations: Vec<u32>,
+    pub invalid_parameter_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VulkanDistributedComponentBatchOutputObservation {
+    pub component_id: String,
+    pub node_id: String,
+    pub device_id: String,
+    pub byte_count: usize,
+    pub byte_digest: String,
+    pub chunk_byte_count: usize,
+    pub chunk_digests: Vec<String>,
+}
+
 struct VulkanDistributedComponentBatchShardRunner {
     device_id: String,
     dispatches: Vec<VulkanDistributedComponentBatchShardDispatch>,
@@ -276,6 +400,364 @@ impl VulkanDistributedComponentBatchShardRunner {
 
 
 impl VulkanDistributedComponentBatchRunners {
+    pub(crate) fn indirect_control_observations(
+        &self,
+    ) -> Result<
+        Vec<VulkanDistributedComponentBatchIndirectControlObservation>,
+        VulkanError,
+    > {
+        let mut observations = Vec::new();
+        for island in &self.dispatches {
+            for shard in &island.shards {
+                if shard.batch_control_buffer_sets.len() != island.planned.dispatches.len() {
+                    return Err(VulkanError(format!(
+                        "distributed component batch island {:?} has {} dispatches but {} control-buffer sets on {:?}",
+                        island.planned.island_id,
+                        island.planned.dispatches.len(),
+                        shard.batch_control_buffer_sets.len(),
+                        shard.device_id,
+                    )));
+                }
+                for (planned, buffers) in island
+                    .planned
+                    .dispatches
+                    .iter()
+                    .zip(&shard.batch_control_buffer_sets)
+                {
+                    let Some(buffer) = buffers.get(
+                        &VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
+                    ) else {
+                        continue;
+                    };
+                    let words = component_batch_indirect_control_words(
+                        &buffer.read_bytes(buffer.byte_capacity())?,
+                    )?;
+                    observations.push(
+                        VulkanDistributedComponentBatchIndirectControlObservation {
+                            component_id: planned.component_id.clone(),
+                            node_id: planned.node_id.clone(),
+                            device_id: shard.device_id.clone(),
+                            batch_width: words[0],
+                            expert_start: words[1],
+                            expert_count: words[2],
+                            owned_route_count: words[3],
+                            dispatch_x: words[4],
+                            dispatch_y: words[5],
+                            dispatch_z: words[6],
+                        },
+                    );
+                }
+            }
+        }
+        Ok(observations)
+    }
+
+    pub(crate) fn selected_resource_record_observations(
+        &self,
+        dynamic_resource_buffers: &BTreeMap<String, Arc<VulkanDynamicResourceBuffers>>,
+        lane_count: usize,
+    ) -> Result<Vec<VulkanDistributedSelectedResourceRecordObservation>, VulkanError> {
+        const ADDRESS_RECORD_BYTE_COUNT: usize = 32;
+        const UNBOUND_PARAMETER_SLOT: u32 = u32::MAX;
+
+        if lane_count == 0 {
+            return Err(VulkanError(
+                "distributed selected-resource observation requires at least one lane"
+                    .to_string(),
+            ));
+        }
+        let mut observations = Vec::new();
+        for island in &self.dispatches {
+            for shard in &island.shards {
+                let dynamic = dynamic_resource_buffers.get(&shard.device_id).ok_or_else(|| {
+                    VulkanError(format!(
+                        "distributed selected-resource observation has no dynamic buffers on {:?}",
+                        shard.device_id,
+                    ))
+                })?;
+                let address_bytes = dynamic
+                    .address_table()
+                    .read_bytes(dynamic.address_table().byte_capacity())?;
+                for gate in &shard.selected_resource_gates {
+                    let leader_partition = island
+                        .planned
+                        .leader()
+                        .selected_resource_partitions
+                        .iter()
+                        .find(|partition| partition.selector_id == gate.selector_id())
+                        .ok_or_else(|| {
+                            VulkanError(format!(
+                                "distributed selected-resource gate {:?} has no leader partition in island {:?}",
+                                gate.selector_id(), island.planned.island_id,
+                            ))
+                        })?;
+                    let selected = gate
+                        .selected_resource_indices(lane_count)
+                        .map_err(|error| VulkanError(error.to_string()))?;
+                    for planned in &island.planned.dispatches {
+                        for partition in planned.selected_resource_partitions.iter().filter(
+                            |partition| {
+                                partition.domain_id == leader_partition.domain_id
+                                    && partition.selection_signal
+                                        == leader_partition.selection_signal
+                            },
+                        ) {
+                            let slots = dynamic
+                                .parameter_slots(
+                                    &planned.component_id,
+                                    &planned.node_id,
+                                    &partition.selection_signal,
+                                )
+                                .ok_or_else(|| {
+                                    VulkanError(format!(
+                                        "distributed selected-resource observation has no parameter slots for {}.{} selector {:?} on {:?}",
+                                        planned.component_id,
+                                        planned.node_id,
+                                        partition.selector_id,
+                                        shard.device_id,
+                                    ))
+                                })?;
+                            let slot_bytes = slots.read_bytes(slots.byte_capacity())?;
+                            let slot_words = slot_bytes
+                                .chunks_exact(size_of::<u32>())
+                                .map(|bytes| {
+                                    u32::from_le_bytes(
+                                        bytes.try_into().expect("u32 slot chunks are exact"),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            for resource_index in &selected {
+                                let expected_byte_counts = partition
+                                    .parameter_resource_byte_counts
+                                    .get(*resource_index)
+                                    .ok_or_else(|| {
+                                        VulkanError(format!(
+                                            "distributed selected-resource observation index {resource_index} exceeds selector {:?} resource metadata",
+                                            partition.selector_id,
+                                        ))
+                                    })?;
+                                if expected_byte_counts.len() != partition.parameters_per_resource {
+                                    return Err(VulkanError(format!(
+                                        "distributed selected-resource observation selector {:?} resource {resource_index} has {} byte counts for {} parameters",
+                                        partition.selector_id,
+                                        expected_byte_counts.len(),
+                                        partition.parameters_per_resource,
+                                    )));
+                                }
+                                let slot_start = resource_index
+                                    .checked_mul(partition.parameters_per_resource)
+                                    .ok_or_else(|| {
+                                        VulkanError(
+                                            "distributed selected-resource slot offset overflowed"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                let slot_end = slot_start
+                                    .checked_add(partition.parameters_per_resource)
+                                    .ok_or_else(|| {
+                                        VulkanError(
+                                            "distributed selected-resource slot range overflowed"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                let parameter_slots = slot_words
+                                    .get(slot_start..slot_end)
+                                    .ok_or_else(|| {
+                                        VulkanError(format!(
+                                            "distributed selected-resource parameter slots for {}.{} resource {resource_index} exceed {} words",
+                                            planned.component_id,
+                                            planned.node_id,
+                                            slot_words.len(),
+                                        ))
+                                    })?
+                                    .to_vec();
+                                let mut record_byte_counts = Vec::with_capacity(parameter_slots.len());
+                                let mut record_representations =
+                                    Vec::with_capacity(parameter_slots.len());
+                                let mut invalid_parameter_indices = Vec::new();
+                                for (parameter_index, (&slot, &expected_byte_count)) in
+                                    parameter_slots.iter().zip(expected_byte_counts).enumerate()
+                                {
+                                    let slot_index = usize::try_from(slot).unwrap_or(usize::MAX);
+                                    let record_start = slot_index
+                                        .checked_mul(ADDRESS_RECORD_BYTE_COUNT)
+                                        .unwrap_or(usize::MAX);
+                                    let record = record_start
+                                        .checked_add(ADDRESS_RECORD_BYTE_COUNT)
+                                        .and_then(|end| address_bytes.get(record_start..end));
+                                    let Some(record) = record.filter(|_| slot != UNBOUND_PARAMETER_SLOT)
+                                    else {
+                                        record_byte_counts.push(0);
+                                        record_representations.push(0);
+                                        invalid_parameter_indices.push(parameter_index);
+                                        continue;
+                                    };
+                                    let device_address = u64::from_le_bytes(
+                                        record[0..8].try_into().expect("address record u64"),
+                                    );
+                                    let byte_count = u64::from_le_bytes(
+                                        record[8..16].try_into().expect("address record u64"),
+                                    );
+                                    let generation = u64::from_le_bytes(
+                                        record[16..24].try_into().expect("address record u64"),
+                                    );
+                                    let resident = u32::from_le_bytes(
+                                        record[24..28].try_into().expect("address record u32"),
+                                    );
+                                    let representation = u32::from_le_bytes(
+                                        record[28..32].try_into().expect("address record u32"),
+                                    );
+                                    record_byte_counts.push(byte_count);
+                                    record_representations.push(representation);
+                                    if device_address == 0
+                                        || generation == 0
+                                        || resident != 1
+                                        || byte_count < u64::try_from(expected_byte_count).unwrap_or(u64::MAX)
+                                    {
+                                        invalid_parameter_indices.push(parameter_index);
+                                    }
+                                }
+                                observations.push(
+                                    VulkanDistributedSelectedResourceRecordObservation {
+                                        component_id: planned.component_id.clone(),
+                                        node_id: planned.node_id.clone(),
+                                        selector_id: partition.selector_id.clone(),
+                                        device_id: shard.device_id.clone(),
+                                        resource_index: *resource_index,
+                                        parameter_slots,
+                                        record_byte_counts,
+                                        record_representations,
+                                        invalid_parameter_indices,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(observations)
+    }
+
+    pub(crate) fn output_observations(
+        &self,
+        batch_slice: &VulkanResidentComponentBatchSliceRunner,
+        lane_count: usize,
+    ) -> Result<Vec<VulkanDistributedComponentBatchOutputObservation>, VulkanError> {
+        if lane_count == 0 {
+            return Err(VulkanError(
+                "distributed component-batch output observation requires at least one lane"
+                    .to_string(),
+            ));
+        }
+        let mut observations = Vec::new();
+        for island in &self.dispatches {
+            for (shard_index, shard_runner) in island.shards.iter().enumerate() {
+                for planned in &island.planned.dispatches {
+                    let planned_shard = planned.shards.get(shard_index).ok_or_else(|| {
+                        VulkanError(format!(
+                            "distributed component-batch output observation has no shard {shard_index} for {}.{}",
+                            planned.component_id, planned.node_id,
+                        ))
+                    })?;
+                    if planned_shard.device_id != shard_runner.device_id {
+                        return Err(VulkanError(format!(
+                            "distributed component-batch output observation changes shard {shard_index} from {:?} to {:?} in {}.{}",
+                            shard_runner.device_id,
+                            planned_shard.device_id,
+                            planned.component_id,
+                            planned.node_id,
+                        )));
+                    }
+                    let private_key =
+                        VulkanDistributedComponentBatchPrivateActivationBufferKey {
+                            activation: distributed_component_batch_activation_key(
+                                &planned.owner_device_id,
+                                &planned.output_activation,
+                            ),
+                            device_id: planned_shard.device_id.clone(),
+                        };
+                    let (buffer, byte_offset, byte_count) =
+                        if let Some(buffer) = self._private_activation_buffers.get(&private_key) {
+                            (
+                                buffer.as_ref(),
+                                0,
+                                planned_shard
+                                    .output_byte_count
+                                    .checked_mul(lane_count)
+                                    .ok_or_else(|| {
+                                        VulkanError(
+                                            "distributed private output observation capacity overflowed"
+                                                .to_string(),
+                                        )
+                                    })?,
+                            )
+                        } else {
+                            let key = distributed_component_batch_signal_key(
+                                &planned.output_activation,
+                                &batch_slice.signal_buffer_indices,
+                            )
+                            .map_err(|error| VulkanError(error.to_string()))?;
+                            let buffer = batch_slice
+                                .distributed_signal_buffer(&key, &planned_shard.device_id)
+                                .map_err(|error| VulkanError(error.to_string()))?;
+                            let (byte_offset, byte_count) = match planned.distribution {
+                                VulkanDistributedDispatchDistribution::OutputRows => {
+                                    distributed_batch_shard_output_binding_range(
+                                        planned.output_byte_capacity,
+                                        lane_count,
+                                        planned_shard.output_byte_offset,
+                                        planned_shard.output_byte_count,
+                                    )
+                                    .map_err(|error| VulkanError(error.to_string()))?
+                                }
+                                VulkanDistributedDispatchDistribution::ExpertRange => (
+                                    0,
+                                    planned
+                                        .output_byte_capacity
+                                        .checked_mul(lane_count)
+                                        .ok_or_else(|| {
+                                            VulkanError(
+                                                "distributed expert output observation capacity overflowed"
+                                                    .to_string(),
+                                            )
+                                        })?,
+                                ),
+                                VulkanDistributedDispatchDistribution::InputColumns => {
+                                    return Err(VulkanError(format!(
+                                        "distributed input-column output observation for {}.{} has no private or reduction buffer",
+                                        planned.component_id, planned.node_id,
+                                    )));
+                                }
+                            };
+                            (buffer.as_ref(), byte_offset, byte_count)
+                        };
+                    let bytes = buffer.read_bytes_at(byte_offset, byte_count)?;
+                    const OBSERVATION_CHUNK_BYTE_COUNT: usize = 4096;
+                    observations.push(VulkanDistributedComponentBatchOutputObservation {
+                        component_id: planned.component_id.clone(),
+                        node_id: planned.node_id.clone(),
+                        device_id: planned_shard.device_id.clone(),
+                        byte_count,
+                        byte_digest: targeted_finalized_artifact_digest(
+                            Sha256::digest(&bytes).as_slice(),
+                        ),
+                        chunk_byte_count: OBSERVATION_CHUNK_BYTE_COUNT,
+                        chunk_digests: bytes
+                            .chunks(OBSERVATION_CHUNK_BYTE_COUNT)
+                            .map(|chunk| {
+                                targeted_finalized_artifact_digest(
+                                    Sha256::digest(chunk).as_slice(),
+                                )
+                            })
+                            .collect(),
+                    });
+                }
+            }
+        }
+        Ok(observations)
+    }
+
     fn resident_transient_bytes_by_device(&self) -> Result<BTreeMap<String, usize>, VulkanError> {
         let mut totals = BTreeMap::<String, usize>::new();
         for (key, buffer) in &self._private_activation_buffers {
@@ -424,6 +906,7 @@ impl VulkanDistributedComponentBatchRunners {
                         dynamic_resource_buffers,
                         &reduction_buffers,
                         &private_activation_buffers,
+                        &private_activation_specs,
                         lane_capacity,
                         execution_plan.shared_activation_route,
                     )?);
@@ -439,6 +922,7 @@ impl VulkanDistributedComponentBatchRunners {
                             parameter_buffers,
                             dynamic_resource_buffers,
                             &private_activation_buffers,
+                            &private_activation_specs,
                             lane_capacity,
                             execution_plan.shared_activation_route,
                         )?,
@@ -490,16 +974,32 @@ impl VulkanDistributedComponentBatchRunners {
             )?;
             let input_frame_capacity = batch_slice.signal_buffer(&input_key)?.frame_byte_capacity;
             let output_frame_capacity = batch_slice.signal_buffer(&output_key)?.frame_byte_capacity;
-            if input_frame_capacity != planned.input_byte_capacity
-                || output_frame_capacity != planned.output_byte_capacity
-            {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
-                    VulkanError(format!(
-                        "distributed component batch {}.{} signal capacities differ from its physical plan",
-                        planned.component_id, planned.node_id
-                    )),
-                ));
-            }
+            let input_is_private = validate_distributed_component_batch_activation_storage(
+                planned,
+                &planned.input_activation,
+                input_frame_capacity,
+                planned.input_byte_capacity,
+                planned
+                    .shards
+                    .iter()
+                    .map(|shard| (shard.device_id.clone(), shard.input_range.byte_count))
+                    .collect(),
+                &private_activation_specs,
+                "input",
+            )?;
+            let output_is_private = validate_distributed_component_batch_activation_storage(
+                planned,
+                &planned.output_activation,
+                output_frame_capacity,
+                planned.output_byte_capacity,
+                planned
+                    .shards
+                    .iter()
+                    .map(|shard| (shard.device_id.clone(), shard.output_byte_count))
+                    .collect(),
+                &private_activation_specs,
+                "output",
+            )?;
             for (activation, key) in planned
                 .auxiliary_input_activations
                 .iter()
@@ -585,13 +1085,35 @@ impl VulkanDistributedComponentBatchRunners {
                         ),
                         device_id: shard.device_id.clone(),
                     };
-                let private_input = private_activation_buffers.get(&input_private_key);
+                let private_input = if input_is_private {
+                    Some(private_activation_buffers.get(&input_private_key).ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            format!(
+                                "distributed component batch {}.{} is missing its private input allocation on {:?}",
+                                planned.component_id, planned.node_id, shard.device_id,
+                            ),
+                        ))
+                    })?)
+                } else {
+                    None
+                };
                 let input = if let Some(buffer) = private_input {
                     buffer
                 } else {
                     batch_slice.distributed_signal_buffer(&input_key, &shard.device_id)?
                 };
-                let private_output = private_activation_buffers.get(&output_private_key);
+                let private_output = if output_is_private {
+                    Some(private_activation_buffers.get(&output_private_key).ok_or_else(|| {
+                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                            format!(
+                                "distributed component batch {}.{} is missing its private output allocation on {:?}",
+                                planned.component_id, planned.node_id, shard.device_id,
+                            ),
+                        ))
+                    })?)
+                } else {
+                    None
+                };
                 let output = if let Some(buffer) = private_output {
                     buffer
                 } else {
@@ -1756,6 +2278,26 @@ fn distributed_component_batch_control_payload_bytes(
             .copy_from_slice(&expert_count.to_le_bytes());
     }
     bytes
+}
+
+fn component_batch_indirect_control_words(
+    bytes: &[u8],
+) -> Result<[u32; 7], VulkanError> {
+    if bytes.len()
+        != VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect.byte_count()
+            as usize
+    {
+        return Err(VulkanError(format!(
+            "component-batch indirect control has {} bytes, expected {}",
+            bytes.len(),
+            VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect.byte_count(),
+        )));
+    }
+    let mut words = [0u32; 7];
+    for (word, bytes) in words.iter_mut().zip(bytes.chunks_exact(size_of::<u32>())) {
+        *word = u32::from_le_bytes(bytes.try_into().expect("one indirect control word"));
+    }
+    Ok(words)
 }
 
 fn distributed_batch_shard_output_binding_range(

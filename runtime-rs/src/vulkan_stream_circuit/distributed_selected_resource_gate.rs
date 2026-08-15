@@ -159,8 +159,14 @@ impl VulkanDistributedSelectedResourceGate {
                     "distributed selected-resource selection count overflowed".to_string(),
                 )
             })?;
-        let missing_queue = VulkanGpuResidencyMissQueue::new(device, selection_count)
-            .map_err(VulkanDistributedDispatchRunnerError::from)?;
+        let missing_queue = VulkanGpuResidencyMissQueue::new(device, selection_count).map_err(
+            |error| {
+                VulkanDistributedDispatchRunnerError(format!(
+                    "distributed selected-resource miss queue for {}.{} selector {:?} on {logical_device_id:?} with {lane_count} lanes and capacity {selection_count} failed: {error}",
+                    dispatch.component_id, dispatch.node_id, selector.id,
+                ))
+            },
+        )?;
         let gate = VulkanGpuResidencyGate::new(
             device,
             &vulkan_gpu_residency_gate_spirv_words()
@@ -282,6 +288,23 @@ impl VulkanDistributedSelectedResourceGate {
 
     pub(crate) fn checkpoint_tag(&self) -> u32 {
         self.checkpoint_tag
+    }
+
+    pub(crate) fn selected_resource_indices(
+        &self,
+        lane_count: usize,
+    ) -> Result<BTreeSet<usize>, VulkanDistributedDispatchRunnerError> {
+        let active_selection_count = self
+            .selection_count_per_lane
+            .checked_mul(lane_count)
+            .ok_or_else(|| {
+                VulkanDistributedDispatchRunnerError(
+                    "distributed selected-resource observation count overflowed".to_string(),
+                )
+            })?;
+        self.gate
+            .selected_resource_indices(active_selection_count)
+            .map_err(VulkanDistributedDispatchRunnerError::from)
     }
 
     pub(crate) fn owned_resource_indices(&self) -> &BTreeSet<usize> {
