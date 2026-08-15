@@ -917,6 +917,36 @@ impl VulkanRuntimeDistributedPlacementSession {
                 .map(|artifact| artifact.artifact.clone())
                 .collect(),
         );
+        let graph = placed_model.executable_circuit_graph()?;
+        let (_, placement_plan, _) = plan_resident_package_placed_stream_circuit_with_tensor_index(
+            &owner_device_id,
+            &placed_model.placement,
+            &graph,
+            manifest_dir,
+            &tensor_index,
+            placed_model.package.activation_element_bytes,
+        )?;
+        let calibration_edges = placement_plan
+            .edges
+            .iter()
+            .cloned()
+            .map(|mut edge| {
+                let is_target_input = edge.destination_component_id == target.component_id;
+                let is_target_output = edge.source_component_id == target.component_id;
+                if is_target_input {
+                    edge.source_device_id = owner_device_id.clone();
+                }
+                if is_target_output {
+                    edge.destination_device_id = owner_device_id.clone();
+                }
+                if is_target_input || is_target_output {
+                    edge.transport = EdgeTransport::LocalBuffer {
+                        device_id: owner_device_id.clone(),
+                    };
+                }
+                edge
+            })
+            .collect::<Vec<_>>();
         let alignment = logical_devices
             .values()
             .map(|device| device.min_storage_buffer_offset_alignment())
@@ -934,10 +964,10 @@ impl VulkanRuntimeDistributedPlacementSession {
                 &tensor_index,
                 &artifact_manifest,
                 &BTreeMap::from([(target.component_id.clone(), planning_device_ids)]),
-                // Component calibration is an isolated boundary transaction.
-                // Full-graph neighbours intentionally remain unmounted and
-                // must not become activation owners in the candidate plan.
-                &[],
+                // Preserve the compiled edge identity and geometry while
+                // replacing absent full-graph neighbours with the local
+                // calibration fixture owner.
+                &calibration_edges,
                 alignment,
                 contract_phase,
                 execution_shape,
@@ -954,9 +984,7 @@ impl VulkanRuntimeDistributedPlacementSession {
                 &tensor_index,
                 &artifact_manifest,
                 &BTreeMap::from([(target.component_id.clone(), planning_device_ids)]),
-                // See the contract-selected path above: target boundaries are
-                // calibration fixtures, not aliases of unmounted graph edges.
-                &[],
+                &calibration_edges,
                 alignment,
                 contract_phase,
                 execution_shape,
