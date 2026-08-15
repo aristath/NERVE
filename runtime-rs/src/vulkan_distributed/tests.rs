@@ -40,7 +40,7 @@ mod tests {
         dispatch.component_id = "layer_00".to_string();
         dispatch.descriptors[0].binding = 0;
         dispatch.descriptors[0].resource = VulkanDescriptorResourceAddress::BoundaryInput {
-            signal_id: "input_frame".to_string(),
+            signal_id: "frame".to_string(),
         };
         let edge = ComponentEdgePlacement {
             edge_index: 0,

@@ -212,7 +212,8 @@ fn distributed_activation(
                     edge.destination_component_id == dispatch.component_id
                         && (edge.destination_port_id == *signal_id
                             || edge.destination_component_port.as_deref()
-                                == Some(signal_id.as_str()))
+                                == Some(signal_id.as_str())
+                            || edge.signal == *signal_id)
                 })
                 .collect::<Vec<_>>();
             let [edge] = matching.as_slice() else {
@@ -259,7 +260,8 @@ fn distributed_activation(
                 .filter(|edge| {
                     edge.source_component_id == dispatch.component_id
                         && (edge.source_port_id == *signal_id
-                            || edge.source_component_port.as_deref() == Some(signal_id.as_str()))
+                            || edge.source_component_port.as_deref() == Some(signal_id.as_str())
+                            || edge.signal == *signal_id)
                 })
                 .collect::<Vec<_>>();
             let [edge] = matching.as_slice() else {
