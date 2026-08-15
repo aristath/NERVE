@@ -1,6 +1,10 @@
 pub(crate) struct VulkanDistributedResidencyCommitRunner {
     _predicate_commit_dispatches: Vec<VulkanResidentKernelDispatch>,
     pub(crate) sequence: VulkanResidentKernelSequence,
+    // The recorded sequence stores raw Vulkan buffer handles. Retain the
+    // corresponding buffer objects until after the sequence is destroyed.
+    _transaction_predicate: Arc<VulkanResidentBuffer>,
+    _shard_residency_predicates: Vec<Arc<VulkanResidentBuffer>>,
 }
 
 fn distributed_commit_residency_fault_spirv_words(
@@ -62,6 +66,8 @@ fn create_distributed_residency_commit_runner(
     Ok(VulkanDistributedResidencyCommitRunner {
         _predicate_commit_dispatches: predicate_commit_dispatches,
         sequence,
+        _transaction_predicate: Arc::clone(transaction_predicate),
+        _shard_residency_predicates: shard_residency_predicates.to_vec(),
     })
 }
 

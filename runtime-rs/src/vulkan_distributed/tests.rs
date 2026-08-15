@@ -3400,6 +3400,18 @@ mod tests {
     }
 
     #[test]
+    fn distributed_completion_waits_for_shards_or_their_coordinator_but_not_both() {
+        assert_eq!(
+            distributed_dispatch_completion_owner(false),
+            VulkanDistributedDispatchCompletionOwner::Shards,
+        );
+        assert_eq!(
+            distributed_dispatch_completion_owner(true),
+            VulkanDistributedDispatchCompletionOwner::Coordinator,
+        );
+    }
+
+    #[test]
     fn tensor_parallel_expert_dispatches_merge_distinct_parameter_fragments_into_one_cohort() {
         let mut gate_up = fixture_plan("row_major").dispatches.remove(0);
         gate_up.dispatch_index = 4;

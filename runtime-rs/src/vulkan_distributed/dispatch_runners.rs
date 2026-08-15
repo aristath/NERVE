@@ -195,6 +195,22 @@ enum VulkanDistributedCoordinatorKind {
     ResidencyCommit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VulkanDistributedDispatchCompletionOwner {
+    Shards,
+    Coordinator,
+}
+
+fn distributed_dispatch_completion_owner(
+    has_coordinator: bool,
+) -> VulkanDistributedDispatchCompletionOwner {
+    if has_coordinator {
+        VulkanDistributedDispatchCompletionOwner::Coordinator
+    } else {
+        VulkanDistributedDispatchCompletionOwner::Shards
+    }
+}
+
 fn physical_island_coordinator_kind(
     island: &VulkanPhysicalExecutionIslandPlan,
     has_shard_residency_predicates: bool,
@@ -632,9 +648,10 @@ impl VulkanDistributedDispatchRunners {
                         (Arc::clone(&predicate), predicate)
                     } else {
                         let mut buffers = owner_device
-                            .create_shared_conditional_resident_buffers(
+                            .create_shared_conditional_resident_buffers_for_route(
                                 &[device],
                                 VULKAN_DEMAND_FEEDBACK_PREDICATE_BYTE_CAPACITY,
+                                VulkanSharedResidentBufferRoute::SharedHost,
                             )
                             .map_err(VulkanDistributedDispatchRunnerError::from)?
                             .buffers
@@ -1334,6 +1351,8 @@ impl VulkanDistributedDispatchRunners {
                 "distributed runner has no dispatch {dispatch_index} owned by {owner_device_id:?}"
             ))
         })?;
+        let completion_owner =
+            distributed_dispatch_completion_owner(dispatch.coordinator_sequence().is_some());
         let resolved_shards = dispatch
             .shards
             .iter()
@@ -1382,7 +1401,8 @@ impl VulkanDistributedDispatchRunners {
                     vec![sync.helper_done(dependency_value)]
                 })
                 .unwrap_or_default();
-            let shard_signal_completion = signal_completion && dispatch.coordinator_sequence().is_none();
+            let shard_signal_completion = signal_completion
+                && completion_owner == VulkanDistributedDispatchCompletionOwner::Shards;
             let submission = if let Some(submission_batch) = submission_batch {
                 submission_batch.enqueue_recorded_sequence(
                     device,
@@ -1418,6 +1438,10 @@ impl VulkanDistributedDispatchRunners {
             submitted.push((device, shard, sequence));
         }
         if let Some(coordinator_sequence) = dispatch.coordinator_sequence() {
+            debug_assert_eq!(
+                completion_owner,
+                VulkanDistributedDispatchCompletionOwner::Coordinator,
+            );
             let owner_device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
                 VulkanDistributedDispatchRunnerError(format!(
                     "failed to resolve distributed coordinator owner {:?}: {error}",
@@ -1840,55 +1864,55 @@ impl VulkanDistributedDispatchRunners {
                 "distributed runner has no dispatch {dispatch_index} owned by {owner_device_id:?}"
             ))
         })?;
-        let resolved_shards = dispatch
-            .shards
-            .iter()
-            .map(|shard| {
-                device_for(&shard.device_id)
-                    .map(|device| (shard, device))
-                    .map_err(|error| {
+        let mut first_error = None;
+        match distributed_dispatch_completion_owner(dispatch.coordinator_sequence().is_some()) {
+            VulkanDistributedDispatchCompletionOwner::Shards => {
+                for shard in &dispatch.shards {
+                    let device = device_for(&shard.device_id).map_err(|error| {
                         VulkanDistributedDispatchRunnerError(format!(
                             "failed to resolve distributed shard device {:?}: {error}",
                             shard.device_id
                         ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut first_error = None;
-        for (shard, device) in &resolved_shards {
-            let sequence = distributed_sequence_for_kind(
-                &shard.sequence,
-                shard.feedback_sequence.as_ref(),
-                sequence_kind,
-                &shard.device_id,
-            )?;
-            if let Err(error) = device.wait_resident_kernel_sequence(sequence)
-                && first_error.is_none()
-            {
-                first_error = Some(format!(
-                    "failed waiting for distributed dispatch {}.{} shard on {:?}: {error}",
-                    dispatch.planned.leader().component_id,
-                    dispatch.planned.tail().node_id,
-                    shard.device_id
-                ));
+                    })?;
+                    let sequence = distributed_sequence_for_kind(
+                        &shard.sequence,
+                        shard.feedback_sequence.as_ref(),
+                        sequence_kind,
+                        &shard.device_id,
+                    )?;
+                    if let Err(error) = device.wait_resident_kernel_sequence(sequence)
+                        && first_error.is_none()
+                    {
+                        first_error = Some(format!(
+                            "failed waiting for distributed dispatch {}.{} shard on {:?}: {error}",
+                            dispatch.planned.leader().component_id,
+                            dispatch.planned.tail().node_id,
+                            shard.device_id
+                        ));
+                    }
+                }
             }
-        }
-        if let Some(coordinator_sequence) = dispatch.coordinator_sequence() {
-            let owner_device = device_for(&dispatch.planned.owner_device_id).map_err(|error| {
-                VulkanDistributedDispatchRunnerError(format!(
-                    "failed to resolve distributed coordinator owner {:?}: {error}",
-                    dispatch.planned.owner_device_id
-                ))
-            })?;
-            if let Err(error) = owner_device.wait_resident_kernel_sequence(coordinator_sequence)
-                && first_error.is_none()
-            {
-                first_error = Some(format!(
-                    "failed waiting for distributed coordinator {}.{} on {:?}: {error}",
-                    dispatch.planned.leader().component_id,
-                    dispatch.planned.tail().node_id,
-                    dispatch.planned.owner_device_id
-                ));
+            VulkanDistributedDispatchCompletionOwner::Coordinator => {
+                let coordinator_sequence = dispatch
+                    .coordinator_sequence()
+                    .expect("coordinator completion owner has a sequence");
+                let owner_device =
+                    device_for(&dispatch.planned.owner_device_id).map_err(|error| {
+                        VulkanDistributedDispatchRunnerError(format!(
+                            "failed to resolve distributed coordinator owner {:?}: {error}",
+                            dispatch.planned.owner_device_id
+                        ))
+                    })?;
+                if let Err(error) =
+                    owner_device.wait_resident_kernel_sequence(coordinator_sequence)
+                {
+                    first_error = Some(format!(
+                        "failed waiting for distributed coordinator {}.{} on {:?}: {error}",
+                        dispatch.planned.leader().component_id,
+                        dispatch.planned.tail().node_id,
+                        dispatch.planned.owner_device_id
+                    ));
+                }
             }
         }
         if let Some(error) = first_error {
