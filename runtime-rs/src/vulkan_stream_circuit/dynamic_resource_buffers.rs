@@ -30,6 +30,19 @@ pub struct VulkanDynamicResourceBuffers {
         std::sync::Mutex<BTreeMap<String, BTreeSet<usize>>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VulkanSelectedResourceRecordObservation {
+    pub component_id: String,
+    pub node_id: String,
+    pub selector_id: String,
+    pub resource_index: usize,
+    pub parameter_ids: Vec<String>,
+    pub parameter_slots: Vec<u32>,
+    pub record_byte_counts: Vec<u64>,
+    pub record_representations: Vec<u32>,
+    pub invalid_parameter_indices: Vec<usize>,
+}
+
 impl VulkanDynamicResourceBuffers {
     pub fn from_layout(
         device: &VulkanComputeDevice,
@@ -221,6 +234,35 @@ impl VulkanDynamicResourceBuffers {
         self.parameter_slots.len()
     }
 
+    pub(crate) fn selected_resource_record_observations(
+        &self,
+        selected_resource_indices: &BTreeMap<String, BTreeSet<usize>>,
+    ) -> Result<Vec<VulkanSelectedResourceRecordObservation>, VulkanError> {
+        let address_bytes = self
+            .address_table
+            .read_bytes(self.address_table.byte_capacity())?;
+        let mut observations = Vec::new();
+        for (key, table) in &self.parameter_slot_tables {
+            let Some(selected) = selected_resource_indices.get(&table.selector_id) else {
+                continue;
+            };
+            let slots = self.parameter_slots.get(key).ok_or_else(|| {
+                VulkanError(format!(
+                    "dynamic resource parameter-slot buffer for {}.{} disappeared",
+                    key.component_id, key.node_id,
+                ))
+            })?;
+            let slot_bytes = slots.read_bytes(slots.byte_capacity())?;
+            observations.extend(selected_resource_record_observations_from_bytes(
+                table,
+                selected,
+                &slot_bytes,
+                &address_bytes,
+            )?);
+        }
+        Ok(observations)
+    }
+
     /// Creates stream-owned arithmetic-ownership tables over the same stable
     /// package address space. Resource residency and addresses remain shared;
     /// later ownership changes cannot leak into another active stream.
@@ -378,6 +420,134 @@ impl VulkanDynamicResourceBuffers {
         );
         Ok(())
     }
+}
+
+fn selected_resource_record_observations_from_bytes(
+    table: &VulkanCompiledParameterSlotTable,
+    selected_resource_indices: &BTreeSet<usize>,
+    parameter_slot_bytes: &[u8],
+    address_table_bytes: &[u8],
+) -> Result<Vec<VulkanSelectedResourceRecordObservation>, VulkanError> {
+    const ADDRESS_RECORD_BYTE_COUNT: usize = 32;
+    const UNBOUND_PARAMETER_SLOT: u32 = u32::MAX;
+
+    if !parameter_slot_bytes.len().is_multiple_of(size_of::<u32>())
+        || !address_table_bytes.len().is_multiple_of(ADDRESS_RECORD_BYTE_COUNT)
+    {
+        return Err(VulkanError(
+            "selected-resource record observation received a misaligned device table"
+                .to_string(),
+        ));
+    }
+    let slot_words = parameter_slot_bytes
+        .chunks_exact(size_of::<u32>())
+        .map(|bytes| {
+            u32::from_le_bytes(bytes.try_into().expect("u32 slot chunks are exact"))
+        })
+        .collect::<Vec<_>>();
+    let slot_count = table.slot_count().ok_or_else(|| {
+        VulkanError(format!(
+            "selected-resource parameter table for selector {:?} overflows",
+            table.selector_id,
+        ))
+    })?;
+    if table.resource_count == 0
+        || !slot_count.is_multiple_of(table.resource_count)
+        || slot_words.len() != slot_count
+    {
+        return Err(VulkanError(format!(
+            "selected-resource parameter table for selector {:?} has invalid geometry",
+            table.selector_id,
+        )));
+    }
+    let parameters_per_resource = slot_count / table.resource_count;
+    if table.parameter_ids.len() != parameters_per_resource {
+        return Err(VulkanError(format!(
+            "selected-resource parameter table for selector {:?} names {} parameters but has {parameters_per_resource} slots per resource",
+            table.selector_id,
+            table.parameter_ids.len(),
+        )));
+    }
+
+    selected_resource_indices
+        .iter()
+        .map(|resource_index| {
+            let slot_start = resource_index
+                .checked_mul(parameters_per_resource)
+                .ok_or_else(|| {
+                    VulkanError(
+                        "selected-resource parameter slot offset overflowed".to_string(),
+                    )
+                })?;
+            let slot_end = slot_start
+                .checked_add(parameters_per_resource)
+                .ok_or_else(|| {
+                    VulkanError(
+                        "selected-resource parameter slot range overflowed".to_string(),
+                    )
+                })?;
+            let parameter_slots = slot_words
+                .get(slot_start..slot_end)
+                .ok_or_else(|| {
+                    VulkanError(format!(
+                        "selected-resource index {resource_index} exceeds selector {:?} parameter slots",
+                        table.selector_id,
+                    ))
+                })?
+                .to_vec();
+            let mut record_byte_counts = Vec::with_capacity(parameters_per_resource);
+            let mut record_representations = Vec::with_capacity(parameters_per_resource);
+            let mut invalid_parameter_indices = Vec::new();
+            for (parameter_index, slot) in parameter_slots.iter().copied().enumerate() {
+                let record = usize::try_from(slot)
+                    .ok()
+                    .filter(|_| slot != UNBOUND_PARAMETER_SLOT)
+                    .and_then(|slot| slot.checked_mul(ADDRESS_RECORD_BYTE_COUNT))
+                    .and_then(|start| {
+                        start
+                            .checked_add(ADDRESS_RECORD_BYTE_COUNT)
+                            .and_then(|end| address_table_bytes.get(start..end))
+                    });
+                let Some(record) = record else {
+                    record_byte_counts.push(0);
+                    record_representations.push(0);
+                    invalid_parameter_indices.push(parameter_index);
+                    continue;
+                };
+                let device_address = u64::from_le_bytes(
+                    record[0..8].try_into().expect("address record u64"),
+                );
+                let byte_count = u64::from_le_bytes(
+                    record[8..16].try_into().expect("address record u64"),
+                );
+                let generation = u64::from_le_bytes(
+                    record[16..24].try_into().expect("address record u64"),
+                );
+                let resident = u32::from_le_bytes(
+                    record[24..28].try_into().expect("address record u32"),
+                );
+                let representation = u32::from_le_bytes(
+                    record[28..32].try_into().expect("address record u32"),
+                );
+                record_byte_counts.push(byte_count);
+                record_representations.push(representation);
+                if device_address == 0 || byte_count == 0 || generation == 0 || resident != 1 {
+                    invalid_parameter_indices.push(parameter_index);
+                }
+            }
+            Ok(VulkanSelectedResourceRecordObservation {
+                component_id: table.key.component_id.clone(),
+                node_id: table.key.node_id.clone(),
+                selector_id: table.selector_id.clone(),
+                resource_index: *resource_index,
+                parameter_ids: table.parameter_ids.clone(),
+                parameter_slots,
+                record_byte_counts,
+                record_representations,
+                invalid_parameter_indices,
+            })
+        })
+        .collect()
 }
 
 fn dynamic_parameter_slot_replacements(
@@ -575,5 +745,82 @@ mod dynamic_resource_buffer_tests {
         .unwrap_err()
         .to_string()
         .contains("exceeds its resource count"));
+    }
+
+    #[test]
+    fn selected_resource_record_observation_reports_exact_slots_and_invalid_records() {
+        let table = parameter_slot_table(
+            2,
+            VulkanCompiledParameterSlotMapping::Explicit {
+                parameter_slots: vec![0, 1, 2, 3],
+            },
+        );
+        let parameter_slot_bytes = [0u32, 1, 2, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut address_table_bytes = Vec::new();
+        for (address, byte_count, generation, resident, representation) in [
+            (0x1000u64, 64u64, 1u64, 1u32, 0u32),
+            (0x2000, 16, 2, 1, 1),
+            (0, 64, 3, 1, 0),
+            (0x4000, 16, 4, 1, 0),
+        ] {
+            address_table_bytes.extend(address.to_le_bytes());
+            address_table_bytes.extend(byte_count.to_le_bytes());
+            address_table_bytes.extend(generation.to_le_bytes());
+            address_table_bytes.extend(resident.to_le_bytes());
+            address_table_bytes.extend(representation.to_le_bytes());
+        }
+
+        let observations = selected_resource_record_observations_from_bytes(
+            &table,
+            &BTreeSet::from([0, 1]),
+            &parameter_slot_bytes,
+            &address_table_bytes,
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].resource_index, 0);
+        assert_eq!(observations[0].parameter_slots, vec![0, 1]);
+        assert_eq!(observations[0].record_byte_counts, vec![64, 16]);
+        assert_eq!(observations[0].record_representations, vec![0, 1]);
+        assert!(observations[0].invalid_parameter_indices.is_empty());
+        assert_eq!(observations[1].resource_index, 1);
+        assert_eq!(observations[1].parameter_slots, vec![2, u32::MAX]);
+        assert_eq!(observations[1].record_byte_counts, vec![64, 0]);
+        assert_eq!(observations[1].invalid_parameter_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn selected_resource_record_observation_rejects_misaligned_tables_and_oob_resources() {
+        let table = parameter_slot_table(
+            1,
+            VulkanCompiledParameterSlotMapping::Explicit {
+                parameter_slots: vec![0, 1],
+            },
+        );
+        assert!(
+            selected_resource_record_observations_from_bytes(
+                &table,
+                &BTreeSet::from([0]),
+                &[0; 7],
+                &[0; 64],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("misaligned")
+        );
+        assert!(
+            selected_resource_record_observations_from_bytes(
+                &table,
+                &BTreeSet::from([1]),
+                &[0; 8],
+                &[0; 64],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds")
+        );
     }
 }
