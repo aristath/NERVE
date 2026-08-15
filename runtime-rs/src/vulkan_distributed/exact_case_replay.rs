@@ -54,7 +54,7 @@ pub(crate) fn replay_exact_execution_cases_to_phase(
         execution_plan.shared_activation_route,
         phase,
     )?;
-    let dispatch_indices_by_component = execution_plan.dispatches.iter().enumerate().fold(
+    let available_dispatch_indices_by_component = execution_plan.dispatches.iter().enumerate().fold(
         BTreeMap::<String, Vec<usize>>::new(),
         |mut by_component, (index, dispatch)| {
             by_component
@@ -65,6 +65,7 @@ pub(crate) fn replay_exact_execution_cases_to_phase(
         },
     );
 
+    let mut selected_dispatch_indices = BTreeSet::new();
     for (component_id, case) in cases {
         if case.behavior.runtime_implementation_fingerprint
             != crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
@@ -79,23 +80,69 @@ pub(crate) fn replay_exact_execution_cases_to_phase(
                 case.behavior.phase,
             ));
         }
+        let available = available_dispatch_indices_by_component
+            .get(component_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if case.strategy == VulkanPlacementExecutionStrategy::SingleDevice {
+            if !available.is_empty() || !case.shards.is_empty() {
+                return exact_case_error(format!(
+                    "single-device exact case for component {component_id:?} conflicts with a distributed runtime plan",
+                ));
+            }
+            continue;
+        }
+        if case.strategy == VulkanPlacementExecutionStrategy::Serialized {
+            return exact_case_error(format!(
+                "serialized exact case for component {component_id:?} cannot replay as one distributed component island",
+            ));
+        }
+        selected_dispatch_indices.extend(exact_dispatch_subset_for_measured_case(
+            execution_plan,
+            component_id,
+            available,
+            case,
+            loaded_manifest,
+        )?);
+    }
+    if let Some(component_id) = available_dispatch_indices_by_component
+        .keys()
+        .find(|component_id| !cases.contains_key(*component_id))
+    {
+        return exact_case_error(format!(
+            "distributed runtime component {component_id:?} has no exact execution case for {phase:?}",
+        ));
+    }
+    execution_plan.dispatches = execution_plan
+        .dispatches
+        .drain(..)
+        .enumerate()
+        .filter_map(|(index, dispatch)| selected_dispatch_indices.contains(&index).then_some(dispatch))
+        .collect();
+    execution_plan.execution_islands = resolved_physical_execution_islands_for_phase(
+        &execution_plan.dispatches,
+        execution_plan.shared_activation_route,
+        phase,
+    )?;
+    let dispatch_indices_by_component = execution_plan.dispatches.iter().enumerate().fold(
+        BTreeMap::<String, Vec<usize>>::new(),
+        |mut by_component, (index, dispatch)| {
+            by_component
+                .entry(dispatch.component_id.clone())
+                .or_default()
+                .push(index);
+            by_component
+        },
+    );
+
+    for (component_id, case) in cases {
         let dispatch_indices = dispatch_indices_by_component
             .get(component_id)
             .map(Vec::as_slice)
             .unwrap_or_default();
         match case.strategy {
-            VulkanPlacementExecutionStrategy::SingleDevice => {
-                if !dispatch_indices.is_empty() || !case.shards.is_empty() {
-                    return exact_case_error(format!(
-                        "single-device exact case for component {component_id:?} conflicts with a distributed runtime plan",
-                    ));
-                }
-            }
-            VulkanPlacementExecutionStrategy::Serialized => {
-                return exact_case_error(format!(
-                    "serialized exact case for component {component_id:?} cannot replay as one distributed component island",
-                ));
-            }
+            VulkanPlacementExecutionStrategy::SingleDevice => {}
+            VulkanPlacementExecutionStrategy::Serialized => unreachable!("rejected above"),
             _ => replay_exact_distributed_component_case(
                 execution_plan,
                 component_id,
@@ -106,20 +153,124 @@ pub(crate) fn replay_exact_execution_cases_to_phase(
             )?,
         }
     }
-
-    if let Some(component_id) = dispatch_indices_by_component
-        .keys()
-        .find(|component_id| !cases.contains_key(*component_id))
-    {
-        return exact_case_error(format!(
-            "distributed runtime component {component_id:?} has no exact execution case for {phase:?}",
-        ));
-    }
     execution_plan.execution_islands = resolved_physical_execution_islands_for_phase(
         &execution_plan.dispatches,
         execution_plan.shared_activation_route,
         phase,
     )?;
+    Ok(())
+}
+
+fn exact_dispatch_subset_for_measured_case(
+    execution_plan: &VulkanDistributedExecutionPlan,
+    component_id: &str,
+    available_dispatch_indices: &[usize],
+    measured_case: &VulkanPlacementExecutionCaseIdentity,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
+) -> Result<Vec<usize>, VulkanDistributedPlanError> {
+    let measured_dispatch_count = measured_case
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation, VulkanPlacementOperationGeometry::Dispatch { .. }))
+        .count();
+    if measured_dispatch_count == 0 || measured_dispatch_count > available_dispatch_indices.len() {
+        return exact_case_error(format!(
+            "exact case for component {component_id:?} has no compatible number of distributed dispatches",
+        ));
+    }
+    let mut candidates = Vec::new();
+    exact_dispatch_subset_candidates(
+        execution_plan,
+        available_dispatch_indices,
+        measured_case,
+        loaded_manifest,
+        measured_dispatch_count,
+        0,
+        &mut Vec::with_capacity(measured_dispatch_count),
+        &mut candidates,
+    )?;
+    match candidates.as_slice() {
+        [selected] => Ok(selected.clone()),
+        [] => exact_case_error(format!(
+            "exact case for component {component_id:?} has no structurally matching distributed contract subset",
+        )),
+        _ => exact_case_error(format!(
+            "exact case for component {component_id:?} ambiguously matches {} distributed contract subsets",
+            candidates.len(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exact_dispatch_subset_candidates(
+    execution_plan: &VulkanDistributedExecutionPlan,
+    available_dispatch_indices: &[usize],
+    measured_case: &VulkanPlacementExecutionCaseIdentity,
+    loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
+    required_count: usize,
+    start: usize,
+    selected: &mut Vec<usize>,
+    candidates: &mut Vec<Vec<usize>>,
+) -> Result<(), VulkanDistributedPlanError> {
+    if selected.len() == required_count {
+        let row_extents = selected
+            .iter()
+            .map(|index| {
+                let rows = execution_plan.dispatches[*index].output_rows;
+                (rows, rows)
+            })
+            .collect::<Vec<_>>();
+        let operations = vulkan_distributed_execution_operations(
+            loaded_manifest,
+            execution_plan,
+            selected,
+            &row_extents,
+        )
+        .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+        if !exact_operations_are_structurally_equivalent(&measured_case.operations, &operations) {
+            return Ok(());
+        }
+        let artifact_digest = vulkan_distributed_execution_artifact_digest(
+            loaded_manifest,
+            execution_plan,
+            selected,
+        )
+        .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+        let execution_graph_digest = vulkan_distributed_execution_graph_digest(
+            &measured_case.behavior.compiled_execution_signature,
+            execution_plan,
+            selected,
+        )
+        .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+        let equivalence = vulkan_distributed_execution_equivalence(execution_plan, selected)
+            .map_err(|error| VulkanDistributedPlanError(error.to_string()))?;
+        if artifact_digest == measured_case.artifact_digest
+            && execution_graph_digest == measured_case.execution_graph_digest
+            && equivalence == measured_case.equivalence
+        {
+            candidates.push(selected.clone());
+        }
+        return Ok(());
+    }
+    let remaining_needed = required_count - selected.len();
+    if available_dispatch_indices.len().saturating_sub(start) < remaining_needed {
+        return Ok(());
+    }
+    let last_start = available_dispatch_indices.len() - remaining_needed;
+    for position in start..=last_start {
+        selected.push(available_dispatch_indices[position]);
+        exact_dispatch_subset_candidates(
+            execution_plan,
+            available_dispatch_indices,
+            measured_case,
+            loaded_manifest,
+            required_count,
+            position + 1,
+            selected,
+            candidates,
+        )?;
+        selected.pop();
+    }
     Ok(())
 }
 
@@ -1340,6 +1491,51 @@ mod exact_case_replay_tests {
                 .map(|shard| (shard.device_id.as_str(), shard.row_start, shard.row_count))
                 .collect::<Vec<_>>(),
             [("owner", 0, 2), ("helper", 2, 2)],
+        );
+    }
+
+    #[test]
+    fn exact_plan_set_replay_selects_the_measured_subset_from_available_contracts() {
+        let selected = tensor_parallel_dispatch();
+        let mut unselected = tensor_parallel_dispatch();
+        unselected.dispatch_index = 8;
+        unselected.node_id = "other-down".to_string();
+        unselected.physical_execution_contract_id = "other-contract".to_string();
+        unselected.implementation_digest = "other-implementation".to_string();
+        unselected.input_width += 1;
+        let empty = || VulkanDistributedExecutionPlan {
+            device_ids: vec!["helper".to_string(), "owner".to_string()],
+            storage_buffer_offset_alignment: 4,
+            dispatches: Vec::new(),
+            execution_islands: Vec::new(),
+            shared_activation_route: VulkanSharedResidentBufferRoute::SharedHost,
+            shared_input_byte_capacity: 16,
+            shared_output_byte_capacity: 16,
+            distributed_parameter_byte_count: 0,
+        };
+        let mut plans = VulkanDistributedExecutionPlanSet {
+            decode: VulkanDistributedExecutionPlan {
+                dispatches: vec![selected, unselected],
+                ..empty()
+            },
+            decode_batch: empty(),
+            prefill: empty(),
+        };
+
+        plans
+            .apply_exact_execution_cases(
+                &BTreeMap::from([("moe".to_string(), tensor_parallel_exact_case())]),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &device_execution_identities(),
+                &loaded_manifest(),
+            )
+            .unwrap();
+
+        assert_eq!(plans.decode.dispatches.len(), 1);
+        assert_eq!(
+            plans.decode.dispatches[0].physical_execution_contract_id,
+            "contract",
         );
     }
 

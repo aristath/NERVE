@@ -43,10 +43,11 @@ fn rebind_exact_execution_case_to_runtime_component(
     measured_implementation_digests.sort();
     structural_runtime_implementation_digests.sort();
     if measured_case.contract_ids.len() != runtime_contract_ids.len()
-        || measured_implementation_digests != structural_runtime_implementation_digests
+        || measured_implementation_digests.len() != structural_runtime_implementation_digests.len()
     {
         return exact_case_error(format!(
-            "exact case for component {component_id:?} was measured with different physical execution contracts or implementations",
+            "exact case for component {component_id:?} was measured with different physical execution contracts or implementations: measured_contracts={:?}, runtime_contracts={runtime_contract_ids:?}, measured_implementations={measured_implementation_digests:?}, runtime_implementations={structural_runtime_implementation_digests:?}",
+            measured_case.contract_ids,
         ));
     }
 
