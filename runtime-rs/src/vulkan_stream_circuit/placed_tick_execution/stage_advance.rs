@@ -123,13 +123,14 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                 }
             }
             VulkanMountedPlacedStreamTickStage::Dispatch { .. } => {
+                let distributed_stage_index = slice.cursor.next_stage_index;
                 if let Some(distributed) = slice
                     .execution_plan
-                    .distributed_dispatch_at_stage(slice.cursor.next_stage_index)
+                    .distributed_dispatch_at_stage(distributed_stage_index)
                 {
                     let dependencies = slice
                         .execution_plan
-                        .distributed_dispatch_dependencies_at_stage(slice.cursor.next_stage_index)
+                        .distributed_dispatch_dependencies_at_stage(distributed_stage_index)
                         .expect("every distributed stage has a dependency topology");
                     debug_assert_eq!(dependencies.dispatch_index, distributed.dispatch_index);
                     let consumes_ready = ready_dependency.is_some_and(|(dispatch_index, _)| {
@@ -157,7 +158,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     }) = slice.cursor.tick_plan.stages.get(
                         slice
                             .execution_plan
-                            .physical_execution_island_at_stage(slice.cursor.next_stage_index)
+                            .physical_execution_island_at_stage(distributed_stage_index)
                             .expect("every distributed dispatch belongs to a stage group")
                             .end_stage_index,
                     ) {
@@ -347,7 +348,7 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                         }
                     } else if !compact_distributed_stage_is_terminal(
                         slice.execution_plan,
-                        slice.cursor.next_stage_index,
+                        distributed_stage_index,
                     ) {
                         distributed_runners
                             .wait_dispatch(
