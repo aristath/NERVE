@@ -15,6 +15,35 @@ pub struct VulkanMountedPlacedResidentDispatchSegmentRunner {
 }
 
 impl VulkanMountedPlacedResidentDispatchSegmentRunner {
+    /// Mounts a synchronization-capable execution boundary with no model
+    /// dispatches of its own. Prefix and suffix runtime dispatches use these
+    /// boundaries when the adjacent model dispatch is physically distributed,
+    /// so input, sampling, feedback, and timeline work remain first-class GPU
+    /// submissions instead of depending on a neighboring local model segment.
+    fn from_extension_boundary(
+        device: &VulkanComputeDevice,
+        mounted: &VulkanMountedPlacedStreamCircuit,
+        stage_index: usize,
+    ) -> Result<Self, VulkanMountedPlacedResidentKernelDispatchError> {
+        Ok(Self {
+            start_stage_index: stage_index,
+            end_stage_index: stage_index,
+            dispatch_count: 0,
+            dispatches: Vec::new(),
+            stream_control_buffer: mounted.stream_control_buffer.clone(),
+            sequences: RefCell::new(BTreeMap::from([(
+                0,
+                device
+                    .create_resident_kernel_sequence()
+                    .map_err(VulkanMountedPlacedResidentKernelDispatchError::Vulkan)?,
+            )])),
+            feedback_sequences: RefCell::new(Vec::new()),
+            feedback_indirect: None,
+            demand_residency: None,
+            pipeline_continuation_predicate: None,
+        })
+    }
+
     fn from_dispatch_stages(
         device: &VulkanComputeDevice,
         mounted: &VulkanMountedPlacedStreamCircuit,
@@ -136,6 +165,13 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
         generation_tail_dispatch_count: Option<usize>,
         lane_capacity: usize,
     ) -> Result<(), VulkanError> {
+        if self.dispatches.is_empty()
+            && prefix_dispatches.is_empty()
+            && suffix_dispatches.is_empty()
+        {
+            self.feedback_indirect = None;
+            return Ok(());
+        }
         let indirect = if let Some(demand) = &self.demand_residency {
             control.register_sequence_dimensions(
                 device_id,
@@ -423,7 +459,16 @@ impl VulkanMountedPlacedResidentDispatchSegmentRunner {
             .iter()
             .map(|dispatch| stream_control_push_constant_bytes(&dispatch.push_constants, control))
             .collect::<Result<Vec<_>, _>>()?;
-        let indirect = use_feedback_indirect
+        let command_count = prefix_dispatches
+            .len()
+            .checked_add(self.dispatches.len())
+            .and_then(|count| count.checked_add(suffix_dispatches.len()))
+            .ok_or_else(|| {
+                VulkanMountedPlacedResidentKernelDispatchError::Vulkan(VulkanError(
+                    "resident dispatch sequence length overflowed".to_string(),
+                ))
+            })?;
+        let indirect = (use_feedback_indirect && command_count != 0)
             .then(|| {
                 self.feedback_indirect.as_ref().ok_or_else(|| {
                     VulkanMountedPlacedResidentKernelDispatchError::Vulkan(VulkanError(

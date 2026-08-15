@@ -7,6 +7,8 @@ pub struct VulkanMountedPlacedResidentStreamTickExecutionPlan {
     pub dispatch_count: usize,
     pub distributed_dispatch_count: usize,
     dispatch_segments: Vec<VulkanMountedPlacedResidentDispatchSegmentRunner>,
+    prefix_extension_runner: Option<VulkanMountedPlacedResidentDispatchSegmentRunner>,
+    suffix_extension_runner: Option<VulkanMountedPlacedResidentDispatchSegmentRunner>,
     distributed_dispatch_stages: BTreeMap<usize, VulkanMountedPlacedStreamTickDispatch>,
     physical_execution_islands: BTreeMap<usize, VulkanMountedPhysicalExecutionIslandStage>,
     distributed_dispatch_dependencies:
@@ -212,10 +214,27 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
                 &distributed_dispatch_indices,
                 &physical_execution_islands,
             );
+        let first_dispatch_stage_index = tick_plan.stages.iter().find_map(|stage| match stage {
+            VulkanMountedPlacedStreamTickStage::Dispatch { stage_index, .. } => Some(*stage_index),
+            _ => None,
+        });
+        let last_dispatch_stage_index = tick_plan.stages.iter().rev().find_map(|stage| match stage {
+            VulkanMountedPlacedStreamTickStage::Dispatch { stage_index, .. } => Some(*stage_index),
+            _ => None,
+        });
+        let prefix_extension_stage_index = first_dispatch_stage_index
+            .filter(|stage_index| physical_execution_islands.contains_key(stage_index));
+        let suffix_extension_stage_index = last_dispatch_stage_index.filter(|stage_index| {
+            physical_execution_islands.values().any(|island| {
+                island.end_stage_index.checked_sub(1) == Some(*stage_index)
+            })
+        });
         let distributed_dispatch_dependencies = distributed_dispatch_dependency_topologies(
             &physical_execution_islands,
             &dispatch_segment_stage_ranges,
             &tick_plan.stages,
+            prefix_extension_stage_index,
+            suffix_extension_stage_index,
         );
         let mut dispatch_segments = Vec::new();
         for &(start, end) in &dispatch_segment_stage_ranges {
@@ -246,12 +265,33 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
             .sum();
         let dispatch_segment_count = dispatch_segments.len();
         let distributed_dispatch_count = distributed_dispatch_stages.len();
+        let prefix_extension_runner = prefix_extension_stage_index
+            .map(|stage_index| {
+                VulkanMountedPlacedResidentDispatchSegmentRunner::from_extension_boundary(
+                    device,
+                    mounted,
+                    stage_index,
+                )
+            })
+            .transpose()?;
+        let suffix_extension_runner = suffix_extension_stage_index
+            .and_then(|stage_index| stage_index.checked_add(1))
+            .map(|stage_index| {
+                VulkanMountedPlacedResidentDispatchSegmentRunner::from_extension_boundary(
+                    device,
+                    mounted,
+                    stage_index,
+                )
+            })
+            .transpose()?;
         Ok(Self {
             tick_plan: Arc::new(tick_plan),
             dispatch_segment_count,
             dispatch_count,
             distributed_dispatch_count,
             dispatch_segments,
+            prefix_extension_runner,
+            suffix_extension_runner,
             distributed_dispatch_stages,
             physical_execution_islands,
             distributed_dispatch_dependencies,
@@ -291,13 +331,28 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
     ) -> Result<(), VulkanError> {
         let first_stage_index = self.first_dispatch_segment_stage_index();
         let last_stage_index = self.last_dispatch_segment_stage_index();
+        if let Some(runner) = &mut self.prefix_extension_runner {
+            runner.configure_feedback_indirect_dispatches(
+                device,
+                control,
+                device_id,
+                prefix_dispatches,
+                &[],
+                None,
+                lane_capacity,
+            )?;
+        }
         for segment in &mut self.dispatch_segments {
-            let prefix = if Some(segment.start_stage_index) == first_stage_index {
+            let prefix = if self.prefix_extension_runner.is_none()
+                && Some(segment.start_stage_index) == first_stage_index
+            {
                 prefix_dispatches
             } else {
                 &[]
             };
-            let suffix = if Some(segment.start_stage_index) == last_stage_index {
+            let suffix = if self.suffix_extension_runner.is_none()
+                && Some(segment.start_stage_index) == last_stage_index
+            {
                 suffix_dispatches
             } else {
                 &[]
@@ -308,9 +363,21 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
                 device_id,
                 prefix,
                 suffix,
-                (Some(segment.start_stage_index) == last_stage_index)
+                (self.suffix_extension_runner.is_none()
+                    && Some(segment.start_stage_index) == last_stage_index)
                     .then_some(generation_tail_dispatch_count)
                     .flatten(),
+                lane_capacity,
+            )?;
+        }
+        if let Some(runner) = &mut self.suffix_extension_runner {
+            runner.configure_feedback_indirect_dispatches(
+                device,
+                control,
+                device_id,
+                &[],
+                suffix_dispatches,
+                generation_tail_dispatch_count,
                 lane_capacity,
             )?;
         }
@@ -323,6 +390,24 @@ impl VulkanMountedPlacedResidentStreamTickExecutionPlan {
                 .checked_add(segment.feedback_dispatch_count()?)
                 .ok_or_else(|| VulkanError("resident feedback dispatch count overflowed".to_string()))
         })
+    }
+
+    fn prefix_extension_runner_at(
+        &self,
+        stage_index: usize,
+    ) -> Option<&VulkanMountedPlacedResidentDispatchSegmentRunner> {
+        self.prefix_extension_runner
+            .as_ref()
+            .filter(|runner| runner.start_stage_index == stage_index)
+    }
+
+    fn suffix_extension_runner_after(
+        &self,
+        stage_index: usize,
+    ) -> Option<&VulkanMountedPlacedResidentDispatchSegmentRunner> {
+        self.suffix_extension_runner
+            .as_ref()
+            .filter(|runner| runner.start_stage_index == stage_index)
     }
 
     pub fn distributed_dispatch_at_stage(
@@ -398,6 +483,8 @@ fn distributed_dispatch_dependency_topologies(
     physical_execution_islands: &BTreeMap<usize, VulkanMountedPhysicalExecutionIslandStage>,
     dispatch_segment_stage_ranges: &[(usize, usize)],
     stages: &[VulkanMountedPlacedStreamTickStage],
+    prefix_extension_stage_index: Option<usize>,
+    suffix_extension_stage_index: Option<usize>,
 ) -> BTreeMap<usize, VulkanMountedPlacedDistributedDispatchDependencies> {
     physical_execution_islands
         .iter()
@@ -409,10 +496,14 @@ fn distributed_dispatch_dependency_topologies(
             );
             let dependencies = VulkanMountedPlacedDistributedDispatchDependencies {
                     dispatch_index: group.leader().dispatch_index,
-                    has_owner_producer: dispatch_segment_stage_ranges
-                        .iter()
-                        .any(|(_, end)| end == stage_index),
-                    has_owner_continuation: completion_consumer_stage_index.is_some(),
+                    has_owner_producer: prefix_extension_stage_index == Some(*stage_index)
+                        || dispatch_segment_stage_ranges
+                            .iter()
+                            .any(|(_, end)| end == stage_index),
+                    has_owner_continuation: completion_consumer_stage_index.is_some()
+                        || suffix_extension_stage_index.is_some_and(|terminal_stage_index| {
+                            group.end_stage_index.checked_sub(1) == Some(terminal_stage_index)
+                        }),
                     completion_consumer_stage_index,
             };
             (*stage_index, dependencies)

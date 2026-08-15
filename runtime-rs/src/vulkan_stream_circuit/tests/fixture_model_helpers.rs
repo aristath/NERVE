@@ -480,7 +480,13 @@ fn distributed_dependency_topology_covers_edges_and_adjacent_dispatches() {
 
     assert_eq!(ranges, vec![(1, 2), (4, 5)]);
     assert_eq!(
-        distributed_dispatch_dependency_topologies(&physical_execution_islands, &ranges, &stages),
+        distributed_dispatch_dependency_topologies(
+            &physical_execution_islands,
+            &ranges,
+            &stages,
+            None,
+            None,
+        ),
         BTreeMap::from([
             (
                 0,
@@ -550,7 +556,13 @@ fn distributed_dependency_topology_uses_composed_group_boundaries() {
 
     assert_eq!(ranges, vec![(0, 2), (4, 6)]);
     assert_eq!(
-        distributed_dispatch_dependency_topologies(&physical_execution_islands, &ranges, &stages),
+        distributed_dispatch_dependency_topologies(
+            &physical_execution_islands,
+            &ranges,
+            &stages,
+            None,
+            None,
+        ),
         BTreeMap::from([(
             2,
             VulkanMountedPlacedDistributedDispatchDependencies {
@@ -619,8 +631,13 @@ fn sparse_expert_island_keeps_one_router_and_one_reduction_on_the_coordinator() 
         &distributed_indices,
         &islands,
     );
-    let dependencies =
-        distributed_dispatch_dependency_topologies(&islands, &ranges, &stages);
+    let dependencies = distributed_dispatch_dependency_topologies(
+        &islands,
+        &ranges,
+        &stages,
+        None,
+        None,
+    );
 
     assert_eq!(ranges, vec![(0, 2), (4, 5)]);
     assert_eq!(islands.len(), 1);
@@ -698,8 +715,13 @@ fn distributed_completion_wait_moves_to_the_first_true_activation_consumer() {
         &distributed_indices,
         &islands,
     );
-    let dependencies =
-        distributed_dispatch_dependency_topologies(&islands, &ranges, &stages);
+    let dependencies = distributed_dispatch_dependency_topologies(
+        &islands,
+        &ranges,
+        &stages,
+        None,
+        None,
+    );
 
     assert_eq!(ranges, vec![(0, 1), (2, 4), (4, 6)]);
     assert_eq!(
@@ -717,6 +739,8 @@ fn distributed_completion_wait_moves_to_the_first_true_activation_consumer() {
         dispatch_count: 4,
         distributed_dispatch_count: 1,
         dispatch_segments: Vec::new(),
+        prefix_extension_runner: None,
+        suffix_extension_runner: None,
         distributed_dispatch_stages: distributed_stages,
         physical_execution_islands: islands,
         distributed_dispatch_dependencies: dependencies,
@@ -767,6 +791,8 @@ fn cursor_completes_an_entire_matching_distributed_group() {
         dispatch_count: 0,
         distributed_dispatch_count: 2,
         dispatch_segments: Vec::new(),
+        prefix_extension_runner: None,
+        suffix_extension_runner: None,
         distributed_dispatch_stages: BTreeMap::from([
             (0, distributed_dispatch),
             (1, second_distributed_dispatch),
@@ -811,6 +837,70 @@ fn cursor_completes_an_entire_matching_distributed_group() {
         .unwrap();
     assert!(cursor.is_completed());
     assert_eq!(cursor.completed_stage_count, 2);
+}
+
+#[test]
+fn fully_distributed_chain_has_virtual_owner_boundaries() {
+    let stages = vec![
+        fixture_tick_dispatch_stage(0),
+        fixture_tick_dispatch_stage(1),
+    ];
+    let tick_plan = VulkanMountedPlacedStreamTickPlan {
+        backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+        device_id: "gpu0".to_string(),
+        stages: stages.clone(),
+        stage_count: 2,
+        receive_stage_count: 0,
+        dispatch_stage_count: 2,
+        publish_stage_count: 0,
+        local_edge_read_count: 0,
+        local_edge_write_count: 0,
+        incoming_edge_read_count: 0,
+        outgoing_edge_write_count: 0,
+        model_input_read_count: 0,
+        model_output_write_count: 0,
+        can_execute: false,
+    };
+    let distributed_indices = BTreeSet::from([0, 1]);
+    let distributed_stages =
+        distributed_dispatch_stages(&tick_plan, &distributed_indices).unwrap();
+    let islands = physical_execution_island_stage_groups(
+        &distributed_stages,
+        &[vec![0], vec![1]],
+    )
+    .unwrap();
+    let ranges = resident_dispatch_segment_stage_ranges_for_physical_islands(
+        &stages,
+        &distributed_indices,
+        &islands,
+    );
+    let dependencies = distributed_dispatch_dependency_topologies(
+        &islands,
+        &ranges,
+        &stages,
+        Some(0),
+        Some(1),
+    );
+
+    assert!(ranges.is_empty());
+    assert_eq!(
+        dependencies[&0],
+        VulkanMountedPlacedDistributedDispatchDependencies {
+            dispatch_index: 0,
+            has_owner_producer: true,
+            has_owner_continuation: false,
+            completion_consumer_stage_index: None,
+        }
+    );
+    assert_eq!(
+        dependencies[&1],
+        VulkanMountedPlacedDistributedDispatchDependencies {
+            dispatch_index: 1,
+            has_owner_producer: false,
+            has_owner_continuation: true,
+            completion_consumer_stage_index: None,
+        }
+    );
 }
 
 fn numeric_state_error(actual: &[u8], expected: &[u8], dtype: &str) -> (f64, f64) {

@@ -128,6 +128,81 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     .execution_plan
                     .distributed_dispatch_at_stage(distributed_stage_index)
                 {
+                    if let Some(prefix_runner) = slice
+                        .execution_plan
+                        .prefix_extension_runner_at(distributed_stage_index)
+                    {
+                        debug_assert!(ready_dependency.is_none());
+                        let dependency_value = distributed_runners
+                            .reserve_dependency_value(
+                                slice.device_id(),
+                                distributed.dispatch_index,
+                            )
+                            .map_err(
+                                VulkanMountedPlacedResidentInProcessStreamTickError::Distributed,
+                            )?;
+                        let mut wait_points = std::mem::take(&mut pending_edge_wait_points);
+                        if let Some(wait) = feedback_turn
+                            .and_then(|turn| turn.destination_wait(slice.device_id()))
+                        {
+                            wait_points.push(wait);
+                        }
+                        let signal_points = distributed_runners
+                            .owner_ready_signal_points(
+                                slice.device_id(),
+                                distributed.dispatch_index,
+                                dependency_value,
+                            )
+                            .map_err(
+                                VulkanMountedPlacedResidentInProcessStreamTickError::Distributed,
+                            )?;
+                        if slice.dispatch_extensions.prefix_dispatches.is_empty() {
+                            if let Some(submission_batch) = submission_batch {
+                                submission_batch
+                                    .enqueue_timeline_semaphore_bridge(
+                                        slice.device,
+                                        &wait_points,
+                                        &signal_points,
+                                    )
+                                    .map_err(
+                                        VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                    )?;
+                            } else {
+                                slice
+                                    .device
+                                    .submit_timeline_semaphore_bridge(
+                                        &wait_points,
+                                        &signal_points,
+                                    )
+                                    .map_err(
+                                        VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                    )?;
+                            }
+                        } else {
+                            prefix_runner
+                                .submit_with_stream_control_and_timeline_semaphores(
+                                    slice.device,
+                                    control,
+                                    slice.dispatch_extensions.prefix_dispatches.as_slice(),
+                                    &[],
+                                    slice.dispatch_extensions.sequence_variant,
+                                    submission_policy.feedback_lane,
+                                    None,
+                                    &[],
+                                    &wait_points,
+                                    &signal_points,
+                                    false,
+                                    submission_batch,
+                                )
+                                .map_err(|error| {
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::StreamTick(
+                                        VulkanMountedPlacedResidentStreamTickError::Dispatch(error),
+                                    )
+                                })?;
+                            last_submitted_segment = Some(prefix_runner);
+                        }
+                        ready_dependency = Some((distributed.dispatch_index, dependency_value));
+                    }
                     let dependencies = slice
                         .execution_plan
                         .distributed_dispatch_dependencies_at_stage(distributed_stage_index)
@@ -369,6 +444,167 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                                 VulkanMountedPlacedResidentInProcessStreamTickError::Distributed,
                             )?;
                     }
+                    let distributed_end_stage_index = slice
+                        .execution_plan
+                        .physical_execution_island_at_stage(distributed_stage_index)
+                        .expect("every distributed dispatch belongs to a stage group")
+                        .end_stage_index;
+                    if let Some(suffix_runner) = slice
+                        .execution_plan
+                        .suffix_extension_runner_after(distributed_end_stage_index)
+                    {
+                        let wait_points = completion_dependency
+                            .take()
+                            .map(|(dispatch_index, dependency_value)| {
+                                distributed_runners.owner_completion_wait_points(
+                                    slice.device_id(),
+                                    dispatch_index,
+                                    dependency_value,
+                                )
+                            })
+                            .transpose()
+                            .map_err(
+                                VulkanMountedPlacedResidentInProcessStreamTickError::Distributed,
+                            )?
+                            .unwrap_or_default();
+                        let mut signal_points = Vec::new();
+                        if feedback_turn
+                            .is_some_and(|turn| turn.output_device_id == slice.device_id())
+                        {
+                            signal_points.push(
+                                feedback_turn
+                                    .expect("resident feedback output signal was present")
+                                    .output_signal(),
+                            );
+                        }
+                        if output_turn
+                            .is_some_and(|turn| turn.output_device_id == slice.device_id())
+                        {
+                            signal_points.push(
+                                output_turn
+                                    .expect("resident output timeline signal was present")
+                                    .signal,
+                            );
+                        }
+                        let suffix_dispatches =
+                            slice.dispatch_extensions.suffix_dispatches.as_slice();
+                        let terminal_step_index = if state_transaction.is_some()
+                            || !slice
+                                .dispatch_extensions
+                                .terminal_snapshot_copies
+                                .is_empty()
+                        {
+                            Some(
+                                suffix_runner
+                                    .feedback_sequence_step_count(
+                                        0,
+                                        suffix_dispatches.len(),
+                                        slice.dispatch_extensions.sequence_variant,
+                                        submission_policy.feedback_lane,
+                                        None,
+                                    )
+                                    .map_err(|error| {
+                                        VulkanMountedPlacedResidentInProcessStreamTickError::StreamTick(
+                                            VulkanMountedPlacedResidentStreamTickError::Dispatch(error),
+                                        )
+                                    })?
+                                    .checked_sub(1)
+                                    .ok_or_else(|| {
+                                        VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
+                                            VulkanError(
+                                                "resident feedback snapshot step index overflowed"
+                                                    .to_string(),
+                                            ),
+                                        )
+                                    })?,
+                            )
+                        } else {
+                            None
+                        };
+                        let mut snapshot_copies = state_transaction
+                            .map(|transaction| {
+                                transaction
+                                    .copies_for_tick(
+                                        &slice.mounted.buffers,
+                                        terminal_step_index
+                                            .expect("a state transaction requires one terminal step"),
+                                        submission_policy.feedback_lane.ok_or_else(|| {
+                                            VulkanMountedPlacedResidentInProcessStreamTickError::Schedule(
+                                                VulkanError(
+                                                    "resident feedback snapshot requires a sequence lane"
+                                                        .to_string(),
+                                                ),
+                                            )
+                                        })?,
+                                    )
+                                    .map_err(
+                                        VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                    )
+                            })
+                            .transpose()?
+                            .unwrap_or_default();
+                        if let Some(after_step_index) = terminal_step_index {
+                            snapshot_copies.extend(
+                                slice
+                                    .dispatch_extensions
+                                    .terminal_snapshot_copies
+                                    .iter()
+                                    .copied()
+                                    .map(|copy| {
+                                        VulkanResidentKernelSequenceSnapshotCopy::
+                                            unconditional_from_range_after_conditional_step(
+                                                after_step_index,
+                                                copy,
+                                            )
+                                    }),
+                            );
+                        }
+                        if suffix_dispatches.is_empty() && snapshot_copies.is_empty() {
+                            if let Some(submission_batch) = submission_batch {
+                                submission_batch
+                                    .enqueue_timeline_semaphore_bridge(
+                                        slice.device,
+                                        &wait_points,
+                                        &signal_points,
+                                    )
+                                    .map_err(
+                                        VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                    )?;
+                            } else {
+                                slice
+                                    .device
+                                    .submit_timeline_semaphore_bridge(
+                                        &wait_points,
+                                        &signal_points,
+                                    )
+                                    .map_err(
+                                        VulkanMountedPlacedResidentInProcessStreamTickError::Schedule,
+                                    )?;
+                            }
+                        } else {
+                            suffix_runner
+                                .submit_with_stream_control_and_timeline_semaphores(
+                                    slice.device,
+                                    control,
+                                    &[],
+                                    suffix_dispatches,
+                                    slice.dispatch_extensions.sequence_variant,
+                                    submission_policy.feedback_lane,
+                                    None,
+                                    &snapshot_copies,
+                                    &wait_points,
+                                    &signal_points,
+                                    submission_policy.signal_completion,
+                                    submission_batch,
+                                )
+                                .map_err(|error| {
+                                    VulkanMountedPlacedResidentInProcessStreamTickError::StreamTick(
+                                        VulkanMountedPlacedResidentStreamTickError::Dispatch(error),
+                                    )
+                                })?;
+                            last_submitted_segment = Some(suffix_runner);
+                        }
+                    }
                     continue;
                 }
 
@@ -429,8 +665,9 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                     }
                 };
                 wait_points.append(&mut pending_edge_wait_points);
-                if slice.execution_plan.first_dispatch_segment_stage_index()
-                    == Some(segment.start_stage_index)
+                if slice.execution_plan.prefix_extension_runner.is_none()
+                    && slice.execution_plan.first_dispatch_segment_stage_index()
+                        == Some(segment.start_stage_index)
                     && feedback_turn
                         .and_then(|turn| turn.destination_wait(slice.device_id()))
                         .is_some()
@@ -522,8 +759,9 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                         signal_points.push(signal_point);
                     }
                 }
-                let is_terminal_segment = slice.execution_plan.last_dispatch_segment_stage_index()
-                    == Some(segment.start_stage_index);
+                let is_terminal_segment = slice.execution_plan.suffix_extension_runner.is_none()
+                    && slice.execution_plan.last_dispatch_segment_stage_index()
+                        == Some(segment.start_stage_index);
                 if is_terminal_segment
                     && feedback_turn
                         .is_some_and(|turn| turn.output_device_id == slice.device_id())
@@ -543,8 +781,9 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             .signal,
                     );
                 }
-                let prefix_dispatches = if slice.execution_plan.first_dispatch_segment_stage_index()
-                    == Some(segment.start_stage_index)
+                let prefix_dispatches = if slice.execution_plan.prefix_extension_runner.is_none()
+                    && slice.execution_plan.first_dispatch_segment_stage_index()
+                        == Some(segment.start_stage_index)
                 {
                     slice.dispatch_extensions.prefix_dispatches.as_slice()
                 } else {
