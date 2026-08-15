@@ -226,6 +226,60 @@ fn placed_edge_pairs_group_every_remote_consumer_by_produced_port() {
 }
 
 #[test]
+fn placed_graph_groups_local_only_produced_ports_for_distributed_consumers() {
+    let plans = vec![local_fanout_edge_plan()];
+    let groups = group_placed_graph_edges_by_produced_port(&plans).unwrap();
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].source_device_id, "gpu0");
+    assert_eq!(groups[0].source_component_id, "input_adapter");
+    assert_eq!(groups[0].source_port_id, "shared_context");
+    assert_eq!(groups[0].byte_capacity, 8_192);
+    assert!(groups[0].edges.is_empty());
+}
+
+#[test]
+fn placed_graph_merges_local_and_remote_consumers_of_one_produced_port() {
+    let source = mixed_fanout_edge_plan();
+    let plans = vec![
+        source.clone(),
+        VulkanPlacedEdgeIoPlan {
+            backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+            device_id: "gpu1".to_string(),
+            signal_element_bytes: Some(2),
+            local_edges: Vec::new(),
+            endpoints: vec![incoming_fanout_endpoint(&source.endpoints[0])],
+            local_edge_count: 0,
+            incoming_endpoint_count: 1,
+            outgoing_endpoint_count: 0,
+            total_buffer_count: 1,
+            total_endpoint_count: 1,
+            total_byte_capacity: Some(8_192),
+            unresolved_byte_edges: Vec::new(),
+        },
+        VulkanPlacedEdgeIoPlan {
+            backend_id: VULKAN_STREAM_CIRCUIT_BACKEND_ID.to_string(),
+            device_id: "gpu2".to_string(),
+            signal_element_bytes: Some(2),
+            local_edges: Vec::new(),
+            endpoints: vec![incoming_fanout_endpoint(&source.endpoints[1])],
+            local_edge_count: 0,
+            incoming_endpoint_count: 1,
+            outgoing_endpoint_count: 0,
+            total_buffer_count: 1,
+            total_endpoint_count: 1,
+            total_byte_capacity: Some(8_192),
+            unresolved_byte_edges: Vec::new(),
+        },
+    ];
+    let groups = group_placed_graph_edges_by_produced_port(&plans).unwrap();
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].byte_capacity, 8_192);
+    assert_eq!(groups[0].edges.len(), 2);
+}
+
+#[test]
 fn selected_boundary_route_must_match_mounted_edge_identity_and_fanout() {
     let first = outgoing_fanout_endpoint(0, 5, "gpu1", "draft_01");
     let second = outgoing_fanout_endpoint(1, 6, "gpu2", "draft_02");

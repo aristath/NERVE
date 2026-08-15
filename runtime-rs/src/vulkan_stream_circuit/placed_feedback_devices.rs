@@ -1293,11 +1293,8 @@ where
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let edge_groups = group_placed_edge_pairs_by_produced_port(
-        pair_placed_edge_endpoints(&plans)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?,
-    )
-    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+    let edge_groups = group_placed_graph_edges_by_produced_port(&plans)
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
 
     let mut local_edge_overrides =
         BTreeMap::<String, Vec<VulkanPlacedLocalEdgeBufferOverride>>::new();

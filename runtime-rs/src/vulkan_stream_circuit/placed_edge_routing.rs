@@ -255,3 +255,61 @@ fn group_placed_edge_pairs_by_produced_port(
     }
     Ok(groups.into_values().collect())
 }
+
+/// Groups the complete placed graph by produced port. A local graph edge may
+/// still need a cross-device resident allocation when its consumer becomes a
+/// tensor-parallel island, so it must participate in the same grouping as an
+/// edge that was already cross-device in the serialized placement.
+fn group_placed_graph_edges_by_produced_port(
+    plans: &[VulkanPlacedEdgeIoPlan],
+) -> Result<Vec<VulkanPlacedProducedPortEdgeGroup>, VulkanError> {
+    let mut groups = group_placed_edge_pairs_by_produced_port(pair_placed_edge_endpoints(plans)?)?
+        .into_iter()
+        .map(|group| {
+            (
+                (
+                    group.source_device_id.clone(),
+                    group.source_component_id.clone(),
+                    group.source_port_id.clone(),
+                ),
+                group,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for plan in plans {
+        for edge in &plan.local_edges {
+            let byte_capacity = edge.byte_capacity.ok_or_else(|| {
+                VulkanError(format!(
+                    "local edge {} on produced port {}.{} has unknown byte capacity",
+                    edge.edge_index, edge.source_component_id, edge.source_port_id,
+                ))
+            })?;
+            let key = (
+                edge.device_id.clone(),
+                edge.source_component_id.clone(),
+                edge.source_port_id.clone(),
+            );
+            let group = groups
+                .entry(key)
+                .or_insert_with(|| VulkanPlacedProducedPortEdgeGroup {
+                    source_device_id: edge.device_id.clone(),
+                    source_component_id: edge.source_component_id.clone(),
+                    source_port_id: edge.source_port_id.clone(),
+                    byte_capacity,
+                    edges: Vec::new(),
+                });
+            if group.byte_capacity != byte_capacity {
+                return Err(VulkanError(format!(
+                    "produced port {}.{} on {:?} has incompatible local capacities {} and {byte_capacity}",
+                    group.source_component_id,
+                    group.source_port_id,
+                    group.source_device_id,
+                    group.byte_capacity,
+                )));
+            }
+        }
+    }
+
+    Ok(groups.into_values().collect())
+}
