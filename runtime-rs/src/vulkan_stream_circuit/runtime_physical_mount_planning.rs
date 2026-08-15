@@ -463,6 +463,16 @@ pub fn plan_vulkan_runtime_physical_mount(
         .device_for_component(&output_component_id)
         .to_string();
     let tensor_index = runtime_model.load_runtime_tensor_index(manifest_dir)?;
+    let activation_element_bytes = runtime_model
+        .package
+        .activation_element_bytes
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| {
+            physical_mount_planning_error(
+                "distributed execution planning",
+                "compiled package has no positive activation element width",
+            )
+        })?;
     let resource_contract = instantiate_runtime_resource_contract(runtime_model)
         .map_err(|error| physical_mount_planning_error("compiled resource contract", error))?;
     let residency_plan = plan_vulkan_runtime_residency_with_contract(
@@ -554,6 +564,7 @@ pub fn plan_vulkan_runtime_physical_mount(
         &physical_execution_plan.component_device_pools,
         &placement_plan.edges,
         storage_buffer_offset_alignment,
+        activation_element_bytes,
         &runtime_model.execution_scope,
         &resource_contract,
         &physical_execution_plan.decode_execution_cases_by_component,

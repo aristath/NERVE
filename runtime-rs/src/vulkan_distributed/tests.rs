@@ -19,6 +19,7 @@ mod tests {
 
     use super::*;
     use crate::stream_plan::TensorMetadata;
+    use crate::stream_circuit::{EdgeTransport, StreamCircuitConnection};
     use crate::vulkan_stream_circuit::{
         CompiledAtomicResidencyGroup, CompiledImmutableResource, CompiledResourceBinding,
         CompiledResourceBindingMapping, CompiledResourceByteRange, CompiledResourceCompatibility,
@@ -32,6 +33,47 @@ mod tests {
         physical_execution_artifact_id,
         vulkan_hybrid_dispatch_parameter_requirements_by_component,
     };
+
+    #[test]
+    fn distributed_boundary_activation_uses_compiled_edge_capacity() {
+        let mut dispatch = fixture_prepared_plan().dispatches.remove(0);
+        dispatch.component_id = "layer_00".to_string();
+        dispatch.descriptors[0].binding = 0;
+        dispatch.descriptors[0].resource = VulkanDescriptorResourceAddress::BoundaryInput {
+            signal_id: "input_frame".to_string(),
+        };
+        let edge = ComponentEdgePlacement {
+            edge_index: 0,
+            connection: StreamCircuitConnection::Forward,
+            signal: "frame".to_string(),
+            shape: vec![5_120],
+            source_component_id: "input_transducer".to_string(),
+            source_device_id: "gpu0".to_string(),
+            source_port_id: "output_frame".to_string(),
+            source_component_port: Some("output".to_string()),
+            destination_component_id: "layer_00".to_string(),
+            destination_device_id: "gpu0".to_string(),
+            destination_port_id: "input_frame".to_string(),
+            destination_component_port: Some("input".to_string()),
+            transport: EdgeTransport::LocalBuffer {
+                device_id: "gpu0".to_string(),
+            },
+        };
+
+        let activation = distributed_activation(
+            &dispatch,
+            0,
+            1,
+            "contract input",
+            &[edge],
+            2,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(activation.byte_capacity, 10_240);
+        assert_eq!(activation.signal_byte_capacity, 10_240);
+    }
 
     #[test]
     fn placed_components_do_not_implicitly_shard_their_internal_dispatches() {
@@ -4249,6 +4291,7 @@ mod tests {
             &component_device_pools("component", &["owner", "helper"]),
             &[],
             4,
+            2,
             ExecutionPhase::Decode,
             ExecutionShape::SingleLane,
             None,
@@ -4272,6 +4315,7 @@ mod tests {
             &component_device_pools("component", &["owner", "helper"]),
             &[],
             4,
+            2,
             ExecutionPhase::Decode,
             ExecutionShape::SingleLane,
             None,
@@ -4303,6 +4347,7 @@ mod tests {
             &component_device_pools("component", &["owner", "helper"]),
             &[],
             4,
+            2,
             ExecutionPhase::Decode,
             ExecutionShape::SingleLane,
             None,
@@ -4334,6 +4379,7 @@ mod tests {
             &component_device_pools("component", &["owner", "helper"]),
             &[],
             4,
+            2,
             ExecutionPhase::Decode,
             ExecutionShape::SingleLane,
             None,

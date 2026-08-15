@@ -78,6 +78,17 @@ impl VulkanResidentInProcessPlacedModelPackage {
         let manifest_dir = manifest_dir.as_ref();
         let mount_speculative_decoders = speculative_draft_tokens > 0;
         let package_id = runtime_model.package.package_id.clone();
+        let activation_element_bytes = runtime_model
+            .package
+            .activation_element_bytes
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(
+                        "distributed execution requires a compiled activation element width",
+                    ),
+                )
+            })?;
         let execution_scope = runtime_model.execution_scope.clone();
         if execution_scope.trim().is_empty() {
             return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
@@ -324,6 +335,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 &physical_execution_plan.component_device_pools,
                 &placement_plan.edges,
                 storage_buffer_offset_alignment,
+                activation_element_bytes,
                 &execution_scope,
                 &compiled_resource_contract,
                 &physical_execution_plan.decode_execution_cases_by_component,

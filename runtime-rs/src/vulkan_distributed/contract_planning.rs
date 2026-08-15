@@ -272,6 +272,7 @@ fn plan_contract_dispatch(
     artifact: &crate::vulkan_stream_circuit::VulkanPhysicalKernelArtifact,
     contract: &PhysicalExecutionContract,
     storage_buffer_offset_alignment: usize,
+    activation_element_bytes: usize,
     resource_context: Option<(&str, &CompiledResourceResidencyContract)>,
     activation_catalog: &BTreeMap<(String, String), VulkanDistributedActivationSlot>,
 ) -> Result<Option<VulkanDistributedDispatchPlan>, VulkanDistributedPlanError> {
@@ -344,6 +345,7 @@ fn plan_contract_dispatch(
             1,
             "contract input",
             edge_placements,
+            activation_element_bytes,
         )?
         .ok_or_else(|| {
             dispatch_error(
@@ -401,6 +403,7 @@ fn plan_contract_dispatch(
         1,
         "contract output",
         edge_placements,
+        activation_element_bytes,
     )?
     .ok_or_else(|| {
         dispatch_error(

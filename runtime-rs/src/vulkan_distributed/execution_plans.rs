@@ -135,6 +135,7 @@ impl VulkanDistributedExecutionPlan {
             component_device_pools,
             edge_placements,
             storage_buffer_offset_alignment,
+            BF16_BYTE_COUNT,
             phase,
             execution_shape,
             None,
@@ -162,6 +163,7 @@ impl VulkanDistributedExecutionPlan {
             component_device_pools,
             edge_placements,
             storage_buffer_offset_alignment,
+            BF16_BYTE_COUNT,
             phase,
             execution_shape,
             Some((execution_scope, resource_contract)),
@@ -209,6 +211,7 @@ impl VulkanDistributedExecutionPlan {
             component_device_pools,
             edge_placements,
             storage_buffer_offset_alignment,
+            BF16_BYTE_COUNT,
             phase,
             execution_shape,
             Some((execution_scope, resource_contract)),
@@ -224,6 +227,7 @@ impl VulkanDistributedExecutionPlan {
         component_device_pools: &BTreeMap<String, Vec<String>>,
         edge_placements: &[ComponentEdgePlacement],
         storage_buffer_offset_alignment: usize,
+        activation_element_bytes: usize,
         phase: ExecutionPhase,
         execution_shape: ExecutionShape,
         resource_context: Option<(&str, &CompiledResourceResidencyContract)>,
@@ -231,6 +235,11 @@ impl VulkanDistributedExecutionPlan {
             &BTreeMap<String, BTreeSet<String>>,
         >,
     ) -> Result<Self, VulkanDistributedPlanError> {
+        if activation_element_bytes == 0 {
+            return Err(VulkanDistributedPlanError(
+                "distributed activation element width must be positive".to_string(),
+            ));
+        }
         if storage_buffer_offset_alignment == 0
             || !storage_buffer_offset_alignment.is_power_of_two()
             || !storage_buffer_offset_alignment.is_multiple_of(BF16_BYTE_COUNT)
@@ -313,6 +322,7 @@ impl VulkanDistributedExecutionPlan {
                     artifact,
                     contract,
                     storage_buffer_offset_alignment,
+                    activation_element_bytes,
                     resource_context,
                     &activation_catalog,
                 )?
@@ -576,6 +586,7 @@ impl VulkanDistributedExecutionPlanSet {
             &component_device_pools.decode,
             edge_placements,
             storage_buffer_offset_alignment,
+            BF16_BYTE_COUNT,
             ExecutionPhase::Decode,
             ExecutionShape::SingleLane,
             resource_context,
@@ -589,6 +600,7 @@ impl VulkanDistributedExecutionPlanSet {
                 &component_device_pools.decode_batch,
                 edge_placements,
                 storage_buffer_offset_alignment,
+                BF16_BYTE_COUNT,
                 ExecutionPhase::Decode,
                 ExecutionShape::MultiLane,
                 resource_context,
@@ -601,6 +613,7 @@ impl VulkanDistributedExecutionPlanSet {
             &component_device_pools.prefill,
             edge_placements,
             storage_buffer_offset_alignment,
+            BF16_BYTE_COUNT,
             ExecutionPhase::Prefill,
             ExecutionShape::MultiLane,
             resource_context,
@@ -621,6 +634,7 @@ impl VulkanDistributedExecutionPlanSet {
         component_device_pools: &VulkanDistributedPhaseComponentDevicePools,
         edge_placements: &[ComponentEdgePlacement],
         storage_buffer_offset_alignment: usize,
+        activation_element_bytes: usize,
         execution_scope: &str,
         resource_contract: &CompiledResourceResidencyContract,
         decode_cases: &BTreeMap<
@@ -682,6 +696,7 @@ impl VulkanDistributedExecutionPlanSet {
                 pools,
                 edge_placements,
                 storage_buffer_offset_alignment,
+                activation_element_bytes,
                 phase,
                 shape,
                 resource_context,

@@ -177,6 +177,7 @@ fn distributed_activation(
     required: usize,
     role: &str,
     edge_placements: &[ComponentEdgePlacement],
+    activation_element_bytes: usize,
 ) -> Result<Option<VulkanDistributedActivationSlot>, VulkanDistributedPlanError> {
     let descriptor = dispatch
         .descriptors
@@ -234,13 +235,18 @@ fn distributed_activation(
                     ),
                 ));
             };
+            let byte_capacity = distributed_boundary_edge_byte_capacity(
+                dispatch,
+                edge,
+                activation_element_bytes,
+            )?;
             VulkanDistributedActivationSlot {
                 binding,
                 component_id: dispatch.component_id.clone(),
                 signal_id: signal_id.clone(),
                 slot: edge.edge_index,
-                byte_capacity: required,
-                signal_byte_capacity: required,
+                byte_capacity,
+                signal_byte_capacity: byte_capacity,
                 storage: VulkanDistributedActivationStorage::Edge {
                     edge_index: edge.edge_index,
                     owner_device_id: edge.source_device_id.clone(),
@@ -276,13 +282,18 @@ fn distributed_activation(
                     ),
                 ));
             };
+            let byte_capacity = distributed_boundary_edge_byte_capacity(
+                dispatch,
+                edge,
+                activation_element_bytes,
+            )?;
             VulkanDistributedActivationSlot {
                 binding,
                 component_id: dispatch.component_id.clone(),
                 signal_id: signal_id.clone(),
                 slot: edge.edge_index,
-                byte_capacity: required,
-                signal_byte_capacity: required,
+                byte_capacity,
+                signal_byte_capacity: byte_capacity,
                 storage: VulkanDistributedActivationStorage::Edge {
                     edge_index: edge.edge_index,
                     owner_device_id: edge.source_device_id.clone(),
@@ -306,6 +317,29 @@ fn distributed_activation(
         ));
     }
     Ok(Some(activation))
+}
+
+fn distributed_boundary_edge_byte_capacity(
+    dispatch: &VulkanPreparedDispatch,
+    edge: &ComponentEdgePlacement,
+    activation_element_bytes: usize,
+) -> Result<usize, VulkanDistributedPlanError> {
+    if activation_element_bytes == 0 || edge.shape.is_empty() {
+        return Err(dispatch_error(
+            dispatch,
+            "distributed boundary edge has no typed activation extent".to_string(),
+        ));
+    }
+    edge.shape
+        .iter()
+        .try_fold(activation_element_bytes, |bytes, extent| {
+            bytes.checked_mul(*extent).ok_or_else(|| {
+                dispatch_error(
+                    dispatch,
+                    "distributed boundary edge byte capacity overflowed".to_string(),
+                )
+            })
+        })
 }
 
 fn distribute_rows(
