@@ -1720,6 +1720,85 @@ mod tests {
     }
 
     #[test]
+    fn external_shared_requirement_matches_materialization_or_restores_after_rejection() {
+        let (Ok(owner), Ok(worker)) = (
+            selected_test_vulkan_device_from_env("NERVE_TEST_VULKAN_DEVICE_UUID"),
+            selected_test_vulkan_device_from_env(
+                "NERVE_TEST_VULKAN_SECONDARY_DEVICE_UUID",
+            ),
+        ) else {
+            eprintln!("skipping cross-device Vulkan test: explicit device pair unset");
+            return;
+        };
+        assert_ne!(owner.physical_device_id(), worker.physical_device_id());
+        const LOGICAL_BYTES: usize = 33_030_144;
+        let owner_before = owner
+            .device_local_memory_accounting()
+            .unwrap()
+            .tracked_allocation_bytes;
+        let worker_before = worker
+            .device_local_memory_accounting()
+            .unwrap()
+            .tracked_allocation_bytes;
+        let physical_bytes = owner
+            .shared_device_resident_buffer_memory_requirement_bytes(
+                &[&worker],
+                LOGICAL_BYTES,
+            )
+            .unwrap();
+
+        match owner.create_shared_resident_buffers_for_route(
+            &[&worker],
+            LOGICAL_BYTES,
+            VulkanSharedResidentBufferRoute::ExternalDeviceLocal,
+        ) {
+            Ok(shared) => {
+                assert_eq!(shared.route, VulkanSharedResidentBufferRoute::ExternalDeviceLocal);
+                assert_eq!(shared.buffers.len(), 2);
+                assert_eq!(
+                    owner
+                        .device_local_memory_accounting()
+                        .unwrap()
+                        .tracked_allocation_bytes
+                        - owner_before,
+                    physical_bytes as u64,
+                );
+                assert_eq!(
+                    worker
+                        .device_local_memory_accounting()
+                        .unwrap()
+                        .tracked_allocation_bytes,
+                    worker_before,
+                    "imported peer views must not claim a second physical allocation",
+                );
+                drop(shared);
+            }
+            Err(error) => {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("has no device-local import type"),
+                    "unexpected external-memory rejection: {error}",
+                );
+            }
+        }
+        assert_eq!(
+            owner
+                .device_local_memory_accounting()
+                .unwrap()
+                .tracked_allocation_bytes,
+            owner_before,
+        );
+        assert_eq!(
+            worker
+                .device_local_memory_accounting()
+                .unwrap()
+                .tracked_allocation_bytes,
+            worker_before,
+        );
+    }
+
+    #[test]
     fn device_local_readback_uses_staging_after_gpu_write() {
         let Ok(device) = selected_test_vulkan_device() else {
             eprintln!("skipping Vulkan readback test: explicit device UUID unset");

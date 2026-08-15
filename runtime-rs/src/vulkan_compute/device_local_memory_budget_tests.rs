@@ -1028,11 +1028,12 @@ fn classified_stream_memory_admission_never_borrows_between_runner_classes() {
                 .is_err(),
             "permanent allocation must not borrow prompt-runner device credit",
         );
+        let error = take_scoped_host_memory_capacity(&host, 1)
+            .unwrap()
+            .unwrap_err();
         assert!(
-            take_scoped_host_memory_capacity(&host, 1)
-                .unwrap()
-                .is_err(),
-            "permanent allocation must not borrow prompt-runner host credit",
+            error.to_string().contains("Permanent stream host admission"),
+            "the rejected allocation must identify the exact exhausted class: {error}",
         );
     }
     admission

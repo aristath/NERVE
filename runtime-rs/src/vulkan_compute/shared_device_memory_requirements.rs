@@ -1,12 +1,47 @@
+struct VulkanRawExternalResidentBuffer<'a> {
+    device: &'a VulkanComputeDevice,
+    buffer: vk::Buffer,
+    requirements: vk::MemoryRequirements,
+    requires_dedicated: bool,
+}
+
+fn external_resident_buffer_allocation_size(
+    raw_buffers: &[VulkanRawExternalResidentBuffer<'_>],
+) -> Result<vk::DeviceSize, VulkanError> {
+    let first = raw_buffers.first().ok_or_else(|| {
+        VulkanError("external resident buffer participant set is empty".to_string())
+    })?;
+    if raw_buffers.iter().any(|raw| raw.requires_dedicated) {
+        let required_size = first.requirements.size;
+        if raw_buffers
+            .iter()
+            .any(|raw| raw.requirements.size != required_size)
+        {
+            return Err(VulkanError(
+                "cross-device dedicated buffer requirements disagree on allocation size"
+                    .to_string(),
+            ));
+        }
+        Ok(required_size)
+    } else {
+        Ok(raw_buffers
+            .iter()
+            .map(|raw| raw.requirements.size)
+            .max()
+            .expect("validated external resident buffers are nonempty"))
+    }
+}
+
 impl VulkanComputeDevice {
-    pub(crate) fn shared_device_resident_buffer_memory_requirement_bytes(
-        &self,
-        peer_devices: &[&VulkanComputeDevice],
+    fn create_raw_external_resident_buffers<'a>(
+        &'a self,
+        peer_devices: &[&'a VulkanComputeDevice],
         byte_capacity: usize,
-    ) -> Result<usize, VulkanError> {
+        usage: vk::BufferUsageFlags,
+    ) -> Result<Vec<VulkanRawExternalResidentBuffer<'a>>, VulkanError> {
         if byte_capacity == 0 {
             return Err(VulkanError(
-                "shared device-local requirement capacity must not be zero".to_string(),
+                "shared device-local allocation capacity must not be zero".to_string(),
             ));
         }
         let devices = std::iter::once(self)
@@ -17,7 +52,7 @@ impl VulkanComputeDevice {
             .any(|device| !device.supports_shared_device_memory())
         {
             return Err(VulkanError(format!(
-                "shared device-local memory is not supported by every requirement participant: {:?}",
+                "shared device-local memory is not supported by every participating device: {:?}",
                 devices
                     .iter()
                     .filter(|device| !device.supports_shared_device_memory())
@@ -31,18 +66,14 @@ impl VulkanComputeDevice {
                 .any(|existing| existing.shares_logical_device_with(device))
             {
                 return Err(VulkanError(format!(
-                    "shared device-local requirement repeats logical device {:?}",
-                    device.device_name(),
+                    "shared device-local allocation repeats logical device {:?}",
+                    device.device_name()
                 )));
             }
         }
 
-        let mut raw_buffers = Vec::<(
-            &VulkanComputeDevice,
-            vk::Buffer,
-            vk::MemoryRequirements,
-            bool,
-        )>::with_capacity(devices.len());
+        let mut raw_buffers =
+            Vec::<VulkanRawExternalResidentBuffer<'_>>::with_capacity(devices.len());
         let create_result = (|| {
             for device in &devices {
                 unsafe {
@@ -50,14 +81,14 @@ impl VulkanComputeDevice {
                         .handle_types(VULKAN_SHARED_DEVICE_MEMORY_HANDLE_TYPE);
                     let buffer_info = vk::BufferCreateInfo::default()
                         .size(byte_capacity as vk::DeviceSize)
-                        .usage(resident_buffer_usage())
+                        .usage(usage)
                         .sharing_mode(vk::SharingMode::EXCLUSIVE)
                         .push_next(&mut external);
                     let buffer = device.device.create_buffer(&buffer_info, None).map_err(
                         |error| {
                             VulkanError(format!(
-                                "failed to query external device-local buffer on {:?}: {error:?}",
-                                device.device_name(),
+                                "failed to create external device-local buffer on {:?}: {error:?}",
+                                device.device_name
                             ))
                         },
                     )?;
@@ -69,59 +100,50 @@ impl VulkanComputeDevice {
                     device
                         .device
                         .get_buffer_memory_requirements2(&requirements_info, &mut requirements);
-                    raw_buffers.push((
+                    raw_buffers.push(VulkanRawExternalResidentBuffer {
                         device,
                         buffer,
-                        requirements.memory_requirements,
-                        dedicated.requires_dedicated_allocation == vk::TRUE,
-                    ));
+                        requirements: requirements.memory_requirements,
+                        requires_dedicated: dedicated.requires_dedicated_allocation == vk::TRUE,
+                    });
                 }
             }
             Ok::<(), VulkanError>(())
         })();
         if let Err(error) = create_result {
             unsafe {
-                for (device, buffer, _, _) in raw_buffers {
-                    device.device.destroy_buffer(buffer, None);
+                for raw in raw_buffers {
+                    raw.device.device.destroy_buffer(raw.buffer, None);
                 }
             }
             return Err(error);
         }
+        Ok(raw_buffers)
+    }
 
-        let dedicated = raw_buffers.iter().any(|(_, _, _, dedicated)| *dedicated);
-        let allocation_size = if dedicated {
-            let required_size = raw_buffers[0].2.size;
-            if raw_buffers
-                .iter()
-                .any(|(_, _, requirements, _)| requirements.size != required_size)
-            {
-                unsafe {
-                    for (device, buffer, _, _) in raw_buffers {
-                        device.device.destroy_buffer(buffer, None);
-                    }
-                }
-                return Err(VulkanError(
-                    "cross-device dedicated buffer requirements disagree on allocation size"
-                        .to_string(),
-                ));
-            }
-            required_size
-        } else {
-            raw_buffers
-                .iter()
-                .map(|(_, _, requirements, _)| requirements.size)
-                .max()
-                .expect("at least one external requirement buffer exists")
-        };
+    pub(crate) fn shared_device_resident_buffer_memory_requirement_bytes(
+        &self,
+        peer_devices: &[&VulkanComputeDevice],
+        byte_capacity: usize,
+    ) -> Result<usize, VulkanError> {
+        let raw_buffers = self.create_raw_external_resident_buffers(
+            peer_devices,
+            byte_capacity,
+            resident_buffer_usage(),
+        )?;
+        let requirement = external_resident_buffer_allocation_size(&raw_buffers)
+            .and_then(|bytes| {
+                usize::try_from(bytes).map_err(|_| {
+                    VulkanError(
+                        "shared device-local allocation requirement exceeds usize".to_string(),
+                    )
+                })
+            });
         unsafe {
-            for (device, buffer, _, _) in raw_buffers {
-                device.device.destroy_buffer(buffer, None);
+            for raw in raw_buffers {
+                raw.device.device.destroy_buffer(raw.buffer, None);
             }
         }
-        usize::try_from(allocation_size).map_err(|_| {
-            VulkanError(
-                "shared device-local allocation requirement exceeds usize".to_string(),
-            )
-        })
+        requirement
     }
 }

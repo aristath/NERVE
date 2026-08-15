@@ -344,6 +344,7 @@ pub(crate) struct VulkanMemoryAdmission {
         VulkanMemoryAdmissionAllocationClass,
         (usize, Arc<Mutex<VulkanHostMemoryPermitPool>>),
     >,
+    device_labels_by_tracker_key: BTreeMap<usize, String>,
 }
 
 pub(crate) struct VulkanMemoryAdmissionScope {
@@ -426,8 +427,11 @@ impl VulkanMemoryAdmission {
         }
 
         let mut device_pools = BTreeMap::new();
+        let mut device_labels_by_tracker_key = BTreeMap::new();
         for (_, (device, tracker_key, class_requirements)) in requirements_by_physical_device
         {
+            device_labels_by_tracker_key
+                .insert(tracker_key, device.physical_device_id().to_string());
             let total_bytes = class_requirements.values().try_fold(0usize, |total, bytes| {
                 total.checked_add(*bytes).ok_or_else(|| {
                     VulkanError("classified stream device admission overflowed".to_string())
@@ -511,6 +515,7 @@ impl VulkanMemoryAdmission {
         Ok(Self {
             device_pools,
             host_pools,
+            device_labels_by_tracker_key,
         })
     }
 
@@ -561,9 +566,18 @@ impl VulkanMemoryAdmission {
     }
 
     pub(crate) fn ensure_fully_consumed(&self, concern: &str) -> Result<(), VulkanError> {
-        let (remaining_device_bytes, remaining_host_bytes) =
+        let (
+            remaining_device_bytes,
+            remaining_host_bytes,
+            remaining_device_pools,
+        ) =
             self.remaining_bytes_for_class(None, concern)?;
-        Self::reject_remaining_credit(concern, remaining_device_bytes, remaining_host_bytes)
+        Self::reject_remaining_credit(
+            concern,
+            remaining_device_bytes,
+            remaining_host_bytes,
+            &remaining_device_pools,
+        )
     }
 
     pub(crate) fn ensure_class_fully_consumed(
@@ -571,74 +585,101 @@ impl VulkanMemoryAdmission {
         allocation_class: VulkanMemoryAdmissionAllocationClass,
         concern: &str,
     ) -> Result<(), VulkanError> {
-        let (remaining_device_bytes, remaining_host_bytes) =
+        let (
+            remaining_device_bytes,
+            remaining_host_bytes,
+            remaining_device_pools,
+        ) =
             self.remaining_bytes_for_class(Some(allocation_class), concern)?;
-        Self::reject_remaining_credit(concern, remaining_device_bytes, remaining_host_bytes)
+        Self::reject_remaining_credit(
+            concern,
+            remaining_device_bytes,
+            remaining_host_bytes,
+            &remaining_device_pools,
+        )
     }
 
     fn remaining_bytes_for_class(
         &self,
         allocation_class: Option<VulkanMemoryAdmissionAllocationClass>,
         concern: &str,
-    ) -> Result<(usize, usize), VulkanError> {
+    ) -> Result<
+        (
+            usize,
+            usize,
+            Vec<(String, VulkanMemoryAdmissionAllocationClass, usize)>,
+        ),
+        VulkanError,
+    > {
         if concern.trim().is_empty() {
             return Err(VulkanError(
                 "memory admission consumption check requires a concern".to_string(),
             ));
         }
         let mut remaining_device_bytes = 0usize;
-        for ((_, pool_class), pool) in &self.device_pools {
+        let mut remaining_device_pools = Vec::new();
+        for ((tracker_key, pool_class), pool) in &self.device_pools {
             if allocation_class.is_some_and(|expected| expected != *pool_class) {
                 continue;
             }
+            let remaining = pool
+                .lock()
+                .map_err(|_| {
+                    VulkanError(format!("{concern} device admission pool is poisoned",))
+                })?
+                .remaining_byte_count();
             remaining_device_bytes = remaining_device_bytes
-                .checked_add(
-                    pool.lock()
-                        .map_err(|_| {
-                            VulkanError(format!(
-                                "{concern} device admission pool is poisoned",
-                            ))
-                        })?
-                        .remaining_byte_count(),
-                )
+                .checked_add(remaining)
                 .ok_or_else(|| {
                     VulkanError(format!(
                         "{concern} remaining device admission bytes overflowed",
                     ))
                 })?;
+            if remaining > 0 {
+                remaining_device_pools.push((
+                    self.device_labels_by_tracker_key
+                        .get(tracker_key)
+                        .cloned()
+                        .unwrap_or_else(|| format!("tracker:{tracker_key}")),
+                    *pool_class,
+                    remaining,
+                ));
+            }
         }
         let mut remaining_host_bytes = 0usize;
         for (pool_class, (_, pool)) in &self.host_pools {
             if allocation_class.is_some_and(|expected| expected != *pool_class) {
                 continue;
             }
+            let pool = pool.lock().map_err(|_| {
+                VulkanError(format!("{concern} host admission pool is poisoned"))
+            })?;
             remaining_host_bytes = remaining_host_bytes
-                .checked_add(
-                    pool.lock()
-                        .map_err(|_| {
-                            VulkanError(format!("{concern} host admission pool is poisoned"))
-                        })?
-                        .remaining_byte_count(),
-                )
+                .checked_add(pool.remaining_byte_count())
                 .ok_or_else(|| {
                     VulkanError(format!(
                         "{concern} remaining host admission bytes overflowed",
                     ))
                 })?;
         }
-        Ok((remaining_device_bytes, remaining_host_bytes))
+        Ok((
+            remaining_device_bytes,
+            remaining_host_bytes,
+            remaining_device_pools,
+        ))
     }
 
     fn reject_remaining_credit(
         concern: &str,
         remaining_device_bytes: usize,
         remaining_host_bytes: usize,
+        remaining_device_pools: &[(String, VulkanMemoryAdmissionAllocationClass, usize)],
     ) -> Result<(), VulkanError> {
         if remaining_device_bytes == 0 && remaining_host_bytes == 0 {
             return Ok(());
         }
         Err(VulkanError(format!(
-            "{concern} left {remaining_device_bytes} device bytes and {remaining_host_bytes} host bytes as unexplained admission credit",
+            "{concern} left {remaining_device_bytes} device bytes and {remaining_host_bytes} host bytes as unexplained admission credit; device_pools={remaining_device_pools:?}",
         )))
     }
 
@@ -683,6 +724,10 @@ impl VulkanMemoryAdmission {
             VulkanHostMemoryPermit,
         )>,
     ) -> Self {
+        let device_labels_by_tracker_key = device_permits
+            .iter()
+            .map(|(key, _, _)| (*key, format!("test-tracker:{key}")))
+            .collect();
         Self {
             device_pools: device_permits
                 .into_iter()
@@ -705,6 +750,7 @@ impl VulkanMemoryAdmission {
                     )
                 })
                 .collect(),
+            device_labels_by_tracker_key,
         }
     }
 
@@ -888,7 +934,7 @@ fn take_scoped_host_memory_capacity(
     byte_count: usize,
 ) -> Option<Result<VulkanHostMemoryPermit, VulkanError>> {
     let tracker_key = Arc::as_ptr(tracker) as usize;
-    let (pool, recycle_released_capacity) = match VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
+    let (pool, allocation_class, recycle_released_capacity) = match VULKAN_MEMORY_ADMISSION_SCOPES.with(|scopes| {
         scopes.borrow().last().map(|scope| {
             (
                 scope
@@ -901,7 +947,9 @@ fn take_scoped_host_memory_capacity(
             )
         })
     })? {
-        (Some(pool), _, recycle_released_capacity) => (pool, recycle_released_capacity),
+        (Some(pool), allocation_class, recycle_released_capacity) => {
+            (pool, allocation_class, recycle_released_capacity)
+        }
         (None, allocation_class, _) => {
             return Some(Err(VulkanError(
                 format!(
@@ -912,8 +960,14 @@ fn take_scoped_host_memory_capacity(
     };
     let child = pool
         .lock()
-            .map_err(|_| VulkanError("stream host permit pool was poisoned".to_string()))
-        .and_then(|mut pool| pool.take(byte_count));
+        .map_err(|_| VulkanError("stream host permit pool was poisoned".to_string()))
+        .and_then(|mut pool| {
+            pool.take(byte_count).map_err(|error| {
+                VulkanError(format!(
+                    "{allocation_class:?} stream host admission cannot provide {byte_count} bytes: {error}",
+                ))
+            })
+        });
     Some(child.map(|permit| {
         if recycle_released_capacity {
             permit.recycle_into(Arc::downgrade(&pool))
