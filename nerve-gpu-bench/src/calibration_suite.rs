@@ -164,6 +164,8 @@ pub fn run_calibration_suite(
                 &runtime_models[&case.owner_target_id][case.runtime_variant_index],
                 &case.target,
                 case.phase,
+                None,
+                &[],
                 order,
             )?;
             if measurement.catalog.observation_count() == 0 {
@@ -190,6 +192,8 @@ pub fn run_calibration_suite(
                     &runtime_models[&case.owner_target_id][case.runtime_variant_index],
                     &case.target,
                     case.phase,
+                    None,
+                    &[],
                     &order,
                 )?;
                 if measurement.catalog.observation_count() == 0 {

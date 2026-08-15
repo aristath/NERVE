@@ -15,8 +15,8 @@ use nerve_runtime::{
 };
 
 use crate::calibration_device_state::{
-    capture_device_snapshots, open_calibration_targets, print_device_snapshots,
-    quiesce_and_verify_device_snapshots,
+    capture_device_snapshots, close_and_verify_device_snapshots, open_calibration_targets,
+    print_device_snapshots,
 };
 use crate::calibration_package::CalibrationPackage;
 use crate::cli::PackageCalibrationPhase;
@@ -128,7 +128,7 @@ pub fn measure_region_candidates_for_runtime_model(
             unavailable_case_count: 0,
         })
     })();
-    let restoration = quiesce_and_verify_device_snapshots(&opened, &before);
+    let restoration = close_and_verify_device_snapshots(opened, &before);
     match (measurement, restoration) {
         (Ok(measurement), Ok(())) => Ok(measurement),
         (Err(error), Ok(())) => Err(error),

@@ -15,8 +15,8 @@ use nerve_runtime::{
 };
 
 use crate::calibration_device_state::{
-    capture_device_snapshots, open_calibration_targets, print_device_snapshots,
-    quiesce_and_verify_device_snapshots,
+    capture_device_snapshots, close_and_verify_device_snapshots, open_calibration_targets,
+    print_device_snapshots,
 };
 use crate::calibration_package::CalibrationPackage;
 use crate::cli::PackageCalibrationPhase;
@@ -178,7 +178,8 @@ pub fn measure_selected_resource_classes_for_runtime_model(
             },
         )
     })();
-    let restoration_result = quiesce_and_verify_device_snapshots(&devices, &before);
+    drop(device);
+    let restoration_result = close_and_verify_device_snapshots(devices, &before);
     match (calibration_result, restoration_result) {
         (Ok(measurement), Ok(())) => Ok(measurement),
         (Err(error), Ok(())) => Err(error.into()),

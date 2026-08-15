@@ -103,6 +103,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             package,
             component,
             phase,
+            strategy,
+            contract_ids,
             target_ids,
             runtime,
             output,
@@ -111,6 +113,29 @@ fn run() -> Result<(), Box<dyn Error>> {
                 &package,
                 &component,
                 phase,
+                strategy,
+                &contract_ids,
+                &target_ids,
+                runtime,
+                &output,
+            )?;
+        }
+        Command::CalibratePlacement {
+            package,
+            component,
+            phase,
+            strategy,
+            contract_ids,
+            target_ids,
+            runtime,
+            output,
+        } => {
+            package_calibration::run_placement_calibration(
+                &package,
+                &component,
+                phase,
+                strategy,
+                &contract_ids,
                 &target_ids,
                 runtime,
                 &output,

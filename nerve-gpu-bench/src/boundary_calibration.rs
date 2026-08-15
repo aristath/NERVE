@@ -10,8 +10,8 @@ use nerve_runtime::{
 };
 
 use crate::calibration_device_state::{
-    capture_device_snapshots, discover_calibration_hardware_profiles, open_calibration_targets,
-    print_device_snapshots, quiesce_and_verify_device_snapshots,
+    capture_device_snapshots, close_and_verify_device_snapshots,
+    discover_calibration_hardware_profiles, open_calibration_targets, print_device_snapshots,
 };
 use crate::cli::PackageCalibrationPhase;
 use crate::output::write_atomic;
@@ -91,7 +91,7 @@ pub fn measure_boundary_candidate_for_byte_counts(
         activation_batch_width,
         frame_byte_counts,
     );
-    let restoration_result = quiesce_and_verify_device_snapshots(&devices, &before);
+    let restoration_result = close_and_verify_device_snapshots(devices, &before);
     let reports = match (calibration_result, restoration_result) {
         (Ok(reports), Ok(())) => reports,
         (Err(error), Ok(())) => return Err(error.into()),

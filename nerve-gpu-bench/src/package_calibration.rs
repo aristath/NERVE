@@ -4,6 +4,7 @@ use std::error::Error;
 use std::io;
 use std::path::Path;
 
+use nerve_execution_contracts::ExecutionStrategy;
 use nerve_runtime::{
     VulkanPlacementCalibrationCatalog, VulkanRuntimeDistributedPlacementCalibrationReport,
     VulkanRuntimePlacementCalibrationPolicy, VulkanRuntimePlacementCalibrationTarget,
@@ -16,8 +17,8 @@ use nerve_runtime::{
 };
 
 use crate::calibration_device_state::{
-    capture_device_snapshots, discover_calibration_hardware_profiles, open_calibration_targets,
-    print_device_snapshots, quiesce_and_verify_device_snapshots,
+    capture_device_snapshots, close_and_verify_device_snapshots,
+    discover_calibration_hardware_profiles, open_calibration_targets, print_device_snapshots,
 };
 use crate::calibration_package::{CalibrationPackage, CalibrationRuntimeConfig};
 use crate::cli::PackageCalibrationPhase;
@@ -28,14 +29,24 @@ pub fn run_package_calibration(
     package: &Path,
     component: &str,
     phase: PackageCalibrationPhase,
+    strategy: Option<ExecutionStrategy>,
+    contract_ids: &[String],
     ordered_target_ids: &[String],
     runtime: CalibrationRuntimeConfig,
     output: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let package = CalibrationPackage::load(package)?;
     package.reject_output_collision(output)?;
-    let measurement =
-        measure_package_candidates(&package, component, phase, ordered_target_ids, runtime)?;
+    let measurement = measure_package_candidates(
+        &package,
+        component,
+        phase,
+        strategy,
+        contract_ids,
+        ordered_target_ids,
+        runtime,
+        true,
+    )?;
     if !requested_component_candidate_available(
         measurement.catalog.observation_count(),
         measurement.reports.len(),
@@ -95,6 +106,64 @@ pub fn run_package_calibration(
     Ok(())
 }
 
+pub fn run_placement_calibration(
+    package: &Path,
+    component: &str,
+    phase: PackageCalibrationPhase,
+    strategy: Option<ExecutionStrategy>,
+    contract_ids: &[String],
+    ordered_target_ids: &[String],
+    runtime: CalibrationRuntimeConfig,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let package = CalibrationPackage::load(package)?;
+    package.reject_output_collision(output)?;
+    let measurement = measure_package_candidates(
+        &package,
+        component,
+        phase,
+        strategy,
+        contract_ids,
+        ordered_target_ids,
+        runtime,
+        false,
+    )?;
+    if !requested_component_candidate_available(
+        measurement.catalog.observation_count(),
+        measurement.reports.len(),
+        ordered_target_ids.len(),
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the requested component placement candidate is unavailable",
+        )
+        .into());
+    }
+    let payload = measurement.catalog.to_json_bytes()?;
+    write_atomic(output, &payload)?;
+    println!(
+        "calibrated placement package={} requested_component={} phase={} batch_width={} targets={:?} observations={} distributed_reports={} best_measured_ns={} output={}",
+        package.source_path().display(),
+        component,
+        match phase {
+            PackageCalibrationPhase::Decode => "decode",
+            PackageCalibrationPhase::Prefill { .. } => "prefill",
+        },
+        phase.activation_batch_width(),
+        ordered_target_ids,
+        measurement.catalog.observation_count(),
+        measurement.reports.len(),
+        measurement
+            .reports
+            .iter()
+            .map(|report| report.measured_execution_ns)
+            .min()
+            .unwrap_or(0),
+        output.display(),
+    );
+    Ok(())
+}
+
 pub struct PackageCalibrationMeasurement {
     pub targets: Vec<VulkanRuntimePlacementCalibrationTarget>,
     pub catalog: VulkanPlacementCalibrationCatalog,
@@ -128,8 +197,11 @@ pub fn measure_package_candidates(
     package: &CalibrationPackage,
     component: &str,
     phase: PackageCalibrationPhase,
+    strategy: Option<ExecutionStrategy>,
+    contract_ids: &[String],
     ordered_target_ids: &[String],
     runtime: CalibrationRuntimeConfig,
+    include_selected_resource_evidence: bool,
 ) -> Result<PackageCalibrationMeasurement, Box<dyn Error>> {
     let owner_id = ordered_target_ids.first().ok_or_else(|| {
         io::Error::new(
@@ -174,6 +246,8 @@ pub fn measure_package_candidates(
             runtime_model,
             &target,
             phase,
+            strategy,
+            contract_ids,
             ordered_target_ids,
         )?;
         let component_candidate_available = requested_component_candidate_available(
@@ -182,6 +256,7 @@ pub fn measure_package_candidates(
             ordered_target_ids.len(),
         );
         let selected_resource_participants = selected_resource_calibration_participants(
+            include_selected_resource_evidence,
             component_candidate_available,
             ordered_target_ids,
         );
@@ -234,10 +309,11 @@ pub fn measure_package_candidates(
 }
 
 fn selected_resource_calibration_participants<'a>(
+    include_selected_resource_evidence: bool,
     component_candidate_available: bool,
     ordered_target_ids: &'a [String],
 ) -> &'a [String] {
-    if component_candidate_available {
+    if include_selected_resource_evidence && component_candidate_available {
         ordered_target_ids
     } else {
         &[]
@@ -261,6 +337,8 @@ pub fn measure_package_candidates_for_runtime_model(
     runtime_model: &nerve_runtime::VulkanResidentRuntimeModel,
     target: &VulkanRuntimePlacementCalibrationTarget,
     phase: PackageCalibrationPhase,
+    strategy: Option<ExecutionStrategy>,
+    requested_contract_ids: &[String],
     ordered_target_ids: &[String],
 ) -> Result<PackageCalibrationMeasurement, Box<dyn Error>> {
     let execution_phase = match phase {
@@ -310,6 +388,37 @@ pub fn measure_package_candidates_for_runtime_model(
     };
     let candidates =
         vulkan_runtime_distributed_contract_candidates(runtime_model, target, execution_phase)?;
+    let candidates = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            if !candidate_matches_requested_contracts(
+                &candidate.contract_ids,
+                requested_contract_ids,
+            ) {
+                return None;
+            }
+            match candidate_matches_requested_strategy(
+                runtime_model,
+                &target.component_id,
+                &candidate.contract_ids,
+                strategy,
+            ) {
+                Ok(true) => Some(Ok(candidate)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .collect::<Result<Vec<_>, io::Error>>()?;
+    if (strategy.is_some() || !requested_contract_ids.is_empty()) && candidates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "component {:?} has no complete candidate for {execution_phase:?} matching strategy={strategy:?} contracts={requested_contract_ids:?}",
+                target.component_id,
+            ),
+        )
+        .into());
+    }
     let calibration_result = (|| {
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
         let mut reports = Vec::new();
@@ -356,7 +465,7 @@ pub fn measure_package_candidates_for_runtime_model(
         Ok::<_, nerve_runtime::VulkanResidentTokenModelPackageError>((catalog, reports))
     })();
 
-    let restoration_result = quiesce_and_verify_device_snapshots(&devices, &before);
+    let restoration_result = close_and_verify_device_snapshots(devices, &before);
 
     let (catalog, reports) = match (calibration_result, restoration_result) {
         (Ok(measured), Ok(())) => measured,
@@ -381,9 +490,76 @@ pub fn measure_package_candidates_for_runtime_model(
     })
 }
 
+fn candidate_matches_requested_contracts(
+    candidate: &BTreeSet<String>,
+    requested: &[String],
+) -> bool {
+    requested.is_empty()
+        || (candidate.len() == requested.len()
+            && requested
+                .iter()
+                .all(|contract_id| candidate.contains(contract_id)))
+}
+
+fn candidate_matches_requested_strategy(
+    runtime_model: &nerve_runtime::VulkanResidentRuntimeModel,
+    component_id: &str,
+    contract_ids: &BTreeSet<String>,
+    requested: Option<ExecutionStrategy>,
+) -> Result<bool, io::Error> {
+    let Some(requested) = requested else {
+        return Ok(true);
+    };
+    let execution = runtime_model
+        .component_executions
+        .iter()
+        .find(|execution| execution.component_id == component_id)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("component {component_id:?} has no execution catalog"),
+            )
+        })?;
+    let matching = execution
+        .kernels
+        .iter()
+        .flat_map(|kernel| &kernel.physical_execution_contracts)
+        .filter(|contract| contract_ids.contains(&contract.contract_id))
+        .collect::<Vec<_>>();
+    if matching.len() != contract_ids.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("component {component_id:?} candidate references unknown physical contracts"),
+        ));
+    }
+    Ok(matching
+        .iter()
+        .all(|contract| contract.strategy == requested))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_contract_selection_never_accepts_a_subset_or_superset() {
+        let candidate = ["gate".to_string(), "down".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert!(candidate_matches_requested_contracts(&candidate, &[]));
+        assert!(candidate_matches_requested_contracts(
+            &candidate,
+            &["down".to_string(), "gate".to_string()]
+        ));
+        assert!(!candidate_matches_requested_contracts(
+            &candidate,
+            &["gate".to_string()]
+        ));
+        assert!(!candidate_matches_requested_contracts(
+            &candidate,
+            &["down".to_string(), "gate".to_string(), "other".to_string()]
+        ));
+    }
 
     fn measurement_with_selected_resource_counts(
         planned: usize,
@@ -404,7 +580,18 @@ mod tests {
     fn unavailable_component_skips_all_selected_resource_workloads() {
         let targets = ["owner".to_string(), "helper".to_string()];
 
-        assert!(selected_resource_calibration_participants(false, &targets).is_empty());
+        assert!(
+            selected_resource_calibration_participants(true, false, &targets).is_empty()
+        );
+    }
+
+    #[test]
+    fn focused_placement_skips_selected_resource_workloads() {
+        let targets = ["owner".to_string(), "helper".to_string()];
+
+        assert!(
+            selected_resource_calibration_participants(false, true, &targets).is_empty()
+        );
     }
 
     #[test]
@@ -416,7 +603,7 @@ mod tests {
         ];
 
         assert_eq!(
-            selected_resource_calibration_participants(true, &targets),
+            selected_resource_calibration_participants(true, true, &targets),
             targets,
         );
     }

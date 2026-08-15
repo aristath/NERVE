@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
 
+use nerve_execution_contracts::ExecutionStrategy;
 use nerve_runtime::ResourceResidencyPolicy;
 
 use crate::calibration_package::CalibrationRuntimeConfig;
@@ -41,6 +42,18 @@ pub enum Command {
         package: PathBuf,
         component: String,
         phase: PackageCalibrationPhase,
+        strategy: Option<ExecutionStrategy>,
+        contract_ids: Vec<String>,
+        target_ids: Vec<String>,
+        runtime: CalibrationRuntimeConfig,
+        output: PathBuf,
+    },
+    CalibratePlacement {
+        package: PathBuf,
+        component: String,
+        phase: PackageCalibrationPhase,
+        strategy: Option<ExecutionStrategy>,
+        contract_ids: Vec<String>,
         target_ids: Vec<String>,
         runtime: CalibrationRuntimeConfig,
         output: PathBuf,
@@ -211,7 +224,8 @@ where
         "summarize" => parse_input_file_command("summarize", args.collect()),
         "validate" => parse_validate(args.collect()),
         "calibrate-suite" => parse_calibrate_suite(args.collect()),
-        "calibrate-package" => parse_calibrate_package(args.collect()),
+        "calibrate-package" => parse_calibrate_component(args.collect(), false),
+        "calibrate-placement" => parse_calibrate_component(args.collect(), true),
         "calibrate-boundaries" => parse_calibrate_boundaries(args.collect()),
         "calibrate-load-wave" => parse_calibrate_load_wave(args.collect()),
         "merge-catalogs" => parse_merge_catalogs(args.collect()),
@@ -541,11 +555,21 @@ fn parse_merge_catalogs(arguments: Vec<String>) -> Result<Command, CliError> {
     Ok(Command::MergeCatalogs { inputs, output })
 }
 
-fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> {
+fn parse_calibrate_component(
+    arguments: Vec<String>,
+    placement_only: bool,
+) -> Result<Command, CliError> {
+    let command_name = if placement_only {
+        "calibrate-placement"
+    } else {
+        "calibrate-package"
+    };
     let mut package = None;
     let mut component = None;
     let mut phase = None;
     let mut activation_batch_width = None;
+    let mut strategy = None;
+    let mut contract_ids = Vec::new();
     let mut target_ids = Vec::new();
     let mut runtime = CalibrationRuntimeArguments::default();
     let mut output = None;
@@ -584,6 +608,31 @@ fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> 
                     ));
                 }
             }
+            "--strategy" => {
+                let value = required_value(&arguments, &mut index, "--strategy")?;
+                let value = match value.as_str() {
+                    "tensor_parallel" => ExecutionStrategy::TensorParallel,
+                    "expert_parallel" => ExecutionStrategy::ExpertParallel,
+                    "tensor_parallel_expert" => ExecutionStrategy::TensorParallelExpert,
+                    _ => {
+                        return Err(CliError(format!(
+                            "invalid --strategy {value:?}; expected tensor_parallel, expert_parallel, or tensor_parallel_expert"
+                        )));
+                    }
+                };
+                if strategy.replace(value).is_some() {
+                    return Err(CliError(
+                        "--strategy may only be specified once".to_string(),
+                    ));
+                }
+            }
+            "--contract" => {
+                let contract_id = required_value(&arguments, &mut index, "--contract")?;
+                if contract_id.is_empty() {
+                    return Err(CliError("--contract requires a nonempty ID".to_string()));
+                }
+                contract_ids.push(contract_id);
+            }
             "--target" => {
                 target_ids.push(required_value(&arguments, &mut index, "--target")?);
             }
@@ -596,7 +645,7 @@ fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> 
             other => {
                 if !runtime.parse_option(other, &arguments, &mut index)? {
                     return Err(CliError(format!(
-                        "unknown calibrate-package argument {other:?}\n\n{}",
+                        "unknown {command_name} argument {other:?}\n\n{}",
                         usage()
                     )));
                 }
@@ -604,44 +653,67 @@ fn parse_calibrate_package(arguments: Vec<String>) -> Result<Command, CliError> 
         }
         index += 1;
     }
-    let package =
-        package.ok_or_else(|| CliError("calibrate-package requires --package PATH".to_string()))?;
+    let package = package
+        .ok_or_else(|| CliError(format!("{command_name} requires --package PATH")))?;
     let component = component
         .filter(|component| !component.is_empty())
-        .ok_or_else(|| CliError("calibrate-package requires --component ID".to_string()))?;
-    let phase =
-        parse_package_calibration_phase(phase, activation_batch_width, "calibrate-package")?;
+        .ok_or_else(|| CliError(format!("{command_name} requires --component ID")))?;
+    let phase = parse_package_calibration_phase(phase, activation_batch_width, command_name)?;
     if target_ids.is_empty() {
-        return Err(CliError(
-            "calibrate-package requires at least one ordered --target vulkan-uuid:ID".to_string(),
-        ));
+        return Err(CliError(format!(
+            "{command_name} requires at least one ordered --target vulkan-uuid:ID"
+        )));
     }
     if let Some(target_id) = target_ids
         .iter()
         .find(|target_id| !is_canonical_vulkan_target_id(target_id))
     {
         return Err(CliError(format!(
-            "calibrate-package target {target_id:?} is not a canonical vulkan-uuid identity"
+            "{command_name} target {target_id:?} is not a canonical vulkan-uuid identity"
         )));
     }
     let mut distinct_target_ids = target_ids.clone();
     distinct_target_ids.sort();
     distinct_target_ids.dedup();
     if distinct_target_ids.len() != target_ids.len() {
-        return Err(CliError(
-            "calibrate-package requires distinct ordered target identities".to_string(),
-        ));
+        return Err(CliError(format!(
+            "{command_name} requires distinct ordered target identities"
+        )));
     }
-    let output =
-        output.ok_or_else(|| CliError("calibrate-package requires --output PATH".to_string()))?;
-    Ok(Command::CalibratePackage {
-        package,
-        component,
-        phase,
-        target_ids,
-        runtime: runtime.finish(),
-        output,
-    })
+    let mut distinct_contract_ids = contract_ids.clone();
+    distinct_contract_ids.sort();
+    distinct_contract_ids.dedup();
+    if distinct_contract_ids.len() != contract_ids.len() {
+        return Err(CliError(format!(
+            "{command_name} requires distinct contract identities"
+        )));
+    }
+    contract_ids.sort();
+    let output = output.ok_or_else(|| CliError(format!("{command_name} requires --output PATH")))?;
+    let runtime = runtime.finish();
+    if placement_only {
+        Ok(Command::CalibratePlacement {
+            package,
+            component,
+            phase,
+            strategy,
+            contract_ids,
+            target_ids,
+            runtime,
+            output,
+        })
+    } else {
+        Ok(Command::CalibratePackage {
+            package,
+            component,
+            phase,
+            strategy,
+            contract_ids,
+            target_ids,
+            runtime,
+            output,
+        })
+    }
 }
 
 fn parse_package_calibration_phase(
@@ -878,7 +950,7 @@ fn parse_usize_allow_zero(value: &str, option: &str) -> Result<usize, CliError> 
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-suite --package PACKAGE.json [--target VULKAN_UUID ...] [--prefill-width N ...] [--max-group-size N] [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] [--dry-plan] [--output CATALOG_OR_PLAN.json]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] --target VULKAN_UUID ... [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-load-wave --package PACKAGE.json --component ID --selector ID --phase decode|prefill [--batch-width N] --resource-index N ... --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
+    "Usage:\n  nerve-gpu-bench list [--json]\n  nerve-gpu-bench run [--output PATH] [--payload-bytes BYTES] [--samples N] [--format FORMAT ...] [--max-group-size N] [--include-target ID ...] [--exclude-target ID ...] [--exclude-pci PCI ...] [--exclude-kind KIND ...] [--no-pairs] [--dry-plan] [--execute]\n  nerve-gpu-bench calibrate-suite --package PACKAGE.json [--target VULKAN_UUID ...] [--prefill-width N ...] [--max-group-size N] [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] [--dry-plan] [--output CATALOG_OR_PLAN.json]\n  nerve-gpu-bench calibrate-package --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] [--strategy tensor_parallel|expert_parallel|tensor_parallel_expert] [--contract ID ...] --target VULKAN_UUID ... [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-placement --package PACKAGE.json --component ID --phase decode|prefill [--batch-width N] [--strategy tensor_parallel|expert_parallel|tensor_parallel_expert] [--contract ID ...] --target VULKAN_UUID ... [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-boundaries --package PACKAGE.json --phase decode|prefill [--batch-width N] --source VULKAN_UUID --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench calibrate-load-wave --package PACKAGE.json --component ID --selector ID --phase decode|prefill [--batch-width N] --resource-index N ... --target VULKAN_UUID [--context-size N] [--speculative-draft-tokens N] [--residency-policy POLICY] --output CATALOG.json\n  nerve-gpu-bench merge-catalogs --input CATALOG.json --input CATALOG.json ... --output MERGED.json\n  nerve-gpu-bench summarize --input PATH\n  nerve-gpu-bench validate --input PATH\n"
 }
 
 #[cfg(test)]
@@ -1309,11 +1381,48 @@ mod tests {
                 package: PathBuf::from("compiled/vulkan_resident_package.json"),
                 component: "transformer.block.7".to_string(),
                 phase: PackageCalibrationPhase::Decode,
+                strategy: None,
+                contract_ids: Vec::new(),
                 target_ids: vec![owner.to_string(), worker.to_string()],
                 runtime: CalibrationRuntimeConfig::default(),
                 output: PathBuf::from("placement.json"),
             },
         );
+    }
+
+    #[test]
+    fn parses_focused_component_placement_calibration() {
+        let owner = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let worker = "vulkan-uuid:ffeeddccbbaa99887766554433221100";
+        assert!(matches!(
+            parse_args(
+                [
+                    "calibrate-placement",
+                    "--package",
+                    "compiled/vulkan_resident_package.json",
+                    "--component",
+                    "transformer.block.7",
+                    "--phase",
+                    "decode",
+                    "--strategy",
+                    "tensor_parallel_expert",
+                    "--target",
+                    owner,
+                    "--target",
+                    worker,
+                    "--output",
+                    "placement.json",
+                ]
+                .map(str::to_string),
+            )
+            .unwrap(),
+            Command::CalibratePlacement {
+                phase: PackageCalibrationPhase::Decode,
+                strategy: Some(ExecutionStrategy::TensorParallelExpert),
+                ref target_ids,
+                ..
+            } if target_ids == &[owner.to_string(), worker.to_string()]
+        ));
     }
 
     #[test]
@@ -1330,6 +1439,8 @@ mod tests {
                 "prefill",
                 "--batch-width",
                 "64",
+                "--strategy",
+                "tensor_parallel",
                 "--target",
                 target,
                 "--output",
@@ -1347,6 +1458,114 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_exact_distributed_strategy_for_component_calibration() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let command = parse_args(
+            [
+                "calibrate-package",
+                "--package",
+                "package.json",
+                "--component",
+                "block",
+                "--phase",
+                "decode",
+                "--strategy",
+                "tensor_parallel_expert",
+                "--target",
+                target,
+                "--output",
+                "placement.json",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::CalibratePackage {
+                strategy: Some(ExecutionStrategy::TensorParallelExpert),
+                ..
+            }
+        ));
+
+        for invalid in ["single_device", "model_specific_tp", ""] {
+            let error = parse_args(
+                [
+                    "calibrate-package",
+                    "--package",
+                    "package.json",
+                    "--component",
+                    "block",
+                    "--phase",
+                    "decode",
+                    "--strategy",
+                    invalid,
+                    "--target",
+                    target,
+                    "--output",
+                    "placement.json",
+                ]
+                .map(str::to_string),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("invalid --strategy"));
+        }
+    }
+
+    #[test]
+    fn parses_an_exact_complete_physical_contract_candidate() {
+        let target = "vulkan-uuid:00112233445566778899aabbccddeeff";
+        let command = parse_args(
+            [
+                "calibrate-package",
+                "--package",
+                "package.json",
+                "--component",
+                "block",
+                "--phase",
+                "decode",
+                "--contract",
+                "contract-b",
+                "--contract",
+                "contract-a",
+                "--target",
+                target,
+                "--output",
+                "placement.json",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::CalibratePackage { contract_ids, .. }
+                if contract_ids == ["contract-a", "contract-b"]
+        ));
+
+        let repeated = parse_args(
+            [
+                "calibrate-package",
+                "--package",
+                "package.json",
+                "--component",
+                "block",
+                "--phase",
+                "decode",
+                "--contract",
+                "contract-a",
+                "--contract",
+                "contract-a",
+                "--target",
+                target,
+                "--output",
+                "placement.json",
+            ]
+            .map(str::to_string),
+        )
+        .unwrap_err();
+        assert!(repeated.to_string().contains("distinct contract"));
     }
 
     #[test]
@@ -1716,6 +1935,7 @@ mod tests {
             ("--component", "other"),
             ("--phase", "prefill"),
             ("--batch-width", "32"),
+            ("--strategy", "expert_parallel"),
             ("--output", "other.json"),
         ] {
             let mut arguments = [
@@ -1728,6 +1948,8 @@ mod tests {
                 "prefill",
                 "--batch-width",
                 "64",
+                "--strategy",
+                "tensor_parallel",
                 "--target",
                 target,
                 "--output",
