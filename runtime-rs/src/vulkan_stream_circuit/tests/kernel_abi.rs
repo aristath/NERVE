@@ -61,6 +61,7 @@ fn kernel_interfaces_describe_fixture_model_compiled_component_abi() {
             name: "stream_tick".to_string(),
             scalar_type: "u64".to_string(),
             source: VulkanKernelScalarSource::PushConstant,
+            canonical_u32: None,
         }
     );
     assert_eq!(q_rope.stream_metadata.control_flags.name, "control_flags");
@@ -261,6 +262,7 @@ fn stream_control_buffer_bytes_follow_kernel_abi_order() {
         VulkanKernelStreamMetadata::from_compiled_contract(
             "rotary_position_embedding",
             Some(2),
+            None,
         )
         .push_constants();
     assert!(push_constants.is_empty());
@@ -320,6 +322,7 @@ fn compiled_contract_can_require_stream_control_for_any_operation() {
     let metadata = VulkanKernelStreamMetadata::from_compiled_contract(
         "architecture_defined_temporal_operation",
         Some(6),
+        None,
     );
 
     assert_eq!(metadata.stream_control_binding, Some(6));
@@ -331,6 +334,7 @@ fn operation_name_does_not_implicitly_require_stream_control() {
     let metadata = VulkanKernelStreamMetadata::from_compiled_contract(
         "inverse_rotary_position_embedding",
         None,
+        None,
     );
 
     assert_eq!(metadata.stream_control_binding, None);
@@ -340,7 +344,8 @@ fn operation_name_does_not_implicitly_require_stream_control() {
 #[test]
 fn sparse_moe_kernels_receive_an_explicit_expert_range() {
     for op in ["sparse_moe_gate_up", "sparse_moe_down"] {
-        let metadata = VulkanKernelStreamMetadata::from_compiled_contract(op, None);
+        let metadata =
+            VulkanKernelStreamMetadata::from_compiled_contract(op, None, Some(256));
         let push_constants = metadata.push_constants();
 
         assert_eq!(
@@ -350,27 +355,71 @@ fn sparse_moe_kernels_receive_an_explicit_expert_range() {
                     name: "expert_start".to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
+                    canonical_u32: Some(0),
                 },
                 VulkanKernelScalarBinding {
                     name: "expert_count".to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
+                    canonical_u32: Some(256),
                 },
             ]
         );
-        assert_eq!(
-            stream_control_push_constant_bytes(
-                &push_constants,
-                VulkanMountedPlacedStreamControl {
-                    stream_tick: 42,
-                    control_flags: 7,
-                    dynamic_state_capacity_activations: 65_536,
-                },
-            )
-            .unwrap(),
-            [0u8; 8]
-        );
+        let bytes = stream_control_push_constant_bytes(
+            &push_constants,
+            VulkanMountedPlacedStreamControl {
+                stream_tick: 42,
+                control_flags: 7,
+                dynamic_state_capacity_activations: 65_536,
+            },
+        )
+        .unwrap();
+        assert_eq!(&bytes[0..4], &0u32.to_le_bytes());
+        assert_eq!(&bytes[4..8], &256u32.to_le_bytes());
     }
+}
+
+#[test]
+fn independent_sparse_moe_canonical_execution_owns_every_selected_expert() {
+    let node = VulkanNodeBinding {
+        node_index: 7,
+        node_id: "expert_gate_up".to_string(),
+        op: "independent_sparse_moe_gate_up".to_string(),
+        specialization: String::new(),
+        stream_control_binding: None,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        parameters: Vec::new(),
+        state_reads: Vec::new(),
+        state_writes: Vec::new(),
+        selection_domain: None,
+        selected_parameter_accesses: vec![VulkanSelectedParameterAccessBinding {
+            component_id: "layer_00".to_string(),
+            node_id: "expert_gate_up".to_string(),
+            selection_signal: "expert_routes".to_string(),
+            execution_signal: "expert_routes".to_string(),
+            execution_calibration_word_base: 0,
+            layout: PlannedSelectedParameterLayout::Independent {
+                resource_count: 256,
+                parameters_per_resource: 4,
+            },
+            parameter_ids: Vec::new(),
+        }],
+    };
+
+    let kernel = VulkanKernelInterface::from_node_binding("layer_00", &node);
+    let bytes = stream_control_push_constant_bytes(
+        &kernel.stream_metadata.push_constants(),
+        VulkanMountedPlacedStreamControl {
+            stream_tick: 42,
+            control_flags: 7,
+            dynamic_state_capacity_activations: 65_536,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(&bytes[0..4], &0u32.to_le_bytes());
+    assert_eq!(&bytes[4..8], &256u32.to_le_bytes());
 }
 
 #[test]
@@ -505,6 +554,7 @@ fn fused_head_norm_rope_kernel_receives_compiled_stream_control_metadata() {
     let metadata = VulkanKernelStreamMetadata::from_compiled_contract(
         "parallel_head_norm_rope_2way",
         Some(5),
+        None,
     );
 
     assert_eq!(metadata.stream_control_binding, Some(5));
@@ -513,6 +563,7 @@ fn fused_head_norm_rope_kernel_receives_compiled_stream_control_metadata() {
     let codebook_metadata = VulkanKernelStreamMetadata::from_compiled_contract(
         "parallel_head_norm_rope_2way_codebook_u8",
         Some(5),
+        None,
     );
     assert_eq!(codebook_metadata.stream_control_binding, Some(5));
     assert!(codebook_metadata.push_constants().is_empty());
@@ -520,6 +571,7 @@ fn fused_head_norm_rope_kernel_receives_compiled_stream_control_metadata() {
     let embedded_metadata = VulkanKernelStreamMetadata::from_compiled_contract(
         "parallel_head_norm_rope_2way_embedded_parameters",
         Some(5),
+        None,
     );
     assert_eq!(embedded_metadata.stream_control_binding, Some(5));
     assert!(embedded_metadata.push_constants().is_empty());
@@ -530,6 +582,7 @@ fn fused_append_attention_kernel_receives_stream_control_metadata() {
     let metadata = VulkanKernelStreamMetadata::from_compiled_contract(
         "append_scaled_dot_product_attention",
         Some(7),
+        None,
     );
 
     assert_eq!(metadata.stream_control_binding, Some(7));

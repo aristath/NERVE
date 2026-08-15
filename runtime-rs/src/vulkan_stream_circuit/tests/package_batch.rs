@@ -1880,17 +1880,20 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         name: "expert_start".to_string(),
         scalar_type: "u32".to_string(),
         source: VulkanKernelScalarSource::PushConstant,
+        canonical_u32: None,
     }];
     let expert_range = [
         VulkanKernelScalarBinding {
             name: "expert_start".to_string(),
             scalar_type: "u32".to_string(),
             source: VulkanKernelScalarSource::PushConstant,
+            canonical_u32: None,
         },
         VulkanKernelScalarBinding {
             name: "expert_count".to_string(),
             scalar_type: "u32".to_string(),
             source: VulkanKernelScalarSource::PushConstant,
+            canonical_u32: None,
         },
     ];
     let sparse_indirect = VulkanResidentComponentBatchStageArtifact {
@@ -1924,6 +1927,7 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
             name: "model_specific_scalar".to_string(),
             scalar_type: "u32".to_string(),
             source: VulkanKernelScalarSource::PushConstant,
+            canonical_u32: None,
         }],
     ));
 

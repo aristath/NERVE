@@ -1565,11 +1565,13 @@ mod tests {
                     name: "input_start".to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
+                    canonical_u32: None,
                 },
                 VulkanKernelScalarBinding {
                     name: "input_count".to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
+                    canonical_u32: None,
                 },
             ],
             stream_control_binding: None,
@@ -2078,11 +2080,13 @@ mod tests {
                         name: "expert_start".to_string(),
                         scalar_type: "u32".to_string(),
                         source: VulkanKernelScalarSource::PushConstant,
+                        canonical_u32: None,
                     },
                     VulkanKernelScalarBinding {
                         name: "expert_count".to_string(),
                         scalar_type: "u32".to_string(),
                         source: VulkanKernelScalarSource::PushConstant,
+                        canonical_u32: None,
                     },
                 ],
                 stream_control_binding: None,
@@ -2171,11 +2175,13 @@ mod tests {
                     name: "expert_start".to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
+                    canonical_u32: None,
                 },
                 VulkanKernelScalarBinding {
                     name: "expert_count".to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
+                    canonical_u32: None,
                 },
             ],
             stream_control_binding: None,
@@ -2490,11 +2496,13 @@ mod tests {
                         name: "expert_start".to_string(),
                         scalar_type: "u32".to_string(),
                         source: VulkanKernelScalarSource::PushConstant,
+                        canonical_u32: None,
                     },
                     VulkanKernelScalarBinding {
                         name: "expert_count".to_string(),
                         scalar_type: "u32".to_string(),
                         source: VulkanKernelScalarSource::PushConstant,
+                        canonical_u32: None,
                     },
                 ],
                 stream_control_binding: None,
@@ -4578,6 +4586,7 @@ mod tests {
             name: "stream_tick".to_string(),
             scalar_type: "u64".to_string(),
             source: VulkanKernelScalarSource::PushConstant,
+            canonical_u32: None,
         }];
 
         let plan = VulkanDistributedExecutionPlan::from_prepared_plans(

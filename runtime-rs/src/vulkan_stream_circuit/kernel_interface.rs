@@ -103,9 +103,38 @@ impl VulkanKernelInterface {
             stream_metadata: VulkanKernelStreamMetadata::from_compiled_contract(
                 &node.op,
                 node.stream_control_binding,
+                canonical_expert_count(node),
             ),
         }
     }
+}
+
+fn canonical_expert_count(node: &VulkanNodeBinding) -> Option<u32> {
+    if matches!(
+        node.op.as_str(),
+        "independent_sparse_moe_gate_up" | "independent_sparse_moe_down"
+    ) {
+        let counts = node
+            .selected_parameter_accesses
+            .iter()
+            .filter_map(|access| match access.layout {
+                PlannedSelectedParameterLayout::Independent { resource_count, .. } => {
+                    u32::try_from(resource_count).ok()
+                }
+                PlannedSelectedParameterLayout::Partitioned { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+        return (counts.len() == 1).then(|| *counts.first().unwrap());
+    }
+    if matches!(node.op.as_str(), "sparse_moe_gate_up" | "sparse_moe_down") {
+        return node
+            .parameters
+            .first()
+            .and_then(|parameter| parameter.shape.as_ref())
+            .and_then(|shape| shape.first())
+            .and_then(|count| u32::try_from(*count).ok());
+    }
+    None
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,7 +147,34 @@ pub struct VulkanKernelStreamMetadata {
 }
 
 impl VulkanKernelStreamMetadata {
-    fn from_compiled_contract(op: &str, stream_control_binding: Option<u32>) -> Self {
+    fn from_compiled_contract(
+        op: &str,
+        stream_control_binding: Option<u32>,
+        canonical_expert_count: Option<u32>,
+    ) -> Self {
+        let expert_range = matches!(
+            op,
+            "sparse_moe_gate_up"
+                | "sparse_moe_down"
+                | "independent_sparse_moe_gate_up"
+                | "independent_sparse_moe_down"
+        )
+        .then(|| {
+            let expert_count = canonical_expert_count
+                .filter(|count| *count > 0)
+                .expect("sparse MoE kernels require a nonzero canonical expert count");
+            vec![
+                VulkanKernelScalarBinding::push_constant_u32(
+                    "expert_start",
+                    0,
+                ),
+                VulkanKernelScalarBinding::push_constant_u32(
+                    "expert_count",
+                    expert_count,
+                ),
+            ]
+        })
+        .unwrap_or_default();
         Self {
             stream_tick: VulkanKernelScalarBinding::push_constant("stream_tick", "u64"),
             control_flags: VulkanKernelScalarBinding::push_constant("control_flags", "u32"),
@@ -127,20 +183,7 @@ impl VulkanKernelStreamMetadata {
                 "u32",
             ),
             stream_control_binding,
-            push_constants: if matches!(
-                op,
-                "sparse_moe_gate_up"
-                    | "sparse_moe_down"
-                    | "independent_sparse_moe_gate_up"
-                    | "independent_sparse_moe_down"
-            ) {
-                vec![
-                    VulkanKernelScalarBinding::push_constant("expert_start", "u32"),
-                    VulkanKernelScalarBinding::push_constant("expert_count", "u32"),
-                ]
-            } else {
-                Vec::new()
-            },
+            push_constants: expert_range,
         }
     }
 
@@ -154,6 +197,7 @@ pub struct VulkanKernelScalarBinding {
     pub name: String,
     pub scalar_type: String,
     pub source: VulkanKernelScalarSource,
+    pub canonical_u32: Option<u32>,
 }
 
 impl VulkanKernelScalarBinding {
@@ -162,6 +206,16 @@ impl VulkanKernelScalarBinding {
             name: name.into(),
             scalar_type: scalar_type.into(),
             source: VulkanKernelScalarSource::PushConstant,
+            canonical_u32: None,
+        }
+    }
+
+    fn push_constant_u32(name: impl Into<String>, canonical_value: u32) -> Self {
+        Self {
+            name: name.into(),
+            scalar_type: "u32".to_string(),
+            source: VulkanKernelScalarSource::PushConstant,
+            canonical_u32: Some(canonical_value),
         }
     }
 }

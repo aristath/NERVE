@@ -1574,6 +1574,7 @@ fn validate_partition_origin(
                     name: name.to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
+                    canonical_u32: None,
             }];
             if launch.workgroup_x == WorkgroupXMapping::Repeated {
                 let count_name = launch.count_push_constant.as_deref().ok_or_else(|| {
@@ -1586,6 +1587,7 @@ fn validate_partition_origin(
                     name: count_name.to_string(),
                     scalar_type: "u32".to_string(),
                     source: VulkanKernelScalarSource::PushConstant,
+                    canonical_u32: None,
                 });
             }
             if artifact.push_constants == expected {

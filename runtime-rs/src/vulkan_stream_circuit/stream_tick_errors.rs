@@ -160,6 +160,9 @@ pub enum VulkanMountedPlacedResidentKernelDispatchError {
         name: String,
         scalar_type: String,
     },
+    MissingCanonicalPushConstantValue {
+        name: String,
+    },
     PushConstantByteCountOverflow,
     ComponentRunnerDescriptorCountOverflow {
         component_id: String,
@@ -353,6 +356,10 @@ impl Display for VulkanMountedPlacedResidentKernelDispatchError {
                 f,
                 "unsupported push-constant binding {name:?} with scalar type {scalar_type:?}"
             ),
+            Self::MissingCanonicalPushConstantValue { name } => write!(
+                f,
+                "push-constant binding {name:?} has no canonical execution value"
+            ),
             Self::PushConstantByteCountOverflow => {
                 f.write_str("push-constant byte count overflowed")
             }
@@ -423,10 +430,20 @@ fn stream_control_push_constant_bytes(
                 bytes.extend_from_slice(&control.dynamic_state_capacity_activations.to_le_bytes());
             }
             ("expert_start", "u32") => {
-                bytes.extend_from_slice(&0u32.to_le_bytes());
+                let value = binding.canonical_u32.ok_or_else(|| {
+                    VulkanMountedPlacedResidentKernelDispatchError::MissingCanonicalPushConstantValue {
+                        name: binding.name.clone(),
+                    }
+                })?;
+                bytes.extend_from_slice(&value.to_le_bytes());
             }
             ("expert_count", "u32") => {
-                bytes.extend_from_slice(&0u32.to_le_bytes());
+                let value = binding.canonical_u32.ok_or_else(|| {
+                    VulkanMountedPlacedResidentKernelDispatchError::MissingCanonicalPushConstantValue {
+                        name: binding.name.clone(),
+                    }
+                })?;
+                bytes.extend_from_slice(&value.to_le_bytes());
             }
             _ => {
                 return Err(

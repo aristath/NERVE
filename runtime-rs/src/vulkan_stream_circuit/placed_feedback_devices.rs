@@ -688,6 +688,7 @@ impl VulkanResidentInProcessPlacedFeedbackLoop {
                                 name: "expert_start".to_string(),
                                 scalar_type: "u32".to_string(),
                                 source: VulkanKernelScalarSource::PushConstant,
+                                canonical_u32: None,
                             }]
                 });
         let has_demand_checkpoints = model.resource_residency_policy.is_demand_loaded()

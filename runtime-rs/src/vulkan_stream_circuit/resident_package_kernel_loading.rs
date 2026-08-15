@@ -426,6 +426,7 @@ fn physical_contract_push_constants(
         name: origin.clone(),
         scalar_type: "u32".to_string(),
         source: VulkanKernelScalarSource::PushConstant,
+        canonical_u32: None,
     }];
     if launch.workgroup_x == nerve_execution_contracts::WorkgroupXMapping::Repeated {
         let count = launch.count_push_constant.as_ref().ok_or_else(|| {
@@ -438,6 +439,7 @@ fn physical_contract_push_constants(
             name: count.clone(),
             scalar_type: "u32".to_string(),
             source: VulkanKernelScalarSource::PushConstant,
+            canonical_u32: None,
         });
     }
     Ok(controls)
