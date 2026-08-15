@@ -697,8 +697,17 @@ impl VulkanRuntimePhysicalExecutionResidencyPlan {
                     .to_string(),
             ));
         }
-        let groups = group_placed_graph_edges_by_produced_port(edge_plans)
-            .map_err(residency_display_error)?;
+        let distributed_edge_indices = activations
+            .allocations
+            .iter()
+            .filter_map(|allocation| match allocation.storage {
+                VulkanDistributedActivationStorage::Edge { edge_index, .. } => Some(edge_index),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let groups =
+            group_placed_graph_edges_by_produced_port(edge_plans, &distributed_edge_indices)
+                .map_err(residency_display_error)?;
         let mut removals = BTreeSet::<(String, VulkanRuntimeResidentStreamAllocationKind)>::new();
         let mut additions = BTreeMap::<String, Vec<VulkanRuntimeResidentStreamAllocation>>::new();
         let mut external_additions = BTreeMap::<

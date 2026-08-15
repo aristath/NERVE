@@ -262,6 +262,7 @@ fn group_placed_edge_pairs_by_produced_port(
 /// edge that was already cross-device in the serialized placement.
 fn group_placed_graph_edges_by_produced_port(
     plans: &[VulkanPlacedEdgeIoPlan],
+    distributed_edge_indices: &BTreeSet<usize>,
 ) -> Result<Vec<VulkanPlacedProducedPortEdgeGroup>, VulkanError> {
     let mut groups = group_placed_edge_pairs_by_produced_port(pair_placed_edge_endpoints(plans)?)?
         .into_iter()
@@ -278,7 +279,11 @@ fn group_placed_graph_edges_by_produced_port(
         .collect::<BTreeMap<_, _>>();
 
     for plan in plans {
-        for edge in &plan.local_edges {
+        for edge in plan
+            .local_edges
+            .iter()
+            .filter(|edge| distributed_edge_indices.contains(&edge.edge_index))
+        {
             let byte_capacity = edge.byte_capacity.ok_or_else(|| {
                 VulkanError(format!(
                     "local edge {} on produced port {}.{} has unknown byte capacity",

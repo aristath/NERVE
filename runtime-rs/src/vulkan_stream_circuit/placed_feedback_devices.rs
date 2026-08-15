@@ -1293,8 +1293,17 @@ where
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let edge_groups = group_placed_graph_edges_by_produced_port(&plans)
-        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+    let distributed_edge_indices = distributed_activation_buffers
+        .allocations
+        .iter()
+        .filter_map(|allocation| match allocation.planned.storage {
+            VulkanDistributedActivationStorage::Edge { edge_index, .. } => Some(edge_index),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let edge_groups =
+        group_placed_graph_edges_by_produced_port(&plans, &distributed_edge_indices)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
 
     let mut local_edge_overrides =
         BTreeMap::<String, Vec<VulkanPlacedLocalEdgeBufferOverride>>::new();
@@ -1353,7 +1362,9 @@ where
                 }
             },
         );
-        let mut participant_device_ids = group
+        let mut participant_device_ids = BTreeSet::from([group.source_device_id.clone()]);
+        participant_device_ids.extend(
+            group
             .edges
             .iter()
             .flat_map(|(outgoing, incoming)| {
@@ -1361,8 +1372,8 @@ where
                     outgoing.local_device_id.clone(),
                     incoming.local_device_id.clone(),
                 ]
-            })
-            .collect::<BTreeSet<_>>();
+            }),
+        );
         for allocation in &distributed_activation_buffers.allocations {
             if matches!(
                 allocation.planned.storage,
@@ -1399,7 +1410,14 @@ where
         let owner_index = unique_devices
             .iter()
             .position(|(device, _)| device.shares_logical_device_with(declared_source_device))
-            .expect("produced-port participants include the source device");
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(format!(
+                    "produced port {}.{} participants omit source device {:?}",
+                    group.source_component_id,
+                    group.source_port_id,
+                    group.source_device_id,
+                )))
+            })?;
         unique_devices.swap(0, owner_index);
         let required_route = resolve_vulkan_produced_port_resident_route(
             &group,

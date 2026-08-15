@@ -228,7 +228,7 @@ fn placed_edge_pairs_group_every_remote_consumer_by_produced_port() {
 #[test]
 fn placed_graph_groups_local_only_produced_ports_for_distributed_consumers() {
     let plans = vec![local_fanout_edge_plan()];
-    let groups = group_placed_graph_edges_by_produced_port(&plans).unwrap();
+    let groups = group_placed_graph_edges_by_produced_port(&plans, &BTreeSet::from([4])).unwrap();
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].source_device_id, "gpu0");
@@ -272,11 +272,19 @@ fn placed_graph_merges_local_and_remote_consumers_of_one_produced_port() {
             unresolved_byte_edges: Vec::new(),
         },
     ];
-    let groups = group_placed_graph_edges_by_produced_port(&plans).unwrap();
+    let groups = group_placed_graph_edges_by_produced_port(&plans, &BTreeSet::from([4])).unwrap();
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].byte_capacity, 8_192);
     assert_eq!(groups[0].edges.len(), 2);
+}
+
+#[test]
+fn placed_graph_does_not_remount_unrelated_local_only_produced_ports() {
+    let plans = vec![local_fanout_edge_plan()];
+    let groups = group_placed_graph_edges_by_produced_port(&plans, &BTreeSet::new()).unwrap();
+
+    assert!(groups.is_empty());
 }
 
 #[test]
