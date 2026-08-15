@@ -189,6 +189,100 @@ fn compiled_resource_representation_group_residency_bytes(
     })
 }
 
+fn compiled_resource_source_group_payload_bytes(
+    contract: &CompiledResourceResidencyContract,
+    index: &CompiledResourceContractIndex,
+    selector: &CompiledResourceSelector,
+    ownership: &VulkanCompiledResourceSelectorOwnership,
+    resource_index: usize,
+) -> Result<usize, VulkanRuntimeResidencyPlanError> {
+    match &selector.mapping {
+        CompiledResourceSelectorMapping::GroupTable { atomic_group_ids } => {
+            let group_id = atomic_group_ids.get(resource_index).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "compiled selector {:?} omits resource index {resource_index}",
+                    selector.id,
+                ))
+            })?;
+            let group = index.atomic_group(contract, group_id).ok_or_else(|| {
+                VulkanRuntimeResidencyPlanError(format!(
+                    "compiled selector {:?} references missing atomic group {group_id:?}",
+                    selector.id,
+                ))
+            })?;
+            let projection = ownership.source_projection(&selector.id, resource_index);
+            group.resource_ids.iter().try_fold(0usize, |total, resource_id| {
+                let bytes = if let Some(projection) = projection {
+                    projection
+                        .resources
+                        .get(resource_id)
+                        .map(|resource| resource.byte_count)
+                        .ok_or_else(|| {
+                            VulkanRuntimeResidencyPlanError(format!(
+                                "compiled ownership projection omits resource {resource_id:?}",
+                            ))
+                        })?
+                } else {
+                    let resource = index.resource(contract, resource_id).ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "compiled atomic group {group_id:?} references missing resource {resource_id:?}",
+                        ))
+                    })?;
+                    compiled_resource_bytes(resource)
+                        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?
+                };
+                if bytes == 0 {
+                    return Err(VulkanRuntimeResidencyPlanError(
+                        "compiled ownership source payload is empty".to_string(),
+                    ));
+                }
+                checked_residency_add(total, bytes, "compiled resource selector group bytes")
+            })
+        }
+        CompiledResourceSelectorMapping::PartitionTemplate {
+            partition_template_id,
+        } => {
+            if ownership
+                .source_projection(&selector.id, resource_index)
+                .is_some()
+            {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "compiled partition selector {:?} cannot use a source projection",
+                    selector.id,
+                )));
+            }
+            let template = index
+                .partition_template(contract, partition_template_id)
+                .ok_or_else(|| {
+                    VulkanRuntimeResidencyPlanError(format!(
+                        "compiled selector {:?} references missing partition template {partition_template_id:?}",
+                        selector.id,
+                    ))
+                })?;
+            if resource_index >= template.partition_count {
+                return Err(VulkanRuntimeResidencyPlanError(format!(
+                    "compiled selector {:?} resource index {resource_index} exceeds partition template count {}",
+                    selector.id, template.partition_count,
+                )));
+            }
+            template.member_templates.iter().try_fold(0usize, |total, member| {
+                member.range_templates.iter().try_fold(total, |total, range| {
+                    if range.byte_count == 0 {
+                        return Err(VulkanRuntimeResidencyPlanError(
+                            "compiled partition source payload is empty".to_string(),
+                        ));
+                    }
+                    checked_residency_add(
+                        total,
+                        range.byte_count,
+                        "compiled resource selector group bytes",
+                    )
+                })
+            })
+        }
+    }
+}
+
 fn compiled_resource_stable_slab_payload_bytes(
     device: &VulkanComputeDevice,
     arena_byte_capacity: usize,
@@ -310,9 +404,6 @@ fn plan_compiled_resource_store_residency_for_ownership(
                 .to_string(),
         ));
     }
-    let source_payload_bytes_by_slot = layout
-        .source_payload_bytes_by_address_slot_for_ownership(contract, ownership)
-        .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     let contract_index = CompiledResourceContractIndex::new(contract)
         .map_err(|error| VulkanRuntimeResidencyPlanError(error.to_string()))?;
     let mut maximum_load_wave_group_count = 0usize;
@@ -328,44 +419,28 @@ fn plan_compiled_resource_store_residency_for_ownership(
     let mut retained_representation_cache_resource_count = 0usize;
     let mut retained_representation_cache_selector_ids = BTreeSet::new();
     for selector in &selected {
-        let selector_layout = layout
+        if !layout
             .selectors
             .iter()
-            .find(|layout| layout.selector_id == selector.id)
-            .ok_or_else(|| {
-                VulkanRuntimeResidencyPlanError(format!(
-                    "compiled resource store selector {:?} has no address layout",
-                    selector.id,
-                ))
-            })?;
+            .any(|layout| layout.selector_id == selector.id)
+        {
+            return Err(VulkanRuntimeResidencyPlanError(format!(
+                "compiled resource store selector {:?} has no address layout",
+                selector.id,
+            )));
+        }
         let mut owned_group_payload_bytes = ownership
             .resources(&selector.id)
             .into_iter()
             .flatten()
             .map(|resource_index| {
-                selector_layout
-                    .mapping
-                    .resource_slots(*resource_index)
-                    .ok_or_else(|| {
-                        VulkanRuntimeResidencyPlanError(format!(
-                            "compiled resource store selector {:?} resource {resource_index} has no address slots",
-                            selector.id,
-                        ))
-                    })?
-                    .into_iter()
-                    .try_fold(0usize, |total, slot| {
-                        let bytes = source_payload_bytes_by_slot.get(&slot).ok_or_else(|| {
-                            VulkanRuntimeResidencyPlanError(format!(
-                                "compiled resource store selector {:?} address slot {slot} has no source payload",
-                                selector.id,
-                            ))
-                        })?;
-                        checked_residency_add(
-                            total,
-                            *bytes,
-                            "compiled resource selector group bytes",
-                        )
-                    })
+                compiled_resource_source_group_payload_bytes(
+                    contract,
+                    &contract_index,
+                    selector,
+                    ownership,
+                    *resource_index,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         owned_group_payload_bytes.sort_unstable_by(|left, right| right.cmp(left));
