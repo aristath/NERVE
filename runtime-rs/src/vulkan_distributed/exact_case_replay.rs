@@ -1309,6 +1309,8 @@ mod exact_case_replay_tests {
         relabeled.dispatches[0].physical_artifact_id = "another-artifact-label".to_string();
         relabeled.dispatches[0].physical_execution_contract_id =
             "another-component-contract-label".to_string();
+        relabeled.dispatches[0].implementation_digest =
+            format!("sha256:{}", "d".repeat(64));
         relabeled.execution_islands = resolved_physical_execution_islands_for_phase(
             &relabeled.dispatches,
             relabeled.shared_activation_route,

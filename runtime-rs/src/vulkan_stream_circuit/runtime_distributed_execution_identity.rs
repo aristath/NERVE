@@ -321,7 +321,6 @@ pub(crate) fn vulkan_distributed_execution_graph_digest(
                 );
             }
             Ok(serde_json::json!({
-                "implementation_digest": dispatch.implementation_digest,
                 "strategy": distributed_execution_strategy_name(dispatch.execution_strategy),
                 "contract_member_count": dispatch.contract_member_node_ids.len(),
                 "local_intermediates": dispatch.local_intermediates.iter().map(|intermediate| serde_json::json!({
