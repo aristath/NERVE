@@ -65,17 +65,27 @@ fn component_batch_stages_replace_push_constants(
     push_constants: &[VulkanKernelScalarBinding],
 ) -> bool {
     push_constants.iter().all(|binding| {
-        binding.name == "expert_start"
-            && binding.scalar_type == "u32"
-            && binding.source == VulkanKernelScalarSource::PushConstant
-            && !stages.is_empty()
-            && stages.iter().all(|stage| {
-                matches!(
-                    stage.control.storage_buffer().2,
+        if binding.scalar_type != "u32"
+            || binding.source != VulkanKernelScalarSource::PushConstant
+            || stages.is_empty()
+        {
+            return false;
+        }
+        stages.iter().all(|stage| {
+            let payload = stage.control.storage_buffer().2;
+            match binding.name.as_str() {
+                "expert_start" => matches!(
+                    payload,
                     VulkanResidentComponentBatchControlPayload::WidthExpertStart
                         | VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
-                )
-            })
+                ),
+                "expert_count" => matches!(
+                    payload,
+                    VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect
+                ),
+                _ => false,
+            }
+        })
     })
 }
 

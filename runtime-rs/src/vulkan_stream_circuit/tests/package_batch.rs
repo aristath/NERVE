@@ -1850,9 +1850,38 @@ fn component_batch_control_uses_typed_persistent_buffers_for_every_payload() {
         scalar_type: "u32".to_string(),
         source: VulkanKernelScalarSource::PushConstant,
     }];
+    let expert_range = [
+        VulkanKernelScalarBinding {
+            name: "expert_start".to_string(),
+            scalar_type: "u32".to_string(),
+            source: VulkanKernelScalarSource::PushConstant,
+        },
+        VulkanKernelScalarBinding {
+            name: "expert_count".to_string(),
+            scalar_type: "u32".to_string(),
+            source: VulkanKernelScalarSource::PushConstant,
+        },
+    ];
+    let sparse_indirect = VulkanResidentComponentBatchStageArtifact {
+        control: VulkanResidentComponentBatchControlSpec::StorageBuffer {
+            byte_count: 7 * VULKAN_COMPONENT_BATCH_WIDTH_CONTROL_BYTE_CAPACITY,
+            binding: 31,
+            payload: VulkanResidentComponentBatchControlPayload::WidthExpertRangeIndirect,
+            access: VulkanResidentComponentBatchControlAccess::ReadWrite,
+        },
+        ..sparse.clone()
+    };
     assert!(component_batch_stages_replace_push_constants(
         std::slice::from_ref(&sparse),
         &expert_start,
+    ));
+    assert!(component_batch_stages_replace_push_constants(
+        std::slice::from_ref(&sparse_indirect),
+        &expert_range,
+    ));
+    assert!(!component_batch_stages_replace_push_constants(
+        std::slice::from_ref(&sparse),
+        &expert_range[1..],
     ));
     assert!(!component_batch_stages_replace_push_constants(
         std::slice::from_ref(&width_only),
