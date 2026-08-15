@@ -240,7 +240,7 @@ fn validate_vulkan_runtime_output_transducer_hardware_compatibility(
     Ok(())
 }
 
-pub(crate) fn validate_vulkan_package_source_component_hardware_compatibility(
+pub fn validate_vulkan_package_source_component_hardware_compatibility(
     package_root: &Path,
     manifest: &VulkanResidentModelPackageManifest,
     source_component_id: &str,

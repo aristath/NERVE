@@ -188,30 +188,6 @@ fn runtime_capacity_packed_model(
         )
         .into());
     }
-    let package_manifest = args.package_manifest.as_ref().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "automatic placement requires a compiled package manifest",
-        )
-    })?;
-    let mut editor_devices = runtime_devices_from_compute_devices(
-        RUNTIME_DEFAULT_LOGICAL_DEVICE_ID,
-        None,
-        available_devices,
-    );
-    for editor_device in &mut editor_devices {
-        let Some(physical_device_id) = editor_device.physical_device_id.clone() else {
-            continue;
-        };
-        editor_device.device_id = physical_device_id.clone();
-        editor_device.runtime_device_id = Some(physical_device_id.clone());
-        editor_device.hardware_profile = profiles
-            .iter()
-            .find(|profile| profile.hardware_identity.stable_device_id == physical_device_id)
-            .cloned();
-    }
-    let compatibility_editor =
-        RuntimeModelEditor::load_with_available_devices(package_manifest, editor_devices)?;
     let mut incompatibilities = Vec::new();
     let runtime_role_by_instance = runtime_model
         .circuit_graph
@@ -236,9 +212,11 @@ fn runtime_capacity_packed_model(
                         ),
                     )
                 })?;
-            match compatibility_editor.validate_source_component_device_compatibility(
+            match validate_vulkan_package_source_component_hardware_compatibility(
+                manifest_dir,
+                &runtime_model.package,
                 &instance.source_component_id,
-                &device.physical_device_id,
+                profile,
             ) {
                 Ok(()) if runtime_role.is_signal_processor() => {
                     compatible_signal_components.insert(instance.instance_id.clone());
