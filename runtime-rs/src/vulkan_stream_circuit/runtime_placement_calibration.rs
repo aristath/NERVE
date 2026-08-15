@@ -221,21 +221,17 @@ impl VulkanRuntimePlacementCalibrationSuite {
                     "failed to plan runtime placement calibration residency: {error}",
                 ))
             })?;
-            target.planned_resident_parameter_bytes = residency_plan
-                .device_plans
-                .iter()
-                .try_fold(0usize, |total, plan| {
-                    total
-                        .checked_add(plan.parameter_residency.current_resident_bytes)
-                        .and_then(|total| {
-                            total.checked_add(plan.resource_store.maximum_load_wave_payload_bytes)
-                        })
-                })
-                .ok_or_else(|| {
-                    VulkanResidentTokenModelPackageError::new(
-                        "runtime placement calibration transaction bytes overflowed",
-                    )
-                })?;
+            target.planned_resident_parameter_bytes =
+                runtime_placement_calibration_target_parameter_bytes(
+                    residency_plan.device_plans.iter().map(|plan| {
+                        (
+                            plan.device_id.as_str(),
+                            plan.parameter_residency.current_resident_bytes,
+                            plan.resource_store.maximum_load_wave_payload_bytes,
+                        )
+                    }),
+                    VULKAN_RUNTIME_PLACEMENT_CALIBRATION_LOGICAL_DEVICE_ID,
+                )?;
             sources.push(VulkanRuntimePlacementCalibrationSource {
                 runtime_model: calibration_model,
                 residency_plan,
@@ -316,6 +312,89 @@ impl VulkanRuntimePlacementCalibrationSuite {
         self.plans_by_capability_and_targets
             .insert(cache_key, plans.clone());
         Ok((plans, shared_prepare_ns, prepare_ns))
+    }
+}
+
+fn runtime_placement_calibration_target_parameter_bytes<'a>(
+    plans: impl IntoIterator<Item = (&'a str, usize, usize)>,
+    target_device_id: &str,
+) -> Result<usize, VulkanResidentTokenModelPackageError> {
+    let mut target_plans = plans
+        .into_iter()
+        .filter(|(device_id, _, _)| *device_id == target_device_id);
+    let (_, current_resident_bytes, maximum_load_wave_payload_bytes) =
+        target_plans.next().ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "runtime placement calibration residency has no target device {target_device_id:?}",
+            ))
+        })?;
+    if target_plans.next().is_some() {
+        return Err(VulkanResidentTokenModelPackageError::new(format!(
+            "runtime placement calibration residency repeats target device {target_device_id:?}",
+        )));
+    }
+    current_resident_bytes
+        .checked_add(maximum_load_wave_payload_bytes)
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(
+                "runtime placement calibration transaction bytes overflowed",
+            )
+        })
+}
+
+#[cfg(test)]
+mod runtime_placement_calibration_target_parameter_tests {
+    use super::*;
+
+    #[test]
+    fn target_parameter_accounting_excludes_unmounted_graph_remainder() {
+        let bytes = runtime_placement_calibration_target_parameter_bytes(
+            [
+                ("calibration:unmounted", 36_000usize, 4_000usize),
+                (
+                    VULKAN_RUNTIME_PLACEMENT_CALIBRATION_LOGICAL_DEVICE_ID,
+                    700,
+                    300,
+                ),
+            ],
+            VULKAN_RUNTIME_PLACEMENT_CALIBRATION_LOGICAL_DEVICE_ID,
+        )
+        .unwrap();
+
+        assert_eq!(bytes, 1_000);
+    }
+
+    #[test]
+    fn target_parameter_accounting_rejects_missing_or_duplicate_target() {
+        assert!(
+            runtime_placement_calibration_target_parameter_bytes(
+                [("calibration:unmounted", 1usize, 1usize)],
+                VULKAN_RUNTIME_PLACEMENT_CALIBRATION_LOGICAL_DEVICE_ID,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("no target device")
+        );
+        assert!(
+            runtime_placement_calibration_target_parameter_bytes(
+                [
+                    (
+                        VULKAN_RUNTIME_PLACEMENT_CALIBRATION_LOGICAL_DEVICE_ID,
+                        1usize,
+                        1usize,
+                    ),
+                    (
+                        VULKAN_RUNTIME_PLACEMENT_CALIBRATION_LOGICAL_DEVICE_ID,
+                        2usize,
+                        2usize,
+                    ),
+                ],
+                VULKAN_RUNTIME_PLACEMENT_CALIBRATION_LOGICAL_DEVICE_ID,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("repeats target device")
+        );
     }
 }
 

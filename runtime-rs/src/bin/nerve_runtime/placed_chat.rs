@@ -505,9 +505,12 @@ fn run_placed_chat(
                 )?
                 .0
         };
-    if args.component_shard_devices.is_empty()
-        && let Some(auto_placement) = &mut auto_placement
-    {
+    if !args.component_shard_devices.is_empty() {
+        eprintln!(
+            "nerve runtime distributed calibration disabled by {} explicit component shard override(s)",
+            args.component_shard_devices.len(),
+        );
+    } else if let Some(auto_placement) = &mut auto_placement {
         // Contract discovery and physical calibration must start from the
         // compiler's exact graph. A selected scalar representation may replace
         // the original component boundary and therefore has no authority to
@@ -523,6 +526,10 @@ fn run_placed_chat(
             auto_placement,
             &bound_devices,
         )?;
+    } else {
+        eprintln!(
+            "nerve runtime distributed calibration unavailable: automatic placement context is absent"
+        );
     }
     let required_owner_by_component = (!args.component_shard_devices.is_empty())
         .then(|| signal_processor_owner_constraints(&runtime_model));

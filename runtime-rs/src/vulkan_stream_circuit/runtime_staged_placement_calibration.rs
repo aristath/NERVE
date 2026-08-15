@@ -145,9 +145,15 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
             stage_policy,
         )?;
         let Some(report) = report else {
+            eprintln!(
+                "nerve runtime staged distributed calibration unavailable: participants={expected_ids:?}, reason=physical calibration produced no admissible report",
+            );
             return Ok(None);
         };
         if !vulkan_runtime_distributed_calibration_report_is_complete(&report) {
+            eprintln!(
+                "nerve runtime staged distributed calibration unavailable: participants={expected_ids:?}, reason=physical calibration report is incomplete",
+            );
             return Ok(None);
         }
         if report.physical_device_ids != expected_ids
@@ -201,6 +207,9 @@ fn calibrate_vulkan_runtime_staged_placement_phase_candidate_with_policy(
             .canonical_reference(&report.execution_case.behavior)
             .is_none()
         {
+            eprintln!(
+                "nerve runtime staged distributed calibration unavailable: participants={expected_ids:?}, reason=no canonical reference passed validation for the exact behavior",
+            );
             return Ok(None);
         }
         if let Some((physical_device_id, device)) = &canonical_participant {
