@@ -994,6 +994,10 @@ impl VulkanRuntimeDistributedPlacementSession {
         }
         .map_err(|error| distributed_calibration_error_value(error.to_string()))?;
         if full_distributed_execution_plan.dispatches.is_empty() {
+            eprintln!(
+                "nerve runtime distributed calibration unavailable: component={}, phase={phase:?}, reason=no distributed dispatches for selected contracts",
+                target.component_id,
+            );
             return Ok(None);
         }
         if logical_device_ids.len() > 1
@@ -1002,6 +1006,10 @@ impl VulkanRuntimeDistributedPlacementSession {
                 .iter()
                 .any(|dispatch| dispatch.shards.len() < logical_device_ids.len())
         {
+            eprintln!(
+                "nerve runtime distributed calibration unavailable: component={}, phase={phase:?}, reason=a dispatch does not cover every requested participant",
+                target.component_id,
+            );
             return Ok(None);
         }
         let exclusion_plan =
@@ -1029,6 +1037,10 @@ impl VulkanRuntimeDistributedPlacementSession {
         let Some(distributed_parameter_budget) =
             maximum_total_resident_parameter_bytes.checked_sub(owner_static_bytes)
         else {
+            eprintln!(
+                "nerve runtime distributed calibration unavailable: component={}, phase={phase:?}, reason=owner static parameters exceed the aggregate calibration budget",
+                target.component_id,
+            );
             return Ok(None);
         };
         let (distributed_execution_plan, sample_fraction_millionths) =
@@ -1048,6 +1060,10 @@ impl VulkanRuntimeDistributedPlacementSession {
                     )
                     .map_err(|error| distributed_calibration_error_value(error.to_string()))?
                 else {
+                    eprintln!(
+                        "nerve runtime distributed calibration unavailable: component={}, phase={phase:?}, reason=no nonzero distributed sample fits the calibration budget",
+                        target.component_id,
+                    );
                     return Ok(None);
                 };
                 sampled
@@ -1069,6 +1085,10 @@ impl VulkanRuntimeDistributedPlacementSession {
                 .map(|partition| partition.selector_id.clone())
                 .collect::<BTreeSet<_>>();
             if target_selector_ids != distributed_selector_ids {
+                eprintln!(
+                    "nerve runtime distributed calibration unavailable: component={}, phase={phase:?}, reason=distributed selected-resource coverage differs from the canonical target",
+                    target.component_id,
+                );
                 return Ok(None);
             }
         }
@@ -1125,6 +1145,10 @@ impl VulkanRuntimeDistributedPlacementSession {
             .iter()
             .any(|device_id| !used_devices.contains(device_id.as_str()))
         {
+            eprintln!(
+                "nerve runtime distributed calibration unavailable: component={}, phase={phase:?}, reason=sampled plan leaves a requested participant unused",
+                target.component_id,
+            );
             return Ok(None);
         }
         let activation_plan =
@@ -1181,6 +1205,10 @@ impl VulkanRuntimeDistributedPlacementSession {
                         .is_none_or(|capacity| bytes > capacity)
                 })
         {
+            eprintln!(
+                "nerve runtime distributed calibration unavailable: component={}, phase={phase:?}, reason=sampled static parameters exceed a participant capacity",
+                target.component_id,
+            );
             return Ok(None);
         }
 
@@ -1243,6 +1271,10 @@ impl VulkanRuntimeDistributedPlacementSession {
             None,
         )?
         else {
+            eprintln!(
+                "nerve runtime distributed calibration unavailable: component={}, phase={phase:?}, reason=selected resources cannot be mounted within the remaining calibration capacity",
+                target.component_id,
+            );
             return Ok(None);
         };
         if has_distributed_selected_resources {

@@ -35,7 +35,8 @@ mod tests {
         resolve_runtime_context_size, resolve_runtime_vulkan_physical_device_ref_in,
         resolve_speculative_draft_tokens, runtime_chat_repl_control, runtime_critical_path_lines,
         runtime_device_bindings_report, runtime_distributed_execution_phase_counter_lines,
-        runtime_model, runtime_model_with_explicit_shard_owners,
+        runtime_model, runtime_model_with_component_owners_from,
+        runtime_model_with_explicit_shard_owners,
         runtime_physical_device_bindings_in, runtime_uses_explicit_placement, submit_chat_turn,
         usage, validate_explicit_distributed_physical_bindings,
         validate_explicit_logical_device_bindings,
@@ -318,6 +319,44 @@ mod tests {
                 .device_id,
             "gpu-user-owner",
         );
+    }
+
+    #[test]
+    fn distributed_calibration_keeps_the_exact_graph_and_copies_only_runtime_owners() {
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixtures/tiny_model/vulkan_resident_package.json");
+        let exact = runtime_model(&Args::default(), &package).unwrap();
+        let component_id = exact
+            .circuit_graph
+            .components
+            .iter()
+            .find(|component| component.runtime_role.is_signal_processor())
+            .unwrap()
+            .component_id
+            .clone();
+        let mut owner_args = Args {
+            chat: true,
+            ..Args::default()
+        };
+        owner_args.component_shard_devices.insert(
+            component_id.clone(),
+            vec!["gpu-measured-owner".to_string(), "gpu-helper".to_string()],
+        );
+        let selected_owner_source =
+            runtime_model_with_explicit_shard_owners(&owner_args, exact.clone()).unwrap();
+
+        let calibration =
+            runtime_model_with_component_owners_from(exact.clone(), &selected_owner_source)
+                .unwrap();
+
+        assert_eq!(
+            calibration.placement.device_for_component(&component_id),
+            "gpu-measured-owner",
+        );
+        assert_eq!(calibration.circuit_graph, exact.circuit_graph);
+        assert_eq!(calibration.component_executions, exact.component_executions);
+        assert_eq!(calibration.implementation_selection, exact.implementation_selection);
+        assert!(calibration.placement.component_shard_devices.is_empty());
     }
 
     #[test]

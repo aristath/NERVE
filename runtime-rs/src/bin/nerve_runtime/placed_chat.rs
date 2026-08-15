@@ -185,6 +185,10 @@ fn calibrate_runtime_distributed_decode_candidates(
         .into_iter()
         .collect::<BTreeSet<_>>();
     if selected_logical_devices.len() < 2 {
+        eprintln!(
+            "nerve runtime distributed calibration unavailable: runtime placement exposes {} physical participant(s); at least two are required",
+            selected_logical_devices.len(),
+        );
         return Ok(());
     }
     let targets = nerve_runtime::vulkan_runtime_placement_calibration_targets(runtime_model)?;
@@ -196,6 +200,10 @@ fn calibrate_runtime_distributed_decode_candidates(
             VulkanTargetedComponentExecutionPhase::Decode,
         )?;
         if candidates.is_empty() {
+            eprintln!(
+                "nerve runtime distributed calibration unavailable: representative={}.{}, reason=no compiler-emitted decode contract candidate",
+                target.component_id, target.terminal_node_id,
+            );
             continue;
         }
         let owner = runtime_model
@@ -500,9 +508,18 @@ fn run_placed_chat(
     if args.component_shard_devices.is_empty()
         && let Some(auto_placement) = &mut auto_placement
     {
+        // Contract discovery and physical calibration must start from the
+        // compiler's exact graph. A selected scalar representation may replace
+        // the original component boundary and therefore has no authority to
+        // erase the physical alternatives compiled for that boundary. Carry
+        // only the measured scalar owners into the exact graph.
+        let exact_calibration_model = runtime_model_with_component_owners_from(
+            auto_placement.exact_runtime_model.clone(),
+            &runtime_model,
+        )?;
         calibrate_runtime_distributed_decode_candidates(
             manifest_dir,
-            &runtime_model,
+            &exact_calibration_model,
             auto_placement,
             &bound_devices,
         )?;
