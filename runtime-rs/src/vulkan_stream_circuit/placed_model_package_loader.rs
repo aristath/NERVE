@@ -1992,9 +1992,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
         }
         distributed_dispatch_runners
-            .configure_feedback_indirect_dispatches(&mut feedback_control, |device_id| {
-                device_for(device_id)
-            })
+            .configure_feedback_indirect_dispatches(
+                &mut feedback_control,
+                feedback_lane_capacity,
+                |device_id| device_for(device_id),
+            )
             .map_err(|error| {
                 VulkanResidentInProcessPlacedRuntimeError::Package(
                     VulkanResidentTokenModelPackageError::new(format!(

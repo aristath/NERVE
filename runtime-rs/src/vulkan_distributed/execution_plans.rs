@@ -64,13 +64,15 @@ pub struct VulkanDistributedDispatchSubmission {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VulkanDistributedDispatchSequenceKind {
     Direct,
-    FeedbackIndirect,
+    FeedbackIndirect { lane: usize },
 }
 
 impl VulkanDistributedDispatchSequenceKind {
     pub fn for_feedback_lane(feedback_lane: Option<usize>) -> Self {
         if feedback_lane.is_some() {
-            Self::FeedbackIndirect
+            Self::FeedbackIndirect {
+                lane: feedback_lane.expect("feedback lane was checked"),
+            }
         } else {
             Self::Direct
         }

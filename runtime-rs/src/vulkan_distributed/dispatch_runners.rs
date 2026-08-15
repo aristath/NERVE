@@ -148,16 +148,16 @@ pub(crate) fn validate_selected_resource_execution_ownership_replacement(
 
 fn distributed_sequence_for_kind<'a, T>(
     direct: &'a T,
-    feedback_indirect: Option<&'a T>,
+    feedback_indirect: &'a [T],
     sequence_kind: VulkanDistributedDispatchSequenceKind,
     device_id: &str,
 ) -> Result<&'a T, VulkanDistributedDispatchRunnerError> {
     match sequence_kind {
         VulkanDistributedDispatchSequenceKind::Direct => Ok(direct),
-        VulkanDistributedDispatchSequenceKind::FeedbackIndirect => {
-            feedback_indirect.ok_or_else(|| {
+        VulkanDistributedDispatchSequenceKind::FeedbackIndirect { lane } => {
+            feedback_indirect.get(lane).ok_or_else(|| {
                 VulkanDistributedDispatchRunnerError(format!(
-                    "distributed feedback shard on {device_id:?} has no indirect sequence"
+                    "distributed feedback shard on {device_id:?} has no indirect sequence for lane {lane}"
                 ))
             })
         }
@@ -941,7 +941,7 @@ impl VulkanDistributedDispatchRunners {
                     resident_dispatches,
                     selected_resource_gates,
                     sequence,
-                    feedback_sequence: None,
+                    feedback_sequences: Vec::new(),
                 });
                 shard_count = shard_count
                     .checked_add(planned_island.dispatches.len())
@@ -1199,12 +1199,18 @@ impl VulkanDistributedDispatchRunners {
     pub(crate) fn configure_feedback_indirect_dispatches<'a, F, E>(
         &mut self,
         control: &mut VulkanResidentFeedbackControlPlane,
+        lane_capacity: usize,
         mut device_for: F,
     ) -> Result<(), VulkanDistributedDispatchRunnerError>
     where
         F: FnMut(&str) -> Result<&'a VulkanComputeDevice, E>,
         E: Display,
     {
+        if lane_capacity == 0 {
+            return Err(VulkanDistributedDispatchRunnerError(
+                "distributed feedback requires at least one sequence lane".to_string(),
+            ));
+        }
         for dispatch in &mut self.dispatches {
             for shard in &mut dispatch.shards {
                 let device = device_for(&shard.device_id).map_err(|error| {
@@ -1279,13 +1285,17 @@ impl VulkanDistributedDispatchRunners {
                         "distributed feedback indirect commands exceed recorded steps".to_string(),
                     ));
                 }
-                let sequence = device
-                    .create_resident_kernel_sequence()
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                device
-                    .record_resident_kernel_sequence(&sequence, &steps)
-                    .map_err(VulkanDistributedDispatchRunnerError::from)?;
-                shard.feedback_sequence = Some(sequence);
+                shard.feedback_sequences = (0..lane_capacity)
+                    .map(|_| {
+                        let sequence = device
+                            .create_resident_kernel_sequence()
+                            .map_err(VulkanDistributedDispatchRunnerError::from)?;
+                        device
+                            .record_resident_kernel_sequence(&sequence, &steps)
+                            .map_err(VulkanDistributedDispatchRunnerError::from)?;
+                        Ok(sequence)
+                    })
+                    .collect::<Result<Vec<_>, VulkanDistributedDispatchRunnerError>>()?;
             }
         }
         Ok(())
@@ -1372,7 +1382,7 @@ impl VulkanDistributedDispatchRunners {
             .map(|(shard, device)| {
                 distributed_sequence_for_kind(
                     &shard.sequence,
-                    shard.feedback_sequence.as_ref(),
+                    &shard.feedback_sequences,
                     sequence_kind,
                     &shard.device_id,
                 )
@@ -1731,7 +1741,7 @@ impl VulkanDistributedDispatchRunners {
                 let (shard, device) = resolved_shards[*shard_index];
                 distributed_sequence_for_kind(
                     &shard.sequence,
-                    shard.feedback_sequence.as_ref(),
+                    &shard.feedback_sequences,
                     sequence_kind,
                     &shard.device_id,
                 )
@@ -1876,7 +1886,7 @@ impl VulkanDistributedDispatchRunners {
                     })?;
                     let sequence = distributed_sequence_for_kind(
                         &shard.sequence,
-                        shard.feedback_sequence.as_ref(),
+                        &shard.feedback_sequences,
                         sequence_kind,
                         &shard.device_id,
                     )?;
@@ -2000,7 +2010,7 @@ pub struct VulkanDistributedDispatchShardRunner {
     pub(crate) selected_resource_gates:
         Vec<Vec<VulkanDistributedSelectedResourceGate>>,
     pub sequence: VulkanResidentKernelSequence,
-    feedback_sequence: Option<VulkanResidentKernelSequence>,
+    feedback_sequences: Vec<VulkanResidentKernelSequence>,
 }
 
 

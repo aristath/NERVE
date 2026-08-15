@@ -1381,19 +1381,19 @@ mod tests {
     #[test]
     fn distributed_sequence_selection_matches_the_submitted_variant() {
         let direct = "direct";
-        let feedback = "feedback";
+        let feedback = ["feedback-0", "feedback-1", "feedback-2"];
         assert_eq!(
             VulkanDistributedDispatchSequenceKind::for_feedback_lane(None),
             VulkanDistributedDispatchSequenceKind::Direct,
         );
         assert_eq!(
             VulkanDistributedDispatchSequenceKind::for_feedback_lane(Some(7)),
-            VulkanDistributedDispatchSequenceKind::FeedbackIndirect,
+            VulkanDistributedDispatchSequenceKind::FeedbackIndirect { lane: 7 },
         );
         assert_eq!(
             distributed_sequence_for_kind(
                 &direct,
-                Some(&feedback),
+                &feedback,
                 VulkanDistributedDispatchSequenceKind::Direct,
                 "device",
             )
@@ -1403,24 +1403,24 @@ mod tests {
         assert_eq!(
             distributed_sequence_for_kind(
                 &direct,
-                Some(&feedback),
-                VulkanDistributedDispatchSequenceKind::FeedbackIndirect,
+                &feedback,
+                VulkanDistributedDispatchSequenceKind::FeedbackIndirect { lane: 2 },
                 "device",
             )
             .unwrap(),
-            &feedback,
+            &feedback[2],
         );
         let error = distributed_sequence_for_kind(
             &direct,
-            None,
-            VulkanDistributedDispatchSequenceKind::FeedbackIndirect,
+            &feedback,
+            VulkanDistributedDispatchSequenceKind::FeedbackIndirect { lane: 3 },
             "helper",
         )
         .unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("feedback shard on \"helper\" has no indirect sequence")
+                .contains("feedback shard on \"helper\" has no indirect sequence for lane 3")
         );
     }
 
