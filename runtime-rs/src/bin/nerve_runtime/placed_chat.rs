@@ -174,6 +174,120 @@ fn runtime_model_with_component_owners_from(
     .map_err(|error| Box::new(error) as Box<dyn Error>)
 }
 
+fn calibrate_runtime_distributed_decode_candidates(
+    manifest_dir: &Path,
+    runtime_model: &VulkanResidentRuntimeModel,
+    auto_placement: &mut RuntimeAutoPlacementContext,
+    bound_devices: &RuntimeBoundVulkanDevices,
+) -> Result<(), Box<dyn Error>> {
+    let selected_logical_devices = runtime_model
+        .placement_device_ids()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if selected_logical_devices.len() < 2 {
+        return Ok(());
+    }
+    let targets = nerve_runtime::vulkan_runtime_placement_calibration_targets(runtime_model)?;
+    let started = Instant::now();
+    for target in targets {
+        let candidates = vulkan_runtime_distributed_contract_candidates(
+            runtime_model,
+            &target,
+            VulkanTargetedComponentExecutionPhase::Decode,
+        )?;
+        if candidates.is_empty() {
+            continue;
+        }
+        let owner = runtime_model
+            .placement
+            .device_for_component(&target.component_id);
+        let mut logical_devices = selected_logical_devices.iter().cloned().collect::<Vec<_>>();
+        logical_devices.sort_by_key(|device_id| (device_id != owner, device_id.clone()));
+        let mut physical_ids = BTreeSet::new();
+        let devices = logical_devices
+            .into_iter()
+            .filter_map(|logical_device_id| {
+                let device = bound_devices.devices.get(&logical_device_id)?;
+                physical_ids
+                    .insert(device.physical_device_id().to_string())
+                    .then(|| {
+                        (
+                            device.physical_device_id().to_string(),
+                            Rc::clone(device),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        if devices.len() < 2 {
+            continue;
+        }
+        let capacities = devices
+            .iter()
+            .map(|(physical_id, device)| {
+                (
+                    physical_id.clone(),
+                    usize::try_from(device.device_local_memory_budget().reservable_bytes)
+                        .unwrap_or(usize::MAX),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let total_capacity = capacities
+            .values()
+            .try_fold(0usize, |total, capacity| total.checked_add(*capacity))
+            .unwrap_or(usize::MAX);
+        for candidate in candidates {
+            let remaining = VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION
+                .checked_sub(started.elapsed())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "runtime distributed placement calibration exceeded its one-minute bound",
+                    )
+                })?;
+            let policy = VulkanRuntimePlacementCalibrationPolicy {
+                maximum_duration: remaining,
+                maximum_total_resident_parameter_bytes: total_capacity,
+                maximum_resident_parameter_bytes_by_physical_device: capacities.clone(),
+                ..VulkanRuntimePlacementCalibrationPolicy::default()
+            };
+            let report = calibrate_vulkan_runtime_staged_contract_candidate_with_policy(
+                &devices,
+                manifest_dir,
+                runtime_model,
+                &target,
+                VulkanTargetedComponentExecutionPhase::Decode,
+                &candidate.contract_ids,
+                &mut auto_placement.calibration_catalog,
+                policy,
+            )
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "distributed calibration rejected {} contracts {:?}: {error}",
+                        target.component_id, candidate.contract_ids,
+                    ),
+                )
+            })?;
+            if let Some(report) = report {
+                eprintln!(
+                    "nerve runtime distributed calibration: representative={}.{}, occurrences={}, contracts={:?}, devices={:?}, measured_ns={}, measured_ns_per_activation={}, dispatches={}, shards={}",
+                    target.component_id,
+                    target.terminal_node_id,
+                    target.component_ids.len(),
+                    candidate.contract_ids,
+                    report.physical_device_ids,
+                    report.measured_execution_ns,
+                    report.measured_ns_per_activation,
+                    report.physical_dispatch_count,
+                    report.shard_count,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn resolve_runtime_hybrid_physical_execution(
     manifest_dir: &Path,
     runtime_model: VulkanResidentRuntimeModel,
@@ -383,6 +497,16 @@ fn run_placed_chat(
                 )?
                 .0
         };
+    if args.component_shard_devices.is_empty()
+        && let Some(auto_placement) = &mut auto_placement
+    {
+        calibrate_runtime_distributed_decode_candidates(
+            manifest_dir,
+            &runtime_model,
+            auto_placement,
+            &bound_devices,
+        )?;
+    }
     let required_owner_by_component = (!args.component_shard_devices.is_empty())
         .then(|| signal_processor_owner_constraints(&runtime_model));
     let (runtime_model, automatic_physical_execution_plan) =
