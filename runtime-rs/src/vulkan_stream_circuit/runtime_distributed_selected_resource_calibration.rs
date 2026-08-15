@@ -689,15 +689,19 @@ impl VulkanRuntimeSelectedResourceExecutionSession {
             &loaded_manifest,
             target.phase,
         )?;
+        let behavior = distributed_calibration_island_behavior(
+            &execution_plan,
+            requirement.compiled_execution_signature,
+            target.phase,
+        )?;
         let mut execution_case = distributed_calibration_execution_case(
             &[(physical_device_id.to_string(), Rc::clone(&device))],
             std::slice::from_ref(&logical_device_id),
             &execution_plan,
             &loaded_manifest,
-            requirement.compiled_execution_signature,
+            behavior,
             requirement.artifact_digest,
             requirement.execution_graph_digest,
-            target.phase,
             &dispatch_work,
         )?;
         let contract_id = execution_case

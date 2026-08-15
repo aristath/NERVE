@@ -415,10 +415,9 @@ fn distributed_calibration_execution_case(
     logical_device_ids: &[String],
     execution_plan: &VulkanDistributedExecutionPlan,
     loaded_manifest: &VulkanLoadedKernelArtifactCatalog,
-    compiled_execution_signature: String,
+    behavior: VulkanPlacementBehaviorIdentity,
     artifact_digest: String,
     execution_graph_digest: String,
-    phase: VulkanTargetedComponentExecutionPhase,
     dispatch_work: &[VulkanRuntimeDistributedPlacementDispatchWork],
 ) -> Result<VulkanPlacementExecutionCaseIdentity, VulkanResidentTokenModelPackageError> {
     if devices.len() != logical_device_ids.len()
@@ -603,32 +602,10 @@ fn distributed_calibration_execution_case(
     transports.sort();
     transports.dedup();
 
-    let shape = VulkanPlacementShapeClass {
-        activation_batch_width: phase.activation_batch_width(),
-        input_byte_capacity: first_island.leader().input_byte_capacity,
-        output_byte_capacity: last_island.tail().output_byte_capacity,
-    };
-    let execution_phase = match phase {
-        VulkanTargetedComponentExecutionPhase::Decode => {
-            nerve_execution_contracts::ExecutionPhase::Decode
-        }
-        VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
-            nerve_execution_contracts::ExecutionPhase::Prefill
-        }
-    };
-    let input_fixture_digest =
-        distributed_calibration_fixture_identity(execution_phase, &shape, 0)?;
     let equivalence =
         vulkan_distributed_execution_equivalence(execution_plan, &dispatch_indices)?;
     Ok(VulkanPlacementExecutionCaseIdentity {
-        behavior: VulkanPlacementBehaviorIdentity {
-            compiled_execution_signature,
-            runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT
-                .to_string(),
-            phase: execution_phase,
-            shape,
-            input_fixture_digest,
-        },
+        behavior,
         contract_ids,
         implementation_digests,
         artifact_digest,
@@ -649,6 +626,39 @@ fn distributed_calibration_execution_case(
         output_physical_device_id,
         owner_physical_device_id,
         transports,
+    })
+}
+
+fn distributed_calibration_island_behavior(
+    execution_plan: &VulkanDistributedExecutionPlan,
+    compiled_execution_signature: String,
+    phase: VulkanTargetedComponentExecutionPhase,
+) -> Result<VulkanPlacementBehaviorIdentity, VulkanResidentTokenModelPackageError> {
+    let first_island = execution_plan.execution_islands.first().ok_or_else(|| {
+        distributed_calibration_error_value(
+            "distributed calibration behavior requires a physical execution island",
+        )
+    })?;
+    let last_island = execution_plan.execution_islands.last().expect("checked nonempty above");
+    let shape = VulkanPlacementShapeClass {
+        activation_batch_width: phase.activation_batch_width(),
+        input_byte_capacity: first_island.leader().input_byte_capacity,
+        output_byte_capacity: last_island.tail().output_byte_capacity,
+    };
+    let execution_phase = match phase {
+        VulkanTargetedComponentExecutionPhase::Decode => {
+            nerve_execution_contracts::ExecutionPhase::Decode
+        }
+        VulkanTargetedComponentExecutionPhase::Prefill { .. } => {
+            nerve_execution_contracts::ExecutionPhase::Prefill
+        }
+    };
+    Ok(VulkanPlacementBehaviorIdentity {
+        compiled_execution_signature,
+        runtime_implementation_fingerprint: crate::RUNTIME_IMPLEMENTATION_FINGERPRINT.to_string(),
+        phase: execution_phase,
+        input_fixture_digest: distributed_calibration_fixture_identity(execution_phase, &shape, 0)?,
+        shape,
     })
 }
 
@@ -1560,15 +1570,15 @@ impl VulkanRuntimeDistributedPlacementSession {
             }
         }
 
+        let behavior = canonical_component_boundary_behavior(&placed_model, target, phase)?;
         let execution_case = distributed_calibration_execution_case(
             &devices,
             &logical_device_ids,
             &distributed_execution_plan,
             &loaded_manifest,
-            target.signature_id.clone(),
+            behavior,
             artifact_digest,
             execution_graph_digest,
-            phase,
             &dispatch_work,
         )?;
         Ok(Some(Self {
