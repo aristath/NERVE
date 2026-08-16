@@ -307,6 +307,82 @@ fn plan_vulkan_runtime_residency_from_planning_basis(
             mount_speculative_decoders,
             residency_policy,
         )?;
+    if mount_speculative_decoders {
+        let mut output_resident_transducer_tensors = BTreeSet::from([
+            runtime_model
+                .package
+                .output_transducer
+                .spec
+                .norm_parameter_tensor
+                .as_str(),
+            runtime_model
+                .package
+                .output_transducer
+                .spec
+                .projection_parameter_tensor
+                .as_str(),
+        ]);
+        if let Some(scale) = runtime_model
+            .package
+            .output_transducer
+            .spec
+            .projection_scale_parameter_tensor
+            .as_deref()
+        {
+            output_resident_transducer_tensors.insert(scale);
+        }
+        if input_device_id == output_device_id {
+            output_resident_transducer_tensors.insert(
+                runtime_model
+                    .package
+                    .input_transducer
+                    .spec
+                    .parameter_tensor
+                    .as_str(),
+            );
+        }
+        let additional_tensors = speculative_decoder_shared_additional_parameter_tensors(
+            runtime_model,
+            |tensor| output_resident_transducer_tensors.contains(tensor),
+        );
+        let additional_bytes = additional_tensors.into_iter().try_fold(
+            0usize,
+            |total, tensor| {
+                let byte_count = tensor_index
+                    .tensors
+                    .get(tensor)
+                    .and_then(|metadata| metadata.byte_count)
+                    .ok_or_else(|| {
+                        VulkanRuntimeResidencyPlanError(format!(
+                            "speculative decoder shared parameter {tensor:?} has no exact source byte count",
+                        ))
+                    })?;
+                checked_residency_add(
+                    total,
+                    byte_count,
+                    "speculative decoder shared parameter bytes",
+                )
+            },
+        )?;
+        let output_parameters = parameter_residency_by_device
+            .get_mut(&output_device_id)
+            .expect("output owner parameter residency was indexed above");
+        output_parameters.always_resident_bytes = checked_residency_add(
+            output_parameters.always_resident_bytes,
+            additional_bytes,
+            "speculative decoder shared always-resident parameter bytes",
+        )?;
+        output_parameters.current_resident_bytes = checked_residency_add(
+            output_parameters.current_resident_bytes,
+            additional_bytes,
+            "speculative decoder shared current parameter bytes",
+        )?;
+        output_parameters.maximum_addressable_bytes = checked_residency_add(
+            output_parameters.maximum_addressable_bytes,
+            additional_bytes,
+            "speculative decoder shared maximum parameter bytes",
+        )?;
+    }
     let compiled_resource_layout = VulkanCompiledResourceAddressLayout::from_contract(
         resource_contract,
     )

@@ -554,6 +554,31 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     )?),
                 )
             };
+        let speculative_shared_additional_parameters = if mount_speculative_decoders {
+            let tensors = speculative_decoder_shared_additional_parameter_tensors(
+                &runtime_model,
+                |tensor| {
+                    output_transducer_parameter_buffers
+                        .parameter_buffer(tensor)
+                        .is_some()
+                },
+            );
+            if tensors.is_empty() {
+                None
+            } else {
+                Some(Arc::new(
+                    load_resident_package_parameter_buffers_for_tensors(
+                        output_device,
+                        &output_device_id,
+                        &tensor_index,
+                        &tensors,
+                    )
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?,
+                ))
+            }
+        } else {
+            None
+        };
         let distributed_parameter_buffers = Arc::new(
             match parameter_pool {
                 Some(pool) => VulkanDistributedParameterBuffers::allocate_and_load_from_pool(
@@ -1234,7 +1259,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
             runtime_model: &runtime_model,
             capacity,
             tensor_index: &tensor_index,
-            target_output_parameters: &output_transducer_parameter_buffers,
+            shared_additional_parameters: speculative_shared_additional_parameters.clone(),
             input_embedding_spec: &runtime_model.package.input_transducer.spec,
             input_embedding_spirv_words: &input_transducer_spirv_words,
             input_embedding_batch_spirv_words: &input_transducer_batch_spirv_words,

@@ -29,7 +29,7 @@ struct VulkanResidentSpeculativeDecoderLoadContext<'a> {
     runtime_model: &'a VulkanResidentRuntimeModel,
     capacity: usize,
     tensor_index: &'a TensorIndex,
-    target_output_parameters: &'a VulkanPermanentParameterBuffers,
+    shared_additional_parameters: Option<Arc<VulkanPermanentParameterBuffers>>,
     input_embedding_spec: &'a VulkanResidentInputEmbeddingTransducerSpec,
     input_embedding_spirv_words: &'a [u32],
     input_embedding_batch_spirv_words: &'a [u32],
@@ -47,6 +47,27 @@ fn speculative_decoder_additional_parameter_tensors<'a>(
     std::iter::once(input_embedding.parameter_tensor.as_str())
         .chain(speculative_decoder_output_parameter_tensors(output))
         .filter(|tensor| !target_has_tensor(tensor))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn speculative_decoder_shared_additional_parameter_tensors<'a>(
+    runtime_model: &'a VulkanResidentRuntimeModel,
+    mut target_has_tensor: impl FnMut(&str) -> bool,
+) -> Vec<&'a str> {
+    runtime_model
+        .package
+        .speculative_decoders
+        .iter()
+        .filter_map(VulkanResidentSpeculativeDecoderPackageSpec::dedicated_output_transducer)
+        .flat_map(|output| {
+            speculative_decoder_additional_parameter_tensors(
+                &runtime_model.package.input_transducer.spec,
+                output,
+                &mut target_has_tensor,
+            )
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -214,29 +235,7 @@ impl VulkanResidentSpeculativeDecoderModelPackage {
                         )),
                     )
                 })?;
-                let additional_tensors = speculative_decoder_additional_parameter_tensors(
-                    context.input_embedding_spec,
-                    output,
-                    |tensor| {
-                        context
-                            .target_output_parameters
-                            .parameter_buffer(tensor)
-                            .is_some()
-                    },
-                );
-                let additional_parameter_buffers = if additional_tensors.is_empty() {
-                    None
-                } else {
-                    Some(Arc::new(
-                        load_resident_package_parameter_buffers_for_tensors(
-                            device,
-                            device_id,
-                            context.tensor_index,
-                            &additional_tensors,
-                        )
-                        .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?,
-                    ))
-                };
+                let additional_parameter_buffers = context.shared_additional_parameters.clone();
                 let output_norm_spirv_words = load_required_resident_model_package_shader(
                     context.manifest_dir,
                     &output.norm_shader_path,

@@ -1530,9 +1530,8 @@ fn output_transducer_overlay_mounts_target_representation_as_one_unit() {
     std::fs::remove_dir_all(candidate_root).unwrap();
 }
 
-#[test]
-fn output_transducer_logical_contract_allows_packed_parameter_storage() {
-    let source = VulkanResidentDraftOutputTransducerPackageSpec {
+fn fixture_draft_output_transducer() -> VulkanResidentDraftOutputTransducerPackageSpec {
+    VulkanResidentDraftOutputTransducerPackageSpec {
         component_id: "draft_output".to_string(),
         input_signal_id: "input".to_string(),
         hidden_signal_id: "hidden".to_string(),
@@ -1559,7 +1558,12 @@ fn output_transducer_logical_contract_allows_packed_parameter_storage() {
         projection_local_size_x: 1024,
         norm_shader_path: "norm.spv".to_string(),
         projection_shader_path: "bf16_projection.spv".to_string(),
-    };
+    }
+}
+
+#[test]
+fn output_transducer_logical_contract_allows_packed_parameter_storage() {
+    let source = fixture_draft_output_transducer();
     let mut packed = source.clone();
     packed.projection_parameter_tensor = "packed_int4_projection".to_string();
     packed.projection_parameter_dtype = "U8".to_string();
@@ -1579,6 +1583,48 @@ fn output_transducer_logical_contract_allows_packed_parameter_storage() {
 
     packed.hidden_size -= 1;
     assert!(validate_draft_output_transducer_logical_contract(&source, &packed).is_err());
+}
+
+#[test]
+fn speculative_decoders_share_one_exact_set_of_parameters_missing_from_the_target_output_device() {
+    let mut runtime_model = fixture_model_runtime_model();
+    let mut decoder = parallel_speculative_decoder_with_default("draft", 2);
+    decoder.execution_contract =
+        VulkanResidentSpeculativeExecutionContract::AutoregressiveFeedback {
+            processor_schedule: "one_token_per_tick".to_string(),
+            output_schedule: "dedicated_token_transducer".to_string(),
+        };
+    decoder.output_transducer = Some(fixture_draft_output_transducer());
+    runtime_model.package.speculative_decoders = vec![decoder.clone(), decoder];
+
+    let output_resident = BTreeSet::from(["norm", "bf16_projection"]);
+    assert_eq!(
+        speculative_decoder_shared_additional_parameter_tensors(&runtime_model, |tensor| {
+            output_resident.contains(tensor)
+        }),
+        vec![runtime_model
+            .package
+            .input_transducer
+            .spec
+            .parameter_tensor
+            .as_str()]
+    );
+
+    let everything_resident = BTreeSet::from([
+        "norm",
+        "bf16_projection",
+        runtime_model
+            .package
+            .input_transducer
+            .spec
+            .parameter_tensor
+            .as_str(),
+    ]);
+    assert!(speculative_decoder_shared_additional_parameter_tensors(
+        &runtime_model,
+        |tensor| everything_resident.contains(tensor),
+    )
+    .is_empty());
 }
 
 #[test]
