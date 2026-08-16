@@ -379,28 +379,6 @@ impl VulkanHybridResourceReservations {
         Ok(Some(next))
     }
 
-    fn reserve_classes(
-        &self,
-        resources: &VulkanHybridCandidateResources,
-        classes: &BTreeSet<VulkanHybridResourceClass>,
-        capacity: &VulkanPlacementCapacityEnvelope,
-    ) -> Result<Option<Self>, VulkanHybridResourceError> {
-        if classes.is_empty() {
-            return Ok(Some(self.clone()));
-        }
-        self.reserve(
-            &VulkanHybridCandidateResources::new(
-                resources
-                    .claims
-                    .iter()
-                    .filter(|claim| classes.contains(&claim.class))
-                    .cloned()
-                    .collect(),
-            ),
-            capacity,
-        )
-    }
-
     fn claims_are_subset_of(&self, other: &Self) -> bool {
         self.shared_claims_by_id
             .iter()

@@ -258,6 +258,113 @@ struct VulkanHybridResolvedCandidateGraph<'a> {
     boundaries_by_index: BTreeMap<usize, Vec<VulkanHybridResolvedBoundaryCandidate<'a>>>,
 }
 
+struct VulkanHybridIndexedClaims<'a> {
+    claim_index_by_id: BTreeMap<&'a str, usize>,
+    claims_by_index: Vec<&'a VulkanHybridResourceClaim>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VulkanHybridRouteResourceState {
+    device_bytes: BTreeMap<VulkanPlacementDeviceExecutionIdentity, VulkanHybridResourceBytes>,
+    host_bytes: VulkanHybridResourceBytes,
+    seen_claim_bits: Vec<u64>,
+}
+
+impl VulkanHybridRouteResourceState {
+    fn new(claim_count: usize) -> Self {
+        Self {
+            device_bytes: BTreeMap::new(),
+            host_bytes: VulkanHybridResourceBytes::default(),
+            seen_claim_bits: vec![0; claim_count.div_ceil(u64::BITS as usize)],
+        }
+    }
+
+    fn reserve_classes(
+        &self,
+        resources: &VulkanHybridCandidateResources,
+        classes: Option<&BTreeSet<VulkanHybridResourceClass>>,
+        indexed_claims: &VulkanHybridIndexedClaims<'_>,
+        capacity: &VulkanPlacementCapacityEnvelope,
+    ) -> Result<Option<Self>, VulkanHybridResourceError> {
+        let mut next = self.clone();
+        for claim in &resources.claims {
+            if classes.is_some_and(|classes| !classes.contains(&claim.class)) {
+                continue;
+            }
+            let claim_index = indexed_claims
+                .claim_index_by_id
+                .get(claim.claim_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    VulkanHybridResourceError(format!(
+                        "hybrid route claim {:?} was not indexed",
+                        claim.claim_id,
+                    ))
+                })?;
+            let word = claim_index / u64::BITS as usize;
+            let mask = 1u64 << (claim_index % u64::BITS as usize);
+            if next.seen_claim_bits[word] & mask != 0 {
+                if claim.shared {
+                    continue;
+                }
+                return Err(VulkanHybridResourceError(format!(
+                    "hybrid exclusive resource claim {:?} was reserved twice",
+                    claim.claim_id,
+                )));
+            }
+            next.seen_claim_bits[word] |= mask;
+            let bytes = match &claim.target {
+                VulkanHybridResourceTarget::Device(device) => {
+                    if !capacity.available_bytes_by_device.contains_key(device) {
+                        return Ok(None);
+                    }
+                    next.device_bytes.entry(device.clone()).or_default()
+                }
+                VulkanHybridResourceTarget::Host => &mut next.host_bytes,
+            };
+            add_hybrid_resource_claim(bytes, claim)?;
+        }
+        for (device, bytes) in &next.device_bytes {
+            let Some(available) = capacity.available_bytes_by_device.get(device).copied() else {
+                return Ok(None);
+            };
+            if bytes.required_capacity_bytes()? > available {
+                return Ok(None);
+            }
+        }
+        if next.host_bytes.required_capacity_bytes()? > capacity.host_available_bytes {
+            return Ok(None);
+        }
+        Ok(Some(next))
+    }
+
+    fn materialize(
+        self,
+        indexed_claims: &VulkanHybridIndexedClaims<'_>,
+    ) -> VulkanHybridResourceReservations {
+        let mut shared_claims_by_id = BTreeMap::new();
+        let mut exclusive_claim_ids = BTreeSet::new();
+        for (claim_index, claim) in indexed_claims.claims_by_index.iter().enumerate() {
+            let word = claim_index / u64::BITS as usize;
+            let mask = 1u64 << (claim_index % u64::BITS as usize);
+            if self.seen_claim_bits[word] & mask == 0 {
+                continue;
+            }
+            if claim.shared {
+                shared_claims_by_id.insert(claim.claim_id.clone(), (*claim).clone());
+            } else {
+                exclusive_claim_ids.insert(claim.claim_id.clone());
+            }
+        }
+        VulkanHybridResourceReservations {
+            device_bytes: self.device_bytes,
+            host_bytes: self.host_bytes,
+            shared_claims_by_id,
+            exclusive_claim_ids,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanHybridPlacementState {
     cursor: usize,
@@ -273,8 +380,8 @@ struct VulkanHybridRouteSearchState {
     output_physical_device_id: Option<String>,
     steps: Vec<VulkanHybridScheduledStep>,
     predicted_duration_ns_per_activation: u128,
-    calibration_resource_reservations: VulkanHybridResourceReservations,
-    authoritative_resource_reservations: VulkanHybridResourceReservations,
+    calibration_resource_reservations: VulkanHybridRouteResourceState,
+    authoritative_resource_reservations: VulkanHybridRouteResourceState,
 }
 
 /// Selects exact measured physical islands for a canonical ordered graph.
@@ -403,7 +510,6 @@ pub fn plan_vulkan_hybrid_ordered_graph_candidates_with_resources(
         boundary_candidates,
         resources,
     )?;
-
     let mut states_by_cursor = vec![Vec::<VulkanHybridPlacementState>::new(); component_count + 1];
     states_by_cursor[0].push(VulkanHybridPlacementState {
         cursor: 0,
@@ -523,6 +629,7 @@ where
         boundary_candidates,
         resources,
     )?;
+    let indexed_claims = index_vulkan_hybrid_candidate_claims(&resolved)?;
     let minimum_suffix_duration =
         minimum_hybrid_route_suffix_durations(component_count, &resolved, eligible_capacity)?;
     let Some(initial_bound) = minimum_suffix_duration[0] else {
@@ -551,8 +658,12 @@ where
             output_physical_device_id: None,
             steps: Vec::new(),
             predicted_duration_ns_per_activation: 0,
-            calibration_resource_reservations: VulkanHybridResourceReservations::default(),
-            authoritative_resource_reservations: VulkanHybridResourceReservations::default(),
+            calibration_resource_reservations: VulkanHybridRouteResourceState::new(
+                indexed_claims.claims_by_index.len(),
+            ),
+            authoritative_resource_reservations: VulkanHybridRouteResourceState::new(
+                indexed_claims.claims_by_index.len(),
+            ),
         },
     );
     let mut insertion_ordinal = 0u64;
@@ -562,8 +673,12 @@ where
             let route = VulkanHybridPlacementRoute {
                 steps: state.steps,
                 predicted_duration_ns_per_activation: state.predicted_duration_ns_per_activation,
-                calibration_resource_reservations: state.calibration_resource_reservations,
-                authoritative_resource_reservations: state.authoritative_resource_reservations,
+                calibration_resource_reservations: state
+                    .calibration_resource_reservations
+                    .materialize(&indexed_claims),
+                authoritative_resource_reservations: state
+                    .authoritative_resource_reservations
+                    .materialize(&indexed_claims),
             };
             if let Some(result) = visitor(&route)? {
                 return Ok(Some(result));
@@ -601,7 +716,8 @@ where
                         .authoritative_resource_reservations
                         .reserve_classes(
                             boundary.resources,
-                            authoritative_resource_classes,
+                            Some(authoritative_resource_classes),
+                            &indexed_claims,
                             eligible_capacity,
                         )
                         .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
@@ -611,7 +727,12 @@ where
                     next.authoritative_resource_reservations = authoritative_resource_reservations;
                     next.calibration_resource_reservations = next
                         .calibration_resource_reservations
-                        .reserve(boundary.resources, &unbounded_capacity)
+                        .reserve_classes(
+                            boundary.resources,
+                            None,
+                            &indexed_claims,
+                            &unbounded_capacity,
+                        )
                         .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
                         .ok_or_else(|| {
                             VulkanHybridPlacementError(
@@ -636,7 +757,8 @@ where
                     .authoritative_resource_reservations
                     .reserve_classes(
                         candidate.resources,
-                        authoritative_resource_classes,
+                        Some(authoritative_resource_classes),
+                        &indexed_claims,
                         eligible_capacity,
                     )
                     .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
@@ -646,7 +768,12 @@ where
                 next.authoritative_resource_reservations = authoritative_resource_reservations;
                 next.calibration_resource_reservations = next
                     .calibration_resource_reservations
-                    .reserve(candidate.resources, &unbounded_capacity)
+                    .reserve_classes(
+                        candidate.resources,
+                        None,
+                        &indexed_claims,
+                        &unbounded_capacity,
+                    )
                     .map_err(|error| VulkanHybridPlacementError(error.to_string()))?
                     .ok_or_else(|| {
                         VulkanHybridPlacementError(
@@ -905,6 +1032,45 @@ fn resolve_vulkan_hybrid_candidate_graph<'a>(
     Ok(VulkanHybridResolvedCandidateGraph {
         regions_by_start,
         boundaries_by_index,
+    })
+}
+
+fn index_vulkan_hybrid_candidate_claims<'a>(
+    resolved: &'a VulkanHybridResolvedCandidateGraph<'a>,
+) -> Result<VulkanHybridIndexedClaims<'a>, VulkanHybridPlacementError> {
+    let mut claim_index_by_id = BTreeMap::new();
+    let mut claims_by_index = Vec::new();
+    for claim in resolved
+        .regions_by_start
+        .values()
+        .flatten()
+        .flat_map(|candidate| &candidate.resources.claims)
+        .chain(
+            resolved
+                .boundaries_by_index
+                .values()
+                .flatten()
+                .flat_map(|candidate| &candidate.resources.claims),
+        )
+    {
+        validate_hybrid_resource_claim(claim)
+            .map_err(|error| VulkanHybridPlacementError(error.to_string()))?;
+        if let Some(existing_index) = claim_index_by_id.get(claim.claim_id.as_str()).copied() {
+            if claims_by_index[existing_index] != claim {
+                return Err(VulkanHybridPlacementError(format!(
+                    "hybrid resource claim {:?} has conflicting definitions",
+                    claim.claim_id,
+                )));
+            }
+            continue;
+        }
+        let index = claims_by_index.len();
+        claim_index_by_id.insert(claim.claim_id.as_str(), index);
+        claims_by_index.push(claim);
+    }
+    Ok(VulkanHybridIndexedClaims {
+        claim_index_by_id,
+        claims_by_index,
     })
 }
 
@@ -2073,6 +2239,7 @@ mod hybrid_placement_optimizer_tests {
     fn duration_ordered_route_search_does_not_expand_equal_cost_prefix_combinations() {
         const COMPONENT_COUNT: usize = 64;
         const ALTERNATIVES_PER_COMPONENT: usize = 4;
+        const SHARED_CLAIMS_PER_COMPONENT: usize = 256;
         let mut catalog = VulkanPlacementCalibrationCatalog::default();
         let mut candidates = Vec::new();
         for component_index in 0..COMPONENT_COUNT {
@@ -2106,12 +2273,34 @@ mod hybrid_placement_optimizer_tests {
                 });
             }
         }
-        let resources = VulkanHybridCandidateResourceCatalog::from_calibration(
+        let mut resources = VulkanHybridCandidateResourceCatalog::from_calibration(
             &catalog,
             &candidates,
             &[],
         )
         .unwrap();
+        for component_index in 0..COMPONENT_COUNT {
+            let claims = (0..SHARED_CLAIMS_PER_COMPONENT)
+                .map(|claim_index| {
+                    VulkanHybridResourceClaim::device(
+                        format!("component:{component_index}:tensor:{claim_index}"),
+                        device("gpu0", 2),
+                        VulkanHybridResourceClass::Permanent,
+                        1,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for alternative_index in 0..ALTERNATIVES_PER_COMPONENT {
+                resources
+                    .replace_region_claims(
+                        &format!(
+                            "component:{component_index}:alternative:{alternative_index}"
+                        ),
+                        claims.clone(),
+                    )
+                    .unwrap();
+            }
+        }
         let mut visited_routes = 0usize;
         let selected = visit_vulkan_hybrid_ordered_graph_routes_by_duration(
             &catalog,
@@ -2132,6 +2321,13 @@ mod hybrid_placement_optimizer_tests {
         assert_eq!(visited_routes, 1);
         assert_eq!(selected.predicted_duration_ns_per_activation, 64);
         assert_eq!(selected_step_region_ids(&selected.steps).len(), COMPONENT_COUNT);
+        assert_eq!(
+            selected
+                .calibration_resource_reservations
+                .shared_claims_by_id
+                .len(),
+            COMPONENT_COUNT * SHARED_CLAIMS_PER_COMPONENT,
+        );
     }
 
     #[test]
