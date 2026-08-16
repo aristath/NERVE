@@ -209,10 +209,10 @@ impl VulkanStreamCircuitStreamBuffers {
             .iter()
             .zip(&page_tables)
             .map(|(state, page_table)| {
-                VulkanResidentBufferWriteRange::new(&state.buffer, 0, page_table)
+                VulkanResidentBufferUpdateRange::new(&state.buffer, 0, page_table)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        device.write_resident_buffer_ranges(&ranges)?;
+        device.update_resident_buffer_ranges(&ranges)?;
         Ok(initialized_byte_count)
     }
 

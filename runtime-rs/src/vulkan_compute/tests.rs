@@ -2902,3 +2902,16 @@ mod tests {
         assert!(copy.completion.pending_value().is_none());
     }
 }
+#[test]
+fn resident_buffer_updates_split_at_the_vulkan_command_limit() {
+    assert!(vulkan_resident_buffer_update_chunks(0).is_err());
+    assert!(vulkan_resident_buffer_update_chunks(6).is_err());
+    assert_eq!(
+        vulkan_resident_buffer_update_chunks(4).unwrap(),
+        vec![0..4],
+    );
+    assert_eq!(
+        vulkan_resident_buffer_update_chunks(65_536 + 8).unwrap(),
+        vec![0..65_536, 65_536..65_544],
+    );
+}
