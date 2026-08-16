@@ -1053,21 +1053,29 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
         },
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+    let graph_parameter_component_ids =
+        exact_vulkan_runtime_hybrid_graph_parameter_anchor_ids(runtime_model, component_id)?;
     append_vulkan_hybrid_graph_parameter_requirements(
         &placed_model,
         tensor_index,
         resource_contract,
         identity_by_logical_device,
-        Some(&BTreeSet::from([component_id.to_string()])),
+        Some(&graph_parameter_component_ids),
         &requirements.prepared_parameter_tensors,
         &mut requirements.requirements_by_component,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    let mut component_requirements = requirements
-        .requirements_by_component
-        .get(component_id)
-        .cloned()
-        .unwrap_or_default();
+    let mut component_requirements = graph_parameter_component_ids
+        .iter()
+        .flat_map(|anchor_id| {
+            requirements
+                .requirements_by_component
+                .get(anchor_id)
+                .into_iter()
+                .flatten()
+                .cloned()
+        })
+        .collect::<Vec<_>>();
     component_requirements.extend(exact_vulkan_runtime_hybrid_component_state_requirements(
         package_root,
         runtime_model,
@@ -1120,6 +1128,52 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
         shared_ranges: component_requirements,
         direct_claims: selected_resource_requirements.direct_claims,
     })
+}
+
+/// Assigns graph-owned parameters to the signal component that determines
+/// their physical endpoint. Input-transducer resources follow the first signal
+/// owner; output, sampler, and draft resources follow the last. Keeping these
+/// fixed bytes in candidate admission prevents the terminal mount verifier from
+/// rediscovering that an otherwise complete route overfilled its endpoint GPU.
+fn exact_vulkan_runtime_hybrid_graph_parameter_anchor_ids(
+    runtime_model: &VulkanResidentRuntimeModel,
+    component_id: &str,
+) -> Result<BTreeSet<String>, VulkanRuntimeHybridPlacementError> {
+    let signal_component_ids = runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| component.component_id.as_str())
+        .collect::<Vec<_>>();
+    let (Some(first), Some(last)) = (
+        signal_component_ids.first().copied(),
+        signal_component_ids.last().copied(),
+    ) else {
+        return runtime_hybrid_error(
+            "exact hybrid graph parameter planning found no signal processor",
+        );
+    };
+    if !signal_component_ids.contains(&component_id) {
+        return runtime_hybrid_error(format!(
+            "exact hybrid graph parameter planning references unknown signal processor {component_id:?}",
+        ));
+    }
+    Ok(runtime_model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| match component.runtime_role {
+            CircuitRuntimeRole::SignalProcessor => component.component_id == component_id,
+            CircuitRuntimeRole::InputTransducer => component_id == first,
+            CircuitRuntimeRole::OutputTransducer
+            | CircuitRuntimeRole::Sampler
+            | CircuitRuntimeRole::DraftProcessor
+            | CircuitRuntimeRole::DraftInputAdapter
+            | CircuitRuntimeRole::DraftOutputTransducer => component_id == last,
+        })
+        .map(|component| component.component_id.clone())
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]

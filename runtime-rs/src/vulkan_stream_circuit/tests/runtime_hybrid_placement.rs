@@ -1792,6 +1792,11 @@ fn runtime_hybrid_exact_candidate_resources_prune_before_terminal_mount() {
     let [full_device] = full_residency.device_plans.as_slice() else {
         panic!("the one-device fixture must have one residency plan");
     };
+    assert_eq!(
+        exact_parameter_bytes,
+        full_device.parameter_residency.current_resident_bytes,
+        "candidate admission must include graph-owned endpoint parameters before terminal mount",
+    );
     let expected_candidate_state = full_device
         .working_set
         .transient_state_bytes
@@ -1826,6 +1831,51 @@ fn runtime_hybrid_exact_candidate_resources_prune_before_terminal_mount() {
         .is_some(),
         "sampled transient memory is not exact enough to prune before terminal mount",
     );
+}
+
+#[test]
+fn runtime_hybrid_graph_parameters_follow_their_signal_endpoints() {
+    let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
+    let signal_ids = model
+        .circuit_graph
+        .components
+        .iter()
+        .filter(|component| component.runtime_role.is_signal_processor())
+        .map(|component| component.component_id.as_str())
+        .collect::<Vec<_>>();
+    let [first, middle, last] = signal_ids.as_slice() else {
+        panic!("the fixture must contain three signal processors");
+    };
+
+    let first_anchors =
+        exact_vulkan_runtime_hybrid_graph_parameter_anchor_ids(&model, first).unwrap();
+    let middle_anchors =
+        exact_vulkan_runtime_hybrid_graph_parameter_anchor_ids(&model, middle).unwrap();
+    let last_anchors =
+        exact_vulkan_runtime_hybrid_graph_parameter_anchor_ids(&model, last).unwrap();
+    let roles = |ids: &BTreeSet<String>| {
+        model
+            .circuit_graph
+            .components
+            .iter()
+            .filter(|component| ids.contains(&component.component_id))
+            .map(|component| component.runtime_role)
+            .collect::<Vec<_>>()
+    };
+
+    let first_roles = roles(&first_anchors);
+    assert_eq!(first_roles.len(), 2);
+    assert!(first_roles.contains(&CircuitRuntimeRole::InputTransducer));
+    assert!(first_roles.contains(&CircuitRuntimeRole::SignalProcessor));
+
+    let middle_roles = roles(&middle_anchors);
+    assert_eq!(middle_roles, [CircuitRuntimeRole::SignalProcessor]);
+
+    let last_roles = roles(&last_anchors);
+    assert_eq!(last_roles.len(), 3);
+    assert!(last_roles.contains(&CircuitRuntimeRole::SignalProcessor));
+    assert!(last_roles.contains(&CircuitRuntimeRole::OutputTransducer));
+    assert!(last_roles.contains(&CircuitRuntimeRole::Sampler));
 }
 
 #[test]

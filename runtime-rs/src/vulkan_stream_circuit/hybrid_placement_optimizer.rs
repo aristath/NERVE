@@ -537,9 +537,15 @@ where
             .collect(),
         host_available_bytes: usize::MAX,
     };
-    let mut frontier = BTreeMap::<(u128, u128, u64), VulkanHybridRouteSearchState>::new();
+    let mut frontier =
+        BTreeMap::<(u128, std::cmp::Reverse<usize>, std::cmp::Reverse<u128>, u64), VulkanHybridRouteSearchState>::new();
     frontier.insert(
-        (initial_bound, 0, 0),
+        (
+            initial_bound,
+            std::cmp::Reverse(0),
+            std::cmp::Reverse(0),
+            0,
+        ),
         VulkanHybridRouteSearchState {
             cursor: 0,
             output_physical_device_id: None,
@@ -689,7 +695,15 @@ where
                 frontier.insert(
                     (
                         estimated_duration,
-                        next.predicted_duration_ns_per_activation,
+                        // A* permits arbitrary ordering among states with the
+                        // same admissible total-duration bound. Prefer the
+                        // state that has advanced furthest through the graph,
+                        // then the one with more already-measured work. The
+                        // previous shallow-first tie break materialized every
+                        // equal-cost prefix combination before allowing one
+                        // route to reach the terminal node.
+                        std::cmp::Reverse(next.cursor),
+                        std::cmp::Reverse(next.predicted_duration_ns_per_activation),
                         insertion_ordinal,
                     ),
                     next,
@@ -2053,6 +2067,71 @@ mod hybrid_placement_optimizer_tests {
             ["slow", "second"]
         );
         assert_eq!(selected.predicted_duration_ns_per_activation, 13);
+    }
+
+    #[test]
+    fn duration_ordered_route_search_does_not_expand_equal_cost_prefix_combinations() {
+        const COMPONENT_COUNT: usize = 64;
+        const ALTERNATIVES_PER_COMPONENT: usize = 4;
+        let mut catalog = VulkanPlacementCalibrationCatalog::default();
+        let mut candidates = Vec::new();
+        for component_index in 0..COMPONENT_COUNT {
+            let behavior = region_behavior(&format!("component-{component_index}"));
+            for alternative_index in 0..ALTERNATIVES_PER_COMPONENT {
+                let mut observation = region_observation(
+                    behavior.clone(),
+                    VulkanPlacementExecutionStrategy::SingleDevice,
+                    &[("gpu0", 1)],
+                    "gpu0",
+                    "gpu0",
+                    "gpu0",
+                    1,
+                    1,
+                );
+                observation.execution_case.implementation_digests = vec![format!(
+                    "sha256:{component_index:032x}{alternative_index:032x}"
+                )];
+                observation.execution_case.artifact_digest = format!(
+                    "sha256:{alternative_index:032x}{component_index:032x}"
+                );
+                let execution_case = record(&mut catalog, observation);
+                candidates.push(VulkanHybridRegionCandidate {
+                    candidate_id: format!(
+                        "component:{component_index}:alternative:{alternative_index}"
+                    ),
+                    component_start: component_index,
+                    component_end: component_index + 1,
+                    semantic_contract_id: format!("component-{component_index}"),
+                    execution_case,
+                });
+            }
+        }
+        let resources = VulkanHybridCandidateResourceCatalog::from_calibration(
+            &catalog,
+            &candidates,
+            &[],
+        )
+        .unwrap();
+        let mut visited_routes = 0usize;
+        let selected = visit_vulkan_hybrid_ordered_graph_routes_by_duration(
+            &catalog,
+            COMPONENT_COUNT,
+            &candidates,
+            &[],
+            &resources,
+            &BTreeSet::new(),
+            &capacity(2, usize::MAX, usize::MAX),
+            |route| {
+                visited_routes += 1;
+                Ok(Some(route.clone()))
+            },
+        )
+        .unwrap()
+        .expect("one equal-cost route must reach the terminal node directly");
+
+        assert_eq!(visited_routes, 1);
+        assert_eq!(selected.predicted_duration_ns_per_activation, 64);
+        assert_eq!(selected_step_region_ids(&selected.steps).len(), COMPONENT_COUNT);
     }
 
     #[test]
