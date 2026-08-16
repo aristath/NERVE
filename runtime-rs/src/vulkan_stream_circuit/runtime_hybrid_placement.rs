@@ -676,6 +676,16 @@ fn resolve_vulkan_runtime_hybrid_physical_execution_with_catalog(
                     .max();
             let decode_owner_by_component =
                 runtime_hybrid_physical_owners(&decode.ordered_placement)?;
+            if physical_mount_planning
+                .as_ref()
+                .is_some_and(|planning| planning.speculative_draft_tokens > 0)
+                && !runtime_hybrid_owner_segments_are_contiguous(
+                    &decode.ordered_placement.component_ids,
+                    &decode_owner_by_component,
+                )?
+            {
+                return Ok(None);
+            }
             if let Some(activation_batch_width) = prefill_activation_batch_width {
                 let resolution = visit_vulkan_runtime_hybrid_ordered_graph_with_owners_by_duration(
                     &mounted_model,
@@ -1900,6 +1910,34 @@ fn runtime_hybrid_physical_owners(
         );
     }
     Ok(owners)
+}
+
+fn runtime_hybrid_owner_segments_are_contiguous(
+    component_ids: &[String],
+    owners: &BTreeMap<String, String>,
+) -> Result<bool, VulkanRuntimeHybridPlacementError> {
+    if component_ids.len() != owners.len() {
+        return runtime_hybrid_error(
+            "runtime hybrid owner contiguity requires one owner per ordered component",
+        );
+    }
+    let mut completed = BTreeSet::new();
+    let mut current = None::<&str>;
+    for component_id in component_ids {
+        let owner = owners.get(component_id).ok_or_else(|| {
+            VulkanRuntimeHybridPlacementError(format!(
+                "runtime hybrid owner contiguity has no owner for component {component_id:?}",
+            ))
+        })?;
+        if current == Some(owner.as_str()) {
+            continue;
+        }
+        if !completed.insert(owner.as_str()) {
+            return Ok(false);
+        }
+        current = Some(owner);
+    }
+    Ok(true)
 }
 
 fn runtime_hybrid_step_component_cases<'a>(

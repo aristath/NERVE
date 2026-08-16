@@ -35,6 +35,32 @@ fn hybrid_test_device(id: &str) -> VulkanPlacementDeviceExecutionIdentity {
     }
 }
 
+#[test]
+fn speculative_batch_owner_capability_rejects_device_reentry() {
+    let components = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let contiguous = BTreeMap::from([
+        ("a".to_string(), "gpu0".to_string()),
+        ("b".to_string(), "gpu0".to_string()),
+        ("c".to_string(), "gpu1".to_string()),
+    ]);
+    let reentrant = BTreeMap::from([
+        ("a".to_string(), "gpu0".to_string()),
+        ("b".to_string(), "gpu1".to_string()),
+        ("c".to_string(), "gpu0".to_string()),
+    ]);
+
+    assert!(runtime_hybrid_owner_segments_are_contiguous(&components, &contiguous).unwrap());
+    assert!(!runtime_hybrid_owner_segments_are_contiguous(&components, &reentrant).unwrap());
+    assert!(runtime_hybrid_owner_segments_are_contiguous(
+        &components,
+        &BTreeMap::from([
+            ("a".to_string(), "gpu0".to_string()),
+            ("b".to_string(), "gpu0".to_string()),
+        ]),
+    )
+    .is_err());
+}
+
 fn hybrid_test_observation(
     behavior: VulkanPlacementBehaviorIdentity,
     device_id: &str,
