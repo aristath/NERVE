@@ -71,11 +71,22 @@ fn compose_runtime_physical_execution_plan(
             &args.component_physical_strategies,
         )?;
     }
-    let plan = plan.with_exact_cross_device_boundary_routes(
-        runtime_model,
-        placement_calibration_catalog,
-        device_identity_by_logical_device,
-    )?;
+    // Automatic placement may claim a measured boundary only from the exact
+    // calibration catalog that selected it. Caller-authored placement remains
+    // executable without such evidence: the mount layer will select its
+    // deterministic workload-free transport and will not represent that route
+    // as calibrated performance evidence.
+    let plan = match placement_calibration_catalog {
+        Some(catalog) => plan.with_exact_cross_device_boundary_routes(
+            runtime_model,
+            Some(catalog),
+            device_identity_by_logical_device,
+        )?,
+        None => {
+            plan.validate(runtime_model)?;
+            plan
+        }
+    };
     Ok(Some(plan))
 }
 

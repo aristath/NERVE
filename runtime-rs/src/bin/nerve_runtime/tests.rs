@@ -30,6 +30,7 @@ mod tests {
         parse_chat_template_variable, parse_device_binding_assignment, parse_source_chain,
         parse_vulkan_device_uuid_ref,
         declared_runtime_logical_device_ids,
+        compose_runtime_physical_execution_plan,
         explicit_physical_mount_report, workload_free_physical_planning_devices,
         rank_runtime_auto_placement_candidates_across_capability_classes,
         resolve_runtime_context_size, resolve_runtime_vulkan_physical_device_ref_in,
@@ -42,6 +43,56 @@ mod tests {
         validate_explicit_logical_device_bindings,
         RuntimeWorkloadFreePhysicalCapacityObservation,
     };
+
+    #[test]
+    fn caller_placed_cross_device_graph_uses_unmeasured_workload_free_boundary() {
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixtures/tiny_model/vulkan_resident_package.json");
+        let mut args = Args {
+            chat: true,
+            default_device_id: Some("gpu0".to_string()),
+            ..Args::default()
+        };
+        args.duplicate_after
+            .push(("layer_00".to_string(), "layer_copy".to_string()));
+        args.node_devices
+            .insert("layer_copy".to_string(), "gpu1".to_string());
+        let model = runtime_model(&args, &package).unwrap();
+        let identities = BTreeMap::from([
+            (
+                "gpu0".to_string(),
+                nerve_runtime::VulkanPlacementDeviceExecutionIdentity {
+                    physical_device_id: "physical0".to_string(),
+                    api_version: 1,
+                    driver_version: 2,
+                },
+            ),
+            (
+                "gpu1".to_string(),
+                nerve_runtime::VulkanPlacementDeviceExecutionIdentity {
+                    physical_device_id: "physical1".to_string(),
+                    api_version: 1,
+                    driver_version: 2,
+                },
+            ),
+        ]);
+
+        let plan = compose_runtime_physical_execution_plan(
+            &args,
+            &model,
+            None,
+            None,
+            &identities,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(plan.decode_boundary_executions.is_empty());
+        assert_eq!(
+            plan.device_ids(&model),
+            vec!["gpu0".to_string(), "gpu1".to_string()],
+        );
+    }
 
     fn physical_memory_observation(
         physical_device_id: &str,
