@@ -1218,6 +1218,32 @@ fn stream_memory_admission_classifies_each_remountable_runner_independently() {
 }
 
 #[test]
+fn selected_resource_store_reserves_exact_physical_stream_bytes_before_cache_capacity() {
+    let exact = BTreeMap::from([("gpu0".to_string(), 2_443_334_416usize)]);
+
+    assert_eq!(
+        physical_execution_store_pending_fixed_bytes(&exact, "gpu0", 4096).unwrap(),
+        2_443_338_512,
+    );
+    assert!(
+        physical_execution_store_pending_fixed_bytes(&exact, "gpu1", 4096)
+            .unwrap_err()
+            .to_string()
+            .contains("no exact stream requirement"),
+    );
+    assert!(
+        physical_execution_store_pending_fixed_bytes(
+            &BTreeMap::from([("gpu0".to_string(), usize::MAX)]),
+            "gpu0",
+            1,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("overflowed"),
+    );
+}
+
+#[test]
 fn permanent_host_requirements_accumulate_across_memory_domains() {
     let sampler_history_physical_bytes = 2_101_248;
     let other_shared_host_physical_bytes = 2_097_024;

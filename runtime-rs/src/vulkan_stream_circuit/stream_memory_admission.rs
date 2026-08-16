@@ -418,6 +418,314 @@ where
     })
 }
 
+fn physical_execution_stream_device_requirements_by_class<'a, F>(
+    device_plan: &VulkanRuntimePhysicalExecutionDeviceResidencyPlan,
+    device: &'a VulkanComputeDevice,
+    device_for: &F,
+) -> Result<
+    BTreeMap<VulkanMemoryAdmissionAllocationClass, usize>,
+    VulkanResidentInProcessPlacedRuntimeError,
+>
+where
+    F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    let logical_without_execution_transients = device_plan
+        .stream_device_local_bytes
+        .checked_sub(
+            device_plan
+                .breakdown
+                .execution_transient_device_bytes_per_stream,
+        )
+        .ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "physical execution device {:?} stream residency omits its execution transients",
+                    device_plan.device_id,
+                )),
+            )
+        })?;
+    let transient_ledger_logical_bytes = device_plan
+        .execution_transient_device_allocations
+        .iter()
+        .try_fold(0usize, |total, allocation| {
+            total.checked_add(allocation.byte_capacity).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "physical execution device {:?} transient allocation ledger overflowed",
+                        device_plan.device_id,
+                    )),
+                )
+            })
+        })?;
+    if transient_ledger_logical_bytes
+        != device_plan
+            .breakdown
+            .execution_transient_device_bytes_per_stream
+    {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "physical execution device {:?} transient allocation ledger declares {transient_ledger_logical_bytes} bytes but its residency breakdown declares {}",
+                device_plan.device_id,
+                device_plan
+                    .breakdown
+                    .execution_transient_device_bytes_per_stream,
+            )),
+        ));
+    }
+    let resident_ledger_logical_bytes = device_plan
+        .resident_stream_device_allocations
+        .iter()
+        .try_fold(0usize, |total, allocation| {
+            total.checked_add(allocation.byte_capacity).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "physical execution device {:?} resident allocation ledger overflowed",
+                        device_plan.device_id,
+                    )),
+                )
+            })
+        })?;
+    let external_ledger_logical_bytes = device_plan
+        .external_device_local_resident_allocations
+        .iter()
+        .try_fold(0usize, |total, allocation| {
+            total.checked_add(allocation.byte_capacity).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "physical execution device {:?} external allocation ledger overflowed",
+                        device_plan.device_id,
+                    )),
+                )
+            })
+        })?;
+    let private_activation_ledger_logical_bytes = device_plan
+        .private_activation_resident_allocations
+        .iter()
+        .try_fold(0usize, |total, allocation| {
+            total.checked_add(allocation.byte_capacity).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "physical execution device {:?} private activation allocation ledger overflowed",
+                        device_plan.device_id,
+                    )),
+                )
+            })
+        })?;
+    if private_activation_ledger_logical_bytes
+        != device_plan
+            .breakdown
+            .distributed_private_activation_device_bytes_per_stream
+    {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "physical execution device {:?} private activation allocation ledger declares {private_activation_ledger_logical_bytes} bytes but its residency breakdown declares {}",
+                device_plan.device_id,
+                device_plan
+                    .breakdown
+                    .distributed_private_activation_device_bytes_per_stream,
+            )),
+        ));
+    }
+    let residual_logical_bytes = logical_without_execution_transients
+        .checked_sub(resident_ledger_logical_bytes)
+        .and_then(|bytes| bytes.checked_sub(external_ledger_logical_bytes))
+        .and_then(|bytes| bytes.checked_sub(private_activation_ledger_logical_bytes))
+        .ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "physical execution device {:?} resident allocation ledger declares {resident_ledger_logical_bytes} bytes outside its {}-byte non-transient stream residency",
+                    device_plan.device_id, logical_without_execution_transients,
+                )),
+            )
+        })?;
+    let exact_resident_bytes_for =
+        |allocation_class: VulkanMemoryAdmissionAllocationClass| {
+            resident_stream_device_requirement_bytes_with(
+                &device_plan
+                    .resident_stream_device_allocations
+                    .iter()
+                    .filter(|allocation| {
+                        resident_stream_allocation_class(allocation) == allocation_class
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                |allocation| {
+                    device
+                        .resident_buffer_memory_requirement_bytes(
+                            allocation.byte_capacity,
+                        )
+                        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                },
+            )
+        };
+    let exact_external_bytes = external_device_local_resident_requirement_bytes(
+        &device_plan.external_device_local_resident_allocations,
+        device_for,
+    )?;
+    let exact_private_activation_bytes =
+        private_activation_resident_requirement_bytes_with(
+            &device_plan.private_activation_resident_allocations,
+            |allocation| {
+                device
+                    .resident_buffer_memory_requirement_bytes(allocation.byte_capacity)
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+            },
+        )?;
+    let exact_transient_bytes_for =
+        |allocation_class: VulkanMemoryAdmissionAllocationClass| {
+            execution_transient_device_requirement_bytes_with(
+                &device_plan
+                    .execution_transient_device_allocations
+                    .iter()
+                    .filter(|allocation| {
+                        stream_transient_allocation_class(allocation.allocation_class)
+                            == allocation_class
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                |allocation| {
+                    match allocation.usage {
+                        VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage => device
+                            .resident_buffer_memory_requirement_bytes(
+                                allocation.byte_capacity,
+                            ),
+                        VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate => device
+                            .conditional_resident_buffer_memory_requirement_bytes(
+                                allocation.byte_capacity,
+                            ),
+                        VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage => {
+                            let peer_devices = allocation
+                                .participant_device_ids
+                                .iter()
+                                .map(|device_id| device_for(device_id))
+                                .collect::<Result<Vec<_>, _>>()?
+                                .into_iter()
+                                .filter(|candidate| {
+                                    !candidate.shares_logical_device_with(device)
+                                })
+                                .collect::<Vec<_>>();
+                            device.shared_device_resident_buffer_memory_requirement_bytes(
+                                &peer_devices,
+                                allocation.byte_capacity,
+                            )
+                        }
+                    }
+                    .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+                },
+            )
+        };
+    let permanent_base_bytes = residual_logical_bytes
+        .checked_add(exact_external_bytes)
+        .and_then(|bytes| bytes.checked_add(exact_private_activation_bytes))
+        .ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(format!(
+                    "physical execution device {:?} permanent base stream requirement overflowed",
+                    device_plan.device_id,
+                )),
+            )
+        })?;
+    let mut requirements_by_class = BTreeMap::from([(
+        VulkanMemoryAdmissionAllocationClass::Permanent,
+        permanent_base_bytes,
+    )]);
+    for allocation_class in VulkanMemoryAdmissionAllocationClass::ALL {
+        let exact_class_bytes = exact_resident_bytes_for(allocation_class)?
+            .checked_add(exact_transient_bytes_for(allocation_class)?)
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "physical execution device {:?} {allocation_class:?} stream requirement overflowed",
+                        device_plan.device_id,
+                    )),
+                )
+            })?;
+        if exact_class_bytes > 0 {
+            let class_total = requirements_by_class.entry(allocation_class).or_default();
+            *class_total = class_total.checked_add(exact_class_bytes).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "physical execution device {:?} {allocation_class:?} stream requirement overflowed",
+                        device_plan.device_id,
+                    )),
+                )
+            })?;
+        }
+    }
+    Ok(requirements_by_class)
+}
+
+/// Resolves the exact Vulkan allocation requirements for one resident stream
+/// before the selected-resource cache claims the remainder of each heap. The
+/// logical byte ledger is a correctness contract, but it is not a physical
+/// capacity bound: every Vulkan buffer can add alignment and driver-specific
+/// allocation overhead. Mount-time cache sizing and stream admission must use
+/// this same physical calculation or the cache can strand a valid stream.
+fn physical_execution_stream_device_requirement_bytes_by_physical_device<'a, F>(
+    plan: &VulkanRuntimePhysicalExecutionResidencyPlan,
+    device_for: &F,
+) -> Result<BTreeMap<String, usize>, VulkanResidentInProcessPlacedRuntimeError>
+where
+    F: Fn(&str) -> Result<&'a VulkanComputeDevice, VulkanResidentInProcessPlacedRuntimeError>,
+{
+    let mut requirements = BTreeMap::<String, usize>::new();
+    for device_plan in &plan.device_plans {
+        let device = device_for(&device_plan.device_id)?;
+        let bytes = physical_execution_stream_device_requirements_by_class(
+            device_plan,
+            device,
+            device_for,
+        )?
+        .into_values()
+        .try_fold(0usize, |total, bytes| {
+            total.checked_add(bytes).ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(
+                        "physical stream requirement overflowed",
+                    ),
+                )
+            })
+        })?;
+        let total = requirements
+            .entry(device.physical_device_id().to_string())
+            .or_default();
+        *total = total.checked_add(bytes).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(
+                    "physical stream requirement overflowed across logical slices",
+                ),
+            )
+        })?;
+    }
+    for allocation in &plan.execution_transient_host_visible_allocations {
+        let device = device_for(&allocation.logical_device_id)?;
+        let requirement = device
+            .host_visible_resident_buffer_memory_requirement(allocation.byte_capacity)
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        if requirement.domain != VulkanResidentBufferMemoryDomain::DeviceLocal {
+            continue;
+        }
+        let total = requirements
+            .get_mut(device.physical_device_id())
+            .ok_or_else(|| {
+                VulkanResidentInProcessPlacedRuntimeError::Package(
+                    VulkanResidentTokenModelPackageError::new(format!(
+                        "host-visible transient on {:?} has no physical stream requirement",
+                        allocation.logical_device_id,
+                    )),
+                )
+            })?;
+        *total = total.checked_add(requirement.byte_count).ok_or_else(|| {
+            VulkanResidentInProcessPlacedRuntimeError::Package(
+                VulkanResidentTokenModelPackageError::new(
+                    "host-visible physical stream requirement overflowed",
+                ),
+            )
+        })?;
+    }
+    Ok(requirements)
+}
+
 fn reserve_vulkan_runtime_physical_execution_stream_memory<'a, F>(
     package: &VulkanResidentInProcessPlacedModelPackage,
     device_for: &F,
@@ -445,229 +753,12 @@ where
                 .and_modify(|capacity: &mut usize| *capacity = (*capacity).min(safe_capacity))
                 .or_insert(safe_capacity);
             physical_devices.entry(physical_device_id).or_insert(device);
-            let logical_without_execution_transients = device_plan
-                .stream_device_local_bytes
-                .checked_sub(
-                    device_plan
-                        .breakdown
-                        .execution_transient_device_bytes_per_stream,
-                )
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "physical execution device {:?} stream residency omits its execution transients",
-                            device_plan.device_id,
-                        )),
-                    )
-                })?;
-            let transient_ledger_logical_bytes = device_plan
-                .execution_transient_device_allocations
-                .iter()
-                .try_fold(0usize, |total, allocation| {
-                    total.checked_add(allocation.byte_capacity).ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "physical execution device {:?} transient allocation ledger overflowed",
-                                device_plan.device_id,
-                            )),
-                        )
-                    })
-                })?;
-            if transient_ledger_logical_bytes
-                != device_plan
-                    .breakdown
-                    .execution_transient_device_bytes_per_stream
-            {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "physical execution device {:?} transient allocation ledger declares {transient_ledger_logical_bytes} bytes but its residency breakdown declares {}",
-                        device_plan.device_id,
-                        device_plan
-                            .breakdown
-                            .execution_transient_device_bytes_per_stream,
-                    )),
-                ));
-            }
-            let resident_ledger_logical_bytes = device_plan
-                .resident_stream_device_allocations
-                .iter()
-                .try_fold(0usize, |total, allocation| {
-                    total.checked_add(allocation.byte_capacity).ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "physical execution device {:?} resident allocation ledger overflowed",
-                                device_plan.device_id,
-                            )),
-                        )
-                    })
-                })?;
-            let external_ledger_logical_bytes = device_plan
-                .external_device_local_resident_allocations
-                .iter()
-                .try_fold(0usize, |total, allocation| {
-                    total.checked_add(allocation.byte_capacity).ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "physical execution device {:?} external allocation ledger overflowed",
-                                device_plan.device_id,
-                            )),
-                        )
-                    })
-                })?;
-            let private_activation_ledger_logical_bytes = device_plan
-                .private_activation_resident_allocations
-                .iter()
-                .try_fold(0usize, |total, allocation| {
-                    total.checked_add(allocation.byte_capacity).ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "physical execution device {:?} private activation allocation ledger overflowed",
-                                device_plan.device_id,
-                            )),
-                        )
-                    })
-                })?;
-            if private_activation_ledger_logical_bytes
-                != device_plan
-                    .breakdown
-                    .distributed_private_activation_device_bytes_per_stream
-            {
-                return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
-                    VulkanResidentTokenModelPackageError::new(format!(
-                        "physical execution device {:?} private activation allocation ledger declares {private_activation_ledger_logical_bytes} bytes but its residency breakdown declares {}",
-                        device_plan.device_id,
-                        device_plan
-                            .breakdown
-                            .distributed_private_activation_device_bytes_per_stream,
-                    )),
-                ));
-            }
-            let residual_logical_bytes = logical_without_execution_transients
-                .checked_sub(resident_ledger_logical_bytes)
-                .and_then(|bytes| bytes.checked_sub(external_ledger_logical_bytes))
-                .and_then(|bytes| bytes.checked_sub(private_activation_ledger_logical_bytes))
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "physical execution device {:?} resident allocation ledger declares {resident_ledger_logical_bytes} bytes outside its {}-byte non-transient stream residency",
-                            device_plan.device_id, logical_without_execution_transients,
-                        )),
-                    )
-                })?;
-            let exact_resident_bytes_for =
-                |allocation_class: VulkanMemoryAdmissionAllocationClass| {
-                    resident_stream_device_requirement_bytes_with(
-                        &device_plan
-                            .resident_stream_device_allocations
-                            .iter()
-                            .filter(|allocation| {
-                                resident_stream_allocation_class(allocation) == allocation_class
-                            })
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        |allocation| {
-                            device
-                                .resident_buffer_memory_requirement_bytes(
-                                    allocation.byte_capacity,
-                                )
-                                .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-                        },
-                    )
-                };
-            let exact_external_bytes = external_device_local_resident_requirement_bytes(
-                &device_plan.external_device_local_resident_allocations,
-                device_for,
-            )?;
-            let exact_private_activation_bytes =
-                private_activation_resident_requirement_bytes_with(
-                    &device_plan.private_activation_resident_allocations,
-                    |allocation| {
-                        device
-                            .resident_buffer_memory_requirement_bytes(allocation.byte_capacity)
-                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-                    },
+            let requirements_by_class =
+                physical_execution_stream_device_requirements_by_class(
+                    device_plan,
+                    device,
+                    device_for,
                 )?;
-            let exact_transient_bytes_for =
-                |allocation_class: VulkanMemoryAdmissionAllocationClass| {
-                    execution_transient_device_requirement_bytes_with(
-                        &device_plan
-                            .execution_transient_device_allocations
-                            .iter()
-                            .filter(|allocation| {
-                                stream_transient_allocation_class(allocation.allocation_class)
-                                    == allocation_class
-                            })
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        |allocation| {
-                            match allocation.usage {
-                                VulkanRuntimeDeviceLocalTransientAllocationUsage::Storage => device
-                                    .resident_buffer_memory_requirement_bytes(
-                                        allocation.byte_capacity,
-                                    ),
-                                VulkanRuntimeDeviceLocalTransientAllocationUsage::ConditionalPredicate => device
-                                    .conditional_resident_buffer_memory_requirement_bytes(
-                                        allocation.byte_capacity,
-                                    ),
-                                VulkanRuntimeDeviceLocalTransientAllocationUsage::ExternalSharedStorage => {
-                                    let peer_devices = allocation
-                                        .participant_device_ids
-                                        .iter()
-                                        .map(|device_id| device_for(device_id))
-                                        .collect::<Result<Vec<_>, _>>()?
-                                        .into_iter()
-                                        .filter(|candidate| {
-                                            !candidate.shares_logical_device_with(device)
-                                        })
-                                        .collect::<Vec<_>>();
-                                    device.shared_device_resident_buffer_memory_requirement_bytes(
-                                        &peer_devices,
-                                        allocation.byte_capacity,
-                                    )
-                                }
-                            }
-                            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
-                        },
-                    )
-                };
-            let permanent_base_bytes = residual_logical_bytes
-                .checked_add(exact_external_bytes)
-                .and_then(|bytes| bytes.checked_add(exact_private_activation_bytes))
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(format!(
-                            "physical execution device {:?} permanent base stream requirement overflowed",
-                            device_plan.device_id,
-                        )),
-                    )
-                })?;
-            let mut requirements_by_class = BTreeMap::from([(
-                VulkanMemoryAdmissionAllocationClass::Permanent,
-                permanent_base_bytes,
-            )]);
-            for allocation_class in VulkanMemoryAdmissionAllocationClass::ALL {
-                let exact_class_bytes = exact_resident_bytes_for(allocation_class)?
-                    .checked_add(exact_transient_bytes_for(allocation_class)?)
-                    .ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "physical execution device {:?} {allocation_class:?} stream requirement overflowed",
-                                device_plan.device_id,
-                            )),
-                        )
-                    })?;
-                if exact_class_bytes > 0 {
-                    let class_total = requirements_by_class.entry(allocation_class).or_default();
-                    *class_total = class_total.checked_add(exact_class_bytes).ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::Package(
-                            VulkanResidentTokenModelPackageError::new(format!(
-                                "physical execution device {:?} {allocation_class:?} stream requirement overflowed",
-                                device_plan.device_id,
-                            )),
-                        )
-                    })?;
-                }
-            }
             Ok((device, requirements_by_class))
         })
         .collect::<Result<Vec<_>, VulkanResidentInProcessPlacedRuntimeError>>()?;

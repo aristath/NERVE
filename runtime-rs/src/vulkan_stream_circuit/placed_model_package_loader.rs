@@ -5,6 +5,7 @@ struct VulkanDemandPagedSharedTierCapacities {
     host_visible_payload_bytes: usize,
 }
 
+#[cfg(test)]
 fn physical_execution_stream_working_set_bytes(
     plan: &VulkanRuntimePhysicalExecutionResidencyPlan,
     logical_device_ids: &BTreeSet<String>,
@@ -26,6 +27,26 @@ fn physical_execution_stream_working_set_bytes(
                     "physical stream working-set accounting overflowed",
                 )
             })
+    })
+}
+
+fn physical_execution_store_pending_fixed_bytes(
+    physical_stream_requirement_bytes_by_physical_device: &BTreeMap<String, usize>,
+    physical_device_id: &str,
+    store_fixed_bytes: usize,
+) -> Result<usize, VulkanResidentTokenModelPackageError> {
+    let stream_bytes = physical_stream_requirement_bytes_by_physical_device
+        .get(physical_device_id)
+        .copied()
+        .ok_or_else(|| {
+            VulkanResidentTokenModelPackageError::new(format!(
+                "physical selected-resource store {physical_device_id:?} has no exact stream requirement",
+            ))
+        })?;
+    stream_bytes.checked_add(store_fixed_bytes).ok_or_else(|| {
+        VulkanResidentTokenModelPackageError::new(
+            "pending physical residency accounting overflowed",
+        )
     })
 }
 
@@ -495,6 +516,11 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 )),
             )
         })?;
+        let physical_stream_requirement_bytes_by_physical_device =
+            physical_execution_stream_device_requirement_bytes_by_physical_device(
+                &physical_execution_residency_plan,
+                &device_for,
+            )?;
 
         let input_device = device_for(&input_device_id)?;
         let output_device = device_for(&output_device_id)?;
@@ -675,14 +701,19 @@ impl VulkanResidentInProcessPlacedModelPackage {
                 ));
             }
             let allowed_selector_ids = selector_ownership.selector_ids();
-            let working_set_bytes = physical_execution_stream_working_set_bytes(
-                &physical_execution_residency_plan,
-                &logical_device_ids,
-            )
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
             let representative_device_id = logical_device_id_list[0].clone();
             let physical_device = device_for(&representative_device_id)?;
             let physical_device_id = physical_device.physical_device_id().to_string();
+            let working_set_bytes = physical_stream_requirement_bytes_by_physical_device
+                .get(&physical_device_id)
+                .copied()
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "physical selected-resource store {physical_device_id:?} has no exact stream requirement",
+                        )),
+                    )
+                })?;
             let upload_alignment =
                 compiled_resource_upload_alignment(&compiled_resource_contract, physical_device)
                     .map_err(|error| {
@@ -711,19 +742,16 @@ impl VulkanResidentInProcessPlacedModelPackage {
                     VulkanResidentTokenModelPackageError::new(error.to_string()),
                 )
             })?;
-            let pending_fixed_bytes = working_set_bytes
-                .checked_add(store_residency.fixed_device_bytes().map_err(|error| {
+            let pending_fixed_bytes = physical_execution_store_pending_fixed_bytes(
+                &physical_stream_requirement_bytes_by_physical_device,
+                &physical_device_id,
+                store_residency.fixed_device_bytes().map_err(|error| {
                     VulkanResidentInProcessPlacedRuntimeError::Package(
                         VulkanResidentTokenModelPackageError::new(error.to_string()),
                     )
-                })?)
-                .ok_or_else(|| {
-                    VulkanResidentInProcessPlacedRuntimeError::Package(
-                        VulkanResidentTokenModelPackageError::new(
-                            "pending physical residency accounting overflowed",
-                        ),
-                    )
-                })?;
+                })?,
+            )
+            .map_err(VulkanResidentInProcessPlacedRuntimeError::Package)?;
             let store_id =
                 format!("{package_id}:physical_store:{physical_device_id}:{execution_scope}");
             let logical_device_id_list = logical_device_ids.iter().cloned().collect::<Vec<_>>();
