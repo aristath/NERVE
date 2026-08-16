@@ -348,7 +348,7 @@ fn runtime_residency_accounts_selection_telemetry_as_a_physical_allocation() {
         VulkanPlacedStreamCircuitPlan::from_plans(&execution_plan, &resource_plan, resident)
             .unwrap();
 
-    let residency = plan_stream_circuit_residency(&placed, 16, true, 0).unwrap();
+    let residency = plan_stream_circuit_residency(&placed, 16, true, true, 0).unwrap();
     let telemetry = residency
         .allocations
         .iter()
@@ -363,6 +363,70 @@ fn runtime_residency_accounts_selection_telemetry_as_a_physical_allocation() {
     assert_eq!(telemetry.len(), 1);
     assert_eq!(residency.selection_telemetry_bytes, telemetry[0].byte_capacity);
     assert!(residency.selection_telemetry_bytes > 0);
+}
+
+#[test]
+fn ordinary_chat_reserves_two_static_transaction_checkpoints_without_speculation() {
+    let runtime_model = fixture_model_runtime_model();
+    let graph = runtime_model
+        .circuit_graph
+        .to_signal_processor_graph(tiny_model_dir())
+        .unwrap();
+    let tensor_index = TensorIndex::from_json_file(fixture_model_tensor_index_path()).unwrap();
+    let execution_plan =
+        StreamCircuitExecutionPlan::from_graph_with_tensor_index(&graph, &tensor_index).unwrap();
+    let resource_plan =
+        StreamCircuitResourcePlan::from_graph_and_plan(&graph, &execution_plan).unwrap();
+    let placement_plan = graph.placement_plan(&runtime_model.placement).unwrap();
+    let resident = VulkanPlacedStreamCircuitResidentPlan::from_resource_plan_for_device(
+        &resource_plan,
+        &placement_plan,
+        "gpu0",
+        Some(&tensor_index),
+        Some(2),
+    )
+    .unwrap();
+    let mut placed =
+        VulkanPlacedStreamCircuitPlan::from_plans(&execution_plan, &resource_plan, resident)
+            .unwrap();
+    placed
+        .placed_resident_plan
+        .resident_plan
+        .stream_state_buffers
+        .push(VulkanResidentStateBuffer {
+            component_id: "layer_00".to_string(),
+            state_id: "recurrent".to_string(),
+            state_type: "recurrent".to_string(),
+            dtype: Some("BF16".to_string()),
+            layout: Some("fixed".to_string()),
+            static_elements: Some(2_048),
+            elements_per_activation: None,
+            max_dynamic_activations: None,
+            static_bytes: Some(4_096),
+            bytes_per_activation: None,
+            clone_from: None,
+        });
+
+    let residency = plan_stream_circuit_residency(&placed, 16, true, false, 0).unwrap();
+    let checkpoints = residency
+        .allocations
+        .iter()
+        .filter(|allocation| {
+            matches!(
+                allocation.kind,
+                VulkanRuntimeResidentStreamAllocationKind::TransactionCheckpoint { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(residency.transaction_bytes, 0);
+    assert_eq!(residency.transaction_checkpoint_bytes, 8_192);
+    assert_eq!(checkpoints.len(), 2);
+    assert!(checkpoints.iter().all(|allocation| {
+        allocation.byte_capacity == 4_096
+            && resident_stream_allocation_class(allocation)
+                == VulkanMemoryAdmissionAllocationClass::TransactionCheckpoint
+    }));
 }
 
 #[test]

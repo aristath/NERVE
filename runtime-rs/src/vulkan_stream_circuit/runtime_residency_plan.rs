@@ -1,5 +1,5 @@
 pub const VULKAN_RUNTIME_RESIDENCY_PLAN_SCHEMA: &str =
-    "nerve.vulkan_runtime_residency_plan.v9";
+    "nerve.vulkan_runtime_residency_plan.v10";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeResidencyPlan {
@@ -17,6 +17,7 @@ pub struct VulkanRuntimeResidencyPlan {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct VulkanRuntimeDeviceResidencyBreakdown {
     pub stream_state_bytes: usize,
+    pub transaction_checkpoint_bytes: usize,
     pub state_transaction_bytes: usize,
     pub activation_slot_bytes: usize,
     pub selection_telemetry_bytes: usize,
@@ -83,6 +84,9 @@ pub enum VulkanRuntimeResidentStreamAllocationKind {
     StateTransaction {
         component_id: String,
         state_id: String,
+    },
+    TransactionCheckpoint {
+        slot: usize,
     },
     CausalVerificationSnapshot {
         component_id: String,
@@ -327,10 +331,12 @@ fn plan_vulkan_runtime_residency_from_planning_basis(
         let stream = plan_stream_circuit_residency(
             &placed_plan,
             context_capacity_activations,
+            true,
             mount_speculative_decoders,
             speculative_draft_tokens,
         )?;
         breakdown.stream_state_bytes = stream.state_bytes;
+        breakdown.transaction_checkpoint_bytes = stream.transaction_checkpoint_bytes;
         breakdown.state_transaction_bytes = stream.transaction_bytes;
         breakdown.activation_slot_bytes = stream.activation_bytes;
         breakdown.selection_telemetry_bytes = stream.selection_telemetry_bytes;
@@ -521,6 +527,7 @@ fn plan_vulkan_runtime_residency_from_planning_basis(
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct StreamCircuitResidencyBytes {
     state_bytes: usize,
+    transaction_checkpoint_bytes: usize,
     transaction_bytes: usize,
     activation_bytes: usize,
     selection_telemetry_bytes: usize,
@@ -533,6 +540,7 @@ struct StreamCircuitResidencyBytes {
 fn plan_stream_circuit_residency(
     placed_plan: &VulkanPlacedStreamCircuitPlan,
     context_capacity_activations: usize,
+    chat_checkpointing: bool,
     transactional: bool,
     speculative_draft_tokens: usize,
 ) -> Result<StreamCircuitResidencyBytes, VulkanRuntimeResidencyPlanError> {
@@ -540,6 +548,7 @@ fn plan_stream_circuit_residency(
         placed_plan,
         None,
         context_capacity_activations,
+        chat_checkpointing,
         transactional,
         speculative_draft_tokens,
     )
@@ -549,6 +558,7 @@ fn plan_component_stream_circuit_residency(
     placed_plan: &VulkanPlacedStreamCircuitPlan,
     component_id: &str,
     context_capacity_activations: usize,
+    chat_checkpointing: bool,
     transactional: bool,
     speculative_draft_tokens: usize,
 ) -> Result<StreamCircuitResidencyBytes, VulkanRuntimeResidencyPlanError> {
@@ -556,6 +566,7 @@ fn plan_component_stream_circuit_residency(
         placed_plan,
         Some(component_id),
         context_capacity_activations,
+        chat_checkpointing,
         transactional,
         speculative_draft_tokens,
     )
@@ -565,11 +576,13 @@ fn plan_stream_circuit_residency_for_component(
     placed_plan: &VulkanPlacedStreamCircuitPlan,
     component_id: Option<&str>,
     context_capacity_activations: usize,
+    chat_checkpointing: bool,
     transactional: bool,
     speculative_draft_tokens: usize,
 ) -> Result<StreamCircuitResidencyBytes, VulkanRuntimeResidencyPlanError> {
     let resident = &placed_plan.placed_resident_plan.resident_plan;
     let mut state_bytes = 0usize;
+    let mut transaction_checkpoint_bytes_per_slot = 0usize;
     let mut transaction_bytes = 0usize;
     let mut allocations = Vec::new();
     let verification_lane_capacity = if speculative_draft_tokens == 0 {
@@ -605,6 +618,11 @@ fn plan_stream_circuit_residency_for_component(
             },
             byte_capacity: layout.byte_capacity,
         });
+        transaction_checkpoint_bytes_per_slot = checked_residency_add(
+            transaction_checkpoint_bytes_per_slot,
+            layout.static_byte_capacity,
+            "transaction checkpoint bytes",
+        )?;
         if transactional && state.static_bytes.is_some() {
             // Speculative verification uses one transactional slot and one
             // baseline, exactly matching new_transactional(..., 1).
@@ -647,6 +665,21 @@ fn plan_stream_circuit_residency_for_component(
                     state_id: state.state_id.clone(),
                 },
                 byte_capacity,
+            });
+        }
+    }
+    let chat_transaction_checkpoint_slot_count = usize::from(chat_checkpointing) * 2;
+    let transaction_checkpoint_bytes = checked_residency_mul(
+        transaction_checkpoint_bytes_per_slot,
+        chat_transaction_checkpoint_slot_count,
+        "transaction checkpoint bytes",
+    )?;
+    for slot in 0..chat_transaction_checkpoint_slot_count {
+        if transaction_checkpoint_bytes_per_slot > 0 {
+            allocations.push(VulkanRuntimeResidentStreamAllocation {
+                scope: VulkanRuntimeResidentStreamAllocationScope::Target,
+                kind: VulkanRuntimeResidentStreamAllocationKind::TransactionCheckpoint { slot },
+                byte_capacity: transaction_checkpoint_bytes_per_slot,
             });
         }
     }
@@ -764,6 +797,7 @@ fn plan_stream_circuit_residency_for_component(
     allocations.extend(edge_allocations);
     Ok(StreamCircuitResidencyBytes {
         state_bytes,
+        transaction_checkpoint_bytes,
         transaction_bytes,
         activation_bytes,
         selection_telemetry_bytes,
@@ -927,8 +961,13 @@ fn plan_speculative_decoder_residency(
             "speculative decoder device {output_device_id:?} has no resident component slice"
         ))
     })?;
-    let stream =
-        plan_stream_circuit_residency(&placed_plan, context_capacity_activations, true, 0)?;
+    let stream = plan_stream_circuit_residency(
+        &placed_plan,
+        context_capacity_activations,
+        false,
+        true,
+        0,
+    )?;
     let decoder_scope = VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
         decoder_id: decoder.id.clone(),
     };
@@ -1378,6 +1417,7 @@ fn sum_transient_state_breakdown(
 ) -> Result<usize, VulkanRuntimeResidencyPlanError> {
     [
         breakdown.stream_state_bytes,
+        breakdown.transaction_checkpoint_bytes,
         breakdown.state_transaction_bytes,
         breakdown.stream_control_bytes,
         breakdown.speculative_decoder_state_bytes,

@@ -1109,7 +1109,12 @@ fn reusable_stream_memory_admission_isolates_every_lazy_runner_class() {
     let host = Arc::new(Mutex::new(VulkanHostMemoryBudgetTracker::default()));
     let device_key = Arc::as_ptr(&device) as usize;
     let host_key = Arc::as_ptr(&host) as usize;
-    let classes: [(VulkanMemoryAdmissionAllocationClass, usize, usize); 3] = [
+    let classes: [(VulkanMemoryAdmissionAllocationClass, usize, usize); 4] = [
+        (
+            VulkanMemoryAdmissionAllocationClass::TransactionCheckpoint,
+            5_000,
+            6_000,
+        ),
         (VulkanMemoryAdmissionAllocationClass::PromptRunner, 10_000, 11_000),
         (
             VulkanMemoryAdmissionAllocationClass::VerificationRunner,
@@ -1153,6 +1158,9 @@ fn reusable_stream_memory_admission_isolates_every_lazy_runner_class() {
     let mut allocations = Vec::new();
     for (allocation_class, device_bytes, host_bytes) in classes {
         let _scope = match allocation_class {
+            VulkanMemoryAdmissionAllocationClass::TransactionCheckpoint => {
+                admission.enter_transaction_checkpoint()
+            }
             VulkanMemoryAdmissionAllocationClass::PromptRunner => {
                 admission.enter_prompt_runner()
             }

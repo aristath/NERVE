@@ -305,14 +305,16 @@ struct VulkanMemoryAdmissionScopeEntry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum VulkanMemoryAdmissionAllocationClass {
     Permanent,
+    TransactionCheckpoint,
     PromptRunner,
     VerificationRunner,
     CatchUpRunner,
 }
 
 impl VulkanMemoryAdmissionAllocationClass {
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Permanent,
+        Self::TransactionCheckpoint,
         Self::PromptRunner,
         Self::VerificationRunner,
         Self::CatchUpRunner,
@@ -530,6 +532,13 @@ impl VulkanMemoryAdmission {
     /// and consume their credit once.
     pub(crate) fn enter_prompt_runner(&self) -> VulkanMemoryAdmissionScope {
         self.enter_class(VulkanMemoryAdmissionAllocationClass::PromptRunner, true)
+    }
+
+    pub(crate) fn enter_transaction_checkpoint(&self) -> VulkanMemoryAdmissionScope {
+        self.enter_class(
+            VulkanMemoryAdmissionAllocationClass::TransactionCheckpoint,
+            true,
+        )
     }
 
     pub(crate) fn enter_verification_runner(&self) -> VulkanMemoryAdmissionScope {

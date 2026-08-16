@@ -256,14 +256,17 @@ where
 fn resident_stream_allocation_class(
     allocation: &VulkanRuntimeResidentStreamAllocation,
 ) -> VulkanMemoryAdmissionAllocationClass {
-    if allocation.scope == VulkanRuntimeResidentStreamAllocationScope::Target
-        && matches!(
-            allocation.kind,
+    if allocation.scope == VulkanRuntimeResidentStreamAllocationScope::Target {
+        match allocation.kind {
+            VulkanRuntimeResidentStreamAllocationKind::TransactionCheckpoint { .. } => {
+                VulkanMemoryAdmissionAllocationClass::TransactionCheckpoint
+            }
             VulkanRuntimeResidentStreamAllocationKind::StateTransaction { .. }
-                | VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot { .. }
-        )
-    {
-        VulkanMemoryAdmissionAllocationClass::VerificationRunner
+            | VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot { .. } => {
+                VulkanMemoryAdmissionAllocationClass::VerificationRunner
+            }
+            _ => VulkanMemoryAdmissionAllocationClass::Permanent,
+        }
     } else {
         VulkanMemoryAdmissionAllocationClass::Permanent
     }

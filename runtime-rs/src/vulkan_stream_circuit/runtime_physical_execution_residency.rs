@@ -1856,6 +1856,7 @@ fn validate_resident_stream_allocation_ledger(
 ) -> Result<(), VulkanRuntimeResidencyPlanError> {
     let mut identities = BTreeSet::new();
     let mut state_bytes = 0usize;
+    let mut transaction_checkpoint_bytes = 0usize;
     let mut state_transaction_bytes = 0usize;
     let mut causal_verification_snapshot_bytes = 0usize;
     let mut selection_telemetry_bytes = 0usize;
@@ -1890,6 +1891,13 @@ fn validate_resident_stream_allocation_ledger(
             ) => {
                 (&mut state_transaction_bytes, "resident state transaction")
             }
+            (
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentStreamAllocationKind::TransactionCheckpoint { .. },
+            ) => (
+                &mut transaction_checkpoint_bytes,
+                "resident transaction checkpoint",
+            ),
             (
                 VulkanRuntimeResidentStreamAllocationScope::Target,
                 VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot { .. },
@@ -1950,6 +1958,7 @@ fn validate_resident_stream_allocation_ledger(
                 VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { .. },
                 VulkanRuntimeResidentStreamAllocationKind::State { .. }
                 | VulkanRuntimeResidentStreamAllocationKind::StateTransaction { .. }
+                | VulkanRuntimeResidentStreamAllocationKind::TransactionCheckpoint { .. }
                 | VulkanRuntimeResidentStreamAllocationKind::CausalVerificationSnapshot { .. },
             ) => (&mut speculative_decoder_state_bytes, "speculative decoder state"),
             (
@@ -1993,6 +2002,11 @@ fn validate_resident_stream_allocation_ledger(
     let declared = &device.breakdown;
     let actual = [
         ("stream state", state_bytes, declared.stream_state_bytes),
+        (
+            "transaction checkpoint",
+            transaction_checkpoint_bytes,
+            declared.transaction_checkpoint_bytes,
+        ),
         (
             "state transaction",
             state_transaction_bytes,

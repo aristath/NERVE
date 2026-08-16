@@ -483,12 +483,14 @@ fn exact_vulkan_runtime_hybrid_component_state_requirements(
         placed_plan,
         component_id,
         context_capacity_activations,
+        true,
         speculative_draft_tokens > 0,
         speculative_draft_tokens,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     let mut breakdown = VulkanRuntimeDeviceResidencyBreakdown {
         stream_state_bytes: stream.state_bytes,
+        transaction_checkpoint_bytes: stream.transaction_checkpoint_bytes,
         state_transaction_bytes: stream.transaction_bytes,
         activation_slot_bytes: stream.activation_bytes,
         causal_verification_snapshot_bytes: stream.causal_verification_snapshot_bytes,

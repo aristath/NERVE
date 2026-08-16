@@ -2039,9 +2039,9 @@ fn runtime_hybrid_exact_state_is_scoped_to_the_candidate_component() {
     )
     .unwrap();
     let component_id = "layer_00";
-    let full = plan_stream_circuit_residency(&placed_plan, 64, false, 0).unwrap();
+    let full = plan_stream_circuit_residency(&placed_plan, 64, true, false, 0).unwrap();
     let component =
-        plan_component_stream_circuit_residency(&placed_plan, component_id, 64, false, 0)
+        plan_component_stream_circuit_residency(&placed_plan, component_id, 64, true, false, 0)
             .unwrap();
     assert!(component.state_bytes < full.state_bytes);
     assert!(component.activation_bytes < full.activation_bytes);
@@ -2069,6 +2069,7 @@ fn runtime_hybrid_exact_state_is_scoped_to_the_candidate_component() {
     .unwrap();
     let expected = [
         component.state_bytes,
+        component.transaction_checkpoint_bytes,
         component.transaction_bytes,
         component.activation_bytes,
         component.boundary_bytes,

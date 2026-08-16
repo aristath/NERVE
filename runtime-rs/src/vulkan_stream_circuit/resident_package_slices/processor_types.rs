@@ -43,6 +43,10 @@ impl Drop for VulkanResidentInProcessPlacedStreamProcessor {
 }
 
 impl VulkanResidentInProcessPlacedStreamProcessor {
+    fn enter_transaction_checkpoint_memory(&self) -> VulkanMemoryAdmissionScope {
+        self.stream_memory_admission.enter_transaction_checkpoint()
+    }
+
     fn resident_state_snapshot_digest(
         &self,
         devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,

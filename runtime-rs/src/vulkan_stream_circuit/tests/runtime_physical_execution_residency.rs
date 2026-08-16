@@ -1161,6 +1161,10 @@ fn stream_memory_admission_classifies_each_remountable_runner_independently() {
         },
         ..target_transaction.clone()
     };
+    let target_checkpoint = VulkanRuntimeResidentStreamAllocation {
+        kind: VulkanRuntimeResidentStreamAllocationKind::TransactionCheckpoint { slot: 0 },
+        ..target_transaction.clone()
+    };
     let target_state = VulkanRuntimeResidentStreamAllocation {
         kind: VulkanRuntimeResidentStreamAllocationKind::State {
             component_id: "layer_00".to_string(),
@@ -1182,6 +1186,10 @@ fn stream_memory_admission_classifies_each_remountable_runner_independently() {
     assert_eq!(
         resident_stream_allocation_class(&target_snapshot),
         VulkanMemoryAdmissionAllocationClass::VerificationRunner,
+    );
+    assert_eq!(
+        resident_stream_allocation_class(&target_checkpoint),
+        VulkanMemoryAdmissionAllocationClass::TransactionCheckpoint,
     );
     assert_eq!(
         resident_stream_allocation_class(&target_state),

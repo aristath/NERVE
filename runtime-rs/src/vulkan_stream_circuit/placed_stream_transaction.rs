@@ -76,6 +76,9 @@ impl VulkanResidentInProcessPlacedPromptEngine {
         let resident_page_checkpoint = stream.transient_state_pages.clone();
         let page_cow = !history.committed_state_token_ids.is_empty()
             && stream.can_checkpoint_transaction_with_page_cow(&state)?;
+        let _checkpoint_memory_scope = stream
+            .processor
+            .enter_transaction_checkpoint_memory();
         let resident_state = if history.committed_state_token_ids.is_empty() {
             None
         } else {
