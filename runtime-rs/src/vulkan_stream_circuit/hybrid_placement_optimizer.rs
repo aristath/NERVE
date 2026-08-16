@@ -365,6 +365,41 @@ impl VulkanHybridRouteResourceState {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct VulkanHybridRoutePath {
+    tail: Option<Arc<VulkanHybridRoutePathNode>>,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct VulkanHybridRoutePathNode {
+    parent: Option<Arc<VulkanHybridRoutePathNode>>,
+    step: VulkanHybridScheduledStep,
+}
+
+impl VulkanHybridRoutePath {
+    fn pushed(&self, step: VulkanHybridScheduledStep) -> Self {
+        Self {
+            tail: Some(Arc::new(VulkanHybridRoutePathNode {
+                parent: self.tail.clone(),
+                step,
+            })),
+            len: self.len + 1,
+        }
+    }
+
+    fn materialize(self) -> Vec<VulkanHybridScheduledStep> {
+        let mut steps = Vec::with_capacity(self.len);
+        let mut cursor = self.tail;
+        while let Some(node) = cursor {
+            steps.push(node.step.clone());
+            cursor = node.parent.clone();
+        }
+        steps.reverse();
+        steps
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VulkanHybridPlacementState {
     cursor: usize,
@@ -374,11 +409,11 @@ struct VulkanHybridPlacementState {
     resource_reservations: VulkanHybridResourceReservations,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct VulkanHybridRouteSearchState {
     cursor: usize,
     output_physical_device_id: Option<String>,
-    steps: Vec<VulkanHybridScheduledStep>,
+    path: VulkanHybridRoutePath,
     predicted_duration_ns_per_activation: u128,
     calibration_resource_reservations: VulkanHybridRouteResourceState,
     authoritative_resource_reservations: VulkanHybridRouteResourceState,
@@ -656,7 +691,7 @@ where
         VulkanHybridRouteSearchState {
             cursor: 0,
             output_physical_device_id: None,
-            steps: Vec::new(),
+            path: VulkanHybridRoutePath::default(),
             predicted_duration_ns_per_activation: 0,
             calibration_resource_reservations: VulkanHybridRouteResourceState::new(
                 indexed_claims.claims_by_index.len(),
@@ -671,7 +706,7 @@ where
     while let Some((_, state)) = frontier.pop_first() {
         if state.cursor == component_count {
             let route = VulkanHybridPlacementRoute {
-                steps: state.steps,
+                steps: state.path.materialize(),
                 predicted_duration_ns_per_activation: state.predicted_duration_ns_per_activation,
                 calibration_resource_reservations: state
                     .calibration_resource_reservations
@@ -748,10 +783,10 @@ where
                                 "hybrid boundary predicted duration overflowed".to_string(),
                             )
                         })?;
-                    next.steps.push(VulkanHybridScheduledStep::Boundary {
-                        boundary_index: boundary.request.boundary_index,
-                        execution_case: boundary.observation.execution_case.clone(),
-                    });
+                    next.path = next.path.pushed(VulkanHybridScheduledStep::Boundary {
+                            boundary_index: boundary.request.boundary_index,
+                            execution_case: boundary.observation.execution_case.clone(),
+                        });
                 }
                 let Some(authoritative_resource_reservations) = next
                     .authoritative_resource_reservations
@@ -797,12 +832,12 @@ where
                         .output_physical_device_id
                         .clone(),
                 );
-                next.steps.push(VulkanHybridScheduledStep::Region {
-                    candidate_id: candidate.request.candidate_id.clone(),
-                    component_start: candidate.request.component_start,
-                    component_end: candidate.request.component_end,
-                    execution_case: candidate.observation.execution_case.clone(),
-                });
+                next.path = next.path.pushed(VulkanHybridScheduledStep::Region {
+                        candidate_id: candidate.request.candidate_id.clone(),
+                        component_start: candidate.request.component_start,
+                        component_end: candidate.request.component_end,
+                        execution_case: candidate.observation.execution_case.clone(),
+                    });
                 let Some(suffix) = minimum_suffix_duration[next.cursor] else {
                     continue;
                 };
