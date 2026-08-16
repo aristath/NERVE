@@ -4409,6 +4409,50 @@ mod tests {
     }
 
     #[test]
+    fn distributed_contract_selection_ignores_unsharded_scalar_cases() {
+        let pools = component_device_pools("layer_00", &["owner", "helper"]);
+        let measured = BTreeMap::from([
+            (
+                "layer_00".to_string(),
+                BTreeSet::from(["measured-tp".to_string()]),
+            ),
+            (
+                "layer_01".to_string(),
+                BTreeSet::from(["measured-local".to_string()]),
+            ),
+        ]);
+        let selected = merge_distributed_contract_selection_for_pools(
+            &pools,
+            measured,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected,
+            BTreeMap::from([(
+                "layer_00".to_string(),
+                BTreeSet::from(["measured-tp".to_string()]),
+            )]),
+        );
+
+        let explicit = BTreeMap::from([(
+            "layer_00".to_string(),
+            BTreeSet::from(["explicit-tp".to_string()]),
+        )]);
+        let selected = merge_distributed_contract_selection_for_pools(
+            &pools,
+            BTreeMap::from([(
+                "layer_01".to_string(),
+                BTreeSet::from(["measured-local".to_string()]),
+            )]),
+            &explicit,
+        )
+        .unwrap();
+        assert_eq!(selected, explicit);
+    }
+
+    #[test]
     fn an_unseen_operation_family_uses_its_compiled_contract_without_runtime_changes() {
         let mut prepared_plan = fixture_prepared_plan();
         prepared_plan.dispatches[0].op = "future_fused_projection".to_string();

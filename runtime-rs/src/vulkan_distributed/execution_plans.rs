@@ -659,10 +659,12 @@ impl VulkanDistributedExecutionPlanSet {
             |cases: &BTreeMap<
                 String,
                 crate::vulkan_stream_circuit::VulkanPlacementExecutionCaseIdentity,
-            >,
+             >,
+             pools: &BTreeMap<String, Vec<String>>,
              explicit: &BTreeMap<String, BTreeSet<String>>| {
-                let mut selected = cases
+                let measured = cases
                     .iter()
+                    .filter(|(component_id, _)| pools.contains_key(*component_id))
                     .map(|(component_id, case)| {
                         (
                             component_id.clone(),
@@ -670,22 +672,23 @@ impl VulkanDistributedExecutionPlanSet {
                         )
                     })
                     .collect::<BTreeMap<_, _>>();
-                for (component_id, contract_ids) in explicit {
-                    if selected
-                        .insert(component_id.clone(), contract_ids.clone())
-                        .is_some()
-                    {
-                        return Err(VulkanDistributedPlanError(format!(
-                            "component {component_id:?} has both measured and explicit distributed contracts",
-                        )));
-                    }
-                }
-                Ok(selected)
+                merge_distributed_contract_selection_for_pools(pools, measured, explicit)
             };
-        let decode_contracts = selected_contracts(decode_cases, decode_explicit_contracts)?;
-        let decode_batch_contracts =
-            selected_contracts(decode_batch_cases, decode_batch_explicit_contracts)?;
-        let prefill_contracts = selected_contracts(prefill_cases, prefill_explicit_contracts)?;
+        let decode_contracts = selected_contracts(
+            decode_cases,
+            &component_device_pools.decode,
+            decode_explicit_contracts,
+        )?;
+        let decode_batch_contracts = selected_contracts(
+            decode_batch_cases,
+            &component_device_pools.decode_batch,
+            decode_batch_explicit_contracts,
+        )?;
+        let prefill_contracts = selected_contracts(
+            prefill_cases,
+            &component_device_pools.prefill,
+            prefill_explicit_contracts,
+        )?;
         let resource_context = Some((execution_scope, resource_contract));
         let build = |pools: &BTreeMap<String, Vec<String>>,
                      phase,
@@ -730,6 +733,28 @@ impl VulkanDistributedExecutionPlanSet {
     pub fn all(&self) -> [&VulkanDistributedExecutionPlan; 3] {
         [&self.decode, &self.decode_batch, &self.prefill]
     }
+}
+
+fn merge_distributed_contract_selection_for_pools(
+    component_device_pools: &BTreeMap<String, Vec<String>>,
+    measured_contracts: BTreeMap<String, BTreeSet<String>>,
+    explicit_contracts: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<BTreeMap<String, BTreeSet<String>>, VulkanDistributedPlanError> {
+    let mut selected = measured_contracts
+        .into_iter()
+        .filter(|(component_id, _)| component_device_pools.contains_key(component_id))
+        .collect::<BTreeMap<_, _>>();
+    for (component_id, contract_ids) in explicit_contracts {
+        if selected
+            .insert(component_id.clone(), contract_ids.clone())
+            .is_some()
+        {
+            return Err(VulkanDistributedPlanError(format!(
+                "component {component_id:?} has both measured and explicit distributed contracts",
+            )));
+        }
+    }
+    Ok(selected)
 }
 
 fn sampled_distributed_execution_plan(
