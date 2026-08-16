@@ -284,83 +284,23 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
 
     fn temporal_block_lane_capacity(
         &self,
-        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
-        const MINIMUM_DEVICE_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
-        const RECORDED_DISPATCH_BUDGET_PER_SUBMISSION: usize = 65_536;
-
-        let mut width = self.model.normal_prefill_lane_capacity;
-        for slice in &self.device_slices {
-            let device = devices.get(&slice.device_id).ok_or_else(|| {
-                VulkanResidentInProcessPlacedRuntimeError::MissingBoundDevice {
-                    device_id: slice.device_id.clone(),
-                }
-            })?;
-            let (_, signal_buffer_plan) =
-                component_batch_signal_buffer_plan(&slice.mounted, &slice.mounted_bound.dispatches)?;
-            let signal_bytes_per_lane =
-                signal_buffer_plan
-                    .iter()
-                    .try_fold(0usize, |total, allocation| {
-                        total
-                            .checked_add(allocation.frame_byte_capacity)
-                            .ok_or_else(|| {
-                                VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                                    "temporal signal byte count overflowed".to_string(),
-                                ))
-                            })
-                    })?;
-            if signal_bytes_per_lane > 0 {
-                let available = device.remaining_reservable_device_local_memory_bytes();
-                let headroom = (device.device_local_memory_bytes() / 32)
-                    .max(MINIMUM_DEVICE_HEADROOM_BYTES)
-                    .min(available / 2);
-                let usable = available.saturating_sub(headroom);
-                let memory_width = usize::try_from(usable)
-                    .unwrap_or(usize::MAX)
-                    .checked_div(signal_bytes_per_lane)
-                    .unwrap_or_default();
-                width = width.min(memory_width.max(1));
-            }
-
-            for artifact in slice.package_slice.batch_kernels.iter().filter(|artifact| {
-                artifact.batch_mode == VulkanResidentComponentKernelBatchMode::CausalScan
-            }) {
-                width = width.min(artifact.lane_tile_width);
-                for stage in &artifact.stages {
-                    let dispatch_width = u64::from(device.max_compute_work_group_count_x())
-                        .saturating_mul(
-                            u64::try_from(artifact.lane_tile_width).unwrap_or(u64::MAX),
-                        )
-                        .checked_div(u64::from(stage.workgroup_count_x.max(1)))
-                        .and_then(|value| usize::try_from(value).ok())
-                        .unwrap_or(usize::MAX);
-                    width = width.min(dispatch_width.max(1));
-                }
-            }
-
-            let mut scalar_dispatches_per_lane_by_component = BTreeMap::<&str, usize>::new();
-            for dispatch in &slice.mounted_bound.dispatches {
-                if !slice.package_slice.batch_kernels.iter().any(|artifact| {
-                    artifact.component_id == dispatch.component_id && artifact.node_id == dispatch.node_id
-                }) {
-                    *scalar_dispatches_per_lane_by_component
-                        .entry(&dispatch.component_id)
-                        .or_default() += 1;
-                }
-            }
-            let scalar_dispatches_per_lane = scalar_dispatches_per_lane_by_component
-                .values()
-                .copied()
-                .max()
-                .unwrap_or_default();
-            if let Some(dispatch_width) =
-                RECORDED_DISPATCH_BUDGET_PER_SUBMISSION.checked_div(scalar_dispatches_per_lane)
-            {
-                width = width.min(dispatch_width.max(1));
-            }
+        // The physical mount planner selected this exact geometry after
+        // accounting for its complete device-local and host-visible memory
+        // footprint, and stream admission reserved that footprint atomically.
+        // Recomputing the width from post-reservation "remaining" memory
+        // counts the reservation twice and silently constructs a runner that
+        // cannot consume its typed allocation ledger.
+        let lane_capacity = self.model.normal_prefill_lane_capacity;
+        if lane_capacity == 0 || !lane_capacity.is_power_of_two() {
+            return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                VulkanError(format!(
+                    "physical prompt-runner lane capacity {lane_capacity} is not a positive power of two",
+                )),
+            ));
         }
-        Ok(width.max(1))
+        self.causal_block_lane_capacity(lane_capacity)?;
+        Ok(lane_capacity)
     }
 
     fn supports_contiguous_device_batch_pipeline(&self) -> bool {
@@ -369,7 +309,6 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
 
     fn temporal_block_width(
         &self,
-        devices: &BTreeMap<String, Rc<VulkanComputeDevice>>,
         available_token_count: usize,
     ) -> Result<usize, VulkanResidentInProcessPlacedRuntimeError> {
         if available_token_count == 0 {
@@ -383,7 +322,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         if !self.supports_contiguous_device_batch_pipeline() {
             return Ok(1);
         }
-        Ok(available_token_count.min(self.temporal_block_lane_capacity(devices)?))
+        Ok(available_token_count.min(self.temporal_block_lane_capacity()?))
     }
 
     fn causal_block_lane_capacity(
@@ -428,7 +367,7 @@ impl VulkanResidentInProcessPlacedStreamProcessor {
         let block_width = if capture_causal_state_snapshots {
             requested_width
         } else {
-            self.causal_block_lane_capacity(self.temporal_block_lane_capacity(devices)?)?
+            self.temporal_block_lane_capacity()?
         };
         if requested_width > block_width {
             return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(

@@ -560,7 +560,7 @@ impl VulkanResidentInProcessPlacedPromptStream {
         }
         let block_width = self
             .processor
-            .temporal_block_width(&self.devices, external_input_count)?;
+            .temporal_block_width(external_input_count)?;
         if block_width < 2 {
             return Ok((0, None));
         }
