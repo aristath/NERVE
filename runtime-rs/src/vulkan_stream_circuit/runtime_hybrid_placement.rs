@@ -1198,6 +1198,15 @@ fn runtime_hybrid_candidate_graph(
         let tensor_index = runtime_model
             .load_runtime_tensor_index(planner.package_root)
             .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let planning_graph = runtime_model
+            .executable_circuit_graph()
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let planning_basis = prepare_resident_package_planning_basis(
+            &planning_graph,
+            planner.package_root,
+            &tensor_index,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         let resource_contract = instantiate_runtime_resource_contract(runtime_model)
             .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         let resource_layout = VulkanCompiledResourceAddressLayout::from_contract(
@@ -1215,6 +1224,8 @@ fn runtime_hybrid_candidate_graph(
                 })?;
             let requirements = planner.resource_requirements(
                 runtime_model,
+                &planning_graph,
+                &planning_basis,
                 phase,
                 components,
                 &candidate.execution_case,

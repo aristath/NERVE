@@ -46,6 +46,30 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_for_physical_planning_from_basis(
+        manifest_dir: &Path,
+        runtime_model: &VulkanResidentRuntimeModel,
+        resource_contract: &CompiledResourceResidencyContract,
+        tensor_index: &TensorIndex,
+        device_id: &str,
+        capacity: usize,
+        executable_circuit_graph: &VulkanResidentPackageCircuitGraph,
+        planning_basis: &VulkanResidentPackagePlanningBasis,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        Self::prepare_internal_from_planning_basis(
+            None,
+            manifest_dir,
+            runtime_model,
+            resource_contract,
+            tensor_index,
+            device_id,
+            capacity,
+            executable_circuit_graph,
+            planning_basis,
+        )
+    }
+
     fn prepare(
         device: &VulkanComputeDevice,
         manifest_dir: &Path,
@@ -76,6 +100,37 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
         device_id: &str,
         capacity: usize,
     ) -> Result<Self, VulkanResidentTokenModelPackageError> {
+        let executable_circuit_graph = runtime_model.executable_circuit_graph()?;
+        let planning_basis = prepare_resident_package_planning_basis(
+            &executable_circuit_graph,
+            manifest_dir,
+            tensor_index,
+        )?;
+        Self::prepare_internal_from_planning_basis(
+            device,
+            manifest_dir,
+            runtime_model,
+            resource_contract,
+            tensor_index,
+            device_id,
+            capacity,
+            &executable_circuit_graph,
+            &planning_basis,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_internal_from_planning_basis(
+        device: Option<&VulkanComputeDevice>,
+        manifest_dir: &Path,
+        runtime_model: &VulkanResidentRuntimeModel,
+        resource_contract: &CompiledResourceResidencyContract,
+        tensor_index: &TensorIndex,
+        device_id: &str,
+        capacity: usize,
+        executable_circuit_graph: &VulkanResidentPackageCircuitGraph,
+        planning_basis: &VulkanResidentPackagePlanningBasis,
+    ) -> Result<Self, VulkanResidentTokenModelPackageError> {
         if capacity == 0 {
             return Err(VulkanResidentTokenModelPackageError::new(
                 "resident dynamic state capacity must be at least 1 activation",
@@ -94,17 +149,15 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
             &runtime_model.package.package_id,
             &runtime_model.component_executions,
         )?;
-        let executable_circuit_graph = runtime_model.executable_circuit_graph()?;
-
-        let (resource_plan, _placement_plan, placed_plan) =
-            plan_resident_package_placed_stream_circuit_with_tensor_index(
+        let (_placement_plan, placed_plan) = plan_resident_package_from_planning_basis(
                 device_id,
                 &runtime_model.placement,
-                &executable_circuit_graph,
-                manifest_dir,
+                executable_circuit_graph,
                 tensor_index,
                 runtime_model.package.activation_element_bytes,
+                planning_basis,
             )?;
+        let resource_plan = &planning_basis.resource_plan;
         let hosted_component_count = placed_plan.binding_plan.circuits.len();
         let output_component_id = runtime_model
             .package
@@ -178,7 +231,7 @@ impl VulkanResidentModelPackageDeviceSlicePlan {
                     parameter_plan:
                         VulkanPermanentParameterBufferPlan::from_transducer_parameters_for(
                             device_id,
-                            &resource_plan,
+                            resource_plan,
                             Some(tensor_index),
                             output_component_id,
                         )

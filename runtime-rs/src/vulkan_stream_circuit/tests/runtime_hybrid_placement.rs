@@ -1696,6 +1696,7 @@ fn explicit_tp_overlay_retains_exact_routes_for_serialized_outer_boundaries() {
 
 #[test]
 fn runtime_hybrid_exact_candidate_resources_prune_before_terminal_mount() {
+    reset_resident_package_planning_basis_preparation_count();
     let model = fixture_model_runtime_model();
     let catalog = hybrid_test_catalog(&model);
     let package_root = tiny_model_dir();
@@ -1734,6 +1735,11 @@ fn runtime_hybrid_exact_candidate_resources_prune_before_terminal_mount() {
         Some(&planner),
     )
     .unwrap();
+    assert_eq!(
+        resident_package_planning_basis_preparation_count(),
+        1,
+        "candidate discovery must resolve the placement-invariant model plan once",
+    );
     assert_eq!(
         candidates.authoritative_resource_classes,
         BTreeSet::from([

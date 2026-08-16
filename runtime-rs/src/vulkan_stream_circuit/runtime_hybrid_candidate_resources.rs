@@ -56,6 +56,8 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
     fn resource_requirements(
         &self,
         runtime_model: &VulkanResidentRuntimeModel,
+        planning_graph: &VulkanResidentPackageCircuitGraph,
+        planning_basis: &VulkanResidentPackagePlanningBasis,
         phase: VulkanTargetedComponentExecutionPhase,
         component_ids: &[String],
         execution_case: &VulkanPlacementExecutionCaseIdentity,
@@ -122,6 +124,8 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
             requirements.extend(exact_vulkan_runtime_hybrid_component_resource_requirements(
                 self.package_root,
                 runtime_model,
+                planning_graph,
+                planning_basis,
                 component_id,
                 component_case,
                 phase,
@@ -152,6 +156,8 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
         {
             let transient = self.prefill_transient_plan(
                 runtime_model,
+                planning_graph,
+                planning_basis,
                 component_ids,
                 component_cases,
                 activation_batch_width,
@@ -263,6 +269,15 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
             &resource_contract,
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let planning_graph = runtime_model
+            .executable_circuit_graph()
+            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        let planning_basis = prepare_resident_package_planning_basis(
+            &planning_graph,
+            self.package_root,
+            &tensor_index,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         let identity_by_logical_device = self
             .planning_devices
             .iter()
@@ -270,6 +285,8 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
             .collect::<BTreeMap<_, _>>();
         let transient = self.prefill_transient_plan(
             runtime_model,
+            &planning_graph,
+            &planning_basis,
             &placement.component_ids,
             &component_cases,
             activation_batch_width,
@@ -323,6 +340,8 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
     fn prefill_transient_plan(
         &self,
         runtime_model: &VulkanResidentRuntimeModel,
+        planning_graph: &VulkanResidentPackageCircuitGraph,
+        planning_basis: &VulkanResidentPackagePlanningBasis,
         component_ids: &[String],
         component_cases: &[VulkanPlacementExecutionCaseIdentity],
         activation_batch_width: usize,
@@ -375,13 +394,15 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
         let mut slice_plans = Vec::new();
         for logical_device_id in &owner_logical_device_ids {
             slice_plans.push(
-                VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning(
+                VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning_from_basis(
                     self.package_root,
                     &placed_model,
                     resource_contract,
                     tensor_index,
                     logical_device_id,
                     self.context_capacity_activations,
+                    planning_graph,
+                    planning_basis,
                 )
                 .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?,
             );
@@ -395,16 +416,13 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
                 .map(|artifact| artifact.artifact.clone())
                 .collect(),
         );
-        let graph = placed_model
-            .executable_circuit_graph()
-            .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-        let (_, placement_plan, _) = plan_resident_package_placed_stream_circuit_with_tensor_index(
+        let (placement_plan, _) = plan_resident_package_from_planning_basis(
             "hybrid:unmounted",
             &placed_model.placement,
-            &graph,
-            self.package_root,
+            planning_graph,
             tensor_index,
             placed_model.package.activation_element_bytes,
+            planning_basis,
         )
         .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
         let prepared_plans = slice_plans
@@ -906,6 +924,8 @@ fn exact_vulkan_runtime_hybrid_boundary_requirement(
 fn exact_vulkan_runtime_hybrid_component_resource_requirements(
     package_root: &Path,
     runtime_model: &VulkanResidentRuntimeModel,
+    planning_graph: &VulkanResidentPackageCircuitGraph,
+    planning_basis: &VulkanResidentPackagePlanningBasis,
     component_id: &str,
     execution_case: &VulkanPlacementExecutionCaseIdentity,
     phase: VulkanTargetedComponentExecutionPhase,
@@ -946,13 +966,15 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
             .with_component_shard_devices(component_id, participant_logical_device_ids.clone())
             .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     }
-    let slice_plan = VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning(
+    let slice_plan = VulkanResidentModelPackageDeviceSlicePlan::prepare_for_physical_planning_from_basis(
         package_root,
         &placed_model,
         resource_contract,
         tensor_index,
         owner_logical_device_id,
         context_capacity_activations,
+        planning_graph,
+        planning_basis,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     let loaded_manifest =
@@ -965,17 +987,13 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
             .map(|artifact| artifact.artifact.clone())
             .collect(),
     );
-    let graph = placed_model
-        .executable_circuit_graph()
-        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
-    let (_, placement_plan, placed_plan) =
-        plan_resident_package_placed_stream_circuit_with_tensor_index(
+    let (placement_plan, placed_plan) = plan_resident_package_from_planning_basis(
         owner_logical_device_id,
         &placed_model.placement,
-        &graph,
-        package_root,
+        planning_graph,
         tensor_index,
         placed_model.package.activation_element_bytes,
+        planning_basis,
     )
     .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
     let (execution_phase, execution_shape) = distributed_contract_phase_and_shape(phase);

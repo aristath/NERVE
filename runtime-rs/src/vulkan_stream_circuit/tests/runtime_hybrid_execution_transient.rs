@@ -1627,11 +1627,17 @@ fn runtime_hybrid_exact_prefill_candidate_replaces_sampled_transient_geometry() 
         residency_policy: ResourceResidencyPolicy::Eager,
     };
     let tensor_index = model.load_runtime_tensor_index(&package_root).unwrap();
+    let planning_graph = model.executable_circuit_graph().unwrap();
+    let planning_basis =
+        prepare_resident_package_planning_basis(&planning_graph, &package_root, &tensor_index)
+            .unwrap();
     let contract = instantiate_runtime_resource_contract(&model).unwrap();
     let layout = VulkanCompiledResourceAddressLayout::from_contract(&contract).unwrap();
     let requirements = planner
         .resource_requirements(
             &model,
+            &planning_graph,
+            &planning_basis,
             phase,
             &["layer_00".to_string()],
             &execution_case,
