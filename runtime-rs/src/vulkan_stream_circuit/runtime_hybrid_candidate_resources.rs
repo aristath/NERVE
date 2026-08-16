@@ -446,6 +446,7 @@ impl VulkanRuntimeHybridExactCandidateResourcePlanner<'_> {
         replay_exact_execution_cases_to_phase(
             &mut execution_plan,
             &exact_cases,
+            BTreeSet::new(),
             nerve_execution_contracts::ExecutionPhase::Prefill,
             identity_by_logical_device,
             &loaded_manifest,
@@ -1025,6 +1026,7 @@ fn exact_vulkan_runtime_hybrid_component_resource_requirements(
     replay_exact_execution_cases_to_phase(
         &mut execution_plan,
         &BTreeMap::from([(component_id.to_string(), execution_case.clone())]),
+        BTreeSet::new(),
         execution_phase,
         identity_by_logical_device,
         &loaded_manifest,
