@@ -56,6 +56,7 @@ use nerve_runtime::{
     execute_vulkan_resident_chat_transaction, load_vulkan_package_placement_calibration_catalog,
     plan_vulkan_runtime_physical_mount,
     rebalance_demand_paged_vulkan_runtime_model_from_working_set,
+    record_vulkan_runtime_canonical_placement_calibration,
     record_vulkan_runtime_transfer_calibration_report, reset_runtime_critical_path_counters,
     resolve_vulkan_runtime_hybrid_physical_execution_with_representations,
     reset_vulkan_resident_execution_counters, runtime_critical_path_report,

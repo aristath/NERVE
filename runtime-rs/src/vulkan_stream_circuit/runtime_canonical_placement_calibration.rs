@@ -51,6 +51,70 @@ pub fn calibrate_vulkan_runtime_canonical_placement_candidate_with_policy(
     )
 }
 
+impl VulkanRuntimePlacementCalibrationSuite {
+    /// Converts a scalar calibration report already measured by this suite
+    /// into the exact canonical evidence consumed by hybrid placement. This
+    /// reuses the mounted executable plan and measured output instead of
+    /// repeating the same GPU work in a second calibration pass.
+    pub fn canonical_calibration_from_report(
+        &mut self,
+        device: &VulkanComputeDevice,
+        capability_class: &str,
+        manifest_dir: &Path,
+        runtime_model: &VulkanResidentRuntimeModel,
+        report: &VulkanRuntimePlacementCalibrationReport,
+        phase: VulkanTargetedComponentExecutionPhase,
+        warmup_call_count: usize,
+        measured_call_count: usize,
+    ) -> Result<VulkanRuntimeCanonicalPlacementCalibration, VulkanResidentTokenModelPackageError>
+    {
+        let target_index = self
+            .targets()
+            .iter()
+            .position(|target| {
+                target.signature_id == report.target.signature_id
+                    && target.component_id == report.target.component_id
+            })
+            .ok_or_else(|| {
+                canonical_calibration_error_value(
+                    "scalar calibration report does not belong to its calibration suite",
+                )
+            })?;
+        if report.physical_device_id != device.physical_device_id()
+            || report.activation_batch_width != phase.activation_batch_width()
+        {
+            return canonical_calibration_error(
+                "scalar calibration report changed its physical device or phase identity",
+            );
+        }
+        let target = self.targets()[target_index].clone();
+        let plans = self
+            .plans_for_device(
+                device,
+                capability_class,
+                manifest_dir,
+                &[target_index],
+            )?
+            .0;
+        let [cached_plan] = plans.as_slice() else {
+            return canonical_calibration_error(
+                "scalar calibration suite did not retain exactly one executable plan",
+            );
+        };
+        let behavior = canonical_component_boundary_behavior(runtime_model, &target, phase)?;
+        canonical_calibration_from_report_and_plan(
+            device,
+            &target,
+            phase,
+            &behavior,
+            report,
+            cached_plan,
+            warmup_call_count,
+            measured_call_count,
+        )
+    }
+}
+
 fn canonical_component_boundary_behavior(
     runtime_model: &VulkanResidentRuntimeModel,
     target: &VulkanRuntimePlacementCalibrationTarget,
@@ -218,15 +282,39 @@ fn calibrate_vulkan_runtime_canonical_component(
             "canonical component calibration did not retain exactly one executable plan",
         );
     };
+    canonical_calibration_from_report_and_plan(
+        &device,
+        target,
+        phase,
+        behavior,
+        report,
+        cached_plan,
+        warmup_call_count,
+        measured_call_count,
+    )
+    .map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn canonical_calibration_from_report_and_plan(
+    device: &VulkanComputeDevice,
+    target: &VulkanRuntimePlacementCalibrationTarget,
+    phase: VulkanTargetedComponentExecutionPhase,
+    behavior: &VulkanPlacementBehaviorIdentity,
+    report: &VulkanRuntimePlacementCalibrationReport,
+    cached_plan: &VulkanRuntimePlacementCalibrationCachedPlan,
+    warmup_call_count: usize,
+    measured_call_count: usize,
+) -> Result<VulkanRuntimeCanonicalPlacementCalibration, VulkanResidentTokenModelPackageError> {
     let contracts = canonical_component_execution_contracts(cached_plan, target, phase)?;
     let output_artifact = canonical_calibration_output_artifact(report)?;
-    let device_identity = VulkanPlacementDeviceExecutionIdentity {
-        physical_device_id: device.physical_device_id().to_string(),
-        api_version: device.api_version(),
-        driver_version: device.driver_version(),
-    };
+    let physical_device_id = device.physical_device_id();
     let execution_case = canonical_component_execution_case(
-        device_identity,
+        VulkanPlacementDeviceExecutionIdentity {
+            physical_device_id: physical_device_id.to_string(),
+            api_version: device.api_version(),
+            driver_version: device.driver_version(),
+        },
         target,
         behavior,
         &contracts,
@@ -265,10 +353,10 @@ fn calibrate_vulkan_runtime_canonical_component(
         host_resident_bytes: 0,
         host_transient_peak_bytes: 0,
     };
-    Ok(Some(VulkanRuntimeCanonicalPlacementCalibration {
+    Ok(VulkanRuntimeCanonicalPlacementCalibration {
         reference,
         observation,
-    }))
+    })
 }
 
 fn canonical_loaded_reusable_artifact_path<'a>(

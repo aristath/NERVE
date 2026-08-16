@@ -377,6 +377,21 @@ fn runtime_capacity_packed_model(
             calibration_evidence
                 .entry(calibration.target.signature_id.clone())
                 .or_insert(evidence);
+            let scalar_policy = VulkanRuntimePlacementCalibrationPolicy::default();
+            let canonical = calibration_suite.canonical_calibration_from_report(
+                &device,
+                &profile.capability_class,
+                manifest_dir,
+                &runtime_model,
+                &calibration,
+                VulkanTargetedComponentExecutionPhase::Decode,
+                scalar_policy.warmup_units,
+                scalar_policy.measured_units,
+            )?;
+            record_vulkan_runtime_canonical_placement_calibration(
+                &mut exact_calibration_catalog,
+                canonical,
+            )?;
             placement_costs.record_calibration(
                 &calibration.physical_device_id,
                 &calibration.target,
