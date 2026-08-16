@@ -23,6 +23,23 @@ fn speculative_catch_up_rejects_zero_width_and_byte_overflow() {
 }
 
 #[test]
+fn speculative_catch_up_source_binding_is_bounded_by_its_physical_frames() {
+    assert_eq!(
+        speculative_catch_up_source_lane_capacity(4 * 10_240, 10_240, 128).unwrap(),
+        4,
+        "a reusable prompt-width graph must not address beyond a smaller verification source",
+    );
+    assert_eq!(
+        speculative_catch_up_source_lane_capacity(256 * 10_240, 10_240, 128).unwrap(),
+        128,
+        "the execution graph remains the upper bound when the source is wider",
+    );
+    assert!(speculative_catch_up_source_lane_capacity(40_961, 10_240, 128).is_err());
+    assert!(speculative_catch_up_source_lane_capacity(40_960, 0, 128).is_err());
+    assert!(speculative_catch_up_source_lane_capacity(40_960, 10_240, 0).is_err());
+}
+
+#[test]
 fn speculative_catch_up_uses_one_canonical_target_window_capacity() {
     assert_eq!(speculative_catch_up_lane_capacity(1).unwrap(), 2);
     assert_eq!(speculative_catch_up_lane_capacity(2).unwrap(), 4);
