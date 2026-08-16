@@ -1679,6 +1679,31 @@ mod tests {
         )
         .unwrap();
 
+        let mut undersized_output = prepared.clone();
+        let VulkanDescriptorResourceAddress::ActivationSlot {
+            byte_capacity,
+            signal_byte_capacity,
+            ..
+        } = &mut undersized_output.dispatches[0].descriptors[1].resource
+        else {
+            panic!("fixture output is an activation slot");
+        };
+        *byte_capacity = 12;
+        *signal_byte_capacity = 12;
+        assert!(
+            VulkanDistributedExecutionPlan::from_prepared_plans(
+                &[("owner", &undersized_output)],
+                &tensor_index,
+                &artifacts,
+                &component_device_pools("component", &["owner", "helper-a", "helper-b"]),
+                &[],
+                4,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("contract output signal has 12 bytes but requires 16")
+        );
+
         assert_eq!(plan.distributed_parameter_byte_count, 96);
         let planned = &plan.dispatches[0];
         assert_eq!(
@@ -2050,7 +2075,11 @@ mod tests {
             4,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("produces 16 bytes"));
+        assert!(
+            error
+                .to_string()
+                .contains("contract output signal has 8 bytes but requires 16")
+        );
 
         let mut wrong_abi = artifacts.clone();
         wrong_abi.artifacts[0].push_constants.pop();

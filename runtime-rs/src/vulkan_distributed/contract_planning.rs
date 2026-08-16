@@ -1,7 +1,7 @@
 use nerve_execution_contracts::{
     ArtifactRole, ExecutionForm, ExecutionPhase, ExecutionShape, InputDistribution,
-    OutputCollection, ParameterPartitionKind, PartitionOrigin, PhysicalExecutionContract,
-    ReductionFinalization, ReductionOperation, WorkgroupXMapping,
+    OutputCollection, OutputContract, ParameterPartitionKind, PartitionOrigin,
+    PhysicalExecutionContract, ReductionFinalization, ReductionOperation, WorkgroupXMapping,
 };
 
 struct ContractParameterSlice<'a> {
@@ -413,14 +413,13 @@ fn plan_contract_dispatch(
     }
     let output_binding = usize::try_from(output_contract.binding)
         .map_err(|_| dispatch_error(dispatch, "output binding exceeds usize".to_string()))?;
-    let output_required_byte_capacity = logical_extent
-        .checked_mul(activation_element_bytes)
-        .ok_or_else(|| {
-            dispatch_error(
-                dispatch,
-                "partitioned output activation byte capacity overflowed".to_string(),
-            )
-        })?;
+    let output_required_byte_capacity = contract_output_signal_byte_capacity(
+        dispatch,
+        contract,
+        output_contract,
+        logical_extent,
+        activation_element_bytes,
+    )?;
     let output_activation = distributed_activation(
         dispatch,
         output_binding,
@@ -1839,6 +1838,58 @@ fn contract_activation_byte_capacity(
             ),
         )),
     }
+}
+
+fn contract_output_signal_byte_capacity(
+    dispatch: &VulkanPreparedDispatch,
+    contract: &PhysicalExecutionContract,
+    output: &OutputContract,
+    logical_extent: usize,
+    activation_element_bytes: usize,
+) -> Result<usize, VulkanDistributedPlanError> {
+    let Some(reduction) = &output.reduction else {
+        return logical_extent
+            .checked_mul(activation_element_bytes)
+            .ok_or_else(|| {
+                dispatch_error(
+                    dispatch,
+                    "partitioned output activation byte capacity overflowed".to_string(),
+                )
+            });
+    };
+    let element_count = contract
+        .geometry
+        .dimensions
+        .get(&reduction.dimension_name)
+        .copied()
+        .ok_or_else(|| {
+            dispatch_error(
+                dispatch,
+                format!(
+                    "reduction dimension {:?} is not declared",
+                    reduction.dimension_name
+                ),
+            )
+        })
+        .and_then(|elements| {
+            usize::try_from(elements).map_err(|_| {
+                dispatch_error(dispatch, "reduction element count exceeds usize".to_string())
+            })
+        })?;
+    let finalized_element_bytes = match reduction.finalization {
+        ReductionFinalization::StoreF32 => size_of::<f32>(),
+        ReductionFinalization::StoreF32ToBf16
+        | ReductionFinalization::AddBf16ResidualToBf16 { .. }
+        | ReductionFinalization::ScaleByPackedBf16InputToBf16 { .. } => size_of::<u16>(),
+    };
+    element_count
+        .checked_mul(finalized_element_bytes)
+        .ok_or_else(|| {
+            dispatch_error(
+                dispatch,
+                "reduction output activation byte capacity overflowed".to_string(),
+            )
+        })
 }
 
 fn aligned_activation_partition(
