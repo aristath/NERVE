@@ -923,6 +923,47 @@ class VulkanCircuitOptimizerTest(unittest.TestCase):
         )
         self.assertEqual([2], projection["attrs"]["output_element_bytes"])
 
+    def test_keeps_a_selected_local_shard_intermediate_unmaterialized(self) -> None:
+        circuit = {
+            "nodes": [
+                {
+                    "id": "gate_up",
+                    "op": "parallel_linear_silu_multiply",
+                    "inputs": ["normalized"],
+                    "outputs": ["activated"],
+                    "params": ["gate", "up"],
+                },
+                {
+                    "id": "down",
+                    "op": "linear_residual",
+                    "inputs": ["activated", "residual"],
+                    "outputs": ["hidden"],
+                    "params": ["down", "down_scale"],
+                },
+            ]
+        }
+
+        optimized = optimize_circuit_for_vulkan(
+            circuit,
+            prequantization_spec=lambda node: (
+                {
+                    "contract": "bf16_blockwise_fp8_e4m3_f32_scale.v1",
+                    "input_size": 256,
+                    "block_rows": 2,
+                    "block_columns": 128,
+                }
+                if node["id"] == "down"
+                else None
+            ),
+            can_keep_local_shard_intermediate=lambda producer, consumer: (
+                producer["id"] == "gate_up" and consumer["id"] == "down"
+            ),
+        )
+
+        self.assertEqual(["gate_up", "down"], [node["id"] for node in optimized["nodes"]])
+        self.assertEqual(["activated", "residual"], optimized["nodes"][1]["inputs"])
+        self.assertNotIn("physical_input_contract", optimized["nodes"][1]["attrs"])
+
     def test_sparse_gate_up_emits_down_representation_without_helper_dispatch(
         self,
     ) -> None:

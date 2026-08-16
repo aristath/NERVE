@@ -110,6 +110,38 @@ def can_emit_physical_representation_from_producer(
     )
 
 
+def can_keep_tensor_parallel_local_shard_intermediate(
+    circuit: Json,
+    producer: Json,
+    consumer: Json,
+    tensor_index: Json,
+) -> bool:
+    """Keep a legal output-row to input-column edge device-local."""
+
+    producer_outputs = producer.get("outputs", [])
+    consumer_inputs = consumer.get("inputs", [])
+    if (
+        producer.get("op") != "parallel_linear_silu_multiply"
+        or consumer.get("op") != "linear_residual"
+        or len(producer_outputs) != 1
+        or len(consumer_inputs) != 2
+        or consumer_inputs[0] != producer_outputs[0]
+    ):
+        return False
+    physical_circuit = {**circuit, "nodes": [producer, consumer]}
+    return any(
+        implementation.get("execution_form")
+        == "partitioned_input_partial_output"
+        and implementation.get("inputs", [{}])[0].get("distribution")
+        == "sharded"
+        for implementation in physical_kernel_implementations_for_node(
+            physical_circuit,
+            consumer,
+            tensor_index,
+        )
+    )
+
+
 def can_fuse_hyper_connection_rms_norm(
     circuit: Json,
     hyper: Json,
@@ -648,6 +680,14 @@ def build_vulkan_resident_package_manifest(
                     scope,
                     hidden_size=hidden_size,
                     compiler_target=compiler_target,
+                )
+            ),
+            can_keep_local_shard_intermediate=lambda producer, consumer, circuit=circuit: (
+                can_keep_tensor_parallel_local_shard_intermediate(
+                    circuit,
+                    producer,
+                    consumer,
+                    tensor_index,
                 )
             ),
             attention_partition_count=8,

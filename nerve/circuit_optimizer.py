@@ -48,6 +48,9 @@ def optimize_circuit_for_vulkan(
     ) = None,
     prequantization_spec: Callable[[Json], Json | None] | None = None,
     can_emit_representation: Callable[[Json, Json], bool] | None = None,
+    can_keep_local_shard_intermediate: (
+        Callable[[Json, Json], bool] | None
+    ) = None,
     attention_partition_count: int | None = None,
 ) -> Json:
     """Compile discoverable node regions without changing the component boundary."""
@@ -158,6 +161,7 @@ def optimize_circuit_for_vulkan(
         compiled_nodes,
         prequantization_spec,
         can_emit_representation,
+        can_keep_local_shard_intermediate,
     )
     transaction_nodes = _fuse_hyper_connection_rms_norm_regions(
         lowered_nodes,
@@ -741,6 +745,9 @@ def _lower_prequantized_inputs(
     nodes: list[Json],
     describe: Callable[[Json], Json | None] | None,
     can_emit: Callable[[Json, Json], bool] | None,
+    can_keep_local_shard_intermediate: (
+        Callable[[Json, Json], bool] | None
+    ),
 ) -> list[Json]:
     if describe is None:
         return nodes
@@ -755,6 +762,22 @@ def _lower_prequantized_inputs(
         )
         spec = describe(node)
         prepared.append((node, spec))
+
+    if can_keep_local_shard_intermediate is not None:
+        for index in range(1, len(prepared)):
+            producer = prepared[index - 1][0]
+            consumer, consumer_spec = prepared[index]
+            if consumer_spec is not None and can_keep_local_shard_intermediate(
+                producer, consumer
+            ):
+                # Keep the logical BF16 edge intact. The selected physical
+                # implementation consumes each producer shard directly and
+                # quantizes it inside the input-column kernel, so materializing
+                # a whole-frame representation here would introduce an
+                # unnecessary distributed synchronization boundary.
+                prepared[index] = (consumer, None)
+
+    for node, spec in prepared:
         if spec is None:
             continue
 

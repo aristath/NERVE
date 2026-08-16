@@ -29,6 +29,9 @@ from nerve.model_package_physical_kernels import (
 from nerve.model_package_independent_experts import (
     independent_sparse_moe_shader_file,
 )
+from nerve.model_package_manifest import (
+    can_keep_tensor_parallel_local_shard_intermediate,
+)
 from nerve.model_package_shader_compiler import compile_shader_artifacts
 from nerve.model_package_shader_templates import copy_shader_templates
 from nerve.model_package_spirv_requirements import required_shader_files
@@ -391,6 +394,52 @@ def test_compiler_declares_only_an_executable_local_shard_handoff(
 
     down["inputs"][0] = "another-signal"
     assert local_shard_intermediates_for_node(circuit, gate_up, tensor_index) == []
+
+
+def test_compiler_keeps_fp8_dense_ffn_handoff_only_with_executable_input_columns(
+    tmp_path: Path,
+) -> None:
+    down, circuit, tensor_index, _ = fp8_down_fixture(tmp_path)
+    gate_up = {
+        "id": "gate_up",
+        "op": "parallel_linear_silu_multiply",
+        "inputs": ["normalized"],
+        "outputs": ["activated"],
+        "params": ["gate", "up"],
+    }
+    circuit["nodes"] = [gate_up, down]
+
+    assert not can_keep_tensor_parallel_local_shard_intermediate(
+        circuit,
+        gate_up,
+        down,
+        tensor_index,
+    )
+
+    lowered_dir = tmp_path / "lowered"
+    lowered_dir.mkdir()
+    (lowered_dir / "circuit.json").write_text(json.dumps(circuit))
+    derive_tensor_parallel_linear_tensors(
+        {"graph": {"circuits": [{"circuit": "circuit.json"}]}},
+        lowered_dir,
+        tensor_index,
+        target=NativeTarget(),  # type: ignore[arg-type]
+    )
+
+    assert can_keep_tensor_parallel_local_shard_intermediate(
+        circuit,
+        gate_up,
+        down,
+        tensor_index,
+    )
+
+    unrelated = {**gate_up, "outputs": ["another_signal"]}
+    assert not can_keep_tensor_parallel_local_shard_intermediate(
+        circuit,
+        unrelated,
+        down,
+        tensor_index,
+    )
 
 
 def test_dense_ffn_pair_emits_one_compatible_local_tensor_parallel_island(
