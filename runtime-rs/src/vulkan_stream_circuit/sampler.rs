@@ -270,9 +270,14 @@ fn validate_sampler_host_visible_allocations(
     spec: &VulkanResidentSamplerSpec,
     history_byte_capacity: usize,
     token_state_is_active: bool,
-    planned: Option<(&str, &[&VulkanRuntimeSharedHostResidentAllocation])>,
+    planned: Option<(
+        &str,
+        &[&VulkanRuntimeSharedHostResidentAllocation],
+        &VulkanRuntimeResidentStreamAllocationScope,
+        &VulkanRuntimeResidentBufferClass,
+    )>,
 ) -> Result<(), VulkanResidentSamplerRunnerError> {
-    let Some((logical_device_id, allocations)) = planned else {
+    let Some((logical_device_id, allocations, expected_scope, expected_class)) = planned else {
         return Ok(());
     };
     let mut expected = BTreeMap::from([("history_and_output", history_byte_capacity)]);
@@ -310,8 +315,8 @@ fn validate_sampler_host_visible_allocations(
             .into());
         };
         let expected_capacity = expected.get(buffer_id.as_str()).copied();
-        if scope != &VulkanRuntimeResidentStreamAllocationScope::Target
-            || class != &VulkanRuntimeResidentBufferClass::SamplerWorkspace
+        if scope != expected_scope
+            || class != expected_class
             || scope_id != &spec.sampler_id
             || allocation.owner_device_id != logical_device_id
             || allocation.participant_device_ids != [logical_device_id.to_string()]
@@ -333,9 +338,14 @@ fn create_sampler_host_visible_buffer(
     spec: &VulkanResidentSamplerSpec,
     buffer_id: &str,
     byte_capacity: usize,
-    planned: Option<(&str, &[&VulkanRuntimeSharedHostResidentAllocation])>,
+    planned: Option<(
+        &str,
+        &[&VulkanRuntimeSharedHostResidentAllocation],
+        &VulkanRuntimeResidentStreamAllocationScope,
+        &VulkanRuntimeResidentBufferClass,
+    )>,
 ) -> Result<VulkanResidentBuffer, VulkanResidentSamplerRunnerError> {
-    let Some((_, allocations)) = planned else {
+    let Some((_, allocations, _, _)) = planned else {
         return device
             .create_host_visible_resident_buffer(byte_capacity)
             .map_err(Into::into);
@@ -407,7 +417,46 @@ impl VulkanResidentSamplerRunner {
                 random_seed,
             },
             Some(feedback_control),
-            Some((logical_device_id, planned_host_allocations)),
+            Some((
+                logical_device_id,
+                planned_host_allocations,
+                VulkanRuntimeResidentStreamAllocationScope::Target,
+                VulkanRuntimeResidentBufferClass::SamplerWorkspace,
+            )),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_output_transducer_with_spec_and_planned_host_allocations(
+        device: &VulkanComputeDevice,
+        logical_device_id: &str,
+        mounted: &VulkanMountedPlacedStreamCircuit,
+        output_transducer: &VulkanResidentOutputTransducerRunner,
+        kernels: &[VulkanResidentSamplerKernelArtifact],
+        spec: &VulkanResidentSamplerSpec,
+        random_seed: u32,
+        planned_host_allocations: &[&VulkanRuntimeSharedHostResidentAllocation],
+        scope: VulkanRuntimeResidentStreamAllocationScope,
+        class: VulkanRuntimeResidentBufferClass,
+    ) -> Result<Self, VulkanResidentSamplerRunnerError> {
+        Self::from_logits_buffer_with_feedback_control(
+            device,
+            mounted.stream_control_buffer.clone(),
+            output_transducer.logits_buffer(),
+            output_transducer.logits_byte_capacity,
+            kernels,
+            spec,
+            VulkanResidentSamplerStreamConfig {
+                history_capacity_activations: mounted.buffers.dynamic_state_capacity_activations,
+                random_seed,
+            },
+            None,
+            Some((
+                logical_device_id,
+                planned_host_allocations,
+                scope,
+                class,
+            )),
         )
     }
 
@@ -446,6 +495,8 @@ impl VulkanResidentSamplerRunner {
         planned_host_allocations: Option<(
             &str,
             &[&VulkanRuntimeSharedHostResidentAllocation],
+            VulkanRuntimeResidentStreamAllocationScope,
+            VulkanRuntimeResidentBufferClass,
         )>,
     ) -> Result<Self, VulkanResidentSamplerRunnerError> {
         let VulkanResidentSamplerStreamConfig {
@@ -611,6 +662,11 @@ impl VulkanResidentSamplerRunner {
             .checked_mul(VULKAN_SAMPLER_HISTORY_RECORD_BYTE_CAPACITY)
             .and_then(|bytes| bytes.checked_add(spec.output_byte_capacity))
             .ok_or(VulkanResidentSamplerRunnerError::HistoryCapacityOverflow)?;
+        let planned_host_allocations = planned_host_allocations.as_ref().map(
+            |(logical_device_id, allocations, scope, class)| {
+                (*logical_device_id, *allocations, scope, class)
+            },
+        );
         validate_sampler_host_visible_allocations(
             spec,
             history_byte_capacity,

@@ -2441,7 +2441,7 @@ fn host_visible_sampler_buffers_move_to_typed_host_allocations() {
 }
 
 #[test]
-fn speculative_decoder_stream_control_moves_to_typed_host_allocation() {
+fn speculative_decoder_host_visible_state_and_sampler_buffers_move_to_typed_host_allocations() {
     let mut base = physical_execution_residency_base_plan(1_000, 100);
     let owner = &mut base.device_plans[0];
     owner
@@ -2476,6 +2476,30 @@ fn speculative_decoder_stream_control_moves_to_typed_host_allocation() {
     owner.working_set.activation_headroom_bytes += VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
     owner.initial_device_resident_bytes += VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
     base.total_initial_device_resident_bytes += VULKAN_STREAM_CONTROL_BYTE_CAPACITY;
+    for (buffer_id, byte_capacity) in [
+        ("history_and_output", 288),
+        ("scratch", 2_048),
+        ("random_seed", 4),
+        ("seen_token_batch", 512),
+    ] {
+        owner
+            .resident_stream_device_allocations
+            .push(VulkanRuntimeResidentStreamAllocation {
+                scope: VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
+                    decoder_id: "draft".to_string(),
+                },
+                kind: VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                    class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    scope_id: "draft-sampler".to_string(),
+                    buffer_id: buffer_id.to_string(),
+                },
+                byte_capacity,
+            });
+        owner.breakdown.speculative_decoder_workspace_bytes += byte_capacity;
+        owner.working_set.activation_headroom_bytes += byte_capacity;
+        owner.initial_device_resident_bytes += byte_capacity;
+        base.total_initial_device_resident_bytes += byte_capacity;
+    }
     let mut plan = VulkanRuntimePhysicalExecutionResidencyPlan::plan(
         &base,
         &["owner".to_string()],
@@ -2491,7 +2515,7 @@ fn speculative_decoder_stream_control_moves_to_typed_host_allocation() {
 
     assert_eq!(
         plan.total_stream_device_local_bytes,
-        original_device_bytes - 144 - VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+        original_device_bytes - 144 - VULKAN_STREAM_CONTROL_BYTE_CAPACITY - 288 - 4 - 512
     );
     assert!(plan.resident_shared_host_allocations.iter().any(|allocation| {
         matches!(
@@ -2519,6 +2543,44 @@ fn speculative_decoder_stream_control_moves_to_typed_host_allocation() {
                 ..
             } if buffer_id == "stream_control"
         )));
+    for (buffer_id, byte_capacity) in [
+        ("history_and_output", 288),
+        ("random_seed", 4),
+        ("seen_token_batch", 512),
+    ] {
+        assert!(plan.resident_shared_host_allocations.iter().any(|allocation| {
+            matches!(
+                &allocation.kind,
+                VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+                    scope: VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
+                        decoder_id
+                    },
+                    class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    scope_id,
+                    buffer_id: planned_buffer_id,
+                } if decoder_id == "draft"
+                    && scope_id == "draft-sampler"
+                    && planned_buffer_id == buffer_id
+            ) && allocation.owner_device_id == "owner"
+                && allocation.participant_device_ids == ["owner".to_string()]
+                && allocation.byte_capacity == byte_capacity
+        }));
+    }
+    assert_eq!(
+        plan.device_plans[0]
+            .resident_stream_device_allocations
+            .iter()
+            .filter_map(|allocation| match &allocation.kind {
+                VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                    class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    buffer_id,
+                    ..
+                } => Some((buffer_id.as_str(), allocation.byte_capacity)),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![("scratch", 2_048)]
+    );
 }
 
 #[test]

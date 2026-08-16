@@ -1,11 +1,34 @@
 fn mount_speculative_decoder_device_slice(
     device: &VulkanComputeDevice,
     model: &VulkanResidentSpeculativeDecoderModelPackage,
-    planned_stream_control: &VulkanRuntimeSharedHostResidentAllocation,
+    planned_host_allocations: &[&VulkanRuntimeSharedHostResidentAllocation],
 ) -> Result<
     VulkanResidentInProcessPlacedStreamProcessorDevice,
     VulkanResidentInProcessPlacedRuntimeError,
 > {
+    let planned_stream_controls = planned_host_allocations
+        .iter()
+        .copied()
+        .filter(|allocation| {
+            matches!(
+                &allocation.kind,
+                VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+                    class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
+                    buffer_id,
+                    ..
+                } if buffer_id == "stream_control"
+            )
+        })
+        .collect::<Vec<_>>();
+    let [planned_stream_control] = planned_stream_controls.as_slice() else {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} resolves {} host-visible stream-control ledgers, expected one",
+                model.id,
+                planned_stream_controls.len(),
+            )),
+        ));
+    };
     let VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
         scope:
             VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { decoder_id },
@@ -169,7 +192,7 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
     fn from_model(
         device: &VulkanComputeDevice,
         model: &VulkanResidentSpeculativeDecoderModelPackage,
-        planned_stream_control: &VulkanRuntimeSharedHostResidentAllocation,
+        planned_host_allocations: &[&VulkanRuntimeSharedHostResidentAllocation],
         normal_prefill_lane_capacity: usize,
         speculative_draft_tokens: usize,
         target_hidden: &VulkanResidentBuffer,
@@ -195,8 +218,11 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
                 )),
             ));
         };
-        let device_slice =
-            mount_speculative_decoder_device_slice(device, model, planned_stream_control)?;
+        let device_slice = mount_speculative_decoder_device_slice(
+            device,
+            model,
+            planned_host_allocations,
+        )?;
         let mounted = &device_slice.mounted;
 
         let adapter = model.package.dedicated_input_adapter().ok_or_else(|| {
@@ -300,13 +326,32 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
                 &output_spec,
             )
             .map_err(VulkanResidentInProcessPlacedRuntimeError::OutputTransducer)?;
-        let sampler = VulkanResidentSamplerRunner::from_output_transducer_with_spec(
+        let sampler_host_allocations = planned_host_allocations
+            .iter()
+            .copied()
+            .filter(|allocation| {
+                matches!(
+                    &allocation.kind,
+                    VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+                        class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        let sampler = VulkanResidentSamplerRunner::from_output_transducer_with_spec_and_planned_host_allocations(
             device,
+            &model.device_id,
             &mounted,
             &output_transducer,
             sampler_kernels,
             sampler_spec,
             random_seed,
+            &sampler_host_allocations,
+            VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
+                decoder_id: model.id.clone(),
+            },
+            VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
         )
         .map_err(VulkanResidentInProcessPlacedRuntimeError::Sampler)?;
         let pending_target_hiddens = [

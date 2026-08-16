@@ -1847,6 +1847,17 @@ fn runtime_buffer_is_host_visible(
                 buffer_id,
             },
         ) => scope_id == decoder_id && buffer_id == "stream_control",
+        (
+            VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder { .. },
+            VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
+                class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                buffer_id,
+                ..
+            },
+        ) => matches!(
+            buffer_id.as_str(),
+            "history_and_output" | "random_seed" | "seen_token_batch"
+        ),
         _ => false,
     }
 }

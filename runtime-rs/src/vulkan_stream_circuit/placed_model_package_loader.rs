@@ -2041,7 +2041,7 @@ impl VulkanResidentInProcessPlacedModelPackage {
         let mut speculative_decoders = Vec::with_capacity(self.speculative_decoders.len());
         for decoder in &self.speculative_decoders {
             let draft_device = device_for(&decoder.device_id)?;
-            let planned_stream_controls = self
+            let planned_host_allocations = self
                 .physical_execution_residency_plan
                 .resident_shared_host_allocations
                 .iter()
@@ -2052,26 +2052,23 @@ impl VulkanResidentInProcessPlacedModelPackage {
                             scope: VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
                                 decoder_id,
                             },
-                            class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderState,
-                            buffer_id,
                             ..
-                        } if decoder_id == &decoder.id && buffer_id == "stream_control"
+                        } if decoder_id == &decoder.id
                     )
                 })
                 .collect::<Vec<_>>();
-            let [planned_stream_control] = planned_stream_controls.as_slice() else {
+            if planned_host_allocations.is_empty() {
                 return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
                     VulkanResidentTokenModelPackageError::new(format!(
-                        "speculative decoder {:?} resolves {} host-visible stream-control ledgers, expected one",
+                        "speculative decoder {:?} resolves no host-visible allocation ledgers",
                         decoder.id,
-                        planned_stream_controls.len(),
                     )),
                 ));
-            };
+            }
             speculative_decoders.push(VulkanResidentSpeculativeDecoderProcessor::from_model(
                 draft_device,
                 decoder,
-                planned_stream_control,
+                &planned_host_allocations,
                 self,
                 &devices,
                 output_transducer.normalized_frame_buffer(),
