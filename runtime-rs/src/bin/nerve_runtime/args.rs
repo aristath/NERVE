@@ -43,7 +43,8 @@ use nerve_runtime::{
     VulkanResidentRuntimeModel, VulkanResidentSamplerRuntimeConfig, VulkanResidentTokenInputEvent,
     VulkanResidentTokenTextCodec, VulkanRetainedCompiledResourceStores,
     VulkanReusableKernelArtifactManifest, VulkanRuntimePhysicalExecutionPlan,
-    VulkanRuntimePhysicalMountPlan, VulkanRuntimePhysicalPlanningDevice,
+    VulkanRuntimePhysicalExecutionResidencyPlan, VulkanRuntimePhysicalMountPlan,
+    VulkanRuntimePhysicalPlanningDevice, VulkanRuntimeHybridPlacementError,
     VulkanRuntimePlacementCalibrationSuite, VulkanRuntimePlacementCandidate,
     VulkanRuntimePlacementCalibrationPolicy, VulkanRuntimePlacementCostModel,
     VulkanSpeculativeCycleTrace, VulkanSpeculativeWindowStats,
@@ -58,7 +59,7 @@ use nerve_runtime::{
     rebalance_demand_paged_vulkan_runtime_model_from_working_set,
     record_vulkan_runtime_canonical_placement_calibration,
     record_vulkan_runtime_transfer_calibration_report, reset_runtime_critical_path_counters,
-    resolve_vulkan_runtime_hybrid_physical_execution_with_representations,
+    resolve_vulkan_runtime_hybrid_physical_execution_with_representations_and_physical_stream_requirements,
     reset_vulkan_resident_execution_counters, runtime_critical_path_report,
     runtime_critical_path_span, runtime_devices_from_compute_devices,
     validate_vulkan_package_source_component_hardware_compatibility,
@@ -68,6 +69,7 @@ use nerve_runtime::{
     vulkan_runtime_device_capacity_admission_bytes,
     vulkan_runtime_distributed_contract_candidates,
     vulkan_runtime_model_with_component_placement_owned,
+    vulkan_runtime_physical_stream_requirement_bytes_by_physical_device,
     vulkan_runtime_placement_transfer_byte_counts, vulkan_safe_host_available_bytes,
 };
 

@@ -1490,6 +1490,73 @@ fn runtime_hybrid_physical_resolution_carries_measured_tp_into_normal_execution(
 }
 
 #[test]
+fn terminal_hybrid_mount_reserves_exact_physical_stream_overhead() {
+    let model = fixture_model_runtime_model();
+    let physical = VulkanRuntimePhysicalExecutionPlan::uniform(&model);
+    let [logical_device_id] = physical.device_ids(&model).try_into().unwrap();
+    let package_root = tiny_model_dir();
+    let catalog = VulkanPlacementCalibrationCatalog::default();
+    let mut device = physical_mount_test_device(&logical_device_id);
+    device.safe_capacity_bytes = 1usize << 40;
+    let baseline = plan_vulkan_runtime_physical_mount(
+        &package_root,
+        &model,
+        &physical,
+        Some(&catalog),
+        64,
+        0,
+        ResourceResidencyPolicy::DemandPaged,
+        std::slice::from_ref(&device),
+        usize::MAX,
+    )
+    .unwrap()
+    .unwrap();
+    let cache_quota = baseline
+        .selected_resource_cache_quota_bytes_by_logical_device
+        .values()
+        .copied()
+        .sum::<usize>();
+    let physical_device_id = device.identity.physical_device_id.clone();
+    let overhead = 4096usize;
+    let resolver = |plan: &VulkanRuntimePhysicalExecutionResidencyPlan| {
+        let logical_stream_bytes = plan
+            .device_plans
+            .iter()
+            .map(|device| device.stream_device_local_bytes)
+            .sum::<usize>();
+        Ok(BTreeMap::from([(
+            physical_device_id.clone(),
+            logical_stream_bytes + overhead,
+        )]))
+    };
+    let planning = VulkanRuntimeHybridMountPlanningContext {
+        devices: std::slice::from_ref(&device),
+        physical_stream_requirement_resolver: Some(&resolver),
+        speculative_draft_tokens: 0,
+        residency_policy: ResourceResidencyPolicy::DemandPaged,
+        host_safe_capacity_bytes: usize::MAX,
+    };
+
+    let corrected = plan_vulkan_runtime_physical_mount_with_exact_stream_requirements(
+        &package_root,
+        &model,
+        &physical,
+        &catalog,
+        64,
+        &planning,
+        std::slice::from_ref(&device),
+    )
+    .unwrap()
+    .unwrap();
+    let corrected_cache_quota = corrected
+        .selected_resource_cache_quota_bytes_by_logical_device
+        .values()
+        .copied()
+        .sum::<usize>();
+    assert_eq!(corrected_cache_quota + overhead, cache_quota);
+}
+
+#[test]
 fn runtime_hybrid_representation_routes_honor_stable_owner_constraints() {
     let model = fixture_model_runtime_model_with_three_layer_series("gpu0");
     let catalog = hybrid_test_distributed_catalog(&model);
@@ -2704,6 +2771,7 @@ fn runtime_hybrid_mounts_the_jointly_selected_representation_and_physical_plan_o
         &BTreeMap::from([("gpu0".to_string(), "gpu0".to_string())]),
         Some(VulkanRuntimeHybridMountPlanningContext {
             devices: &physical_mount_devices,
+            physical_stream_requirement_resolver: None,
             speculative_draft_tokens: 0,
             residency_policy: ResourceResidencyPolicy::Eager,
             host_safe_capacity_bytes: usize::MAX,

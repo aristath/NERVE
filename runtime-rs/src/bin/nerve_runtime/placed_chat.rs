@@ -402,7 +402,14 @@ fn resolve_runtime_hybrid_physical_execution(
             storage_buffer_offset_alignment: device.min_storage_buffer_offset_alignment(),
         })
         .collect::<Vec<_>>();
-    let Some(resolution) = resolve_vulkan_runtime_hybrid_physical_execution_with_representations(
+    let physical_stream_requirement_resolver = |plan: &VulkanRuntimePhysicalExecutionResidencyPlan| {
+        vulkan_runtime_physical_stream_requirement_bytes_by_physical_device(
+            plan,
+            &bound_devices.devices,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))
+    };
+    let Some(resolution) = resolve_vulkan_runtime_hybrid_physical_execution_with_representations_and_physical_stream_requirements(
         manifest_dir,
         &auto_placement.exact_runtime_model,
         &bound_devices.hardware_profiles,
@@ -415,6 +422,7 @@ fn resolve_runtime_hybrid_physical_execution(
         speculative_draft_tokens,
         residency_policy,
         capacity.host_available_bytes,
+        Some(&physical_stream_requirement_resolver),
         required_owner_by_component,
     )?
     else {

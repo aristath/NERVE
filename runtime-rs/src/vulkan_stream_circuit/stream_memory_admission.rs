@@ -726,6 +726,30 @@ where
     Ok(requirements)
 }
 
+pub fn vulkan_runtime_physical_stream_requirement_bytes_by_physical_device<D>(
+    plan: &VulkanRuntimePhysicalExecutionResidencyPlan,
+    devices: &BTreeMap<String, D>,
+) -> Result<BTreeMap<String, usize>, VulkanResidentInProcessPlacedRuntimeError>
+where
+    D: AsRef<VulkanComputeDevice>,
+{
+    physical_execution_stream_device_requirement_bytes_by_physical_device(
+        plan,
+        &|logical_device_id| {
+            devices
+                .get(logical_device_id)
+                .map(AsRef::as_ref)
+                .ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::Package(
+                        VulkanResidentTokenModelPackageError::new(format!(
+                            "physical stream requirement has no mounted logical device {logical_device_id:?}",
+                        )),
+                    )
+                })
+        },
+    )
+}
+
 fn reserve_vulkan_runtime_physical_execution_stream_memory<'a, F>(
     package: &VulkanResidentInProcessPlacedModelPackage,
     device_for: &F,

@@ -64,10 +64,17 @@ struct VulkanRuntimeHybridCandidateGraph {
 
 struct VulkanRuntimeHybridMountPlanningContext<'a> {
     devices: &'a [VulkanRuntimePhysicalPlanningDevice],
+    physical_stream_requirement_resolver:
+        Option<&'a VulkanRuntimePhysicalStreamRequirementResolver<'a>>,
     speculative_draft_tokens: usize,
     residency_policy: ResourceResidencyPolicy,
     host_safe_capacity_bytes: usize,
 }
+
+pub type VulkanRuntimePhysicalStreamRequirementResolver<'a> = dyn Fn(
+        &VulkanRuntimePhysicalExecutionResidencyPlan,
+    ) -> Result<BTreeMap<String, usize>, VulkanRuntimeHybridPlacementError>
+    + 'a;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VulkanRuntimeHybridComponentStrategyFilter {
@@ -460,6 +467,44 @@ pub fn resolve_vulkan_runtime_hybrid_physical_execution_with_representations(
     required_owner_by_component: Option<&BTreeMap<String, String>>,
 ) -> Result<Option<VulkanRuntimeHybridPhysicalExecutionResolution>, VulkanRuntimeHybridPlacementError>
 {
+    resolve_vulkan_runtime_hybrid_physical_execution_with_representations_and_physical_stream_requirements(
+        package_root,
+        runtime_model,
+        profiles_by_logical_device,
+        execution,
+        catalog,
+        capacity,
+        context_capacity_activations,
+        logical_device_id_by_physical_device,
+        physical_mount_devices,
+        speculative_draft_tokens,
+        residency_policy,
+        host_safe_capacity_bytes,
+        None,
+        required_owner_by_component,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_vulkan_runtime_hybrid_physical_execution_with_representations_and_physical_stream_requirements(
+    package_root: impl AsRef<Path>,
+    runtime_model: &VulkanResidentRuntimeModel,
+    profiles_by_logical_device: &BTreeMap<String, crate::HardwareProcessProfile>,
+    execution: crate::RuntimeExecutionEnvelope,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    capacity: &VulkanPlacementCapacityEnvelope,
+    context_capacity_activations: usize,
+    logical_device_id_by_physical_device: &BTreeMap<String, String>,
+    physical_mount_devices: &[VulkanRuntimePhysicalPlanningDevice],
+    speculative_draft_tokens: usize,
+    residency_policy: ResourceResidencyPolicy,
+    host_safe_capacity_bytes: usize,
+    physical_stream_requirement_resolver: Option<
+        &VulkanRuntimePhysicalStreamRequirementResolver<'_>,
+    >,
+    required_owner_by_component: Option<&BTreeMap<String, String>>,
+) -> Result<Option<VulkanRuntimeHybridPhysicalExecutionResolution>, VulkanRuntimeHybridPlacementError>
+{
     if execution.speculative_draft_tokens != speculative_draft_tokens
         || execution.residency_policy != residency_policy.as_runtime_name().replace('-', "_")
         || execution.context_activations.maximum != context_capacity_activations
@@ -494,6 +539,7 @@ pub fn resolve_vulkan_runtime_hybrid_physical_execution_with_representations(
         logical_device_id_by_physical_device,
         Some(VulkanRuntimeHybridMountPlanningContext {
             devices: physical_mount_devices,
+            physical_stream_requirement_resolver,
             speculative_draft_tokens,
             residency_policy,
             host_safe_capacity_bytes,
@@ -710,18 +756,15 @@ fn try_resolve_vulkan_runtime_hybrid_phase_set_mount(
             .filter(|device| required_devices.contains(&device.logical_device_id))
             .cloned()
             .collect::<Vec<_>>();
-        let exact = plan_vulkan_runtime_physical_mount(
+        let exact = plan_vulkan_runtime_physical_mount_with_exact_stream_requirements(
             package_root,
             &runtime_model,
             &physical_execution_plan,
-            Some(catalog),
+            catalog,
             context_capacity_activations,
-            planning.speculative_draft_tokens,
-            planning.residency_policy,
+            planning,
             &planning_devices,
-            planning.host_safe_capacity_bytes,
-        )
-        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?;
+        )?;
         let Some(exact) = exact else {
             return Ok(None);
         };
@@ -737,6 +780,117 @@ fn try_resolve_vulkan_runtime_hybrid_phase_set_mount(
         prefill_predicted_duration_ns_per_activation,
         physical_mount_plan,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_vulkan_runtime_physical_mount_with_exact_stream_requirements(
+    package_root: &Path,
+    runtime_model: &VulkanResidentRuntimeModel,
+    physical_execution_plan: &VulkanRuntimePhysicalExecutionPlan,
+    catalog: &VulkanPlacementCalibrationCatalog,
+    context_capacity_activations: usize,
+    planning: &VulkanRuntimeHybridMountPlanningContext<'_>,
+    planning_devices: &[VulkanRuntimePhysicalPlanningDevice],
+) -> Result<Option<VulkanRuntimePhysicalMountPlan>, VulkanRuntimeHybridPlacementError> {
+    let mut physical_stream_overhead_bytes = BTreeMap::<String, usize>::new();
+    loop {
+        let adjusted_devices = planning_devices
+            .iter()
+            .map(|device| {
+                let overhead = physical_stream_overhead_bytes
+                    .get(&device.identity.physical_device_id)
+                    .copied()
+                    .unwrap_or_default();
+                let Some(safe_capacity_bytes) = device.safe_capacity_bytes.checked_sub(overhead)
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(VulkanRuntimePhysicalPlanningDevice {
+                    safe_capacity_bytes,
+                    ..device.clone()
+                }))
+            })
+            .collect::<Result<Option<Vec<_>>, VulkanRuntimeHybridPlacementError>>()?;
+        let Some(adjusted_devices) = adjusted_devices else {
+            return Ok(None);
+        };
+        let Some(mount) = plan_vulkan_runtime_physical_mount(
+            package_root,
+            runtime_model,
+            physical_execution_plan,
+            Some(catalog),
+            context_capacity_activations,
+            planning.speculative_draft_tokens,
+            planning.residency_policy,
+            &adjusted_devices,
+            planning.host_safe_capacity_bytes,
+        )
+        .map_err(|error| VulkanRuntimeHybridPlacementError(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let Some(resolver) = planning.physical_stream_requirement_resolver else {
+            return Ok(Some(mount));
+        };
+        let exact_stream_bytes = resolver(&mount.physical_execution_residency_plan)?;
+        let physical_by_logical = planning_devices
+            .iter()
+            .map(|device| {
+                (
+                    device.logical_device_id.as_str(),
+                    device.identity.physical_device_id.as_str(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut logical_stream_bytes = BTreeMap::<String, usize>::new();
+        for device in &mount.physical_execution_residency_plan.device_plans {
+            let physical_device_id = physical_by_logical
+                .get(device.device_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(format!(
+                        "exact physical stream requirement has no binding for logical device {:?}",
+                        device.device_id,
+                    ))
+                })?;
+            let total = logical_stream_bytes
+                .entry(physical_device_id.to_string())
+                .or_default();
+            *total = total
+                .checked_add(device.stream_device_local_bytes)
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(
+                        "logical physical-stream requirement overflowed".to_string(),
+                    )
+                })?;
+        }
+        let mut changed = false;
+        for (physical_device_id, exact_bytes) in &exact_stream_bytes {
+            let logical_bytes = logical_stream_bytes
+                .get(physical_device_id)
+                .copied()
+                .ok_or_else(|| {
+                    VulkanRuntimeHybridPlacementError(format!(
+                        "exact physical stream requirement references unplanned device {physical_device_id:?}",
+                    ))
+                })?;
+            let overhead = exact_bytes.checked_sub(logical_bytes).ok_or_else(|| {
+                VulkanRuntimeHybridPlacementError(format!(
+                    "exact physical stream requirement on {physical_device_id:?} is smaller than its logical allocation ledger",
+                ))
+            })?;
+            let retained = physical_stream_overhead_bytes
+                .entry(physical_device_id.clone())
+                .or_default();
+            if overhead > *retained {
+                *retained = overhead;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(Some(mount));
+        }
+    }
 }
 
 /// Attempts to select exact phase-local physical execution without making the
