@@ -667,7 +667,7 @@ where
     let indexed_claims = index_vulkan_hybrid_candidate_claims(&resolved)?;
     let minimum_suffix_duration =
         minimum_hybrid_route_suffix_durations(component_count, &resolved, eligible_capacity)?;
-    let Some(initial_bound) = minimum_suffix_duration[0] else {
+    let Some(initial_bound) = minimum_suffix_duration[0].get(&None).copied() else {
         return Ok(None);
     };
     let unbounded_capacity = VulkanPlacementCapacityEnvelope {
@@ -838,7 +838,10 @@ where
                         component_end: candidate.request.component_end,
                         execution_case: candidate.observation.execution_case.clone(),
                     });
-                let Some(suffix) = minimum_suffix_duration[next.cursor] else {
+                let Some(suffix) = minimum_suffix_duration[next.cursor]
+                    .get(&next.output_physical_device_id)
+                    .copied()
+                else {
                     continue;
                 };
                 let estimated_duration = next
@@ -880,31 +883,91 @@ fn minimum_hybrid_route_suffix_durations(
     component_count: usize,
     resolved: &VulkanHybridResolvedCandidateGraph<'_>,
     eligible_capacity: &VulkanPlacementCapacityEnvelope,
-) -> Result<Vec<Option<u128>>, VulkanHybridPlacementError> {
-    let mut suffix = vec![None; component_count + 1];
-    suffix[component_count] = Some(0);
+) -> Result<Vec<BTreeMap<Option<String>, u128>>, VulkanHybridPlacementError> {
+    let eligible_device_ids = eligible_capacity
+        .available_bytes_by_device
+        .keys()
+        .map(|device| device.physical_device_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut suffix = vec![BTreeMap::new(); component_count + 1];
+    suffix[component_count].insert(None, 0);
+    for device_id in &eligible_device_ids {
+        suffix[component_count].insert(Some(device_id.clone()), 0);
+    }
     for cursor in (0..component_count).rev() {
         let Some(candidates) = resolved.regions_by_start.get(&cursor) else {
             continue;
         };
-        for candidate in candidates {
-            if !hybrid_execution_case_uses_only_eligible_devices(
-                &candidate.observation.execution_case,
-                eligible_capacity,
-            ) {
-                continue;
+        let preceding_devices = if cursor == 0 {
+            vec![None]
+        } else {
+            eligible_device_ids.iter().cloned().map(Some).collect()
+        };
+        for preceding_device_id in preceding_devices {
+            let mut minimum = None;
+            for candidate in candidates {
+                if !hybrid_execution_case_uses_only_eligible_devices(
+                    &candidate.observation.execution_case,
+                    eligible_capacity,
+                ) {
+                    continue;
+                }
+                let execution_case = &candidate.observation.execution_case;
+                let boundary_duration = match preceding_device_id.as_deref() {
+                    None => Some(0),
+                    Some(source)
+                        if source == execution_case.input_physical_device_id.as_str() =>
+                    {
+                        Some(0)
+                    }
+                    Some(source) => resolved
+                        .boundaries_by_index
+                        .get(&(cursor - 1))
+                        .into_iter()
+                        .flatten()
+                        .filter(|boundary| {
+                            boundary
+                                .observation
+                                .execution_case
+                                .input_physical_device_id
+                                == source
+                                && boundary
+                                    .observation
+                                    .execution_case
+                                    .output_physical_device_id
+                                    == execution_case.input_physical_device_id
+                                && hybrid_execution_case_uses_only_eligible_devices(
+                                    &boundary.observation.execution_case,
+                                    eligible_capacity,
+                                )
+                        })
+                        .map(|boundary| normalized_hybrid_duration_ns(boundary.observation))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .min(),
+                };
+                let Some(boundary_duration) = boundary_duration else {
+                    continue;
+                };
+                let Some(remaining) = suffix[candidate.request.component_end]
+                    .get(&Some(execution_case.output_physical_device_id.clone()))
+                    .copied()
+                else {
+                    continue;
+                };
+                let duration = normalized_hybrid_duration_ns(candidate.observation)?
+                    .checked_add(boundary_duration)
+                    .and_then(|duration| duration.checked_add(remaining))
+                    .ok_or_else(|| {
+                        VulkanHybridPlacementError(
+                            "hybrid route suffix duration overflowed".to_string(),
+                        )
+                    })?;
+                minimum = Some(minimum.map_or(duration, |current: u128| current.min(duration)));
             }
-            let Some(remaining) = suffix[candidate.request.component_end] else {
-                continue;
-            };
-            let duration = normalized_hybrid_duration_ns(candidate.observation)?
-                .checked_add(remaining)
-                .ok_or_else(|| {
-                    VulkanHybridPlacementError(
-                        "hybrid route suffix duration overflowed".to_string(),
-                    )
-                })?;
-            suffix[cursor] = Some(suffix[cursor].map_or(duration, |current| current.min(duration)));
+            if let Some(minimum) = minimum {
+                suffix[cursor].insert(preceding_device_id, minimum);
+            }
         }
     }
     Ok(suffix)
