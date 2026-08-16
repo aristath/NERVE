@@ -363,6 +363,51 @@ fn parallel_block_edge_capacity_is_partitioned_into_exact_lane_frames() {
 }
 
 #[test]
+fn incoming_parallel_block_descriptor_uses_one_lane_as_its_batch_frame() {
+    let descriptor = VulkanMountedPlacedBoundDescriptor {
+        binding: 0,
+        usage: VulkanKernelDescriptorUsage::InputSignal,
+        name: "input_frames".to_string(),
+        target: VulkanMountedPlacedBoundDescriptorTarget::IncomingEdgeBuffer {
+            endpoint: VulkanPlacedEdgeEndpointBufferBinding {
+                buffer_index: 0,
+                endpoint: VulkanPlacedEdgeEndpoint {
+                    endpoint_index: 0,
+                    endpoint_id: "edge_3_incoming".to_string(),
+                    direction: VulkanPlacedEdgeDirection::Incoming,
+                    edge_index: 3,
+                    connection: StreamCircuitConnection::ParallelBlockScatter { width: 2 },
+                    signal: "stream_frame_block".to_string(),
+                    shape: vec![2, 2560],
+                    element_count: 5120,
+                    byte_capacity: Some(10_240),
+                    local_device_id: "gpu1".to_string(),
+                    remote_device_id: "gpu0".to_string(),
+                    local_component_id: "consumer".to_string(),
+                    remote_component_id: "producer".to_string(),
+                    local_port_id: "input_frames".to_string(),
+                    remote_port_id: "output_frames".to_string(),
+                    local_component_port: Some("input_frames".to_string()),
+                    remote_component_port: Some("output_frames".to_string()),
+                    transport: EdgeTransport::CrossDevice {
+                        from_device_id: "gpu0".to_string(),
+                        to_device_id: "gpu1".to_string(),
+                    },
+                },
+                byte_capacity: 10_240,
+            },
+        },
+    };
+
+    let (key, frame_byte_capacity) = component_batch_signal_target(&descriptor)
+        .unwrap()
+        .expect("incoming edge is a component-batch signal");
+
+    assert_eq!(key, VulkanComponentBatchSignalKey::IncomingEdge(3));
+    assert_eq!(frame_byte_capacity, 5_120);
+}
+
+#[test]
 fn produced_parallel_block_port_uses_one_lane_as_its_batch_frame() {
     let port = VulkanPlacedProducedPortBufferBinding {
         local_edges: vec![VulkanPlacedLocalEdgeBufferBinding {

@@ -1181,7 +1181,10 @@ fn component_batch_signal_target(
         )),
         VulkanMountedPlacedBoundDescriptorTarget::IncomingEdgeBuffer { endpoint } => Some((
             VulkanComponentBatchSignalKey::IncomingEdge(endpoint.endpoint.edge_index),
-            endpoint.byte_capacity,
+            component_batch_edge_frame_byte_capacity(
+                &endpoint.endpoint.connection,
+                endpoint.byte_capacity,
+            )?,
         )),
         VulkanMountedPlacedBoundDescriptorTarget::ProducedPortBuffer { port } => {
             let (component_id, port_id) = port.source().ok_or_else(|| {
@@ -1328,15 +1331,41 @@ fn component_batch_bindings<'a>(
                 )))
             })?;
             let allocation = &signal_buffers[*index];
+            if allocation.frame_byte_capacity != frame_byte_capacity {
+                return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                    VulkanError(format!(
+                        "component batch descriptor {}.{} binding {} signal {key:?} has mounted frame capacity {frame_byte_capacity} but its prepared allocation has frame capacity {}",
+                        dispatch.component_id,
+                        dispatch.node_id,
+                        descriptor.binding,
+                        allocation.frame_byte_capacity,
+                    )),
+                ));
+            }
             let (byte_offset, byte_len) = if let Some(lane_index) = lane_index {
-                (
-                    lane_index.checked_mul(frame_byte_capacity).ok_or_else(|| {
-                        VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
-                            "component batch lane offset overflowed".to_string(),
-                        ))
-                    })?,
-                    frame_byte_capacity,
-                )
+                let byte_offset = lane_index.checked_mul(frame_byte_capacity).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "component batch lane offset overflowed".to_string(),
+                    ))
+                })?;
+                let byte_end = byte_offset.checked_add(frame_byte_capacity).ok_or_else(|| {
+                    VulkanResidentInProcessPlacedRuntimeError::BackendLoop(VulkanError(
+                        "component batch lane range overflowed".to_string(),
+                    ))
+                })?;
+                if byte_end > allocation.buffer.byte_capacity() {
+                    return Err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop(
+                        VulkanError(format!(
+                            "component batch descriptor {}.{} binding {} signal {key:?} lane {lane_index} needs byte range {byte_offset}..{byte_end}, beyond its prepared allocation capacity {} (frame capacity {})",
+                            dispatch.component_id,
+                            dispatch.node_id,
+                            descriptor.binding,
+                            allocation.buffer.byte_capacity(),
+                            allocation.frame_byte_capacity,
+                        )),
+                    ));
+                }
+                (byte_offset, frame_byte_capacity)
             } else {
                 (0, allocation.buffer.byte_capacity())
             };
