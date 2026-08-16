@@ -254,6 +254,7 @@ impl VulkanComputeDevice {
         )
     }
 
+    #[track_caller]
     pub fn submit_timeline_semaphore_bridge(
         &self,
         wait_points: &[VulkanTimelineSemaphorePoint<'_>],
@@ -262,8 +263,13 @@ impl VulkanComputeDevice {
         let _submission = runtime_critical_path_span(RuntimeCriticalPathPhase::QueueSubmission);
         self.require_device_healthy()?;
         if wait_points.is_empty() && signal_points.is_empty() {
+            let caller = std::panic::Location::caller();
             return Err(VulkanError(
-                "timeline semaphore bridge has no wait or signal points".to_string(),
+                format!(
+                    "timeline semaphore bridge has no wait or signal points (requested at {}:{})",
+                    caller.file(),
+                    caller.line(),
+                ),
             ));
         }
         for point in wait_points.iter().chain(signal_points) {

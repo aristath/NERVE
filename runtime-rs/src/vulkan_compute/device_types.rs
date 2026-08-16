@@ -1063,6 +1063,7 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         )
     }
 
+    #[track_caller]
     pub fn enqueue_timeline_semaphore_bridge(
         &self,
         device: &'a VulkanComputeDevice,
@@ -1070,8 +1071,13 @@ impl<'a> VulkanResidentQueueSubmissionBatch<'a> {
         signal_points: &[VulkanTimelineSemaphorePoint<'_>],
     ) -> Result<(), VulkanError> {
         if wait_points.is_empty() && signal_points.is_empty() {
+            let caller = std::panic::Location::caller();
             return Err(VulkanError(
-                "timeline semaphore bridge has no wait or signal points".to_string(),
+                format!(
+                    "timeline semaphore bridge has no wait or signal points (requested at {}:{})",
+                    caller.file(),
+                    caller.line(),
+                ),
             ));
         }
         for point in wait_points.iter().chain(signal_points) {

@@ -560,7 +560,12 @@ fn advance_compact_slice_with_distributed_dependencies<'a, 'batch>(
                             );
                         }
                         if suffix_dispatches.is_empty() && snapshot_copies.is_empty() {
-                            if let Some(submission_batch) = submission_batch {
+                            if wait_points.is_empty() && signal_points.is_empty() {
+                                // A host checkpoint may already have completed
+                                // the terminal distributed work. With no
+                                // runtime suffix and no timeline endpoint this
+                                // virtual continuation is intentionally empty.
+                            } else if let Some(submission_batch) = submission_batch {
                                 submission_batch
                                     .enqueue_timeline_semaphore_bridge(
                                         slice.device,

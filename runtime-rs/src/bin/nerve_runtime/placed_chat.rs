@@ -244,14 +244,15 @@ fn calibrate_runtime_distributed_decode_candidates(
             .try_fold(0usize, |total, capacity| total.checked_add(*capacity))
             .unwrap_or(usize::MAX);
         for candidate in candidates {
-            let remaining = VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION
+            let Some(remaining) = VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION
                 .checked_sub(started.elapsed())
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "runtime distributed placement calibration exceeded its one-minute bound",
-                    )
-                })?;
+            else {
+                eprintln!(
+                    "nerve runtime distributed calibration stopped at its one-minute bound; retaining {} exact observation(s)",
+                    auto_placement.calibration_catalog.observation_count(),
+                );
+                return Ok(());
+            };
             let policy = VulkanRuntimePlacementCalibrationPolicy {
                 maximum_duration: remaining,
                 maximum_total_resident_parameter_bytes: total_capacity,
@@ -267,16 +268,33 @@ fn calibrate_runtime_distributed_decode_candidates(
                 &candidate.contract_ids,
                 &mut auto_placement.calibration_catalog,
                 policy,
-            )
-            .map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "distributed calibration rejected {} contracts {:?}: {error}",
-                        target.component_id, candidate.contract_ids,
-                    ),
-                )
-            })?;
+            );
+            let report = match report {
+                Ok(report) => report,
+                Err(error)
+                    if started.elapsed()
+                        >= VULKAN_RUNTIME_PLACEMENT_CALIBRATION_MAXIMUM_DURATION
+                        || error.to_string().contains("configured duration")
+                        || error.to_string().contains("complete-chain duration") =>
+                {
+                    eprintln!(
+                        "nerve runtime distributed calibration stopped at its one-minute bound while evaluating {} contracts {:?}; retaining {} exact observation(s)",
+                        target.component_id,
+                        candidate.contract_ids,
+                        auto_placement.calibration_catalog.observation_count(),
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    eprintln!(
+                        "nerve runtime distributed calibration candidate unavailable: representative={}.{}, contracts={:?}, reason={error}",
+                        target.component_id,
+                        target.terminal_node_id,
+                        candidate.contract_ids,
+                    );
+                    continue;
+                }
+            };
             if let Some(report) = report {
                 eprintln!(
                     "nerve runtime distributed calibration: representative={}.{}, occurrences={}, contracts={:?}, devices={:?}, measured_ns={}, measured_ns_per_activation={}, dispatches={}, shards={}",
