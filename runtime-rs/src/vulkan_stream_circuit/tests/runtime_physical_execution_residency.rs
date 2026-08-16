@@ -2481,6 +2481,7 @@ fn speculative_decoder_host_visible_state_and_sampler_buffers_move_to_typed_host
         ("scratch", 2_048),
         ("random_seed", 4),
         ("seen_token_batch", 512),
+        ("catch_up_controls", 1_280),
     ] {
         owner
             .resident_stream_device_allocations
@@ -2490,7 +2491,11 @@ fn speculative_decoder_host_visible_state_and_sampler_buffers_move_to_typed_host
                 },
                 kind: VulkanRuntimeResidentStreamAllocationKind::RuntimeBuffer {
                     class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
-                    scope_id: "draft-sampler".to_string(),
+                    scope_id: if buffer_id == "catch_up_controls" {
+                        "draft".to_string()
+                    } else {
+                        "draft-sampler".to_string()
+                    },
                     buffer_id: buffer_id.to_string(),
                 },
                 byte_capacity,
@@ -2515,7 +2520,13 @@ fn speculative_decoder_host_visible_state_and_sampler_buffers_move_to_typed_host
 
     assert_eq!(
         plan.total_stream_device_local_bytes,
-        original_device_bytes - 144 - VULKAN_STREAM_CONTROL_BYTE_CAPACITY - 288 - 4 - 512
+        original_device_bytes
+            - 144
+            - VULKAN_STREAM_CONTROL_BYTE_CAPACITY
+            - 288
+            - 4
+            - 512
+            - 1_280
     );
     assert!(plan.resident_shared_host_allocations.iter().any(|allocation| {
         matches!(
@@ -2547,7 +2558,13 @@ fn speculative_decoder_host_visible_state_and_sampler_buffers_move_to_typed_host
         ("history_and_output", 288),
         ("random_seed", 4),
         ("seen_token_batch", 512),
+        ("catch_up_controls", 1_280),
     ] {
+        let expected_scope_id = if buffer_id == "catch_up_controls" {
+            "draft"
+        } else {
+            "draft-sampler"
+        };
         assert!(plan.resident_shared_host_allocations.iter().any(|allocation| {
             matches!(
                 &allocation.kind,
@@ -2559,7 +2576,7 @@ fn speculative_decoder_host_visible_state_and_sampler_buffers_move_to_typed_host
                     scope_id,
                     buffer_id: planned_buffer_id,
                 } if decoder_id == "draft"
-                    && scope_id == "draft-sampler"
+                    && scope_id == expected_scope_id
                     && planned_buffer_id == buffer_id
             ) && allocation.owner_device_id == "owner"
                 && allocation.participant_device_ids == ["owner".to_string()]

@@ -147,6 +147,60 @@ fn mount_speculative_decoder_device_slice(
     })
 }
 
+fn create_planned_speculative_host_buffer(
+    device: &VulkanComputeDevice,
+    model: &VulkanResidentSpeculativeDecoderModelPackage,
+    planned_host_allocations: &[&VulkanRuntimeSharedHostResidentAllocation],
+    buffer_id: &str,
+    byte_capacity: usize,
+) -> Result<VulkanResidentBuffer, VulkanResidentInProcessPlacedRuntimeError> {
+    let matching = planned_host_allocations
+        .iter()
+        .copied()
+        .filter(|allocation| {
+            matches!(
+                &allocation.kind,
+                VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
+                    scope: VulkanRuntimeResidentStreamAllocationScope::SpeculativeDecoder {
+                        decoder_id,
+                    },
+                    class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                    scope_id,
+                    buffer_id: planned_buffer_id,
+                } if decoder_id == &model.id
+                    && scope_id == &model.id
+                    && planned_buffer_id == buffer_id
+            )
+        })
+        .collect::<Vec<_>>();
+    let [allocation] = matching.as_slice() else {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} resolves {} host-visible {buffer_id:?} ledgers, expected one",
+                model.id,
+                matching.len(),
+            )),
+        ));
+    };
+    if allocation.owner_device_id != model.device_id
+        || allocation.participant_device_ids != [model.device_id.clone()]
+        || allocation.byte_capacity != byte_capacity
+    {
+        return Err(VulkanResidentInProcessPlacedRuntimeError::Package(
+            VulkanResidentTokenModelPackageError::new(format!(
+                "speculative decoder {:?} host-visible {buffer_id:?} ledger disagrees with its exact mounted workspace",
+                model.id,
+            )),
+        ));
+    }
+    let host_allocation = device
+        .create_shared_host_allocation(&[], allocation.byte_capacity)
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+    device
+        .import_shared_host_buffer(host_allocation)
+        .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)
+}
+
 impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
     fn mounted(&self) -> &VulkanMountedPlacedStreamCircuit {
         &self.device_slice.mounted
@@ -334,8 +388,9 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
                     &allocation.kind,
                     VulkanRuntimeSharedHostResidentAllocationKind::HostVisibleRuntimeBuffer {
                         class: VulkanRuntimeResidentBufferClass::SpeculativeDecoderWorkspace,
+                        scope_id,
                         ..
-                    }
+                    } if scope_id == &sampler_spec.sampler_id
                 )
             })
             .collect::<Vec<_>>();
@@ -418,9 +473,13 @@ impl VulkanResidentAutoregressiveSpeculativeDecoderProcessor {
                     "speculative catch-up control capacity overflowed".to_string(),
                 ))
             })?;
-        let mut catch_up_controls = device
-            .create_host_visible_resident_buffer(catch_up_control_byte_capacity)
-            .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;
+        let mut catch_up_controls = create_planned_speculative_host_buffer(
+            device,
+            model,
+            planned_host_allocations,
+            "catch_up_controls",
+            catch_up_control_byte_capacity,
+        )?;
         catch_up_controls
             .persistently_map()
             .map_err(VulkanResidentInProcessPlacedRuntimeError::BackendLoop)?;

@@ -1856,7 +1856,7 @@ fn runtime_buffer_is_host_visible(
             },
         ) => matches!(
             buffer_id.as_str(),
-            "history_and_output" | "random_seed" | "seen_token_batch"
+            "history_and_output" | "random_seed" | "seen_token_batch" | "catch_up_controls"
         ),
         _ => false,
     }
